@@ -407,8 +407,12 @@ pub enum Scalar {
     /// Nanoseconds since Unix epoch. Matches pandas `datetime64[ns]`.
     /// Uses `Timestamp::NAT` (i64::MIN) for missing values.
     Datetime64(i64),
-    /// Period ordinal. Uses i64::MIN for NaT (missing value).
-    Period(i64),
+    /// Period value (ordinal + frequency). A `Period` whose `ordinal` is
+    /// `i64::MIN` is NaT (missing). The frequency is carried so writers can
+    /// render the pandas calendar string (`2024Q1`, `2024-03`, ...) — the
+    /// calendar string is not recoverable from the ordinal alone, since
+    /// different frequencies share overlapping ordinal axes.
+    Period(Period),
     /// Numeric interval value. Missing values remain `Scalar::Null`.
     Interval(Interval),
 }
@@ -431,11 +435,11 @@ impl std::fmt::Display for Scalar {
                     write!(f, "Timestamp[{nanos}]")
                 }
             }
-            Self::Period(ordinal) => {
-                if *ordinal == i64::MIN {
+            Self::Period(p) => {
+                if p.ordinal == i64::MIN {
                     write!(f, "NaT")
                 } else {
-                    write!(f, "Period[{ordinal}]")
+                    write!(f, "{}", p.calendar_string())
                 }
             }
             Self::Interval(interval) => write!(f, "{interval}"),
@@ -483,6 +487,21 @@ impl From<String> for Scalar {
 }
 
 impl Scalar {
+    #[inline]
+    const fn debug_variant_name(&self) -> &'static str {
+        match self {
+            Self::Null(_) => "Null",
+            Self::Bool(_) => "Bool",
+            Self::Int64(_) => "Int64",
+            Self::Float64(_) => "Float64",
+            Self::Utf8(_) => "Utf8",
+            Self::Timedelta64(_) => "Timedelta64",
+            Self::Datetime64(_) => "Datetime64",
+            Self::Period(_) => "Period",
+            Self::Interval(_) => "Interval",
+        }
+    }
+
     #[must_use]
     pub fn dtype(&self) -> DType {
         match self {
@@ -505,7 +524,7 @@ impl Scalar {
             Self::Float64(v) => v.is_nan(),
             Self::Timedelta64(v) => *v == Timedelta::NAT,
             Self::Datetime64(v) => *v == Timestamp::NAT,
-            Self::Period(v) => *v == i64::MIN,
+            Self::Period(p) => p.ordinal == i64::MIN,
             _ => false,
         }
     }
@@ -575,7 +594,7 @@ impl Scalar {
             DType::Float64 => Self::Null(NullKind::NaN),
             DType::Timedelta64 => Self::Timedelta64(Timedelta::NAT),
             DType::Datetime64 => Self::Datetime64(Timestamp::NAT),
-            DType::Period => Self::Period(i64::MIN),
+            DType::Period => Self::Period(Period::new(i64::MIN, PeriodFreq::Daily)),
             DType::Null => Self::Null(NullKind::Null),
             DType::Bool
             | DType::BoolNullable
@@ -678,10 +697,10 @@ impl Scalar {
                 }
             }
             (Self::Period(a), Self::Period(b)) => {
-                if *a == i64::MIN || *b == i64::MIN {
+                if a.ordinal == i64::MIN || b.ordinal == i64::MIN {
                     std::cmp::Ordering::Equal
                 } else {
-                    a.cmp(b)
+                    a.ordinal.cmp(&b.ordinal)
                 }
             }
             (Self::Interval(a), Self::Interval(b)) => a
@@ -701,8 +720,10 @@ impl Scalar {
             (Self::Float64(a), Self::Int64(b)) => a
                 .partial_cmp(&(*b as f64))
                 .unwrap_or(std::cmp::Ordering::Equal),
-            // Fallback to debug representation for inconsistent types
-            (a, b) => format!("{a:?}").cmp(&format!("{b:?}")),
+            // Derived Debug starts every variant with its static variant name.
+            // Different variants therefore order by that name before either
+            // payload is observed; compare those names without allocating.
+            (a, b) => a.debug_variant_name().cmp(b.debug_variant_name()),
         }
     }
 
@@ -730,11 +751,11 @@ impl Scalar {
                 value: format!("Timestamp[{v}]"),
                 dtype: DType::Datetime64,
             }),
-            Self::Period(v) if *v == i64::MIN => Err(TypeError::ValueIsMissing {
+            Self::Period(p) if p.ordinal == i64::MIN => Err(TypeError::ValueIsMissing {
                 kind: NullKind::NaT,
             }),
-            Self::Period(v) => Err(TypeError::NonNumericValue {
-                value: format!("Period[{v}]"),
+            Self::Period(p) => Err(TypeError::NonNumericValue {
+                value: p.calendar_string(),
                 dtype: DType::Period,
             }),
             Self::Interval(v) => Err(TypeError::NonNumericValue {
@@ -763,10 +784,10 @@ impl Scalar {
                 kind: NullKind::NaT,
             }),
             Self::Datetime64(v) => Ok(*v),
-            Self::Period(v) if *v == i64::MIN => Err(TypeError::ValueIsMissing {
+            Self::Period(p) if p.ordinal == i64::MIN => Err(TypeError::ValueIsMissing {
                 kind: NullKind::NaT,
             }),
-            Self::Period(v) => Ok(*v),
+            Self::Period(p) => Ok(p.ordinal),
             Self::Interval(v) => Err(TypeError::NonNumericValue {
                 value: v.to_string(),
                 dtype: DType::Interval,
@@ -790,10 +811,10 @@ impl Scalar {
                 kind: NullKind::NaT,
             }),
             Self::Datetime64(v) => Ok(*v != 0),
-            Self::Period(v) if *v == i64::MIN => Err(TypeError::ValueIsMissing {
+            Self::Period(p) if p.ordinal == i64::MIN => Err(TypeError::ValueIsMissing {
                 kind: NullKind::NaT,
             }),
-            Self::Period(v) => Ok(*v != 0),
+            Self::Period(p) => Ok(p.ordinal != 0),
             Self::Interval(_) => Ok(true),
         }
     }
@@ -817,8 +838,8 @@ impl Scalar {
             Self::Timedelta64(v) => Timedelta::format(*v),
             Self::Datetime64(v) if *v == Timestamp::NAT => "NaT".to_string(),
             Self::Datetime64(v) => Timestamp::from_nanos(*v).isoformat(),
-            Self::Period(v) if *v == i64::MIN => "NaT".to_string(),
-            Self::Period(v) => format!("Period[{}]", v),
+            Self::Period(p) if p.ordinal == i64::MIN => "NaT".to_string(),
+            Self::Period(p) => p.calendar_string(),
             Self::Interval(v) => v.to_string(),
         }
     }
@@ -1077,9 +1098,11 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Period => match &value {
-            Scalar::Int64(v) => Ok(Scalar::Period(*v)),
+            // Int cast to a freq-less DType::Period: default to Daily (pandas
+            // requires an explicit freq in the dtype; ours is freq-less).
+            Scalar::Int64(v) => Ok(Scalar::Period(Period::new(*v, PeriodFreq::Daily))),
             Scalar::Utf8(s) => Period::parse(s)
-                .map(|period| Scalar::Period(period.ordinal))
+                .map(Scalar::Period)
                 .map_err(|_| TypeError::InvalidCast { from, to: target }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
@@ -1107,13 +1130,15 @@ fn scalar_to_string_for_astype(value: Scalar) -> String {
         Scalar::Timedelta64(v) => Timedelta::format(v),
         Scalar::Datetime64(v) if v == Timestamp::NAT => "NaT".to_owned(),
         Scalar::Datetime64(v) => format!("Timestamp[{v}]"),
-        Scalar::Period(v) if v == i64::MIN => "NaT".to_owned(),
-        Scalar::Period(v) => format!("Period[{v}]"),
+        Scalar::Period(p) if p.ordinal == i64::MIN => "NaT".to_owned(),
+        Scalar::Period(p) => p.calendar_string(),
         Scalar::Interval(v) => v.to_string(),
     }
 }
 
-fn float_to_string_for_astype(value: f64) -> String {
+pub fn float_to_string_for_astype(value: f64) -> String {
+    use std::fmt::Write as _;
+
     if value.is_nan() {
         return "nan".to_owned();
     }
@@ -1127,17 +1152,28 @@ fn float_to_string_for_astype(value: f64) -> String {
     // boundaries); only the exponent spelling differs (Rust "1e16"/"1e-5" vs
     // Python "1e+16"/"1e-05"), so normalize that. The old `{:.1}` whole / Display
     // decimal path lost scientific notation (1e16 -> "10000000000000000.0").
-    let s = format!("{value:?}");
-    match s.split_once('e') {
-        None => s,
-        Some((mantissa, exp)) => {
-            let (sign, digits) = match exp.strip_prefix('-') {
-                Some(d) => ('-', d),
-                None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
-            };
-            format!("{mantissa}e{sign}{digits:0>2}")
+    // Leave enough spare capacity for the positive sign and one exponent pad
+    // digit, then normalize the formatter output in place. The former branch
+    // allocated a second String and copied the mantissa solely to change
+    // `e16`/`e-5` into pandas' `e+16`/`e-05` spelling.
+    let mut rendered = String::with_capacity(32);
+    let _ = write!(rendered, "{value:?}");
+    let Some(exponent_marker) = rendered.find('e') else {
+        return rendered;
+    };
+
+    let sign_position = exponent_marker + 1;
+    let digits_position = match rendered.as_bytes().get(sign_position) {
+        Some(b'+' | b'-') => sign_position + 1,
+        _ => {
+            rendered.insert(sign_position, '+');
+            sign_position + 1
         }
+    };
+    if rendered.len() - digits_position == 1 {
+        rendered.insert(digits_position, '0');
     }
+    rendered
 }
 
 /// Cast a scalar reference to a target dtype (clones only when conversion is needed).
@@ -1502,6 +1538,8 @@ impl Timedelta {
     }
 
     pub fn format(nanos: i64) -> String {
+        use std::fmt::Write as _;
+
         if nanos == Self::NAT {
             return "NaT".to_string();
         }
@@ -1518,22 +1556,26 @@ impl Timedelta {
         let seconds = (rem % Self::NANOS_PER_MIN) / Self::NANOS_PER_SEC;
         let frac = rem % Self::NANOS_PER_SEC;
 
-        let time_part = format!("{hours:02}:{minutes:02}:{seconds:02}");
+        // Build directly into the returned allocation. The former path first
+        // allocated an `HH:MM:SS` string, then copied it into the result.
+        let mut result = String::with_capacity(32);
+        let _ = write!(result, "{days} days ");
         // '+' joins the negative day count to the positive time remainder.
-        let sep = if days < 0 { "+" } else { "" };
-
+        if days < 0 {
+            result.push('+');
+        }
+        let _ = write!(result, "{hours:02}:{minutes:02}:{seconds:02}");
         if frac > 0 {
             // pandas renders the sub-second part with microsecond precision
             // (6 digits) unless a sub-microsecond (nanosecond) component is
             // present, in which case it widens to 9 digits.
             if frac % 1_000 == 0 {
-                format!("{days} days {sep}{time_part}.{:06}", frac / 1_000)
+                let _ = write!(result, ".{:06}", frac / 1_000);
             } else {
-                format!("{days} days {sep}{time_part}.{frac:09}")
+                let _ = write!(result, ".{frac:09}");
             }
-        } else {
-            format!("{days} days {sep}{time_part}")
         }
+        result
     }
 
     pub fn from_unit(value: f64, unit: &str) -> Result<i64, TimedeltaError> {
@@ -1646,6 +1688,8 @@ impl Timedelta {
     /// NaT returns "NaT".
     #[must_use]
     pub fn isoformat(nanos: i64) -> String {
+        use std::fmt::Write as _;
+
         if nanos == Self::NAT {
             return "NaT".to_string();
         }
@@ -1665,21 +1709,23 @@ impl Timedelta {
         let seconds = remaining / Self::NANOS_PER_SEC;
         let sub_sec_nanos = remaining % Self::NANOS_PER_SEC;
 
-        let mut result = String::new();
+        // Build directly into the returned allocation. The former sequence of
+        // `format!` calls allocated two temporary strings for integral values
+        // and three for fractional values before copying them into `result`.
+        let mut result = String::with_capacity(40);
         if negative {
             result.push('-');
         }
-
-        result.push_str(&format!("P{days}DT{hours}H{minutes}M"));
-
-        if sub_sec_nanos == 0 {
-            result.push_str(&format!("{seconds}S"));
-        } else {
-            let frac = format!("{:09}", sub_sec_nanos);
-            let trimmed = frac.trim_end_matches('0');
-            result.push_str(&format!("{seconds}.{trimmed}S"));
+        // `fmt::Write for String` is infallible.
+        let _ = write!(result, "P{days}DT{hours}H{minutes}M{seconds}");
+        if sub_sec_nanos != 0 {
+            result.push('.');
+            let _ = write!(result, "{sub_sec_nanos:09}");
+            while result.ends_with('0') {
+                result.pop();
+            }
         }
-
+        result.push('S');
         result
     }
 
@@ -1697,10 +1743,7 @@ impl Timedelta {
         if unit_nanos == 0 {
             return Self::NAT;
         }
-        let negative = nanos < 0;
-        let abs_nanos = nanos.saturating_abs();
-        let floored = (abs_nanos / unit_nanos) * unit_nanos;
-        if negative { -floored } else { floored }
+        nanos.div_euclid(unit_nanos).saturating_mul(unit_nanos)
     }
 
     /// Rounds up to the nearest frequency unit.
@@ -1717,10 +1760,12 @@ impl Timedelta {
         if unit_nanos == 0 {
             return Self::NAT;
         }
-        let negative = nanos < 0;
-        let abs_nanos = nanos.saturating_abs();
-        let ceiled = ((abs_nanos + unit_nanos - 1) / unit_nanos) * unit_nanos;
-        if negative { -ceiled } else { ceiled }
+        let remainder = nanos.rem_euclid(unit_nanos);
+        if remainder == 0 {
+            nanos
+        } else {
+            nanos.saturating_add(unit_nanos - remainder)
+        }
     }
 
     /// Rounds to the nearest frequency unit.
@@ -2016,8 +2061,11 @@ impl Timestamp {
         if self.is_nat() || unit_nanos <= 0 {
             return Self::nat();
         }
+        let Some(nanos) = self.nanos.div_euclid(unit_nanos).checked_mul(unit_nanos) else {
+            return Self::nat();
+        };
         Self {
-            nanos: self.nanos.div_euclid(unit_nanos) * unit_nanos,
+            nanos,
             tz: self.tz.clone(),
         }
     }
@@ -2140,8 +2188,10 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let days_since_epoch = total_secs / 86400;
+        // Floor (not truncate) so pre-1970 instants with a sub-day part map to
+        // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
+        // for the post-1970 positive case.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -2161,8 +2211,10 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let days_since_epoch = total_secs / 86400;
+        // Floor (not truncate) so pre-1970 instants with a sub-day part map to
+        // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
+        // for the post-1970 positive case.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -2180,8 +2232,10 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let days_since_epoch = total_secs / 86400;
+        // Floor (not truncate) so pre-1970 instants with a sub-day part map to
+        // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
+        // for the post-1970 positive case.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -2199,8 +2253,11 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        // rem_euclid keeps the seconds-of-day in [0, 86400) even for negative
+        // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
+        // rem_euclid == `%` for the post-1970 positive case.
+        let secs_of_day =
+            self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some(secs_of_day / 3600)
     }
 
@@ -2212,8 +2269,11 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        // rem_euclid keeps the seconds-of-day in [0, 86400) even for negative
+        // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
+        // rem_euclid == `%` for the post-1970 positive case.
+        let secs_of_day =
+            self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some((secs_of_day % 3600) / 60)
     }
 
@@ -2225,8 +2285,11 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        // rem_euclid keeps the seconds-of-day in [0, 86400) even for negative
+        // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
+        // rem_euclid == `%` for the post-1970 positive case.
+        let secs_of_day =
+            self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some(secs_of_day % 60)
     }
 
@@ -2238,7 +2301,9 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
+        // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
+        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
         Some((sub_nanos / 1000) as i64)
     }
 
@@ -2250,7 +2315,9 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
+        // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
+        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
         Some((sub_nanos % 1000) as i64)
     }
 
@@ -2262,7 +2329,8 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let days_since_epoch = self.nanos / Timedelta::NANOS_PER_DAY;
+        // Floor days for pre-1970 (br-frankenpandas-wkjtw); == `/` for positive.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let dow = ((days_since_epoch + 3) % 7 + 7) % 7;
         Some(dow)
     }
@@ -2346,8 +2414,10 @@ impl Timestamp {
         // Convert y/m/d to days since Unix epoch, then to nanos
         // Unix epoch is 1970-01-01, which is ordinal 719163
         let days_since_epoch = ordinal - 719163;
-        let nanos = days_since_epoch * 24 * 60 * 60 * 1_000_000_000_i64;
-        Self { nanos, tz: None }
+        match days_since_epoch.checked_mul(Timedelta::NANOS_PER_DAY) {
+            Some(nanos) => Self { nanos, tz: None },
+            None => Self::nat(),
+        }
     }
 
     /// Return the Julian Date (astronomical day number).
@@ -2560,7 +2630,7 @@ impl Timestamp {
     /// Normalize to midnight/day boundary, matching `pd.Timestamp.normalize()`.
     #[must_use]
     pub fn normalize(&self) -> Self {
-        self.floor_to_unit("D")
+        self.floor_to(Timedelta::NANOS_PER_DAY)
     }
 
     /// Replace timestamp components with new values.
@@ -2600,6 +2670,17 @@ impl Timestamp {
         let us = microsecond.unwrap_or(cur_micro);
         let ns = nanosecond.unwrap_or(cur_nano);
 
+        if !(1..=12).contains(&mo)
+            || !(1..=days_in_month(y, mo as u32).unwrap_or(0) as i64).contains(&d)
+            || !(0..=23).contains(&h)
+            || !(0..=59).contains(&mi)
+            || !(0..=59).contains(&s)
+            || !(0..=999_999).contains(&us)
+            || !(0..=999).contains(&ns)
+        {
+            return Self::nat();
+        }
+
         let days_from_epoch = Self::days_from_ymd(y, mo, d);
         let secs = h * 3600 + mi * 60 + s;
         let total_nanos = days_from_epoch * Timedelta::NANOS_PER_DAY
@@ -2627,13 +2708,17 @@ impl Timestamp {
     /// Matches `pd.Timestamp.isoformat()`. NaT returns "NaT".
     #[must_use]
     pub fn isoformat(&self) -> String {
+        use std::fmt::Write as _;
+
         if self.is_nat() {
             return "NaT".to_string();
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
-        let days_since_epoch = total_secs / 86400;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
+        // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let nanos_of_day = self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY);
+        let secs_of_day = nanos_of_day / Timedelta::NANOS_PER_SEC;
+        let sub_nanos = nanos_of_day.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
 
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
@@ -2650,17 +2735,41 @@ impl Timestamp {
         let minute = (secs_of_day % 3600) / 60;
         let second = secs_of_day % 60;
 
-        let base = if sub_nanos == 0 {
-            format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}")
+        // Build the timestamp and its optional timezone suffix in the returned
+        // allocation. The former timezone-aware path first allocated `base`,
+        // then allocated again to copy `base` into the suffixed result.
+        let suffix_capacity = self
+            .tz
+            .as_ref()
+            .map_or(0, |tz| if tz == "UTC" { 6 } else { tz.len() + 2 });
+        let mut result = String::with_capacity(29 + suffix_capacity);
+        if sub_nanos == 0 {
+            let _ = write!(
+                result,
+                "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}"
+            );
+        } else if sub_nanos.is_multiple_of(1_000) {
+            let _ = write!(
+                result,
+                "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{:06}",
+                sub_nanos / 1_000
+            );
         } else {
-            let micros = sub_nanos / 1000;
-            format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}")
-        };
-        match &self.tz {
-            Some(tz) if tz == "UTC" => format!("{base}+00:00"),
-            Some(tz) => format!("{base}[{tz}]"),
-            None => base,
+            let _ = write!(
+                result,
+                "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{sub_nanos:09}"
+            );
         }
+        match &self.tz {
+            Some(tz) if tz == "UTC" => result.push_str("+00:00"),
+            Some(tz) => {
+                result.push('[');
+                result.push_str(tz);
+                result.push(']');
+            }
+            None => {}
+        }
+        result
     }
 
     /// Alias for isoformat.
@@ -2688,7 +2797,12 @@ impl Timestamp {
             return Ok(Self::nat());
         }
 
-        let (datetime_part, tz) = Self::split_timezone(s);
+        let Some((datetime_part, tz)) = Self::split_timezone(s) else {
+            return Err(TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Timestamp".to_string(),
+            });
+        };
 
         let (date_part, time_part) = if datetime_part.contains('T') {
             datetime_part
@@ -2731,24 +2845,43 @@ impl Timestamp {
         })
     }
 
-    fn split_timezone(s: &str) -> (&str, Option<String>) {
+    fn split_timezone(s: &str) -> Option<(&str, Option<String>)> {
         if let Some(stripped) = s.strip_suffix('Z') {
-            (stripped, Some("UTC".to_string()))
+            Some((stripped, Some("UTC".to_string())))
         } else if let Some(idx) = s.rfind('+') {
-            if idx > 10 {
-                (&s[..idx], Some(s[idx..].to_string()))
+            if idx > 10 && Self::is_timezone_offset(&s[idx..]) {
+                Some((&s[..idx], Some(s[idx..].to_string())))
+            } else if idx > 10 {
+                None
             } else {
-                (s, None)
+                Some((s, None))
             }
         } else if let Some(idx) = s.rfind('-') {
-            if idx > 10 && s[idx..].contains(':') {
-                (&s[..idx], Some(s[idx..].to_string()))
+            if idx > 10 && Self::is_timezone_offset(&s[idx..]) {
+                Some((&s[..idx], Some(s[idx..].to_string())))
+            } else if idx > 10 {
+                None
             } else {
-                (s, None)
+                Some((s, None))
             }
         } else {
-            (s, None)
+            Some((s, None))
         }
+    }
+
+    fn is_timezone_offset(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        if bytes.len() != 6 || !matches!(bytes[0], b'+' | b'-') || bytes[3] != b':' {
+            return false;
+        }
+        if !bytes[1..3].iter().all(u8::is_ascii_digit)
+            || !bytes[4..6].iter().all(u8::is_ascii_digit)
+        {
+            return false;
+        }
+        let hour = u32::from(bytes[1] - b'0') * 10 + u32::from(bytes[2] - b'0');
+        let minute = u32::from(bytes[4] - b'0') * 10 + u32::from(bytes[5] - b'0');
+        hour <= 23 && minute <= 59
     }
 
     fn parse_date(s: &str) -> Option<(i64, u32, u32)> {
@@ -2766,7 +2899,10 @@ impl Timestamp {
     }
 
     fn parse_time(s: &str) -> Option<(u32, u32, u32, u64)> {
-        let (time_str, frac_str) = s.split_once('.').unwrap_or((s, ""));
+        let (time_str, frac_str) = match s.split_once('.') {
+            Some((time, frac)) => (time, Some(frac)),
+            None => (s, None),
+        };
         let parts: Vec<&str> = time_str.split(':').collect();
         if parts.is_empty() || parts.len() > 3 {
             return None;
@@ -2779,11 +2915,22 @@ impl Timestamp {
             return None;
         }
 
-        let nanos = if frac_str.is_empty() {
-            0
-        } else {
-            let padded = format!("{:0<9}", &frac_str[..frac_str.len().min(9)]);
-            padded.parse::<u64>().unwrap_or(0)
+        let nanos = match frac_str {
+            None => 0,
+            Some(frac) => {
+                if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                let digits = frac.len().min(9);
+                let mut nanos = 0_u64;
+                for byte in frac.bytes().take(digits) {
+                    nanos = nanos * 10 + u64::from(byte - b'0');
+                }
+                for _ in digits..9 {
+                    nanos *= 10;
+                }
+                nanos
+            }
         };
 
         Some((hour, minute, second, nanos))
@@ -2822,14 +2969,23 @@ impl Timestamp {
     /// NaT returns "NaT".
     #[must_use]
     pub fn strftime(&self, format: &str) -> String {
+        use std::fmt::Write as _;
+
         if self.is_nat() {
             return "NaT".to_string();
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        // Floor both boundaries for pre-epoch instants. Truncating division
+        // produces an internally inconsistent date/time pair for every negative
+        // non-midnight timestamp (and is especially visible at -1 ns):
+        // 1970-01-01 00:00:00.999999 instead of
+        // 1969-12-31 23:59:59.999999.
+        let total_secs = self.nanos.div_euclid(Timedelta::NANOS_PER_SEC);
+        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
+        // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
+        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
 
-        let days_since_epoch = total_secs / 86400;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        let days_since_epoch = total_secs.div_euclid(86400);
+        let secs_of_day = total_secs.rem_euclid(86400);
 
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
@@ -2847,14 +3003,45 @@ impl Timestamp {
         let second = secs_of_day % 60;
         let micros = sub_nanos / 1000;
 
-        format
-            .replace("%Y", &format!("{year:04}"))
-            .replace("%m", &format!("{m:02}"))
-            .replace("%d", &format!("{d:02}"))
-            .replace("%H", &format!("{hour:02}"))
-            .replace("%M", &format!("{minute:02}"))
-            .replace("%S", &format!("{second:02}"))
-            .replace("%f", &format!("{micros:06}"))
+        // Write recognized directives directly into the returned allocation.
+        // The former seven-step replacement chain copied the whole format once
+        // per directive and allocated a temporary string for every component.
+        let mut result = String::with_capacity(format.len().saturating_add(32));
+        let mut rest = format;
+        while let Some(percent) = rest.find('%') {
+            result.push_str(&rest[..percent]);
+            let directive = &rest[percent..];
+            rest = if let Some(next) = directive.strip_prefix("%Y") {
+                let _ = write!(result, "{year:04}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%m") {
+                let _ = write!(result, "{m:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%d") {
+                let _ = write!(result, "{d:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%H") {
+                let _ = write!(result, "{hour:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%M") {
+                let _ = write!(result, "{minute:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%S") {
+                let _ = write!(result, "{second:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%f") {
+                let _ = write!(result, "{micros:06}");
+                next
+            } else {
+                // Preserve the chained `replace` behavior for unknown, escaped,
+                // and trailing percent signs; the following byte may still begin
+                // a recognized directive (for example, `%%Y` -> `%2024`).
+                result.push('%');
+                &directive[1..]
+            };
+        }
+        result.push_str(rest);
+        result
     }
 
     /// Return the day of the week as a string (e.g., "Monday").
@@ -2874,7 +3061,12 @@ impl Timestamp {
         if self.is_nat() {
             return "NaT".to_string();
         }
-        let days_since_epoch = self.nanos / Timedelta::NANOS_PER_DAY;
+        // Floor days for pre-1970 (br-frankenpandas-wkjtw); == `/` for positive.
+        // Truncating `/` rounds a negative, non-midnight instant TOWARD zero, so
+        // it lands on the following day and names the wrong weekday: pandas 2.2.3
+        // gives 1969-07-20T20:17:40 -> "Sunday", truncation gave "Monday". The
+        // wkjtw fix was applied to `dayofweek` but never here.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let dow = ((days_since_epoch % 7) + 7) % 7;
         NAMES[dow as usize].to_string()
     }
@@ -2901,8 +3093,10 @@ impl Timestamp {
         if self.is_nat() {
             return "NaT".to_string();
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let days_since_epoch = total_secs / 86400;
+        // Floor (not truncate) so pre-1970 instants with a sub-day part map to
+        // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
+        // for the post-1970 positive case.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -3438,10 +3632,12 @@ pub fn nansem(values: &[Scalar], ddof: usize) -> Scalar {
     if nums.len() <= ddof {
         return Scalar::Null(NullKind::NaN);
     }
-    match nanstd(values, ddof) {
-        Scalar::Float64(s) => Scalar::Float64(s / (nums.len() as f64).sqrt()),
-        other => other,
-    }
+    let n = nums.len();
+    let mean = nums.iter().sum::<f64>() / n as f64;
+    let sum_sq = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
+    let var = sum_sq / (n - ddof) as f64;
+    let std = var.sqrt();
+    Scalar::Float64(std / (n as f64).sqrt())
 }
 
 /// Peak-to-peak range of non-missing values (max − min).
@@ -3505,8 +3701,15 @@ pub fn nanskew(values: &[Scalar]) -> Scalar {
         return Scalar::Null(NullKind::NaN);
     }
     let mean = nums.iter().sum::<f64>() / n;
-    let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-    let m3: f64 = nums.iter().map(|x| (x - mean).powi(3)).sum();
+    // Accumulate both central moments while the collected values are hot. Each
+    // sum still observes the same terms in the same order as the former two
+    // iterator passes, preserving floating-point results bit-for-bit.
+    let (mut m2, mut m3) = (0.0_f64, 0.0_f64);
+    for x in nums {
+        let delta = x - mean;
+        m2 += delta.powi(2);
+        m3 += delta.powi(3);
+    }
     let s2 = m2 / (n - 1.0);
     if s2 == 0.0 {
         return Scalar::Float64(0.0);
@@ -3528,8 +3731,15 @@ pub fn nankurt(values: &[Scalar]) -> Scalar {
         return Scalar::Null(NullKind::NaN);
     }
     let mean = nums.iter().sum::<f64>() / n;
-    let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-    let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum();
+    // Accumulate both central moments while the collected values are hot. Each
+    // sum still observes the same terms in the same order as the former two
+    // iterator passes, preserving floating-point results bit-for-bit.
+    let (mut m2, mut m4) = (0.0_f64, 0.0_f64);
+    for x in nums {
+        let delta = x - mean;
+        m2 += delta.powi(2);
+        m4 += delta.powi(4);
+    }
     let s2 = m2 / (n - 1.0);
     if s2 == 0.0 {
         return Scalar::Float64(0.0);
@@ -3912,7 +4122,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
         Utf8(&'a str),
         Timedelta64(i64),
         Datetime64(i64),
-        Period(i64),
+        Period(i64, PeriodFreq),
         Interval(u64, u64, IntervalClosed),
     }
 
@@ -3931,7 +4141,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
             Scalar::Utf8(v) => ScalarKey::Utf8(v.as_str()),
             Scalar::Timedelta64(v) => ScalarKey::Timedelta64(*v),
             Scalar::Datetime64(v) => ScalarKey::Datetime64(*v),
-            Scalar::Period(v) => ScalarKey::Period(*v),
+            Scalar::Period(p) => ScalarKey::Period(p.ordinal, p.freq),
             Scalar::Interval(v) => ScalarKey::Interval(
                 normalized_float_bits(v.left),
                 normalized_float_bits(v.right),
@@ -4144,15 +4354,20 @@ impl Interval {
         };
 
         let inner = &s[1..s.len() - 1];
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() != 2 {
+        let Some((left_text, right_text)) = inner.split_once(',') else {
+            return Err(TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Interval".to_string(),
+            });
+        };
+        if right_text.contains(',') {
             return Err(TypeError::ValueNotParseable {
                 value: s.to_string(),
                 target: "Interval".to_string(),
             });
         }
 
-        let left: f64 = parts[0]
+        let left: f64 = left_text
             .trim()
             .parse()
             .map_err(|_| TypeError::ValueNotParseable {
@@ -4160,7 +4375,7 @@ impl Interval {
                 target: "Interval".to_string(),
             })?;
 
-        let right: f64 = parts[1]
+        let right: f64 = right_text
             .trim()
             .parse()
             .map_err(|_| TypeError::ValueNotParseable {
@@ -4173,14 +4388,20 @@ impl Interval {
 }
 
 impl std::fmt::Display for Interval {
-    /// Matches `str(pd.Interval(0, 5, 'right'))` → `"(0, 5]"`.
+    /// Matches `str(pd.Interval(...))` for the `interval[float64]` subtype, which
+    /// is the only subtype FrankenPandas stores (f64 endpoints): the endpoints
+    /// render with Python `str(float)` semantics, so whole numbers KEEP ".0"
+    /// (`str(pd.Interval(0.0, 5.0, 'right'))` is `"(0.0, 5.0]"`, not `"(0, 5]"`).
+    /// Verified vs pandas 2.2.3 across whole/fractional/negative/scientific
+    /// endpoints. (br-frankenpandas-5xw1b)
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let left_bracket = if self.closed.left_closed() { '[' } else { '(' };
         let right_bracket = if self.closed.right_closed() { ']' } else { ')' };
         write!(
             f,
             "{left_bracket}{}, {}{right_bracket}",
-            self.left, self.right
+            float_to_string_for_astype(self.left),
+            float_to_string_for_astype(self.right)
         )
     }
 }
@@ -4496,6 +4717,97 @@ impl Period {
             target: "Period".to_owned(),
         })
     }
+
+    /// Pandas calendar string for this period, matching `str(pd.Period)`.
+    ///
+    /// Inverts the frequency-specific ordinal axes anchored at 1970:
+    /// `1970`/`1970Q1`/`1970-01`/`1970-01-01`/`1970-01-01 00:00` all have
+    /// ordinal 0. Returns `"NaT"` for the missing sentinel (`i64::MIN`).
+    ///
+    /// Annual/Quarterly/Monthly/Daily and the sub-daily clocks
+    /// (Hourly/Minutely/Secondly) are exact. Weekly and Business use a
+    /// best-effort `YYYY-MM-DD` rendering (their pandas axes — a Sunday-ended
+    /// week range and a business-day count — are not yet wired; neither is
+    /// reachable through the current parse/cast paths).
+    #[must_use]
+    pub fn calendar_string(&self) -> String {
+        let mut rendered = String::new();
+        // `fmt::Write for String` is infallible.
+        let _ = self.write_calendar(&mut rendered);
+        rendered
+    }
+
+    fn write_calendar(&self, rendered: &mut impl std::fmt::Write) -> std::fmt::Result {
+        if self.ordinal == i64::MIN {
+            return rendered.write_str("NaT");
+        }
+        let ord = self.ordinal;
+        match self.freq {
+            PeriodFreq::Annual => {
+                let year = 1970 + ord;
+                write!(rendered, "{year}")
+            }
+            PeriodFreq::Quarterly => {
+                let year = 1970 + ord.div_euclid(4);
+                let quarter = ord.rem_euclid(4) + 1;
+                write!(rendered, "{year}Q{quarter}")
+            }
+            PeriodFreq::Monthly => {
+                let year = 1970 + ord.div_euclid(12);
+                let month = ord.rem_euclid(12) + 1;
+                write!(rendered, "{year:04}-{month:02}")
+            }
+            PeriodFreq::Daily | PeriodFreq::Business | PeriodFreq::Weekly => {
+                let (y, m, d) = civil_from_days(ord);
+                write!(rendered, "{y:04}-{m:02}-{d:02}")
+            }
+            PeriodFreq::Hourly => {
+                let (y, m, d) = civil_from_days(ord.div_euclid(24));
+                let hour = ord.rem_euclid(24);
+                write!(rendered, "{y:04}-{m:02}-{d:02} {hour:02}:00")
+            }
+            PeriodFreq::Minutely => {
+                let day = ord.div_euclid(1440);
+                let mins = ord.rem_euclid(1440);
+                let (y, m, d) = civil_from_days(day);
+                write!(
+                    rendered,
+                    "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+                    mins / 60,
+                    mins % 60
+                )
+            }
+            PeriodFreq::Secondly => {
+                let day = ord.div_euclid(86_400);
+                let secs = ord.rem_euclid(86_400);
+                let (y, m, d) = civil_from_days(day);
+                write!(
+                    rendered,
+                    "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+                    secs / 3600,
+                    (secs % 3600) / 60,
+                    secs % 60
+                )
+            }
+        }
+    }
+}
+
+/// Convert a day count (days since 1970-01-01) to a proleptic-Gregorian
+/// `(year, month, day)`, using Howard Hinnant's civil-from-days algorithm
+/// (same kernel as `Timestamp::isoformat`).
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let days = days_since_epoch + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let doe = days - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as u32, d as u32)
 }
 
 fn parse_annual_period(value: &str) -> Option<i64> {
@@ -4541,11 +4853,10 @@ fn parse_quarter_period(value: &str) -> Option<(i64, u32)> {
 }
 
 impl std::fmt::Display for Period {
-    /// Phase 1: ordinal+freq form, e.g. `Period[Q-DEC, 216]`. Calendar-
-    /// formatted display (`2024Q1`, `2024-03`) lands in Phase 2 once the
-    /// ordinal-to-ymd arithmetic is wired.
+    /// Pandas `str(Period)` form: the calendar string (`2024`, `2024Q1`,
+    /// `2024-03`, `2024-01-15`, ...). NaT (ordinal `i64::MIN`) renders `NaT`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Period[{}, {}]", self.freq, self.ordinal)
+        self.write_calendar(f)
     }
 }
 
@@ -4578,6 +4889,1019 @@ mod tests {
         DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType,
         cast_scalar, common_dtype, infer_dtype,
     };
+
+    /// br-frankenpandas-ay8o9: Scalar::semantic_cmp underpins ALL ordering in
+    /// the library (sort, min/max, is_monotonic, searchsorted, groupby key
+    /// order) and is the reference the differential harnesses rely on. Property
+    /// test of its total-order axioms over finite/non-NaT same-dtype scalars,
+    /// plus the intentional NaN degeneracy. Deterministic seeded LCG — no rand
+    /// crate, no mocks.
+    /// br-frankenpandas-767ak: extends ay8o9's NaN pinning to the temporal NAT
+    /// sentinels (i64::MIN). semantic_cmp treats NAT as degenerate (Equal to all
+    /// same-dtype), which is why temporal ordering ops must treat NAT as missing.
+    #[test]
+    fn semantic_cmp_cross_numeric_int_float_cdpai() {
+        // Property (br-frankenpandas-cdpai): semantic_cmp compares Int64 vs Float64
+        // as f64, antisymmetric across the operand order. Seeded LCG, no mocks.
+        use std::cmp::Ordering;
+        let mut st: u64 = 0xc205_a1b2_c3d4_e5f6;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for _ in 0..3000u32 {
+            let i = (next() % 21) as i64 - 10;
+            let f = (next() % 400) as f64 / 20.0 - 10.0; // finite
+            let exp = (i as f64).partial_cmp(&f).unwrap();
+            assert_eq!(Scalar::Int64(i).semantic_cmp(&Scalar::Float64(f)), exp);
+            assert_eq!(
+                Scalar::Float64(f).semantic_cmp(&Scalar::Int64(i)),
+                exp.reverse()
+            );
+        }
+        // Exact int/float equality compares Equal in both directions.
+        assert_eq!(
+            Scalar::Int64(5).semantic_cmp(&Scalar::Float64(5.0)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Scalar::Float64(5.0).semantic_cmp(&Scalar::Int64(5)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Scalar::Int64(3).semantic_cmp(&Scalar::Float64(3.5)),
+            Ordering::Less
+        );
+        assert_eq!(
+            Scalar::Int64(4).semantic_cmp(&Scalar::Float64(3.5)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn semantic_cmp_nat_degeneracy_temporal_767ak() {
+        use std::cmp::Ordering;
+        const NAT: i64 = i64::MIN;
+
+        // Timedelta64 NAT is degenerate (Equal to finite and to itself).
+        let td_nat = Scalar::Timedelta64(NAT);
+        for v in [-3i64, 0, 5, 99] {
+            let td = Scalar::Timedelta64(v);
+            assert_eq!(td_nat.semantic_cmp(&td), Ordering::Equal, "td NAT vs {v}");
+            assert_eq!(td.semantic_cmp(&td_nat), Ordering::Equal, "td {v} vs NAT");
+        }
+        assert_eq!(td_nat.semantic_cmp(&td_nat), Ordering::Equal);
+
+        // Datetime64 NAT likewise.
+        let dt_nat = Scalar::Datetime64(NAT);
+        for v in [-3i64, 0, 5, 99] {
+            let dt = Scalar::Datetime64(v);
+            assert_eq!(dt_nat.semantic_cmp(&dt), Ordering::Equal, "dt NAT vs {v}");
+            assert_eq!(dt.semantic_cmp(&dt_nat), Ordering::Equal, "dt {v} vs NAT");
+        }
+        assert_eq!(dt_nat.semantic_cmp(&dt_nat), Ordering::Equal);
+
+        // Non-NAT temporal values order normally (reflexive, antisymmetric, lt).
+        for (a, b) in [(1i64, 2i64), (5, 5), (9, -1)] {
+            let (ta, tb) = (Scalar::Timedelta64(a), Scalar::Timedelta64(b));
+            assert_eq!(ta.semantic_cmp(&ta), Ordering::Equal);
+            assert_eq!(ta.semantic_cmp(&tb), b.cmp(&a).reverse()); // a.cmp(b)
+            assert_eq!(ta.semantic_cmp(&tb), a.cmp(&b));
+            let (da, db) = (Scalar::Datetime64(a), Scalar::Datetime64(b));
+            assert_eq!(da.semantic_cmp(&db), a.cmp(&b));
+        }
+    }
+
+    fn semantic_cmp_cross_variant_values_d5ikg() -> [Scalar; 9] {
+        [
+            Scalar::Null(NullKind::Null),
+            Scalar::Bool(true),
+            Scalar::Int64(-7),
+            Scalar::Float64(3.5),
+            Scalar::Utf8("mixed".to_owned()),
+            Scalar::Timedelta64(11),
+            Scalar::Datetime64(1_735_732_800_123_456_789),
+            Scalar::Period(Period::new(649, PeriodFreq::Monthly)),
+            Scalar::Interval(Interval::new(-1.5, 2.5, IntervalClosed::Right)),
+        ]
+    }
+
+    fn semantic_cmp_uses_debug_fallback_d5ikg(left: &Scalar, right: &Scalar) -> bool {
+        !matches!(
+            (left, right),
+            (Scalar::Int64(_), Scalar::Float64(_)) | (Scalar::Float64(_), Scalar::Int64(_))
+        )
+    }
+
+    #[test]
+    fn semantic_cmp_cross_variant_matches_debug_order_d5ikg() {
+        let values = semantic_cmp_cross_variant_values_d5ikg();
+        for (left_index, left) in values.iter().enumerate() {
+            for (right_index, right) in values.iter().enumerate() {
+                if left_index != right_index && semantic_cmp_uses_debug_fallback_d5ikg(left, right)
+                {
+                    assert_eq!(
+                        left.semantic_cmp(right),
+                        format!("{left:?}").cmp(&format!("{right:?}")),
+                        "cross-variant order mismatch: {left:?} vs {right:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn semantic_cmp_cross_variant_debug_alloc_ab_d5ikg() {
+        use std::cmp::Ordering;
+
+        const BATCH: usize = 4_096;
+        const BLOCKS: usize = 9;
+
+        fn former(left: &Scalar, right: &Scalar) -> Ordering {
+            format!("{left:?}").cmp(&format!("{right:?}"))
+        }
+
+        fn candidate(left: &Scalar, right: &Scalar) -> Ordering {
+            left.semantic_cmp(right)
+        }
+
+        fn elapsed(values: &[Scalar], compare: fn(&Scalar, &Scalar) -> Ordering) -> u128 {
+            let mut less = 0usize;
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                for (left_index, left) in values.iter().enumerate() {
+                    for (right_index, right) in values.iter().enumerate() {
+                        if left_index != right_index
+                            && semantic_cmp_uses_debug_fallback_d5ikg(left, right)
+                            && compare(std::hint::black_box(left), std::hint::black_box(right))
+                                == Ordering::Less
+                        {
+                            less += 1;
+                        }
+                    }
+                }
+            }
+            std::hint::black_box(less);
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let values = semantic_cmp_cross_variant_values_d5ikg();
+
+        for (left_index, left) in values.iter().enumerate() {
+            for (right_index, right) in values.iter().enumerate() {
+                if left_index != right_index && semantic_cmp_uses_debug_fallback_d5ikg(left, right)
+                {
+                    assert_eq!(
+                        former(left, right),
+                        candidate(left, right),
+                        "cross-variant order mismatch: {left:?} vs {right:?}"
+                    );
+                }
+            }
+        }
+
+        std::hint::black_box(elapsed(&values, former));
+        std::hint::black_box(elapsed(&values, candidate));
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut candidate_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, candidate));
+                candidate_samples.push(elapsed(&values, candidate));
+                former_samples.push(elapsed(&values, former));
+            } else {
+                candidate_samples.push(elapsed(&values, candidate));
+                former_samples.push(elapsed(&values, former));
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, candidate));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "semantic_cmp_cross_variant_debug_alloc former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup={:.6}",
+            former_p50 as f64 / candidate_p50 as f64
+        );
+    }
+
+    #[test]
+    fn semantic_cmp_total_order_axioms_ay8o9() {
+        use std::cmp::Ordering;
+
+        let mut state: u64 = 0xc0ff_eeba_df00_d123;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..6000u32 {
+            let dt = next() % 4;
+            // Build a same-dtype, finite, non-NaT scalar from a random u32.
+            let mk = |r: u32| match dt {
+                0 => Scalar::Int64((r % 11) as i64 - 5),
+                // finite, in -5.0..=5.0 by 0.5 — no NaN/inf.
+                1 => Scalar::Float64(f64::from((r % 21) as i32 - 10) / 2.0),
+                2 => Scalar::Utf8(format!("s{}", r % 5)),
+                _ => Scalar::Bool(r.is_multiple_of(2)),
+            };
+            let a = mk(next());
+            let b = mk(next());
+            let c = mk(next());
+            let ctx = format!("iter={iter} a={a:?} b={b:?} c={c:?}");
+
+            // Reflexivity.
+            assert_eq!(a.semantic_cmp(&a), Ordering::Equal, "reflexive {ctx}");
+            // Antisymmetry.
+            assert_eq!(
+                a.semantic_cmp(&b),
+                b.semantic_cmp(&a).reverse(),
+                "antisymmetric {ctx}"
+            );
+            // le / ge / eq consistency with the ordering.
+            let ab = a.semantic_cmp(&b);
+            assert_eq!(
+                a.semantic_le(&b),
+                ab != Ordering::Greater,
+                "le-consistent {ctx}"
+            );
+            assert_eq!(
+                a.semantic_ge(&b),
+                ab != Ordering::Less,
+                "ge-consistent {ctx}"
+            );
+            assert_eq!(
+                a.semantic_le(&b) && a.semantic_ge(&b),
+                ab == Ordering::Equal,
+                "le&ge<=>eq {ctx}"
+            );
+            // Transitivity: a<=b && b<=c  =>  a<=c.
+            if a.semantic_cmp(&b) != Ordering::Greater && b.semantic_cmp(&c) != Ordering::Greater {
+                assert_ne!(a.semantic_cmp(&c), Ordering::Greater, "transitivity {ctx}");
+            }
+        }
+
+        // Pin the intentional NaN degeneracy: a Float64 NaN compares Equal to
+        // every finite Float64 (and to itself) — this is why ordering ops must
+        // treat NaN as missing rather than relying on semantic_cmp to order it.
+        let nan = Scalar::Float64(f64::NAN);
+        for v in [
+            Scalar::Float64(-3.5),
+            Scalar::Float64(0.0),
+            Scalar::Float64(7.25),
+        ] {
+            assert_eq!(nan.semantic_cmp(&v), Ordering::Equal, "NaN cmp finite");
+            assert_eq!(v.semantic_cmp(&nan), Ordering::Equal, "finite cmp NaN");
+        }
+        assert_eq!(nan.semantic_cmp(&nan), Ordering::Equal, "NaN cmp NaN");
+    }
+
+    /// br-frankenpandas-be314: common_dtype is the dtype-promotion lattice
+    /// underpinning every binary op, alignment, and concat (dtype coercion is a
+    /// crown-jewel correctness area). Exhaustively (all 13x13 DType pairs) assert
+    /// its lattice axioms — an asymmetric arm would make df1+df2 and df2+df1
+    /// disagree on dtype.
+    #[test]
+    fn common_dtype_lattice_axioms_be314() {
+        const ALL: [DType; 13] = [
+            DType::Null,
+            DType::Bool,
+            DType::BoolNullable,
+            DType::Int64,
+            DType::Int64Nullable,
+            DType::Float64,
+            DType::Utf8,
+            DType::Categorical,
+            DType::Timedelta64,
+            DType::Datetime64,
+            DType::Period,
+            DType::Interval,
+            DType::Sparse,
+        ];
+
+        for &a in &ALL {
+            // Idempotence: a promoted with itself is itself.
+            assert_eq!(common_dtype(a, a), Ok(a), "idempotent {a:?}");
+            // Null is the identity element of the promotion lattice.
+            assert_eq!(
+                common_dtype(DType::Null, a),
+                Ok(a),
+                "null-left identity {a:?}"
+            );
+            assert_eq!(
+                common_dtype(a, DType::Null),
+                Ok(a),
+                "null-right identity {a:?}"
+            );
+
+            for &b in &ALL {
+                // Commutativity: same Ok value AND same ok-ness. An asymmetric
+                // match arm would make binary-op output dtype order-dependent.
+                assert_eq!(
+                    common_dtype(a, b).ok(),
+                    common_dtype(b, a).ok(),
+                    "commutative value {a:?},{b:?}"
+                );
+                assert_eq!(
+                    common_dtype(a, b).is_ok(),
+                    common_dtype(b, a).is_ok(),
+                    "commutative ok-ness {a:?},{b:?}"
+                );
+            }
+        }
+
+        // Associativity over the Ok-closed subset: when both nestings succeed,
+        // promotion order must not change the result.
+        for &a in &ALL {
+            for &b in &ALL {
+                for &c in &ALL {
+                    if let (Ok(ab), Ok(bc)) = (common_dtype(a, b), common_dtype(b, c))
+                        && let (Ok(left), Ok(right)) = (common_dtype(ab, c), common_dtype(a, bc))
+                    {
+                        assert_eq!(left, right, "associative {a:?},{b:?},{c:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// br-frankenpandas-e3sfq: infer_dtype drives Column/Series construction
+    /// dtype inference. Assert its homogeneous + mixed-coercion rules.
+    #[test]
+    fn infer_dtype_coercion_rules_e3sfq() {
+        use DType::{Bool, Float64, Int64, Null, Utf8};
+
+        // Empty and all-null infer to Null.
+        assert_eq!(infer_dtype(&[]), Ok(Null));
+        assert_eq!(
+            infer_dtype(&[Scalar::Null(NullKind::Null), Scalar::Null(NullKind::NaN)]),
+            Ok(Null)
+        );
+
+        // Homogeneous slices infer to their own dtype (random, seeded LCG).
+        let mut s: u64 = 0x132d_a7e0_0e3f_c0de;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        for _ in 0..600u32 {
+            let n = (next() % 6) as usize + 1;
+            let ints: Vec<Scalar> = (0..n)
+                .map(|_| Scalar::Int64((next() % 9) as i64 - 4))
+                .collect();
+            assert_eq!(infer_dtype(&ints), Ok(Int64));
+            let floats: Vec<Scalar> = (0..n)
+                .map(|_| Scalar::Float64(f64::from((next() % 7) as i32)))
+                .collect();
+            assert_eq!(infer_dtype(&floats), Ok(Float64));
+            let bools: Vec<Scalar> = (0..n).map(|_| Scalar::Bool(next() % 2 == 0)).collect();
+            assert_eq!(infer_dtype(&bools), Ok(Bool));
+            let strs: Vec<Scalar> = (0..n)
+                .map(|_| Scalar::Utf8(format!("s{}", next() % 4)))
+                .collect();
+            assert_eq!(infer_dtype(&strs), Ok(Utf8));
+        }
+
+        // Mixed-coercion rules.
+        assert_eq!(
+            infer_dtype(&[
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2)
+            ]),
+            Ok(Int64),
+            "Int64 + nulls -> Int64"
+        );
+        assert_eq!(
+            infer_dtype(&[Scalar::Int64(1), Scalar::Float64(2.5)]),
+            Ok(Float64),
+            "Int64 + Float64 -> Float64"
+        );
+        assert_eq!(
+            infer_dtype(&[Scalar::Bool(true), Scalar::Int64(3)]),
+            Ok(Int64),
+            "Bool + Int64 -> Int64"
+        );
+        assert_eq!(
+            infer_dtype(&[Scalar::Utf8("a".into()), Scalar::Int64(3)]),
+            Ok(Utf8),
+            "Utf8 + Int64 -> Utf8 (object fallback)"
+        );
+    }
+
+    /// br-frankenpandas-1ews0: missing_for_dtype is the canonical per-dtype
+    /// missing sentinel (used by null-fill / with_validity / cast). Exhaustively
+    /// assert it is always missing, and that casting any missing to any dtype
+    /// stays missing.
+    #[test]
+    fn missing_for_dtype_always_missing_1ews0() {
+        const ALL: [DType; 13] = [
+            DType::Null,
+            DType::Bool,
+            DType::BoolNullable,
+            DType::Int64,
+            DType::Int64Nullable,
+            DType::Float64,
+            DType::Utf8,
+            DType::Categorical,
+            DType::Timedelta64,
+            DType::Datetime64,
+            DType::Period,
+            DType::Interval,
+            DType::Sparse,
+        ];
+        for &dt in &ALL {
+            let m = Scalar::missing_for_dtype(dt);
+            assert!(m.is_missing(), "missing_for_dtype({dt:?}) must be missing");
+            for &target in &ALL {
+                let cast = cast_scalar(&m, target).expect("cast of missing");
+                if target == DType::Utf8 {
+                    // Casting a missing value to string follows pandas astype(str):
+                    // it yields a string ("None"/"NaN"/"NaT"), NOT a missing value.
+                    assert!(
+                        matches!(cast, Scalar::Utf8(_)),
+                        "cast(missing {dt:?} -> Utf8) yields a string, got {cast:?}"
+                    );
+                } else {
+                    // Every other target preserves missingness via cast_scalar's
+                    // value.is_missing() -> missing_for_dtype(target) branch.
+                    assert!(
+                        cast.is_missing(),
+                        "cast(missing {dt:?} -> {target:?}) must stay missing, got {cast:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cast_scalar_bool_int_roundtrip_6w07b() {
+        use super::cast_scalar;
+        // Property (br-frankenpandas-6w07b): Bool<->Int64 cast. Seeded LCG, no mocks.
+        assert_eq!(
+            cast_scalar(&Scalar::Bool(true), DType::Int64).unwrap(),
+            Scalar::Int64(1)
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Bool(false), DType::Int64).unwrap(),
+            Scalar::Int64(0)
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Int64(0), DType::Bool).unwrap(),
+            Scalar::Bool(false)
+        );
+        let mut st: u64 = 0x4b07_0b1c_2d3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for _ in 0..2000u32 {
+            let v = (next() % 21) as i64 - 10;
+            assert_eq!(
+                cast_scalar(&Scalar::Int64(v), DType::Bool).unwrap(),
+                Scalar::Bool(v != 0),
+                "int->bool v={v}"
+            );
+        }
+    }
+
+    /// br-frankenpandas-6a83t: cast_scalar is the scalar dtype-coercion path
+    #[test]
+    fn cast_scalar_float_to_int_truncates_toward_zero_u9lec() {
+        use super::cast_scalar;
+        // Property (br-frankenpandas-u9lec): Float64->Int64 truncates toward zero, not
+        // floor (-3.7 -> -3). Seeded LCG, no mocks.
+        let mut st: u64 = 0x4ca5_0b1c_2d3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        // Explicit negative-direction checks (the gotcha).
+        for (f, exp) in [
+            (-3.7, -3i64),
+            (3.7, 3),
+            (-3.2, -3),
+            (3.2, 3),
+            (-0.9, 0),
+            (0.9, 0),
+            (-5.0, -5),
+            (5.0, 5),
+        ] {
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(f), DType::Int64).unwrap(),
+                Scalar::Int64(exp),
+                "cast {f}"
+            );
+        }
+        // Property over random signed fractional values.
+        for _ in 0..3000u32 {
+            let v = (next() % 2_000_001) as f64 / 1000.0 - 1000.0; // [-1000, 1000]
+            let got = cast_scalar(&Scalar::Float64(v), DType::Int64).unwrap();
+            assert_eq!(
+                got,
+                Scalar::Int64(v.trunc() as i64),
+                "trunc-toward-zero v={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn nancount_nunique_prod_any_all_mx60x() {
+        use super::{nanall, nanany, nancount, nannunique, nanprod};
+        // br-frankenpandas-mx60x: nancount/nannunique/nanprod/nanany/nanall skip NaN
+        // and match finite-only oracles. Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e2a_0b1c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let asf = |sc: Scalar| -> f64 { sc.to_f64().unwrap_or(f64::NAN) };
+        let asb = |sc: Scalar| -> bool { matches!(sc, Scalar::Bool(true)) };
+        for iter in 0..1000u32 {
+            let n = (next() % 10) as usize + 1;
+            let raw: Vec<f64> = (0..n)
+                .map(|_| {
+                    if next() % 4 == 0 {
+                        f64::NAN
+                    } else {
+                        (next() % 5) as f64
+                    }
+                })
+                .collect();
+            let finite: Vec<f64> = raw.iter().copied().filter(|x| !x.is_nan()).collect();
+            if finite.is_empty() {
+                continue;
+            }
+            let scalars: Vec<Scalar> = raw.iter().map(|&x| Scalar::Float64(x)).collect();
+            let distinct: std::collections::HashSet<u64> =
+                finite.iter().map(|x| x.to_bits()).collect();
+            let prod: f64 = finite.iter().product();
+            assert!(
+                (asf(nancount(&scalars)) - finite.len() as f64).abs() < 1e-9,
+                "nancount iter={iter}"
+            );
+            assert!(
+                (asf(nannunique(&scalars)) - distinct.len() as f64).abs() < 1e-9,
+                "nannunique iter={iter}"
+            );
+            assert!(
+                (asf(nanprod(&scalars)) - prod).abs() < 1e-7,
+                "nanprod iter={iter}"
+            );
+            assert_eq!(
+                asb(nanany(&scalars)),
+                finite.iter().any(|&x| x != 0.0),
+                "nanany iter={iter}"
+            );
+            assert_eq!(
+                asb(nanall(&scalars)),
+                finite.iter().all(|&x| x != 0.0),
+                "nanall iter={iter}"
+            );
+        }
+    }
+
+    #[test]
+    fn nan_reduction_kernels_skip_correctness_1uagc() {
+        use super::{nanmax, nanmedian, nanmin, nansum};
+        // br-frankenpandas-1uagc: nansum/nanmin/nanmax/nanmedian skip NaN and match
+        // finite-only oracles. Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e1a_0b2c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let val = |sc: Scalar| -> f64 { sc.to_f64().unwrap_or(f64::NAN) };
+        for iter in 0..1000u32 {
+            let n = (next() % 12) as usize + 1;
+            let raw: Vec<f64> = (0..n)
+                .map(|_| {
+                    if next() % 4 == 0 {
+                        f64::NAN
+                    } else {
+                        (next() % 200) as f64 - 100.0
+                    }
+                })
+                .collect();
+            let mut finite: Vec<f64> = raw.iter().copied().filter(|x| !x.is_nan()).collect();
+            if finite.is_empty() {
+                continue;
+            }
+            let scalars: Vec<Scalar> = raw.iter().map(|&x| Scalar::Float64(x)).collect();
+            let sum: f64 = finite.iter().sum();
+            let mn = finite.iter().copied().fold(f64::INFINITY, f64::min);
+            let mx = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            finite.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let m = finite.len();
+            let med = if m % 2 == 1 {
+                finite[m / 2]
+            } else {
+                (finite[m / 2 - 1] + finite[m / 2]) / 2.0
+            };
+            assert!(
+                (val(nansum(&scalars)) - sum).abs() < 1e-7,
+                "nansum iter={iter}"
+            );
+            assert!(
+                (val(nanmin(&scalars)) - mn).abs() < 1e-9,
+                "nanmin iter={iter}"
+            );
+            assert!(
+                (val(nanmax(&scalars)) - mx).abs() < 1e-9,
+                "nanmax iter={iter}"
+            );
+            assert!(
+                (val(nanmedian(&scalars)) - med).abs() < 1e-9,
+                "nanmedian iter={iter}"
+            );
+        }
+    }
+
+    #[test]
+    fn nanvar_ddof_nanstd_nan_skip_p00ag() {
+        use super::{nanmean, nanstd, nanvar};
+        // br-frankenpandas-p00ag: nanmean/nanvar/nanstd skip NaN; ddof picks the
+        // denominator; nanstd==sqrt(nanvar). Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e0a_0b1c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let val = |sc: Scalar| -> f64 { sc.to_f64().unwrap_or(f64::NAN) };
+        for iter in 0..1000u32 {
+            let n = (next() % 10) as usize + 2;
+            let raw: Vec<f64> = (0..n)
+                .map(|_| {
+                    if next() % 4 == 0 {
+                        f64::NAN
+                    } else {
+                        (next() % 200) as f64 / 7.0
+                    }
+                })
+                .collect();
+            let finite: Vec<f64> = raw.iter().copied().filter(|x| !x.is_nan()).collect();
+            if finite.len() < 2 {
+                continue;
+            }
+            let scalars: Vec<Scalar> = raw.iter().map(|&x| Scalar::Float64(x)).collect();
+            let nf = finite.len() as f64;
+            let mean = finite.iter().sum::<f64>() / nf;
+            let ss = finite.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
+            assert!(
+                (val(nanmean(&scalars)) - mean).abs() < 1e-7,
+                "nanmean iter={iter}"
+            );
+            assert!(
+                (val(nanvar(&scalars, 0)) - ss / nf).abs() < 1e-7,
+                "nanvar ddof0 iter={iter}"
+            );
+            assert!(
+                (val(nanvar(&scalars, 1)) - ss / (nf - 1.0)).abs() < 1e-7,
+                "nanvar ddof1 iter={iter}"
+            );
+            assert!(
+                (val(nanstd(&scalars, 1)) - (ss / (nf - 1.0)).sqrt()).abs() < 1e-7,
+                "nanstd ddof1 iter={iter}"
+            );
+        }
+    }
+
+    #[test]
+    fn nanskew_nankurt_min_sample_and_known_xybnq() {
+        // br-frankenpandas-xybnq: guard nanskew/nankurt min-sample-size (NaN below
+        // threshold) + known pandas G1/G2 values (the f4dc5540 inline-copy bug area).
+        use super::{nankurt, nanskew};
+        let f = |xs: &[f64]| -> Vec<Scalar> { xs.iter().map(|&x| Scalar::Float64(x)).collect() };
+        let val = |s: Scalar| -> Option<f64> {
+            if s.is_missing() {
+                None
+            } else {
+                s.to_f64().ok()
+            }
+        };
+
+        // skew needs >= 3 observations.
+        assert_eq!(val(nanskew(&f(&[1.0, 2.0]))), None, "skew n=2 -> NaN");
+        let sym = val(nanskew(&f(&[1.0, 2.0, 3.0]))).expect("skew n=3");
+        assert!(sym.abs() < 1e-9, "symmetric skew ~0, got {sym}");
+        let right = val(nanskew(&f(&[1.0, 1.0, 1.0, 5.0]))).expect("skew n=4");
+        assert!(right > 0.0, "right-skewed -> positive skew, got {right}");
+
+        // kurt needs >= 4 observations.
+        assert_eq!(val(nankurt(&f(&[1.0, 2.0, 3.0]))), None, "kurt n=3 -> NaN");
+        let k = val(nankurt(&f(&[1.0, 2.0, 3.0, 4.0, 5.0]))).expect("kurt n=5");
+        assert!(
+            (k - (-1.2)).abs() < 1e-6,
+            "pandas kurt([1..5]) == -1.2, got {k}"
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn nanskew_fused_moment_scan_ab_mavln() {
+        const ROWS: usize = 100_000;
+        const BATCH: usize = 8;
+
+        fn former(values: &[Scalar]) -> Scalar {
+            let nums = super::collect_finite(values);
+            let n = nums.len() as f64;
+            if n < 3.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = nums.iter().sum::<f64>() / n;
+            let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let m3: f64 = nums.iter().map(|x| (x - mean).powi(3)).sum();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let s3 = s2.powf(1.5);
+            Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3))
+        }
+
+        fn assert_bits_eq(former: Scalar, candidate: Scalar) {
+            match (former, candidate) {
+                (Scalar::Float64(a), Scalar::Float64(b)) => assert_eq!(a.to_bits(), b.to_bits()),
+                (a, b) => assert_eq!(a, b),
+            }
+        }
+
+        fn elapsed(values: &[Scalar], skew: fn(&[Scalar]) -> Scalar) -> u128 {
+            std::hint::black_box(skew(std::hint::black_box(values)));
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(skew(std::hint::black_box(values)));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        for values in [
+            vec![],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![Scalar::Int64(7); 16],
+            vec![
+                Scalar::Int64(-3),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.5),
+                Scalar::Utf8("skip".to_owned()),
+                Scalar::Int64(11),
+            ],
+        ] {
+            assert_bits_eq(former(&values), super::nanskew(&values));
+        }
+
+        let values = (0..ROWS)
+            .map(|i| {
+                if i % 257 == 0 {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Int64(((i * 37 + i / 11) % 10_003) as i64 - 5_001)
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_bits_eq(former(&values), super::nanskew(&values));
+
+        for _ in 0..2 {
+            std::hint::black_box(elapsed(&values, former));
+            std::hint::black_box(elapsed(&values, super::nanskew));
+        }
+
+        let mut former_samples = Vec::with_capacity(18);
+        let mut candidate_samples = Vec::with_capacity(18);
+        for block in 0_usize..9 {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, super::nanskew));
+                candidate_samples.push(elapsed(&values, super::nanskew));
+                former_samples.push(elapsed(&values, former));
+            } else {
+                candidate_samples.push(elapsed(&values, super::nanskew));
+                former_samples.push(elapsed(&values, former));
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, super::nanskew));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "NANSKEW_FUSED_AB rows={ROWS} batch={BATCH} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6}",
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("NANSKEW_FUSED_AB former_samples_ns={former_samples:?}");
+        eprintln!("NANSKEW_FUSED_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn nankurt_fused_moment_scan_ab_idka7() {
+        const ROWS: usize = 65_536;
+        const BATCH: usize = 4;
+
+        fn former(values: &[Scalar]) -> Scalar {
+            let nums = super::collect_finite(values);
+            let n = nums.len() as f64;
+            if n < 4.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = nums.iter().sum::<f64>() / n;
+            let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+            Scalar::Float64(adj * (m4 / (s2 * s2)) - sub)
+        }
+
+        fn assert_bits_eq(former: Scalar, candidate: Scalar) {
+            match (former, candidate) {
+                (Scalar::Float64(a), Scalar::Float64(b)) => assert_eq!(a.to_bits(), b.to_bits()),
+                (a, b) => assert_eq!(a, b),
+            }
+        }
+
+        fn elapsed(values: &[Scalar], kurt: fn(&[Scalar]) -> Scalar) -> u128 {
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(kurt(std::hint::black_box(values)));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        for values in [
+            vec![],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![Scalar::Int64(7); 16],
+            vec![
+                Scalar::Int64(-3),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.5),
+                Scalar::Utf8("skip".to_owned()),
+                Scalar::Int64(11),
+                Scalar::Float64(-7.25),
+            ],
+        ] {
+            assert_bits_eq(former(&values), super::nankurt(&values));
+        }
+
+        let values = (0..ROWS)
+            .map(|i| {
+                if i % 257 == 0 {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Int64(((i * 37 + i / 11) % 10_003) as i64 - 5_001)
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_bits_eq(former(&values), super::nankurt(&values));
+
+        for _ in 0..2 {
+            std::hint::black_box(elapsed(&values, former));
+            std::hint::black_box(elapsed(&values, super::nankurt));
+        }
+
+        let mut former_samples = Vec::with_capacity(10);
+        let mut candidate_samples = Vec::with_capacity(10);
+        for block in 0_usize..5 {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, super::nankurt));
+                candidate_samples.push(elapsed(&values, super::nankurt));
+                former_samples.push(elapsed(&values, former));
+            } else {
+                candidate_samples.push(elapsed(&values, super::nankurt));
+                former_samples.push(elapsed(&values, former));
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, super::nankurt));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "NANKURT_FUSED_AB rows={ROWS} batch={BATCH} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6}",
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("NANKURT_FUSED_AB former_samples_ns={former_samples:?}");
+        eprintln!("NANKURT_FUSED_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    /// behind astype/promotion. Property test of its confirmed identity +
+    /// numeric/bool coercion rules over random scalars. Deterministic seeded LCG.
+    #[test]
+    fn cast_scalar_to_utf8_formatting_yes7i() {
+        // Property (br-frankenpandas-yes7i): cast to Utf8 formats per pandas
+        // astype(str): Int64 -> decimal, Bool -> True/False. Seeded LCG, no mocks.
+        let mut st: u64 = 0x4e57_0b1c_2d3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for _ in 0..3000u32 {
+            let n = (next() % 4_000_001) as i64 - 2_000_000;
+            assert_eq!(
+                cast_scalar(&Scalar::Int64(n), DType::Utf8).unwrap(),
+                Scalar::Utf8(n.to_string())
+            );
+        }
+        assert_eq!(
+            cast_scalar(&Scalar::Bool(true), DType::Utf8).unwrap(),
+            Scalar::Utf8("True".to_string())
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Bool(false), DType::Utf8).unwrap(),
+            Scalar::Utf8("False".to_string())
+        );
+    }
+
+    #[test]
+    fn cast_scalar_coercion_rules_6a83t() {
+        let mut state: u64 = 0x5a17_c0de_1234_abcd;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for _ in 0..4000u32 {
+            let n = (next() % 21) as i64 - 10; // -10..=10, incl 0
+            let b = next() % 2 == 0;
+            let f = f64::from((next() % 41) as i32 - 20) / 4.0; // finite, incl 0.0
+
+            let i = Scalar::Int64(n);
+            let bo = Scalar::Bool(b);
+            let fl = Scalar::Float64(f);
+
+            // Identity casts.
+            assert_eq!(cast_scalar(&i, DType::Int64), Ok(i.clone()));
+            assert_eq!(cast_scalar(&bo, DType::Bool), Ok(bo.clone()));
+            assert_eq!(cast_scalar(&fl, DType::Float64), Ok(fl.clone()));
+
+            // Representation-preserving nullable identities.
+            assert_eq!(cast_scalar(&i, DType::Int64Nullable), Ok(i.clone()));
+            assert_eq!(cast_scalar(&bo, DType::BoolNullable), Ok(bo.clone()));
+
+            // Int64 coercions.
+            assert_eq!(cast_scalar(&i, DType::Bool), Ok(Scalar::Bool(n != 0)));
+            assert_eq!(
+                cast_scalar(&i, DType::Float64),
+                Ok(Scalar::Float64(n as f64))
+            );
+
+            // Bool coercions.
+            assert_eq!(
+                cast_scalar(&bo, DType::Int64),
+                Ok(Scalar::Int64(i64::from(b)))
+            );
+            assert_eq!(
+                cast_scalar(&bo, DType::Float64),
+                Ok(Scalar::Float64(if b { 1.0 } else { 0.0 }))
+            );
+
+            // Finite Float64 -> Int64 truncates toward zero (x as i64).
+            assert_eq!(cast_scalar(&fl, DType::Int64), Ok(Scalar::Int64(f as i64)));
+        }
+    }
 
     /// br-frankenpandas-esjjy / fd90.182: ergonomic From impls for Scalar.
     #[test]
@@ -4631,7 +5955,7 @@ mod tests {
         );
         assert_eq!(
             cast_scalar(&left, DType::Utf8).expect("interval string cast"),
-            Scalar::Utf8("(0, 1]".to_owned())
+            Scalar::Utf8("(0.0, 1.0]".to_owned())
         );
         assert_eq!(
             super::nannunique(&[left.clone(), right, left, Scalar::Null(NullKind::Null)]),
@@ -4654,7 +5978,7 @@ mod tests {
         );
         assert_eq!(
             cast_scalar(&Scalar::Utf8("2024Q1".to_owned()), DType::Period).expect("period cast"),
-            Scalar::Period(216)
+            Scalar::Period(Period::new(216, PeriodFreq::Quarterly))
         );
         assert_eq!(
             cast_scalar(&Scalar::Utf8("(0, 1]".to_owned()), DType::Interval)
@@ -4881,6 +6205,150 @@ mod tests {
         }
     }
 
+    fn float_to_string_for_astype_former(value: f64) -> String {
+        if value.is_nan() {
+            return "nan".to_owned();
+        }
+        if value.is_infinite() {
+            return value.to_string();
+        }
+        let rendered = format!("{value:?}");
+        match rendered.split_once('e') {
+            None => rendered,
+            Some((mantissa, exponent)) => {
+                let (sign, digits) = match exponent.strip_prefix('-') {
+                    Some(digits) => ('-', digits),
+                    None => ('+', exponent.strip_prefix('+').unwrap_or(exponent)),
+                };
+                format!("{mantissa}e{sign}{digits:0>2}")
+            }
+        }
+    }
+
+    fn scientific_astype_values(len: usize) -> Vec<f64> {
+        const EXPONENTS: [i32; 16] = [
+            -300, -200, -100, -50, -10, -7, -6, -5, 16, 17, 20, 50, 100, 200, 300, 307,
+        ];
+        (0..len)
+            .map(|position| {
+                let mantissa = 1.0 + (position % 997) as f64 / 997.0;
+                let magnitude = mantissa * 10.0_f64.powi(EXPONENTS[position % EXPONENTS.len()]);
+                if position.is_multiple_of(2) {
+                    magnitude
+                } else {
+                    -magnitude
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn float_to_string_for_astype_in_place_matches_former() {
+        let fixed = [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -0.0,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::MIN,
+            1e16,
+            -1e16,
+            1e-5,
+            -1e-5,
+            1.234_567_890_123_456_8e20,
+            -9.876_543_210_987_654e-123,
+        ];
+        for value in fixed.into_iter().chain(scientific_astype_values(16_384)) {
+            assert_eq!(
+                super::float_to_string_for_astype(value),
+                float_to_string_for_astype_former(value),
+                "value={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn float_to_string_for_astype_in_place_ab() {
+        use std::time::Instant;
+
+        const VALUES: usize = 16_384;
+        const SAMPLES: usize = 10;
+        let values = scientific_astype_values(VALUES);
+        for &value in &values {
+            let former = float_to_string_for_astype_former(value);
+            assert!(former.contains('e'), "benchmark value must be scientific");
+            assert_eq!(super::float_to_string_for_astype(value), former);
+        }
+
+        for _ in 0..2 {
+            for &value in &values {
+                std::hint::black_box(float_to_string_for_astype_former(value));
+                std::hint::black_box(super::float_to_string_for_astype(value));
+            }
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut public_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let run = |formatter: fn(f64) -> String| {
+                let started = Instant::now();
+                for &value in std::hint::black_box(&values) {
+                    std::hint::black_box(formatter(std::hint::black_box(value)));
+                }
+                started.elapsed().as_nanos()
+            };
+            if sample.is_multiple_of(2) {
+                former_ns.push(run(float_to_string_for_astype_former));
+                public_ns.push(run(super::float_to_string_for_astype));
+            } else {
+                public_ns.push(run(super::float_to_string_for_astype));
+                former_ns.push(run(float_to_string_for_astype_former));
+            }
+        }
+
+        former_ns.sort_unstable();
+        public_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let public_p50 = public_ns[SAMPLES / 2];
+        println!(
+            "float_to_string_for_astype_in_place_ab values={VALUES} former_p50_ns={former_p50} public_p50_ns={public_p50} speedup={:.6} former_samples={former_ns:?} public_samples={public_ns:?}",
+            former_p50 as f64 / public_p50 as f64
+        );
+    }
+
+    #[test]
+    fn cast_float_to_utf8_threshold_boundaries_match_python() {
+        // Python str(float) switches to scientific notation only at |x| >= 1e16
+        // or |x| < 1e-4. Values JUST INSIDE those bounds must stay decimal — a
+        // formatter that switches to sci early (or late) diverges. All expected
+        // values verified against Python 3 str()/repr (== pandas astype(str)).
+        let cases: &[(f64, &str)] = &[
+            (1e15, "1000000000000000.0"),
+            (9_999_999_999_999_998.0, "9999999999999998.0"),
+            (1_234_567_890_123_456.0, "1234567890123456.0"),
+            (123_456_789_012_345.0, "123456789012345.0"),
+            (12_345_678_901_234_567.0, "1.2345678901234568e+16"),
+            (1e16, "1e+16"),
+            (1.5e16, "1.5e+16"),
+            (1e17, "1e+17"),
+            (1e-4, "0.0001"),
+            (5e-5, "5e-05"),
+            (-1e15, "-1000000000000000.0"),
+            (-1e16, "-1e+16"),
+            (-1e-5, "-1e-05"),
+        ];
+        for (v, expected) in cases {
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(*v), DType::Utf8).unwrap(),
+                Scalar::Utf8((*expected).to_owned()),
+                "float {v} -> str"
+            );
+        }
+    }
+
     #[test]
     fn cast_to_bool_uses_pandas_nonzero_truthiness() {
         // pandas astype(bool): zero -> False, any nonzero -> True (not just 0/1),
@@ -5017,6 +6485,109 @@ mod tests {
         assert_eq!(kept[1], Scalar::Int64(3));
     }
 
+    #[test]
+    fn null_helpers_match_scalar_oracle_imt0c() {
+        // Differential vs independent scalar null-helper oracle
+        // (br-frankenpandas-imt0c). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn assert_null_helpers(case: usize, values: &[Scalar], fill: &Scalar) {
+            let expected_missing = values.iter().filter(|value| value.is_missing()).count();
+            let expected_dropped = values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .cloned()
+                .collect::<Vec<_>>();
+            let expected_filled = values
+                .iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        fill.clone()
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                super::count_na(values),
+                expected_missing,
+                "case={case}: count_na mismatch for {values:?}"
+            );
+
+            let dropped = super::dropna(values);
+            assert_eq!(
+                dropped.len(),
+                expected_dropped.len(),
+                "case={case}: dropna length mismatch for {values:?}"
+            );
+            for (pos, (actual, expected)) in dropped.iter().zip(expected_dropped.iter()).enumerate()
+            {
+                assert!(
+                    actual.semantic_eq(expected),
+                    "case={case} pos={pos}: dropna expected {expected:?}, got {actual:?}"
+                );
+            }
+
+            let filled = super::fill_na(values, fill);
+            assert_eq!(
+                filled.len(),
+                expected_filled.len(),
+                "case={case}: fill_na length mismatch for {values:?}"
+            );
+            for (pos, (actual, expected)) in filled.iter().zip(expected_filled.iter()).enumerate() {
+                assert!(
+                    actual.semantic_eq(expected),
+                    "case={case} pos={pos}: fill_na expected {expected:?}, got {actual:?}"
+                );
+            }
+        }
+
+        let all_missing = [
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(f64::NAN),
+            Scalar::Timedelta64(i64::MIN),
+        ];
+        assert_null_helpers(usize::MAX, &all_missing, &Scalar::Utf8("filled".into()));
+
+        let mut seed = 0xc011_a7ed_0b5e_1a55_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+            let mut values = Vec::with_capacity(len);
+            for pos in 0..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                values.push(match next(&mut seed) % 11 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Timedelta64(i64::MIN),
+                    4 => Scalar::Bool(raw & 1 == 0),
+                    5 => Scalar::Int64(raw),
+                    6 => Scalar::Float64(raw as f64 / 37.0),
+                    7 => Scalar::Float64(if raw & 1 == 0 { 0.0 } else { -0.0 }),
+                    8 => Scalar::Utf8(format!("null_helper_{case}_{pos}")),
+                    9 => Scalar::Utf8(String::new()),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+
+            let fill = match case % 5 {
+                0 => Scalar::Bool(true),
+                1 => Scalar::Int64(-777),
+                2 => Scalar::Float64(12.5),
+                3 => Scalar::Utf8("filled".into()),
+                _ => Scalar::Timedelta64(123_456),
+            };
+            assert_null_helpers(case, &values, &fill);
+        }
+    }
+
     // ── Nanops ─────────────────────────────────────────────────────────
 
     #[test]
@@ -5037,6 +6608,129 @@ mod tests {
     }
 
     #[test]
+    fn nansum_nanmean_match_numeric_and_timedelta_oracle_1xmi7() {
+        // Differential vs independent sum/mean oracles
+        // (br-frankenpandas-1xmi7). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar]) -> (Scalar, Scalar) {
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for value in values {
+                if value.is_missing() {
+                    continue;
+                }
+                if let Ok(value) = value.to_f64() {
+                    sum += value;
+                    count += 1;
+                }
+            }
+            let mean = if count == 0 {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(sum / count as f64)
+            };
+            (Scalar::Float64(sum), mean)
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> (Scalar, Scalar) {
+            let mut sum = 0_i128;
+            let mut count = 0_i128;
+            for value in values {
+                if let Scalar::Timedelta64(ns) = value
+                    && !value.is_missing()
+                {
+                    sum += i128::from(*ns);
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                return (Scalar::Float64(0.0), Scalar::Null(NullKind::NaN));
+            }
+            let sum = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+            let mean = (sum / count).clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+            (
+                Scalar::Timedelta64(sum as i64),
+                Scalar::Timedelta64(mean as i64),
+            )
+        }
+
+        fn assert_sum_mean(
+            case: usize,
+            family: &str,
+            values: &[Scalar],
+            expected_sum: Scalar,
+            expected_mean: Scalar,
+        ) {
+            let actual_sum = super::nansum(values);
+            let actual_mean = super::nanmean(values);
+            assert!(
+                actual_sum.semantic_eq(&expected_sum),
+                "case={case} family={family}: expected sum {expected_sum:?}, got {actual_sum:?} for {values:?}"
+            );
+            assert!(
+                actual_mean.semantic_eq(&expected_mean),
+                "case={case} family={family}: expected mean {expected_mean:?}, got {actual_mean:?} for {values:?}"
+            );
+        }
+
+        let all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        let (sum, mean) = expected_numeric(&all_missing);
+        assert_sum_mean(usize::MAX, "numeric_all_missing", &all_missing, sum, mean);
+
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        let (sum, mean) = expected_timedelta(&td_all_missing);
+        assert_sum_mean(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &td_all_missing,
+            sum,
+            mean,
+        );
+
+        let mut seed = 0x511d_ed5a_7a11_1a55_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 257),
+                    5 => Scalar::Float64(raw as f64 / 67.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            let (sum, mean) = expected_numeric(&numeric);
+            assert_sum_mean(case, "numeric", &numeric, sum, mean);
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            let (sum, mean) = expected_timedelta(&timedeltas);
+            assert_sum_mean(case, "timedelta", &timedeltas, sum, mean);
+        }
+    }
+
+    #[test]
     fn nannunique_merges_negative_zero_and_zero() {
         let vals = vec![
             Scalar::Float64(-0.0),
@@ -5044,6 +6738,84 @@ mod tests {
             Scalar::Float64(1.0),
         ];
         assert_eq!(super::nannunique(&vals), Scalar::Int64(2));
+    }
+
+    #[test]
+    fn nannunique_matches_scalar_bucket_oracle_elvbg() {
+        // Differential vs independent scalar unique-bucket oracle
+        // (br-frankenpandas-elvbg). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn same_bucket(left: &Scalar, right: &Scalar) -> bool {
+            match (left, right) {
+                (Scalar::Float64(left), Scalar::Float64(right)) => {
+                    let left = if *left == 0.0 { 0.0 } else { *left };
+                    let right = if *right == 0.0 { 0.0 } else { *right };
+                    left.to_bits() == right.to_bits()
+                }
+                _ => left == right,
+            }
+        }
+
+        fn expected_nunique(values: &[Scalar]) -> i64 {
+            let mut seen = Vec::<Scalar>::new();
+            for value in values {
+                if value.is_missing() {
+                    continue;
+                }
+                if !seen.iter().any(|existing| same_bucket(existing, value)) {
+                    seen.push(value.clone());
+                }
+            }
+            seen.len() as i64
+        }
+
+        fn assert_nannunique(case: usize, values: &[Scalar]) {
+            assert_eq!(
+                super::nannunique(values),
+                Scalar::Int64(expected_nunique(values)),
+                "case={case}: nannunique mismatch for {values:?}"
+            );
+        }
+
+        assert_nannunique(
+            usize::MAX,
+            &[
+                Scalar::Float64(-0.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(f64::NAN),
+                Scalar::Null(NullKind::Null),
+                Scalar::Timedelta64(i64::MIN),
+            ],
+        );
+
+        let mut seed = 0x0e1b_60d0_b5e7_u64;
+        for case in 0..320 {
+            let len = (next(&mut seed) % 97 + 1) as usize;
+            let mut values = Vec::with_capacity(len);
+            for pos in 0..len {
+                let raw = (next(&mut seed) % 1_001) as i64 - 500;
+                values.push(match next(&mut seed) % 11 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 37),
+                    5 => Scalar::Float64(raw as f64 / 19.0),
+                    6 => Scalar::Float64(0.0),
+                    7 => Scalar::Float64(-0.0),
+                    8 => Scalar::Utf8(format!("uniq_{}", pos % 13)),
+                    9 => Scalar::Utf8(String::new()),
+                    _ => Scalar::Timedelta64(raw % 41),
+                });
+            }
+            assert_nannunique(case, &values);
+        }
     }
 
     #[test]
@@ -5112,6 +6884,94 @@ mod tests {
     }
 
     #[test]
+    fn nanany_nanall_nancount_match_scalar_oracle_zr2qg() {
+        // Differential vs scalar truthiness/count oracle
+        // (br-frankenpandas-zr2qg). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn truthy(value: &Scalar) -> Option<bool> {
+            if value.is_missing() {
+                return None;
+            }
+            match value {
+                Scalar::Bool(value) => Some(*value),
+                Scalar::Int64(value) => Some(*value != 0),
+                Scalar::Float64(value) => Some(*value != 0.0),
+                Scalar::Utf8(value) => Some(!value.is_empty()),
+                Scalar::Timedelta64(value) => Some(*value != 0),
+                _ => None,
+            }
+        }
+
+        fn assert_nanops(case: usize, values: &[Scalar]) {
+            let truth_values = values.iter().filter_map(truthy).collect::<Vec<_>>();
+            let expected_any = truth_values.iter().any(|value| *value);
+            let expected_all = !truth_values.iter().any(|value| !*value);
+            let expected_count = values.iter().filter(|value| !value.is_missing()).count() as i64;
+
+            assert_eq!(
+                super::nanany(values),
+                Scalar::Bool(expected_any),
+                "case={case}: nanany mismatch for {values:?}"
+            );
+            assert_eq!(
+                super::nanall(values),
+                Scalar::Bool(expected_all),
+                "case={case}: nanall mismatch for {values:?}"
+            );
+            assert_eq!(
+                super::nancount(values),
+                Scalar::Int64(expected_count),
+                "case={case}: nancount mismatch for {values:?}"
+            );
+        }
+
+        assert_nanops(
+            usize::MAX,
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(f64::NAN),
+                Scalar::Timedelta64(i64::MIN),
+            ],
+        );
+
+        let mut seed = 0x7a20_2f7e_5ca1_ab1e_u64;
+        for case in 0..320 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+            let mut values = Vec::with_capacity(len);
+            for pos in 0..len {
+                let raw = (next(&mut seed) % 10_001) as i64 - 5_000;
+                let value = match next(&mut seed) % 12 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Bool(false),
+                    5 => Scalar::Int64(raw % 17),
+                    6 => Scalar::Int64(0),
+                    7 => Scalar::Float64(raw as f64 / 23.0),
+                    8 => Scalar::Float64(0.0),
+                    9 => Scalar::Utf8(if raw & 1 == 0 {
+                        String::new()
+                    } else {
+                        format!("nanops_{case}_{pos}")
+                    }),
+                    10 => Scalar::Timedelta64(raw),
+                    _ => Scalar::Timedelta64(0),
+                };
+                values.push(value);
+            }
+            assert_nanops(case, &values);
+        }
+    }
+
+    #[test]
     fn nanmin_basic() {
         let vals = vec![
             Scalar::Float64(5.0),
@@ -5136,6 +6996,139 @@ mod tests {
     fn nanmin_nanmax_empty_returns_nan() {
         assert!(super::nanmin(&[]).is_missing());
         assert!(super::nanmax(&[]).is_missing());
+    }
+
+    #[test]
+    fn nanmin_nanmax_match_same_family_oracle_vj7ds() {
+        // Differential vs independent same-family comparator oracle
+        // (br-frankenpandas-vj7ds). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn family_cmp(left: &Scalar, right: &Scalar) -> std::cmp::Ordering {
+            match (left, right) {
+                (Scalar::Bool(left), Scalar::Bool(right)) => left.cmp(right),
+                (Scalar::Int64(left), Scalar::Int64(right)) => left.cmp(right),
+                (Scalar::Float64(left), Scalar::Float64(right)) => {
+                    left.partial_cmp(right).expect("finite floats")
+                }
+                (Scalar::Utf8(left), Scalar::Utf8(right)) => left.cmp(right),
+                (Scalar::Timedelta64(left), Scalar::Timedelta64(right)) => left.cmp(right),
+                _ => panic!("mixed family in nanmin/nanmax oracle"),
+            }
+        }
+
+        fn assert_minmax(case: usize, family: &str, values: &[Scalar]) {
+            let present = values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .cloned()
+                .collect::<Vec<_>>();
+            let actual_min = super::nanmin(values);
+            let actual_max = super::nanmax(values);
+            if present.is_empty() {
+                assert!(
+                    actual_min.is_missing(),
+                    "case={case} family={family}: expected missing min for {values:?}, got {actual_min:?}"
+                );
+                assert!(
+                    actual_max.is_missing(),
+                    "case={case} family={family}: expected missing max for {values:?}, got {actual_max:?}"
+                );
+                return;
+            }
+
+            let expected_min = present.iter().min_by(|left, right| family_cmp(left, right));
+            let expected_max = present.iter().max_by(|left, right| family_cmp(left, right));
+            assert!(
+                actual_min.semantic_eq(expected_min.expect("min")),
+                "case={case} family={family}: expected min {:?}, got {actual_min:?} for {values:?}",
+                expected_min.expect("min")
+            );
+            assert!(
+                actual_max.semantic_eq(expected_max.expect("max")),
+                "case={case} family={family}: expected max {:?}, got {actual_max:?} for {values:?}",
+                expected_max.expect("max")
+            );
+        }
+
+        let all_missing = [
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(f64::NAN),
+            Scalar::Timedelta64(i64::MIN),
+        ];
+        assert_minmax(usize::MAX, "all_missing", &all_missing);
+
+        let mut seed = 0xa11c_0aba_2e7d_f00d_u64;
+        for case in 0..240 {
+            let len = (next(&mut seed) % 73 + 1) as usize;
+
+            let mut ints = Vec::with_capacity(len);
+            ints.push(Scalar::Int64(case as i64 - 120));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 1_001) as i64 - 500;
+                ints.push(match next(&mut seed) % 6 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    _ => Scalar::Int64(raw),
+                });
+            }
+            assert_minmax(case, "int", &ints);
+
+            let mut floats = Vec::with_capacity(len);
+            floats.push(Scalar::Float64(case as f64 / 11.0));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                floats.push(match next(&mut seed) % 8 {
+                    0 | 1 => Scalar::Float64(f64::NAN),
+                    2 => Scalar::Float64(f64::INFINITY),
+                    3 => Scalar::Float64(f64::NEG_INFINITY),
+                    4 => Scalar::Float64(0.0),
+                    5 => Scalar::Float64(-0.0),
+                    _ => Scalar::Float64(raw as f64 / 41.0),
+                });
+            }
+            assert_minmax(case, "float", &floats);
+
+            let mut bools = Vec::with_capacity(len);
+            bools.push(Scalar::Bool(case & 1 == 0));
+            for _ in 1..len {
+                bools.push(match next(&mut seed) % 5 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    raw => Scalar::Bool(raw & 1 == 0),
+                });
+            }
+            assert_minmax(case, "bool", &bools);
+
+            let mut utf8 = Vec::with_capacity(len);
+            utf8.push(Scalar::Utf8(format!("minmax_{}", case % 17)));
+            for pos in 1..len {
+                utf8.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    raw => Scalar::Utf8(format!("minmax_{}_{}", raw, pos % 11)),
+                });
+            }
+            assert_minmax(case, "utf8", &utf8);
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 120));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 1_003) as i64 - 501;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_minmax(case, "timedelta", &timedeltas);
+        }
     }
 
     #[test]
@@ -5204,6 +7197,283 @@ mod tests {
             Scalar::Float64(4.0),
         ];
         assert_eq!(super::nanmedian(&vals), Scalar::Float64(2.5));
+    }
+
+    #[test]
+    fn nanmedian_matches_numeric_and_timedelta_oracle_oabhi() {
+        // Differential vs independent sort-based median oracles
+        // (br-frankenpandas-oabhi). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar]) -> Scalar {
+            let mut finite = values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .filter_map(|value| value.to_f64().ok())
+                .filter(|value| !value.is_nan())
+                .collect::<Vec<_>>();
+            if finite.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            finite.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+            let mid = finite.len() / 2;
+            if finite.len().is_multiple_of(2) {
+                Scalar::Float64((finite[mid - 1] + finite[mid]) / 2.0)
+            } else {
+                Scalar::Float64(finite[mid])
+            }
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> Scalar {
+            let mut finite = values
+                .iter()
+                .filter_map(|value| match value {
+                    Scalar::Timedelta64(ns) if !value.is_missing() => Some(*ns as f64),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if finite.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            finite.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+            let mid = finite.len() / 2;
+            let median = if finite.len().is_multiple_of(2) {
+                (finite[mid - 1] + finite[mid]) / 2.0
+            } else {
+                finite[mid]
+            };
+            Scalar::Timedelta64(median as i64)
+        }
+
+        fn assert_median(case: usize, family: &str, values: &[Scalar], expected: Scalar) {
+            let actual = super::nanmedian(values);
+            assert!(
+                actual.semantic_eq(&expected),
+                "case={case} family={family}: expected {expected:?}, got {actual:?} for {values:?}"
+            );
+        }
+
+        assert_median(
+            usize::MAX,
+            "numeric_all_missing",
+            &[Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)],
+            Scalar::Null(NullKind::NaN),
+        );
+        assert_median(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &[Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)],
+            Scalar::Null(NullKind::NaN),
+        );
+
+        let mut seed = 0x0ab1_1eda_57a7_15e5_u64;
+        for case in 0..220 {
+            let len = (next(&mut seed) % 79 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 110));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 251),
+                    5 => Scalar::Float64(raw as f64 / 61.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            assert_median(case, "numeric", &numeric, expected_numeric(&numeric));
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 110));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_median(
+                case,
+                "timedelta",
+                &timedeltas,
+                expected_timedelta(&timedeltas),
+            );
+        }
+    }
+
+    #[test]
+    fn nanvar_nanstd_nansem_match_numeric_and_timedelta_oracle_k7apg() {
+        // Differential vs independent variance/std/sem oracles
+        // (br-frankenpandas-k7apg). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn numeric_samples(values: &[Scalar]) -> Vec<f64> {
+            values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .filter_map(|value| value.to_f64().ok())
+                .collect()
+        }
+
+        fn timedelta_samples(values: &[Scalar]) -> Vec<f64> {
+            values
+                .iter()
+                .filter_map(|value| match value {
+                    Scalar::Timedelta64(ns) if !value.is_missing() => Some(*ns as f64),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn reductions_from_samples(samples: &[f64], ddof: usize) -> Option<(f64, f64, f64)> {
+            if samples.len() <= ddof {
+                return None;
+            }
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let sum_sq = samples
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
+            let var = sum_sq / (samples.len() - ddof) as f64;
+            let std = var.sqrt();
+            let sem = std / (samples.len() as f64).sqrt();
+            Some((var, std, sem))
+        }
+
+        fn expected_numeric(values: &[Scalar], ddof: usize) -> (Scalar, Scalar, Scalar) {
+            let samples = numeric_samples(values);
+            let Some((var, std, sem)) = reductions_from_samples(&samples, ddof) else {
+                let missing = Scalar::Null(NullKind::NaN);
+                return (missing.clone(), missing.clone(), missing);
+            };
+            (
+                Scalar::Float64(var),
+                Scalar::Float64(std),
+                Scalar::Float64(sem),
+            )
+        }
+
+        fn expected_timedelta(values: &[Scalar], ddof: usize) -> (Scalar, Scalar, Scalar) {
+            let samples = timedelta_samples(values);
+            if samples.is_empty() {
+                let missing = Scalar::Null(NullKind::NaN);
+                return (missing.clone(), missing.clone(), missing);
+            }
+            let Some((var, std, sem)) = reductions_from_samples(&samples, ddof) else {
+                let missing = Scalar::Timedelta64(i64::MIN);
+                return (missing.clone(), missing.clone(), missing);
+            };
+            (
+                Scalar::Timedelta64(var as i64),
+                Scalar::Timedelta64(std as i64),
+                Scalar::Timedelta64(sem as i64),
+            )
+        }
+
+        fn assert_reductions(
+            case: usize,
+            family: &str,
+            values: &[Scalar],
+            ddof: usize,
+            expected: (Scalar, Scalar, Scalar),
+        ) {
+            let (expected_var, expected_std, expected_sem) = expected;
+            let actual_var = super::nanvar(values, ddof);
+            let actual_std = super::nanstd(values, ddof);
+            let actual_sem = super::nansem(values, ddof);
+            assert!(
+                actual_var.semantic_eq(&expected_var),
+                "case={case} family={family} ddof={ddof}: expected var {expected_var:?}, got {actual_var:?} for {values:?}"
+            );
+            assert!(
+                actual_std.semantic_eq(&expected_std),
+                "case={case} family={family} ddof={ddof}: expected std {expected_std:?}, got {actual_std:?} for {values:?}"
+            );
+            assert!(
+                actual_sem.semantic_eq(&expected_sem),
+                "case={case} family={family} ddof={ddof}: expected sem {expected_sem:?}, got {actual_sem:?} for {values:?}"
+            );
+        }
+
+        let numeric_all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        assert_reductions(
+            usize::MAX,
+            "numeric_all_missing",
+            &numeric_all_missing,
+            0,
+            expected_numeric(&numeric_all_missing, 0),
+        );
+
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        assert_reductions(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &td_all_missing,
+            0,
+            expected_timedelta(&td_all_missing, 0),
+        );
+
+        let mut seed = 0x7a11_c0de_5eed_0421_u64;
+        for case in 0..240 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+            let ddof = (next(&mut seed) % 4) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Float64(case as f64 / 13.0));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 251),
+                    5 => Scalar::Float64(raw as f64 / 73.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            assert_reductions(
+                case,
+                "numeric",
+                &numeric,
+                ddof,
+                expected_numeric(&numeric, ddof),
+            );
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 120));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_reductions(
+                case,
+                "timedelta",
+                &timedeltas,
+                ddof,
+                expected_timedelta(&timedeltas, ddof),
+            );
+        }
     }
 
     #[test]
@@ -5554,10 +7824,7 @@ mod tests {
             Timedelta::format(500), // 500ns
             "0 days 00:00:00.000000500"
         );
-        assert_eq!(
-            Timedelta::format(123_456_789),
-            "0 days 00:00:00.123456789"
-        );
+        assert_eq!(Timedelta::format(123_456_789), "0 days 00:00:00.123456789");
     }
 
     #[test]
@@ -5581,6 +7848,121 @@ mod tests {
         );
         assert_eq!(Timedelta::format(-500), "-1 days +23:59:59.999999500");
         assert_eq!(Timedelta::format(-1), "-1 days +23:59:59.999999999");
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn timedelta_format_single_buffer_ab_5ro9h() {
+        use std::{hint::black_box, time::Instant};
+
+        use super::Timedelta;
+
+        fn former(nanos: i64) -> String {
+            if nanos == Timedelta::NAT {
+                return "NaT".to_string();
+            }
+
+            let days = nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+            let rem = nanos.rem_euclid(Timedelta::NANOS_PER_DAY);
+            let hours = rem / Timedelta::NANOS_PER_HOUR;
+            let minutes = (rem % Timedelta::NANOS_PER_HOUR) / Timedelta::NANOS_PER_MIN;
+            let seconds = (rem % Timedelta::NANOS_PER_MIN) / Timedelta::NANOS_PER_SEC;
+            let frac = rem % Timedelta::NANOS_PER_SEC;
+
+            let time_part = format!("{hours:02}:{minutes:02}:{seconds:02}");
+            let sep = if days < 0 { "+" } else { "" };
+            if frac > 0 {
+                if frac % 1_000 == 0 {
+                    format!("{days} days {sep}{time_part}.{:06}", frac / 1_000)
+                } else {
+                    format!("{days} days {sep}{time_part}.{frac:09}")
+                }
+            } else {
+                format!("{days} days {sep}{time_part}")
+            }
+        }
+
+        fn candidate(nanos: i64) -> String {
+            Timedelta::format(nanos)
+        }
+
+        fn elapsed(values: &[i64], format: fn(i64) -> String) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_usize;
+            for &value in values {
+                digest = digest.wrapping_add(black_box(format(black_box(value))).len());
+            }
+            black_box(digest);
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let mut seed = 0x8f42_67a1_b3d9_c50e_u64;
+        let values: Vec<i64> = (0..16_384)
+            .map(|i| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let magnitude = (seed & i64::MAX as u64) as i64;
+                match i % 4 {
+                    0 => magnitude - magnitude % Timedelta::NANOS_PER_SEC,
+                    1 => magnitude,
+                    2 => -(magnitude - magnitude % Timedelta::NANOS_PER_MICRO),
+                    _ => -magnitude,
+                }
+            })
+            .collect();
+
+        for &value in &[
+            Timedelta::NAT,
+            0,
+            1,
+            -1,
+            Timedelta::NANOS_PER_DAY,
+            -Timedelta::NANOS_PER_DAY,
+            i64::MAX,
+            i64::MIN + 1,
+        ] {
+            assert_eq!(former(value), candidate(value));
+        }
+        for &value in &values {
+            assert_eq!(former(value), candidate(value));
+        }
+
+        for _ in 0..2 {
+            black_box(elapsed(&values, former));
+            black_box(elapsed(&values, candidate));
+        }
+
+        let mut former_samples = Vec::with_capacity(18);
+        let mut candidate_samples = Vec::with_capacity(18);
+        for block in 0_usize..9 {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, candidate));
+                candidate_samples.push(elapsed(&values, candidate));
+                former_samples.push(elapsed(&values, former));
+            } else {
+                candidate_samples.push(elapsed(&values, candidate));
+                former_samples.push(elapsed(&values, former));
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, candidate));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "TIMEDELTA_FORMAT_SINGLE_BUFFER_AB rows={} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6}",
+            values.len(),
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("TIMEDELTA_FORMAT_SINGLE_BUFFER_AB former_samples_ns={former_samples:?}");
+        eprintln!("TIMEDELTA_FORMAT_SINGLE_BUFFER_AB candidate_samples_ns={candidate_samples:?}");
     }
 
     #[test]
@@ -5609,6 +7991,130 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn timedelta_isoformat_single_buffer_ab_7jra1() {
+        use std::{hint::black_box, time::Instant};
+
+        use super::Timedelta;
+
+        fn former_impl(nanos: i64) -> String {
+            if nanos == Timedelta::NAT {
+                return "NaT".to_string();
+            }
+
+            let negative = nanos < 0;
+            let abs_nanos = nanos.saturating_abs();
+            let days = abs_nanos / Timedelta::NANOS_PER_DAY;
+            let remaining = abs_nanos % Timedelta::NANOS_PER_DAY;
+            let hours = remaining / Timedelta::NANOS_PER_HOUR;
+            let remaining = remaining % Timedelta::NANOS_PER_HOUR;
+            let minutes = remaining / Timedelta::NANOS_PER_MIN;
+            let remaining = remaining % Timedelta::NANOS_PER_MIN;
+            let seconds = remaining / Timedelta::NANOS_PER_SEC;
+            let sub_sec_nanos = remaining % Timedelta::NANOS_PER_SEC;
+
+            let mut result = String::new();
+            if negative {
+                result.push('-');
+            }
+
+            result.push_str(&format!("P{days}DT{hours}H{minutes}M"));
+
+            if sub_sec_nanos == 0 {
+                result.push_str(&format!("{seconds}S"));
+            } else {
+                let frac = format!("{sub_sec_nanos:09}");
+                let trimmed = frac.trim_end_matches('0');
+                result.push_str(&format!("{seconds}.{trimmed}S"));
+            }
+
+            result
+        }
+
+        fn elapsed(values: &[i64], format: impl Fn(i64) -> String) -> u128 {
+            let start = Instant::now();
+            let mut digest = 0_usize;
+            for &value in values {
+                digest = digest.wrapping_add(black_box(format(black_box(value))).len());
+            }
+            black_box(digest);
+            start.elapsed().as_nanos()
+        }
+
+        fn median(values: &mut [u128]) -> u128 {
+            values.sort_unstable();
+            values[values.len() / 2]
+        }
+
+        let mut seed = 0x7d5a_4c31_91e2_b607_u64;
+        let values: Vec<i64> = (0..16_384)
+            .map(|i| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let magnitude =
+                    (seed & i64::MAX as u64) as i64 % (3_650 * Timedelta::NANOS_PER_DAY);
+                match i % 4 {
+                    0 => magnitude - magnitude % Timedelta::NANOS_PER_SEC,
+                    1 => magnitude,
+                    2 => -(magnitude - magnitude % Timedelta::NANOS_PER_MICRO),
+                    _ => -magnitude,
+                }
+            })
+            .collect();
+
+        for &value in &[
+            Timedelta::NAT,
+            0,
+            1,
+            -1,
+            Timedelta::NANOS_PER_DAY,
+            i64::MAX,
+            i64::MIN + 1,
+        ] {
+            assert_eq!(former_impl(value), Timedelta::isoformat(value));
+        }
+        for &value in &values {
+            assert_eq!(former_impl(value), Timedelta::isoformat(value));
+        }
+
+        for _ in 0..2 {
+            black_box(elapsed(&values, former_impl));
+            black_box(elapsed(&values, Timedelta::isoformat));
+        }
+
+        let mut former = Vec::with_capacity(18);
+        let mut candidate = Vec::with_capacity(18);
+        for block in 0..9 {
+            if block % 2 == 0 {
+                former.push(elapsed(&values, former_impl));
+                candidate.push(elapsed(&values, Timedelta::isoformat));
+                candidate.push(elapsed(&values, Timedelta::isoformat));
+                former.push(elapsed(&values, former_impl));
+            } else {
+                candidate.push(elapsed(&values, Timedelta::isoformat));
+                former.push(elapsed(&values, former_impl));
+                former.push(elapsed(&values, former_impl));
+                candidate.push(elapsed(&values, Timedelta::isoformat));
+            }
+        }
+
+        let former_p50 = median(&mut former);
+        let candidate_p50 = median(&mut candidate);
+        eprintln!(
+            "ISOFORMAT_AB rows={} former_p50_ns={} candidate_p50_ns={} ratio={:.6} former_ns_per_row={:.3} candidate_ns_per_row={:.3}",
+            values.len(),
+            former_p50,
+            candidate_p50,
+            former_p50 as f64 / candidate_p50 as f64,
+            former_p50 as f64 / values.len() as f64,
+            candidate_p50 as f64 / values.len() as f64,
+        );
+        eprintln!("ISOFORMAT_AB former_samples_ns={former:?}");
+        eprintln!("ISOFORMAT_AB candidate_samples_ns={candidate:?}");
+    }
+
+    #[test]
     fn timedelta_floor_ceil_round() {
         use super::Timedelta;
         let nanos = Timedelta::NANOS_PER_HOUR + 30 * Timedelta::NANOS_PER_MIN;
@@ -5631,6 +8137,42 @@ mod tests {
 
         // Invalid freq returns NAT
         assert_eq!(Timedelta::floor(nanos, "invalid"), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timedelta_floor_ceil_negative_use_euclidean_rounding_t79yh() {
+        use super::Timedelta;
+
+        assert_eq!(
+            Timedelta::floor(-1, "s"),
+            -Timedelta::NANOS_PER_SEC,
+            "floor(-1ns, 1s)"
+        );
+        assert_eq!(Timedelta::ceil(-1, "s"), 0, "ceil(-1ns, 1s)");
+        assert_eq!(
+            Timedelta::floor(-1_500_000_000, "s"),
+            -2 * Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(
+            Timedelta::ceil(-1_500_000_000, "s"),
+            -Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(
+            Timedelta::floor(-Timedelta::NANOS_PER_SEC, "s"),
+            -Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(
+            Timedelta::ceil(-Timedelta::NANOS_PER_SEC, "s"),
+            -Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(
+            Timedelta::floor(1_500_000_000, "s"),
+            Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(
+            Timedelta::ceil(1_500_000_000, "s"),
+            2 * Timedelta::NANOS_PER_SEC
+        );
     }
 
     #[test]
@@ -5783,6 +8325,177 @@ mod tests {
     }
 
     #[test]
+    fn nancumulative_matches_numeric_and_timedelta_oracle_k63oz() {
+        // Differential vs independent cumulative nanops oracles
+        // (br-frankenpandas-k63oz). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn assert_vec(case: usize, family: &str, op: &str, actual: &[Scalar], expected: &[Scalar]) {
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "case={case} family={family} op={op}: length mismatch"
+            );
+            for (pos, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    actual.semantic_eq(expected),
+                    "case={case} family={family} op={op} pos={pos}: expected {expected:?}, got {actual:?}"
+                );
+            }
+        }
+
+        fn expected_numeric(
+            values: &[Scalar],
+        ) -> (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>, Vec<Scalar>) {
+            let mut sum = Vec::with_capacity(values.len());
+            let mut prod = Vec::with_capacity(values.len());
+            let mut max = Vec::with_capacity(values.len());
+            let mut min = Vec::with_capacity(values.len());
+            let mut running_sum = 0.0_f64;
+            let mut running_prod = 1.0_f64;
+            let mut running_max: Option<f64> = None;
+            let mut running_min: Option<f64> = None;
+
+            for value in values {
+                if value.is_missing() {
+                    sum.push(Scalar::Null(NullKind::NaN));
+                    prod.push(Scalar::Null(NullKind::NaN));
+                    max.push(Scalar::Null(NullKind::NaN));
+                    min.push(Scalar::Null(NullKind::NaN));
+                    continue;
+                }
+                let Ok(value) = value.to_f64() else {
+                    sum.push(Scalar::Null(NullKind::NaN));
+                    prod.push(Scalar::Null(NullKind::NaN));
+                    max.push(Scalar::Null(NullKind::NaN));
+                    min.push(Scalar::Null(NullKind::NaN));
+                    continue;
+                };
+                if value.is_nan() {
+                    sum.push(Scalar::Null(NullKind::NaN));
+                    prod.push(Scalar::Null(NullKind::NaN));
+                    max.push(Scalar::Null(NullKind::NaN));
+                    min.push(Scalar::Null(NullKind::NaN));
+                    continue;
+                }
+                running_sum += value;
+                running_prod *= value;
+                running_max = Some(running_max.map_or(value, |current| current.max(value)));
+                running_min = Some(running_min.map_or(value, |current| current.min(value)));
+                sum.push(Scalar::Float64(running_sum));
+                prod.push(Scalar::Float64(running_prod));
+                max.push(Scalar::Float64(running_max.expect("initialized")));
+                min.push(Scalar::Float64(running_min.expect("initialized")));
+            }
+
+            (sum, prod, max, min)
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>) {
+            let mut sum = Vec::with_capacity(values.len());
+            let mut max = Vec::with_capacity(values.len());
+            let mut min = Vec::with_capacity(values.len());
+            let mut running_sum = 0_i128;
+            let mut running_max: Option<i64> = None;
+            let mut running_min: Option<i64> = None;
+
+            for value in values {
+                if value.is_missing() {
+                    sum.push(Scalar::Null(NullKind::NaT));
+                    max.push(Scalar::Null(NullKind::NaT));
+                    min.push(Scalar::Null(NullKind::NaT));
+                    continue;
+                }
+                let Scalar::Timedelta64(ns) = value else {
+                    sum.push(Scalar::Null(NullKind::NaT));
+                    max.push(Scalar::Null(NullKind::NaT));
+                    min.push(Scalar::Null(NullKind::NaT));
+                    continue;
+                };
+                running_sum = running_sum.saturating_add(i128::from(*ns));
+                let clamped = running_sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+                running_max = Some(running_max.map_or(*ns, |current| current.max(*ns)));
+                running_min = Some(running_min.map_or(*ns, |current| current.min(*ns)));
+                sum.push(Scalar::Timedelta64(clamped as i64));
+                max.push(Scalar::Timedelta64(running_max.expect("initialized")));
+                min.push(Scalar::Timedelta64(running_min.expect("initialized")));
+            }
+
+            (sum, max, min)
+        }
+
+        let mut seed = 0xc0de_c63a_5eed_0421_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 251),
+                    5 => Scalar::Float64(raw as f64 / 79.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            let (sum, prod, max, min) = expected_numeric(&numeric);
+            assert_vec(case, "numeric", "cumsum", &super::nancumsum(&numeric), &sum);
+            assert_vec(
+                case,
+                "numeric",
+                "cumprod",
+                &super::nancumprod(&numeric),
+                &prod,
+            );
+            assert_vec(case, "numeric", "cummax", &super::nancummax(&numeric), &max);
+            assert_vec(case, "numeric", "cummin", &super::nancummin(&numeric), &min);
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            let (td_sum, td_max, td_min) = expected_timedelta(&timedeltas);
+            assert_vec(
+                case,
+                "timedelta",
+                "cumsum",
+                &super::nancumsum(&timedeltas),
+                &td_sum,
+            );
+            assert_vec(
+                case,
+                "timedelta",
+                "cummax",
+                &super::nancummax(&timedeltas),
+                &td_max,
+            );
+            assert_vec(
+                case,
+                "timedelta",
+                "cummin",
+                &super::nancummin(&timedeltas),
+                &td_min,
+            );
+        }
+    }
+
+    #[test]
     fn nanquantile_linear_interpolation_matches_numpy() {
         let values = vec![
             Scalar::Float64(1.0),
@@ -5858,6 +8571,155 @@ mod tests {
     }
 
     #[test]
+    fn nanquantile_matches_numeric_and_timedelta_oracle_ecb7r() {
+        // Differential vs independent sort-based quantile oracles
+        // (br-frankenpandas-ecb7r). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn interpolated(sorted: &[f64], q: f64) -> f64 {
+            if sorted.len() == 1 {
+                return sorted[0];
+            }
+            let pos = q * (sorted.len() - 1) as f64;
+            let lo = pos.floor() as usize;
+            let hi = pos.ceil() as usize;
+            if lo == hi {
+                sorted[lo]
+            } else {
+                let weight = pos - lo as f64;
+                sorted[lo] + (sorted[hi] - sorted[lo]) * weight
+            }
+        }
+
+        fn expected_numeric(values: &[Scalar], q: f64) -> Scalar {
+            if !(0.0..=1.0).contains(&q) {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mut samples = values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .filter_map(|value| value.to_f64().ok())
+                .collect::<Vec<_>>();
+            if samples.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            samples.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+            Scalar::Float64(interpolated(&samples, q))
+        }
+
+        fn expected_timedelta(values: &[Scalar], q: f64) -> Scalar {
+            if !(0.0..=1.0).contains(&q) {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mut samples = values
+                .iter()
+                .filter_map(|value| match value {
+                    Scalar::Timedelta64(ns) if !value.is_missing() => Some(*ns as f64),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if samples.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            samples.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+            Scalar::Timedelta64(interpolated(&samples, q) as i64)
+        }
+
+        fn assert_quantile(case: usize, family: &str, values: &[Scalar], q: f64, expected: Scalar) {
+            let actual = super::nanquantile(values, q);
+            assert!(
+                actual.semantic_eq(&expected),
+                "case={case} family={family} q={q}: expected {expected:?}, got {actual:?} for {values:?}"
+            );
+        }
+
+        let numeric_all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        assert_quantile(
+            usize::MAX,
+            "numeric_all_missing",
+            &numeric_all_missing,
+            0.5,
+            expected_numeric(&numeric_all_missing, 0.5),
+        );
+        assert_quantile(
+            usize::MAX - 1,
+            "numeric_out_of_range",
+            &[Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            1.25,
+            Scalar::Null(NullKind::NaN),
+        );
+
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        assert_quantile(
+            usize::MAX - 2,
+            "timedelta_all_missing",
+            &td_all_missing,
+            0.5,
+            expected_timedelta(&td_all_missing, 0.5),
+        );
+        assert_quantile(
+            usize::MAX - 3,
+            "timedelta_out_of_range",
+            &[Scalar::Timedelta64(1), Scalar::Timedelta64(2)],
+            -0.25,
+            Scalar::Null(NullKind::NaN),
+        );
+
+        let mut seed = 0x4a17_1e5e_0b5e_a11d_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+            let q = match next(&mut seed) % 8 {
+                0 => 0.0,
+                1 => 0.25,
+                2 => 0.5,
+                3 => 0.75,
+                4 => 1.0,
+                _ => (next(&mut seed) % 1_001) as f64 / 1_000.0,
+            };
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 251),
+                    5 => Scalar::Float64(raw as f64 / 67.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            assert_quantile(case, "numeric", &numeric, q, expected_numeric(&numeric, q));
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_quantile(
+                case,
+                "timedelta",
+                &timedeltas,
+                q,
+                expected_timedelta(&timedeltas, q),
+            );
+        }
+    }
+
+    #[test]
     fn nanargmax_returns_first_position() {
         let values = vec![
             Scalar::Float64(1.0),
@@ -5888,6 +8750,148 @@ mod tests {
     }
 
     #[test]
+    fn nanargmax_nanargmin_match_numeric_and_timedelta_oracle_unkj6() {
+        // Differential vs independent first-tie arg oracles
+        // (br-frankenpandas-unkj6). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar], find_max: bool) -> Option<usize> {
+            let mut best: Option<(usize, f64)> = None;
+            for (idx, value) in values.iter().enumerate() {
+                if value.is_missing() {
+                    continue;
+                }
+                let Ok(value) = value.to_f64() else {
+                    continue;
+                };
+                if value.is_nan() {
+                    continue;
+                }
+                match best {
+                    None => best = Some((idx, value)),
+                    Some((_, current))
+                        if (find_max && value > current) || (!find_max && value < current) =>
+                    {
+                        best = Some((idx, value));
+                    }
+                    _ => {}
+                }
+            }
+            best.map(|(idx, _)| idx)
+        }
+
+        fn expected_timedelta(values: &[Scalar], find_max: bool) -> Option<usize> {
+            let mut best: Option<(usize, i64)> = None;
+            for (idx, value) in values.iter().enumerate() {
+                if value.is_missing() {
+                    continue;
+                }
+                let Scalar::Timedelta64(ns) = value else {
+                    continue;
+                };
+                match best {
+                    None => best = Some((idx, *ns)),
+                    Some((_, current))
+                        if (find_max && *ns > current) || (!find_max && *ns < current) =>
+                    {
+                        best = Some((idx, *ns));
+                    }
+                    _ => {}
+                }
+            }
+            best.map(|(idx, _)| idx)
+        }
+
+        fn assert_args(
+            case: usize,
+            family: &str,
+            values: &[Scalar],
+            expected_min: Option<usize>,
+            expected_max: Option<usize>,
+        ) {
+            assert_eq!(
+                super::nanargmin(values),
+                expected_min,
+                "case={case} family={family}: nanargmin mismatch for {values:?}"
+            );
+            assert_eq!(
+                super::nanargmax(values),
+                expected_max,
+                "case={case} family={family}: nanargmax mismatch for {values:?}"
+            );
+        }
+
+        let all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        assert_args(usize::MAX, "numeric_all_missing", &all_missing, None, None);
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        assert_args(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &td_all_missing,
+            None,
+            None,
+        );
+
+        let mut seed = 0xa126_5eed_ed9e_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            if len > 1 {
+                numeric.push(Scalar::Int64(case as i64 - 130));
+            }
+            for _ in numeric.len()..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 9 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 211),
+                    5 => Scalar::Float64(raw as f64 / 47.0),
+                    6 => Scalar::Float64(0.0),
+                    7 => Scalar::Float64(-0.0),
+                    _ => Scalar::Float64(raw.signum() as f64 * f64::INFINITY),
+                });
+            }
+            assert_args(
+                case,
+                "numeric",
+                &numeric,
+                expected_numeric(&numeric, false),
+                expected_numeric(&numeric, true),
+            );
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            if len > 1 {
+                timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            }
+            for _ in timedeltas.len()..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_args(
+                case,
+                "timedelta",
+                &timedeltas,
+                expected_timedelta(&timedeltas, false),
+                expected_timedelta(&timedeltas, true),
+            );
+        }
+    }
+
+    #[test]
     fn nansem_matches_std_over_sqrt_n() {
         let values = vec![
             Scalar::Float64(2.0),
@@ -5906,6 +8910,180 @@ mod tests {
             return;
         };
         assert!((v - 0.7559289460184544).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nansem_single_buffer_matches_former_numeric_bits_jgwg4() {
+        fn former(values: &[Scalar], ddof: usize) -> Scalar {
+            let nums = super::collect_finite(values);
+            if nums.len() <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            match super::nanstd(values, ddof) {
+                Scalar::Float64(std) => Scalar::Float64(std / (nums.len() as f64).sqrt()),
+                other => other,
+            }
+        }
+
+        fn assert_same_bits(values: &[Scalar], ddof: usize) {
+            let expected = former(values, ddof);
+            let actual = super::nansem(values, ddof);
+            match (&expected, &actual) {
+                (Scalar::Float64(expected), Scalar::Float64(actual)) => {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "values={values:?} ddof={ddof}"
+                    );
+                }
+                _ => assert!(
+                    actual.semantic_eq(&expected),
+                    "values={values:?} ddof={ddof}: expected {expected:?}, got {actual:?}"
+                ),
+            }
+        }
+
+        let mut generated = Vec::with_capacity(4_096);
+        for idx in 0..4_096_i64 {
+            generated.push(match idx % 257 {
+                0 => Scalar::Null(NullKind::NaN),
+                1 => Scalar::Float64(-0.0),
+                2 => Scalar::Float64(0.0),
+                _ if idx % 2 == 0 => Scalar::Int64(idx - 2_048),
+                _ => Scalar::Float64((idx - 2_048) as f64 / 17.0),
+            });
+        }
+
+        let cases = [
+            Vec::new(),
+            vec![Scalar::Int64(1)],
+            vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(f64::NAN),
+                Scalar::Int64(i64::MIN),
+                Scalar::Int64(i64::MAX),
+                Scalar::Float64(-0.0),
+                Scalar::Float64(0.0),
+            ],
+            generated,
+        ];
+        for values in &cases {
+            for ddof in [0, 1, values.len(), values.len().saturating_add(1)] {
+                assert_same_bits(values, ddof);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B harness"]
+    fn nansem_single_buffer_allocator_preconditioned_ab_jgwg4() {
+        const ROWS: usize = 262_144;
+        const BATCH: usize = 8;
+        const BLOCKS: usize = 9;
+        const PRECONDITION_CALLS: usize = 2;
+
+        fn former(values: &[Scalar], ddof: usize) -> Scalar {
+            let nums = super::collect_finite(values);
+            if nums.len() <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            match super::nanstd(values, ddof) {
+                Scalar::Float64(std) => Scalar::Float64(std / (nums.len() as f64).sqrt()),
+                other => other,
+            }
+        }
+
+        fn evaluate(values: &[Scalar], candidate: bool) -> Scalar {
+            let values = std::hint::black_box(values);
+            if candidate {
+                super::nansem(values, 1)
+            } else {
+                former(values, 1)
+            }
+        }
+
+        fn elapsed_ns(values: &[Scalar], candidate: bool) -> u128 {
+            for _ in 0..PRECONDITION_CALLS {
+                std::hint::black_box(evaluate(values, candidate));
+            }
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(evaluate(values, candidate));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        fn spread(a: u128, b: u128) -> f64 {
+            a.abs_diff(b) as f64 / ((a + b) as f64 / 2.0)
+        }
+
+        let values = (0..ROWS)
+            .map(|idx| {
+                if idx % 257 == 0 {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Int64((idx % 8_191) as i64 - 4_095)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let expected_bits = match former(&values, 1) {
+            Scalar::Float64(value) => Some(value.to_bits()),
+            _ => None,
+        };
+        let actual_bits = match super::nansem(&values, 1) {
+            Scalar::Float64(value) => Some(value.to_bits()),
+            _ => None,
+        };
+        assert!(
+            expected_bits.is_some(),
+            "numeric nansem must return Float64"
+        );
+        assert_eq!(actual_bits, expected_bits, "A/B output bits");
+
+        std::hint::black_box(evaluate(&values, false));
+        std::hint::black_box(evaluate(&values, true));
+
+        let body_started = std::time::Instant::now();
+        let mut former_a = Vec::with_capacity(BLOCKS);
+        let mut former_b = Vec::with_capacity(BLOCKS);
+        let mut candidate_a = Vec::with_capacity(BLOCKS);
+        let mut candidate_b = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            let order = if block % 2 == 0 {
+                [(false, 0), (true, 0), (true, 1), (false, 1)]
+            } else {
+                [(true, 1), (false, 1), (false, 0), (true, 0)]
+            };
+            for (candidate, duplicate) in order {
+                let elapsed = elapsed_ns(&values, candidate);
+                match (candidate, duplicate) {
+                    (false, 0) => former_a.push(elapsed),
+                    (false, _) => former_b.push(elapsed),
+                    (true, 0) => candidate_a.push(elapsed),
+                    (true, _) => candidate_b.push(elapsed),
+                }
+            }
+        }
+
+        let former_a = median(former_a) / BATCH as u128;
+        let former_b = median(former_b) / BATCH as u128;
+        let candidate_a = median(candidate_a) / BATCH as u128;
+        let candidate_b = median(candidate_b) / BATCH as u128;
+        let former_mean = (former_a + former_b) as f64 / 2.0;
+        let candidate_mean = (candidate_a + candidate_b) as f64 / 2.0;
+        println!(
+            "NANSEM_SINGLE_BUFFER_AB rows={ROWS} former_a_ns={former_a} former_b_ns={former_b} candidate_a_ns={candidate_a} candidate_b_ns={candidate_b} former_spread={:.6} candidate_spread={:.6} speedup={:.6} body_seconds={:.6}",
+            spread(former_a, former_b),
+            spread(candidate_a, candidate_b),
+            former_mean / candidate_mean,
+            body_started.elapsed().as_secs_f64()
+        );
     }
 
     #[test]
@@ -5944,6 +9122,120 @@ mod tests {
     }
 
     #[test]
+    fn nanptp_matches_numeric_and_timedelta_oracle_affjt() {
+        // Differential vs independent max-min oracles
+        // (br-frankenpandas-affjt). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar]) -> Scalar {
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            let mut seen = false;
+            for value in values {
+                if value.is_missing() {
+                    continue;
+                }
+                if let Ok(value) = value.to_f64() {
+                    seen = true;
+                    lo = lo.min(value);
+                    hi = hi.max(value);
+                }
+            }
+            if seen {
+                Scalar::Float64(hi - lo)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            }
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> Scalar {
+            let mut lo = i64::MAX;
+            let mut hi = i64::MIN;
+            let mut seen = false;
+            for value in values {
+                if let Scalar::Timedelta64(ns) = value
+                    && !value.is_missing()
+                {
+                    seen = true;
+                    lo = lo.min(*ns);
+                    hi = hi.max(*ns);
+                }
+            }
+            if seen {
+                Scalar::Timedelta64(hi - lo)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            }
+        }
+
+        fn assert_ptp(case: usize, family: &str, values: &[Scalar], expected: Scalar) {
+            let actual = super::nanptp(values);
+            assert!(
+                actual.semantic_eq(&expected),
+                "case={case} family={family}: expected {expected:?}, got {actual:?} for {values:?}"
+            );
+        }
+
+        assert_ptp(
+            usize::MAX,
+            "numeric_all_missing",
+            &[Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)],
+            Scalar::Null(NullKind::NaN),
+        );
+        assert_ptp(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &[Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)],
+            Scalar::Null(NullKind::NaN),
+        );
+
+        let mut seed = 0xa22f_17ed_57a7_15e5_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 9 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw),
+                    5 => Scalar::Float64(raw as f64 / 53.0),
+                    6 => Scalar::Float64(0.0),
+                    7 => Scalar::Float64(-0.0),
+                    _ => Scalar::Float64(raw.signum() as f64 * f64::INFINITY),
+                });
+            }
+            assert_ptp(case, "numeric", &numeric, expected_numeric(&numeric));
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 10_001) as i64 - 5_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_ptp(
+                case,
+                "timedelta",
+                &timedeltas,
+                expected_timedelta(&timedeltas),
+            );
+        }
+    }
+
+    #[test]
     fn nanargmax_nanargmin_timedelta64_compare_by_ns_ql1t5() {
         // Per br-frankenpandas-ql1t5: argmax/argmin on Timedelta64 compare
         // i64 ns directly instead of silently skipping via to_f64.
@@ -5969,6 +9261,106 @@ mod tests {
             Scalar::Timedelta64(3 * one_hour),
         ];
         assert!(super::nanprod(&values).is_missing());
+    }
+
+    #[test]
+    fn nanprod_matches_numeric_and_timedelta_oracle_9938h() {
+        // Differential vs independent product oracles
+        // (br-frankenpandas-9938h). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar]) -> Scalar {
+            let mut product = 1.0_f64;
+            for value in values {
+                if value.is_missing() {
+                    continue;
+                }
+                if let Ok(value) = value.to_f64() {
+                    product *= value;
+                }
+            }
+            Scalar::Float64(product)
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> Scalar {
+            if values
+                .iter()
+                .any(|value| matches!(value, Scalar::Timedelta64(_)) && !value.is_missing())
+            {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(1.0)
+            }
+        }
+
+        fn assert_prod(case: usize, family: &str, values: &[Scalar], expected: Scalar) {
+            let actual = super::nanprod(values);
+            assert!(
+                actual.semantic_eq(&expected),
+                "case={case} family={family}: expected {expected:?}, got {actual:?} for {values:?}"
+            );
+        }
+
+        let all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        assert_prod(
+            usize::MAX,
+            "numeric_all_missing",
+            &all_missing,
+            Scalar::Float64(1.0),
+        );
+
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        assert_prod(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &td_all_missing,
+            expected_timedelta(&td_all_missing),
+        );
+
+        let mut seed = 0x6e0d_9938_a11c_0de5_u64;
+        for case in 0..280 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64((case % 17) as i64 - 8));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 2_001) as i64 - 1_000;
+                numeric.push(match next(&mut seed) % 9 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 19),
+                    5 => Scalar::Float64(raw as f64 / 97.0),
+                    6 => Scalar::Float64(0.0),
+                    7 => Scalar::Float64(-0.0),
+                    _ => Scalar::Float64(1.0),
+                });
+            }
+            assert_prod(case, "numeric", &numeric, expected_numeric(&numeric));
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 140));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 10_001) as i64 - 5_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_prod(
+                case,
+                "timedelta",
+                &timedeltas,
+                expected_timedelta(&timedeltas),
+            );
+        }
     }
 
     #[test]
@@ -6038,6 +9430,126 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nanskew_nankurt_match_numeric_oracle_jr7zk() {
+        // Differential vs independent bias-corrected moment oracles
+        // (br-frankenpandas-jr7zk). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn samples(values: &[Scalar]) -> Vec<f64> {
+            values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .filter_map(|value| value.to_f64().ok())
+                .collect()
+        }
+
+        fn expected_skew(values: &[Scalar]) -> Scalar {
+            let samples = samples(values);
+            let n = samples.len() as f64;
+            if n < 3.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = samples.iter().sum::<f64>() / n;
+            let m2 = samples
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
+            let m3 = samples
+                .iter()
+                .map(|value| (value - mean).powi(3))
+                .sum::<f64>();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s2.powf(1.5)))
+        }
+
+        fn expected_kurt(values: &[Scalar]) -> Scalar {
+            let samples = samples(values);
+            let n = samples.len() as f64;
+            if n < 4.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = samples.iter().sum::<f64>() / n;
+            let m2 = samples
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
+            let m4 = samples
+                .iter()
+                .map(|value| (value - mean).powi(4))
+                .sum::<f64>();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+            Scalar::Float64(adj * (m4 / (s2 * s2)) - sub)
+        }
+
+        fn assert_moments(case: usize, values: &[Scalar]) {
+            let expected_skew = expected_skew(values);
+            let expected_kurt = expected_kurt(values);
+            let actual_skew = super::nanskew(values);
+            let actual_kurt = super::nankurt(values);
+            assert!(
+                actual_skew.semantic_eq(&expected_skew),
+                "case={case}: expected skew {expected_skew:?}, got {actual_skew:?} for {values:?}"
+            );
+            assert!(
+                actual_kurt.semantic_eq(&expected_kurt),
+                "case={case}: expected kurt {expected_kurt:?}, got {actual_kurt:?} for {values:?}"
+            );
+        }
+
+        assert_moments(
+            usize::MAX,
+            &[Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)],
+        );
+        assert_moments(
+            usize::MAX - 1,
+            &[
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+            ],
+        );
+
+        let mut seed = 0x5ce7_9a55_a11c_0de5_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+            let mut values = Vec::with_capacity(len);
+            if case % 11 == 0 {
+                values.extend((0..len).map(|_| Scalar::Float64(3.0)));
+            } else {
+                values.push(Scalar::Float64(case as f64 / 19.0));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                    values.push(match next(&mut seed) % 8 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        2 => Scalar::Float64(f64::NAN),
+                        3 => Scalar::Bool(raw & 1 == 0),
+                        4 => Scalar::Int64(raw % 251),
+                        5 => Scalar::Float64(raw as f64 / 83.0),
+                        6 => Scalar::Float64(0.0),
+                        _ => Scalar::Float64(-0.0),
+                    });
+                }
+            }
+            assert_moments(case, &values);
+        }
+    }
+
     // ── Interval tests (br-frankenpandas-j8k4) ──────────────────────────
 
     #[test]
@@ -6061,19 +9573,31 @@ mod tests {
     fn interval_display_matches_pandas_notation() {
         assert_eq!(
             Interval::new(0.0, 5.0, IntervalClosed::Right).to_string(),
-            "(0, 5]"
+            "(0.0, 5.0]"
         );
         assert_eq!(
             Interval::new(0.0, 5.0, IntervalClosed::Left).to_string(),
-            "[0, 5)"
+            "[0.0, 5.0)"
         );
         assert_eq!(
             Interval::new(0.0, 5.0, IntervalClosed::Both).to_string(),
-            "[0, 5]"
+            "[0.0, 5.0]"
         );
         assert_eq!(
             Interval::new(0.0, 5.0, IntervalClosed::Neither).to_string(),
-            "(0, 5)"
+            "(0.0, 5.0)"
+        );
+        assert_eq!(
+            Interval::new(2.5, 3.5, IntervalClosed::Right).to_string(),
+            "(2.5, 3.5]"
+        );
+        assert_eq!(
+            Interval::new(-1.0, 0.0, IntervalClosed::Right).to_string(),
+            "(-1.0, 0.0]"
+        );
+        assert_eq!(
+            Interval::new(1e20, 2e20, IntervalClosed::Right).to_string(),
+            "(1e+20, 2e+20]"
         );
     }
 
@@ -6329,9 +9853,238 @@ mod tests {
     }
 
     #[test]
-    fn period_display_carries_freq_and_ordinal() {
-        let p = Period::new(216, PeriodFreq::Quarterly);
-        assert_eq!(p.to_string(), "Period[Q-DEC, 216]");
+    fn period_arithmetic_matches_seeded_oracles_bac28() {
+        use std::cmp::Ordering;
+
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn freq_for(raw: u64) -> PeriodFreq {
+            match raw % 9 {
+                0 => PeriodFreq::Annual,
+                1 => PeriodFreq::Quarterly,
+                2 => PeriodFreq::Monthly,
+                3 => PeriodFreq::Weekly,
+                4 => PeriodFreq::Daily,
+                5 => PeriodFreq::Business,
+                6 => PeriodFreq::Hourly,
+                7 => PeriodFreq::Minutely,
+                _ => PeriodFreq::Secondly,
+            }
+        }
+
+        fn different_freq(freq: PeriodFreq) -> PeriodFreq {
+            match freq {
+                PeriodFreq::Annual => PeriodFreq::Quarterly,
+                PeriodFreq::Quarterly => PeriodFreq::Monthly,
+                PeriodFreq::Monthly => PeriodFreq::Weekly,
+                PeriodFreq::Weekly => PeriodFreq::Daily,
+                PeriodFreq::Daily => PeriodFreq::Business,
+                PeriodFreq::Business => PeriodFreq::Hourly,
+                PeriodFreq::Hourly => PeriodFreq::Minutely,
+                PeriodFreq::Minutely => PeriodFreq::Secondly,
+                PeriodFreq::Secondly => PeriodFreq::Annual,
+            }
+        }
+
+        fn assert_period_case(
+            case: usize,
+            freq: PeriodFreq,
+            ordinal: i64,
+            shift_by: i64,
+            other_ordinal: i64,
+        ) {
+            let period = Period::new(ordinal, freq);
+            let shifted = period.shift(shift_by);
+            assert_eq!(
+                shifted.ordinal,
+                ordinal.saturating_add(shift_by),
+                "case {case}: shift ordinal"
+            );
+            assert_eq!(shifted.freq, freq, "case {case}: shift freq");
+
+            let same_freq_other = Period::new(other_ordinal, freq);
+            assert_eq!(
+                period.diff(&same_freq_other),
+                Some(ordinal.saturating_sub(other_ordinal)),
+                "case {case}: same-freq diff"
+            );
+            assert_eq!(
+                period.cmp_same_freq(&same_freq_other),
+                Some(ordinal.cmp(&other_ordinal)),
+                "case {case}: same-freq cmp"
+            );
+
+            let cross_freq_other = Period::new(other_ordinal, different_freq(freq));
+            assert_eq!(
+                period.diff(&cross_freq_other),
+                None,
+                "case {case}: cross-freq diff"
+            );
+            assert_eq!(
+                period.cmp_same_freq(&cross_freq_other),
+                None,
+                "case {case}: cross-freq cmp"
+            );
+        }
+
+        assert_period_case(usize::MAX, PeriodFreq::Daily, i64::MAX - 2, 10, i64::MIN);
+        assert_period_case(
+            usize::MAX - 1,
+            PeriodFreq::Daily,
+            i64::MIN + 2,
+            -10,
+            i64::MAX,
+        );
+        assert_eq!(
+            Period::new(10, PeriodFreq::Monthly)
+                .cmp_same_freq(&Period::new(10, PeriodFreq::Monthly)),
+            Some(Ordering::Equal)
+        );
+
+        let mut seed = 0xbac2_8d1f_0d1c_5eed_u64;
+        for case in 0..260 {
+            let freq = freq_for(next(&mut seed));
+            let ordinal = match case % 53 {
+                0 => i64::MAX - (next(&mut seed) % 8) as i64,
+                1 => i64::MIN + (next(&mut seed) % 8) as i64,
+                _ => (next(&mut seed) % 200_001) as i64 - 100_000,
+            };
+            let shift_by = match case % 47 {
+                0 => 512,
+                1 => -512,
+                _ => (next(&mut seed) % 4097) as i64 - 2048,
+            };
+            let other_ordinal = match case % 41 {
+                0 => i64::MAX,
+                1 => i64::MIN,
+                _ => (next(&mut seed) % 200_001) as i64 - 100_000,
+            };
+            assert_period_case(case, freq, ordinal, shift_by, other_ordinal);
+        }
+    }
+
+    #[test]
+    fn period_display_is_pandas_calendar_string() {
+        // Ordinal 216 on the quarterly axis (1970Q1 == 0) is 1970 + 54y = 2024Q1.
+        assert_eq!(
+            Period::new(216, PeriodFreq::Quarterly).to_string(),
+            "2024Q1"
+        );
+        // 1970 + 54 == 2024 on the annual axis.
+        assert_eq!(Period::new(54, PeriodFreq::Annual).to_string(), "2024");
+        // 1970-01 == 0 -> 2024-03 is 54*12 + 2 == 650 months.
+        assert_eq!(Period::new(650, PeriodFreq::Monthly).to_string(), "2024-03");
+        // Day 0 == 1970-01-01; 2024-01-15.
+        assert_eq!(
+            Period::new(fp_days("2024-01-15"), PeriodFreq::Daily).to_string(),
+            "2024-01-15"
+        );
+        assert_eq!(
+            Scalar::Period(Period::new(i64::MIN, PeriodFreq::Daily)).to_string(),
+            "NaT"
+        );
+    }
+
+    fn period_display_former_profile(period: &Period) -> String {
+        let calendar = period.calendar_string();
+        let mut rendered = String::new();
+        rendered.push_str(&calendar);
+        rendered
+    }
+
+    fn measure_period_renderer(periods: &[Period], render: impl Fn(&Period) -> String) -> u128 {
+        use std::{hint::black_box, time::Instant};
+
+        let started = Instant::now();
+        let mut checksum = 0usize;
+        for period in periods {
+            let rendered = render(black_box(period));
+            checksum = checksum.wrapping_add(rendered.len());
+            drop(black_box(rendered));
+        }
+        black_box(checksum);
+        started.elapsed().as_nanos()
+    }
+
+    #[test]
+    #[ignore = "release-only attribution probe for br-frankenpandas-6pqra"]
+    fn profile_period_display_direct_sink_ab_6pqra() {
+        const FREQUENCIES: [PeriodFreq; 9] = [
+            PeriodFreq::Annual,
+            PeriodFreq::Quarterly,
+            PeriodFreq::Monthly,
+            PeriodFreq::Weekly,
+            PeriodFreq::Daily,
+            PeriodFreq::Business,
+            PeriodFreq::Hourly,
+            PeriodFreq::Minutely,
+            PeriodFreq::Secondly,
+        ];
+        const SAMPLES: usize = 10;
+
+        let periods = (0..65_536)
+            .map(|index| {
+                let ordinal = if index % 4093 == 0 {
+                    i64::MIN
+                } else {
+                    ((index as i64 * 7_919) % 4_000_001) - 2_000_000
+                };
+                Period::new(ordinal, FREQUENCIES[index % FREQUENCIES.len()])
+            })
+            .collect::<Vec<_>>();
+
+        for period in &periods {
+            assert_eq!(period_display_former_profile(period), period.to_string());
+        }
+
+        for _ in 0..2 {
+            measure_period_renderer(&periods, period_display_former_profile);
+            measure_period_renderer(&periods, Period::to_string);
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut public_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_ns.push(measure_period_renderer(
+                    &periods,
+                    period_display_former_profile,
+                ));
+                public_ns.push(measure_period_renderer(&periods, Period::to_string));
+            } else {
+                public_ns.push(measure_period_renderer(&periods, Period::to_string));
+                former_ns.push(measure_period_renderer(
+                    &periods,
+                    period_display_former_profile,
+                ));
+            }
+        }
+        former_ns.sort_unstable();
+        public_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let public_p50 = public_ns[SAMPLES / 2];
+        let former_p95 = former_ns[SAMPLES - 1];
+        let public_p95 = public_ns[SAMPLES - 1];
+        println!("PROFILE_PERIOD_DISPLAY_FORMER_NS={former_ns:?}");
+        println!("PROFILE_PERIOD_DISPLAY_PUBLIC_NS={public_ns:?}");
+        println!(
+            "PROFILE_PERIOD_DISPLAY_P50_RATIO={:.6}",
+            former_p50 as f64 / public_p50 as f64
+        );
+        println!(
+            "PROFILE_PERIOD_DISPLAY_P95_RATIO={:.6}",
+            former_p95 as f64 / public_p95 as f64
+        );
+    }
+
+    #[cfg(test)]
+    fn fp_days(ymd: &str) -> i64 {
+        Period::parse(ymd).expect("daily period").ordinal
     }
 
     #[test]
@@ -6396,6 +10149,63 @@ mod tests {
         let r = period_range(start, 1024);
         assert_eq!(r.len(), 1024);
         assert_eq!(r[1023].ordinal, 1023);
+    }
+
+    #[test]
+    fn period_range_matches_seeded_ordinal_oracle_z3zh2() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn freq_for(raw: u64) -> PeriodFreq {
+            match raw % 9 {
+                0 => PeriodFreq::Annual,
+                1 => PeriodFreq::Quarterly,
+                2 => PeriodFreq::Monthly,
+                3 => PeriodFreq::Weekly,
+                4 => PeriodFreq::Daily,
+                5 => PeriodFreq::Business,
+                6 => PeriodFreq::Hourly,
+                7 => PeriodFreq::Minutely,
+                _ => PeriodFreq::Secondly,
+            }
+        }
+
+        fn assert_oracle_case(case: usize, start: Period, periods: usize) {
+            let got = period_range(start, periods);
+            assert_eq!(got.len(), periods, "case {case}: length");
+
+            for (position, period) in got.iter().enumerate() {
+                let expected_ordinal = start.ordinal.saturating_add(position as i64);
+                assert_eq!(
+                    period.ordinal, expected_ordinal,
+                    "case {case}: ordinal at {position}"
+                );
+                assert_eq!(period.freq, start.freq, "case {case}: freq at {position}");
+            }
+        }
+
+        assert_oracle_case(usize::MAX, Period::new(42, PeriodFreq::Monthly), 0);
+        assert_oracle_case(
+            usize::MAX - 1,
+            Period::new(i64::MAX - 3, PeriodFreq::Daily),
+            8,
+        );
+
+        let mut seed = 0x9e21_0d1c_5eed_0421_u64;
+        for case in 0..260 {
+            let freq = freq_for(next(&mut seed));
+            let periods = (next(&mut seed) % 80) as usize;
+            let start_ordinal = if case % 37 == 0 {
+                i64::MAX - 7
+            } else {
+                (next(&mut seed) % 20_001) as i64 - 10_000
+            };
+            assert_oracle_case(case, Period::new(start_ordinal, freq), periods);
+        }
     }
 
     // ── interval_range tests (br-frankenpandas-xaom) ────────────────────
@@ -6502,6 +10312,140 @@ mod tests {
         let bins = interval_range_by_step(0.0, 1.0, 0.1, IntervalClosed::Right).expect("ok");
         assert_eq!(bins.len(), 10);
         assert_eq!(bins.last().unwrap().right, 1.0);
+    }
+
+    #[test]
+    fn interval_range_matches_seeded_arithmetic_oracle_t9ozf() {
+        // Differential vs independent interval edge oracles
+        // (br-frankenpandas-t9ozf). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn closed_for(raw: u64) -> IntervalClosed {
+            match raw % 4 {
+                0 => IntervalClosed::Left,
+                1 => IntervalClosed::Right,
+                2 => IntervalClosed::Both,
+                _ => IntervalClosed::Neither,
+            }
+        }
+
+        fn assert_interval(
+            case: usize,
+            kind: &str,
+            pos: usize,
+            actual: &Interval,
+            expected: &Interval,
+        ) {
+            assert!(
+                (actual.left - expected.left).abs() < 1e-12,
+                "case={case} kind={kind} pos={pos}: expected left {}, got {}",
+                expected.left,
+                actual.left
+            );
+            assert!(
+                (actual.right - expected.right).abs() < 1e-12,
+                "case={case} kind={kind} pos={pos}: expected right {}, got {}",
+                expected.right,
+                actual.right
+            );
+            assert_eq!(
+                actual.closed, expected.closed,
+                "case={case} kind={kind} pos={pos}: closed mismatch"
+            );
+        }
+
+        fn expected_by_periods(
+            start: f64,
+            end: f64,
+            periods: usize,
+            closed: IntervalClosed,
+        ) -> Vec<Interval> {
+            if periods == 0 || !start.is_finite() || !end.is_finite() || start >= end {
+                return Vec::new();
+            }
+            let step = (end - start) / periods as f64;
+            (0..periods)
+                .map(|pos| {
+                    let left = start + step * pos as f64;
+                    let right = if pos + 1 == periods {
+                        end
+                    } else {
+                        start + step * (pos + 1) as f64
+                    };
+                    Interval::new(left, right, closed)
+                })
+                .collect()
+        }
+
+        fn expected_by_step(
+            start: f64,
+            end: f64,
+            step: f64,
+            closed: IntervalClosed,
+        ) -> Vec<Interval> {
+            if start >= end {
+                return Vec::new();
+            }
+            let count = ((end - start) / step).round() as usize;
+            (0..count)
+                .map(|pos| {
+                    let left = start + step * pos as f64;
+                    let right = if pos + 1 == count {
+                        end
+                    } else {
+                        start + step * (pos + 1) as f64
+                    };
+                    Interval::new(left, right, closed)
+                })
+                .collect()
+        }
+
+        assert!(interval_range_by_periods(5.0, 5.0, 4, IntervalClosed::Right).is_empty());
+        assert!(interval_range_by_periods(5.0, 4.0, 4, IntervalClosed::Right).is_empty());
+        assert!(
+            interval_range_by_step(5.0, 5.0, 1.0, IntervalClosed::Right)
+                .expect("zero span")
+                .is_empty()
+        );
+
+        let mut seed = 0x171e_7a11_c0de_5eed_u64;
+        for case in 0..220 {
+            let start = (next(&mut seed) % 2_001) as f64 / 10.0 - 100.0;
+            let periods = (next(&mut seed) % 24 + 1) as usize;
+            let width = (next(&mut seed) % 1_000 + 1) as f64 / 4.0;
+            let end = start + width;
+            let closed = closed_for(next(&mut seed));
+
+            let actual = interval_range_by_periods(start, end, periods, closed);
+            let expected = expected_by_periods(start, end, periods, closed);
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "case={case} periods: length mismatch"
+            );
+            for (pos, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert_interval(case, "periods", pos, actual, expected);
+            }
+
+            let step_count = (next(&mut seed) % 20 + 1) as usize;
+            let step = (next(&mut seed) % 25 + 1) as f64;
+            let step_end = start + step * step_count as f64;
+            let actual = interval_range_by_step(start, step_end, step, closed).expect("divides");
+            let expected = expected_by_step(start, step_end, step, closed);
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "case={case} step: length mismatch"
+            );
+            for (pos, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert_interval(case, "step", pos, actual, expected);
+            }
+        }
     }
 
     // ── Timedelta arithmetic tests (br-frankenpandas-4r56 Phase 1) ──────
@@ -6822,6 +10766,37 @@ mod tests {
     // ── Timestamp rounding tests (br-frankenpandas-5h6n) ────────────────
 
     #[test]
+    fn timestamp_pre_epoch_accessors_floor_not_truncate() {
+        // br-frankenpandas-wkjtw: pre-1970 instants with a sub-day part used to
+        // truncate toward zero, landing on the wrong calendar day. -1 ns is
+        // 1969-12-31 23:59:59.999999999 UTC.
+        let ts = Timestamp::from_nanos(-1);
+        assert_eq!(ts.year(), Some(1969));
+        assert_eq!(ts.month(), Some(12));
+        assert_eq!(ts.day(), Some(31));
+        assert_eq!(ts.hour(), Some(23));
+        assert_eq!(ts.minute(), Some(59));
+        assert_eq!(ts.second(), Some(59));
+        assert_eq!(ts.microsecond(), Some(999_999));
+        assert_eq!(ts.nanosecond(), Some(999));
+        // 1969-12-31 is a Wednesday (pandas Monday=0 -> 2).
+        assert_eq!(ts.dayofweek(), Some(2));
+
+        // 1969-12-31 12:00:00 — the classic truncation case (-43200 s).
+        let noon = Timestamp::from_nanos(-43200 * Timedelta::NANOS_PER_SEC);
+        assert_eq!(noon.year(), Some(1969));
+        assert_eq!(noon.month(), Some(12));
+        assert_eq!(noon.day(), Some(31));
+        assert_eq!(noon.hour(), Some(12));
+
+        // Exact midnight pre-epoch was already correct; keep it green.
+        let midnight = Timestamp::from_nanos(-Timedelta::NANOS_PER_DAY);
+        assert_eq!(midnight.year(), Some(1969));
+        assert_eq!(midnight.day(), Some(31));
+        assert_eq!(midnight.hour(), Some(0));
+    }
+
+    #[test]
     fn timestamp_floor_to_rounds_down() {
         // 12:34:56 → floor by 1H → 12:00:00
         let h = Timedelta::NANOS_PER_HOUR;
@@ -6849,6 +10824,19 @@ mod tests {
         //   result = -2 * 60 = -120.
         let ts = Timestamp::from_nanos(-100);
         assert_eq!(ts.floor_to(60).nanos, -120);
+    }
+
+    #[test]
+    fn timestamp_floor_to_returns_nat_on_axis_underflow_30hdi() {
+        let ts = Timestamp::from_nanos(i64::MIN + 1);
+        assert!(ts.floor_to(10).is_nat());
+
+        let safe = Timestamp::from_nanos(i64::MIN + 10);
+        assert_eq!(safe.floor_to(10).nanos, i64::MIN + 8);
+
+        let tz = Timestamp::from_nanos_tz(-100, "UTC").floor_to(60);
+        assert_eq!(tz.nanos, -120);
+        assert_eq!(tz.tz.as_deref(), Some("UTC"));
     }
 
     #[test]
@@ -7000,6 +10988,117 @@ mod tests {
         assert_eq!(normalized.nanos, Timedelta::NANOS_PER_DAY * 3);
         assert_eq!(normalized.tz.as_deref(), Some("US/Eastern"));
         assert!(Timestamp::nat().normalize().is_nat());
+        for nanos in [
+            i64::MIN + 1,
+            -Timedelta::NANOS_PER_DAY - 1,
+            -Timedelta::NANOS_PER_DAY,
+            -1,
+            0,
+            Timedelta::NANOS_PER_DAY - 1,
+            Timedelta::NANOS_PER_DAY,
+            i64::MAX,
+        ] {
+            let timestamp = Timestamp::from_nanos(nanos);
+            assert_eq!(timestamp.normalize(), timestamp.floor_to_unit("D"));
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground profile-first A/B"]
+    fn timestamp_normalize_direct_day_profile_dk721() {
+        use std::{hint::black_box, time::Instant};
+
+        fn former(timestamp: &Timestamp) -> Timestamp {
+            timestamp.floor_to_unit("D")
+        }
+
+        fn candidate(timestamp: &Timestamp) -> Timestamp {
+            timestamp.normalize()
+        }
+
+        fn elapsed(input: &[Timestamp], normalize: impl Fn(&Timestamp) -> Timestamp) -> u128 {
+            let started = Instant::now();
+            let mut checksum = 0_u64;
+            for timestamp in input {
+                let normalized = normalize(black_box(timestamp));
+                checksum = checksum.rotate_left(7) ^ normalized.nanos as u64;
+            }
+            black_box(checksum);
+            started.elapsed().as_nanos()
+        }
+
+        fn percentile(samples: &mut [u128], percent: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * percent).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        let parity_cases = [
+            Timestamp::nat(),
+            Timestamp::from_nanos(i64::MIN + 1),
+            Timestamp::from_nanos(-Timedelta::NANOS_PER_DAY - 1),
+            Timestamp::from_nanos(-Timedelta::NANOS_PER_DAY),
+            Timestamp::from_nanos(-1),
+            Timestamp::from_nanos(0),
+            Timestamp::from_nanos(Timedelta::NANOS_PER_DAY - 1),
+            Timestamp::from_nanos(Timedelta::NANOS_PER_DAY),
+            Timestamp::from_nanos(i64::MAX),
+            Timestamp::from_nanos_tz(-1, "US/Eastern"),
+            Timestamp::from_nanos_tz(
+                Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR,
+                "Asia/Tokyo",
+            ),
+        ];
+        for timestamp in &parity_cases {
+            assert_eq!(former(timestamp), candidate(timestamp));
+            assert_eq!(timestamp.normalize(), former(timestamp));
+        }
+
+        const ROWS: usize = 16_384;
+        const SAMPLES: usize = 20;
+        let input = (0..ROWS)
+            .map(|index| {
+                let day = index as i64 % 4_096 - 2_048;
+                let offset = ((index as u64).wrapping_mul(6_364_136_223_846_793_005_u64)
+                    % Timedelta::NANOS_PER_DAY as u64) as i64;
+                Timestamp::from_nanos(day * Timedelta::NANOS_PER_DAY + offset)
+            })
+            .collect::<Vec<_>>();
+        for timestamp in &input {
+            assert_eq!(former(timestamp), candidate(timestamp));
+        }
+
+        for _ in 0..3 {
+            black_box(elapsed(&input, former));
+            black_box(elapsed(&input, candidate));
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_ns.push(elapsed(&input, former));
+                candidate_ns.push(elapsed(&input, candidate));
+            } else {
+                candidate_ns.push(elapsed(&input, candidate));
+                former_ns.push(elapsed(&input, former));
+            }
+        }
+
+        let mut former_sorted = former_ns.clone();
+        let mut candidate_sorted = candidate_ns.clone();
+        let former_p50 = percentile(&mut former_sorted, 50);
+        let former_p95 = percentile(&mut former_sorted, 95);
+        let former_p99 = percentile(&mut former_sorted, 99);
+        let candidate_p50 = percentile(&mut candidate_sorted, 50);
+        let candidate_p95 = percentile(&mut candidate_sorted, 95);
+        let candidate_p99 = percentile(&mut candidate_sorted, 99);
+        println!(
+            "TIMESTAMP_NORMALIZE_DIRECT_DAY rows={ROWS} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup_p50={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95} speedup_p95={:.6} former_p99_ns={former_p99} candidate_p99_ns={candidate_p99} speedup_p99={:.6} former_samples={former_ns:?} candidate_samples={candidate_ns:?}",
+            former_p50 as f64 / candidate_p50 as f64,
+            former_p95 as f64 / candidate_p95 as f64,
+            former_p99 as f64 / candidate_p99 as f64,
+        );
     }
 
     #[test]
@@ -7085,6 +11184,155 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_isoformat_pre_epoch_subsecond_uses_floor_day_263m5() {
+        assert_eq!(
+            Timestamp::from_nanos(-1).isoformat(),
+            "1969-12-31T23:59:59.999999999"
+        );
+        assert_eq!(
+            Timestamp::from_nanos(-Timedelta::NANOS_PER_SEC).isoformat(),
+            "1969-12-31T23:59:59"
+        );
+        assert_eq!(
+            Timestamp::from_nanos(-Timedelta::NANOS_PER_DAY).isoformat(),
+            "1969-12-31T00:00:00"
+        );
+        assert_eq!(
+            Timestamp::from_nanos_tz(-1, "UTC").isoformat(),
+            "1969-12-31T23:59:59.999999999+00:00"
+        );
+    }
+
+    #[test]
+    fn timestamp_isoformat_preserves_nanosecond_fraction_4r99y() {
+        assert_eq!(
+            Timestamp::from_nanos(123_456_789).isoformat(),
+            "1970-01-01T00:00:00.123456789"
+        );
+        assert_eq!(
+            Timestamp::from_nanos(123_456_000).isoformat(),
+            "1970-01-01T00:00:00.123456"
+        );
+        assert_eq!(
+            Timestamp::from_nanos(123_000_000).isoformat(),
+            "1970-01-01T00:00:00.123000"
+        );
+        assert_eq!(
+            Timestamp::from_nanos_tz(1, "UTC").isoformat(),
+            "1970-01-01T00:00:00.000000001+00:00"
+        );
+    }
+
+    fn timestamp_isoformat_former_q8g50(timestamp: &Timestamp) -> String {
+        if timestamp.is_nat() {
+            return "NaT".to_owned();
+        }
+        let base = Timestamp::from_nanos(timestamp.nanos).isoformat();
+        match &timestamp.tz {
+            Some(tz) if tz == "UTC" => format!("{base}+00:00"),
+            Some(tz) => format!("{base}[{tz}]"),
+            None => base,
+        }
+    }
+
+    #[test]
+    fn timestamp_isoformat_one_buffer_matches_former_q8g50() {
+        let nanos = [
+            Timestamp::NAT,
+            -Timedelta::NANOS_PER_DAY - 1,
+            -Timedelta::NANOS_PER_SEC,
+            -1,
+            0,
+            1,
+            123_456_000,
+            123_456_789,
+            i64::MAX,
+        ];
+        let timezones = [
+            None,
+            Some("UTC"),
+            Some("America/New_York"),
+            Some(""),
+            Some("Etc/Γ"),
+        ];
+        for value in nanos {
+            for timezone in timezones {
+                let timestamp = Timestamp {
+                    nanos: value,
+                    tz: timezone.map(str::to_owned),
+                };
+                assert_eq!(
+                    timestamp.isoformat(),
+                    timestamp_isoformat_former_q8g50(&timestamp),
+                    "nanos={value} timezone={timezone:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B only"]
+    fn timestamp_isoformat_one_buffer_ab_q8g50() {
+        use std::{hint::black_box, time::Instant};
+
+        const ITEMS: usize = 8_192;
+        const SAMPLES: usize = 10;
+
+        fn elapsed(values: &[Timestamp], render: fn(&Timestamp) -> String) -> u128 {
+            let started = Instant::now();
+            let mut checksum = 0usize;
+            for timestamp in black_box(values) {
+                checksum = checksum.wrapping_add(black_box(render(black_box(timestamp))).len());
+            }
+            black_box(checksum);
+            started.elapsed().as_nanos()
+        }
+
+        let values = (0..ITEMS)
+            .map(|idx| {
+                let nanos = (idx as i64 - ITEMS as i64 / 2) * 1_000_123_456_789;
+                let timezone = if idx.is_multiple_of(2) {
+                    "UTC"
+                } else {
+                    "America/New_York"
+                };
+                Timestamp::from_nanos_tz(nanos, timezone)
+            })
+            .collect::<Vec<_>>();
+        for timestamp in &values {
+            assert_eq!(
+                timestamp.isoformat(),
+                timestamp_isoformat_former_q8g50(timestamp)
+            );
+        }
+
+        black_box(elapsed(&values, timestamp_isoformat_former_q8g50));
+        black_box(elapsed(&values, Timestamp::isoformat));
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut one_buffer_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_ns.push(elapsed(&values, timestamp_isoformat_former_q8g50));
+                one_buffer_ns.push(elapsed(&values, Timestamp::isoformat));
+            } else {
+                one_buffer_ns.push(elapsed(&values, Timestamp::isoformat));
+                former_ns.push(elapsed(&values, timestamp_isoformat_former_q8g50));
+            }
+        }
+        former_ns.sort_unstable();
+        one_buffer_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let one_buffer_p50 = one_buffer_ns[SAMPLES / 2];
+        println!(
+            "timestamp_isoformat_one_buffer_ab items={ITEMS} samples={SAMPLES} former_p50_ns={former_p50} one_buffer_p50_ns={one_buffer_p50} speedup={:.6}x",
+            former_p50 as f64 / one_buffer_p50 as f64
+        );
+        println!("former_samples_ns={former_ns:?}");
+        println!("one_buffer_samples_ns={one_buffer_ns:?}");
+    }
+
+    #[test]
     fn timestamp_strftime_basic() {
         let ts = Timestamp::from_nanos(
             Timedelta::NANOS_PER_DAY * 365
@@ -7094,7 +11342,145 @@ mod tests {
         assert_eq!(ts.strftime("%Y-%m-%d"), "1971-01-01");
         assert_eq!(ts.strftime("%H:%M:%S"), "09:15:00");
         assert_eq!(ts.strftime("%Y/%m/%d %H:%M"), "1971/01/01 09:15");
+        assert_eq!(ts.strftime("%%Y|%%%m|%Q|%|λ"), "%1971|%%01|%Q|%|λ");
         assert_eq!(Timestamp::nat().strftime("%Y-%m-%d"), "NaT");
+    }
+
+    #[test]
+    fn timestamp_strftime_floors_pre_epoch_instants_1pmlp() {
+        let apollo = Timestamp::parse("1969-07-20T20:17:40").unwrap();
+        assert_eq!(
+            apollo.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "1969-07-20 20:17:40.000000"
+        );
+
+        // The smallest negative instant catches both truncation defects:
+        // second flooring and day flooring.
+        let one_ns_before_epoch = Timestamp::from_nanos(-1);
+        assert_eq!(
+            one_ns_before_epoch.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "1969-12-31 23:59:59.999999"
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground normal-release attribution harness"]
+    fn timestamp_strftime_one_buffer_profile_8qzbo() {
+        use std::{hint::black_box, time::Instant};
+
+        const ITEMS: usize = 8_192;
+        const SAMPLES: usize = 10;
+        const FORMAT: &str = "%Y-%m-%d %H:%M:%S.%f|%Y%m%d|%%Y|λ%Q";
+
+        fn former(timestamp: &Timestamp, format: &str) -> String {
+            if timestamp.is_nat() {
+                return "NaT".to_string();
+            }
+            let total_secs = timestamp.nanos / Timedelta::NANOS_PER_SEC;
+            let sub_nanos = timestamp.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
+
+            let days_since_epoch = total_secs / 86400;
+            let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+            let days = days_since_epoch + 719_468;
+            let era = (if days >= 0 { days } else { days - 146_096 }) / 146_097;
+            let doe = days - era * 146_097;
+            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+            let y = yoe + era * 400;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let m = if mp < 10 { mp + 3 } else { mp - 9 };
+            let year = if m <= 2 { y + 1 } else { y };
+            let hour = secs_of_day / 3600;
+            let minute = (secs_of_day % 3600) / 60;
+            let second = secs_of_day % 60;
+            let micros = sub_nanos / 1000;
+
+            format
+                .replace("%Y", &format!("{year:04}"))
+                .replace("%m", &format!("{m:02}"))
+                .replace("%d", &format!("{d:02}"))
+                .replace("%H", &format!("{hour:02}"))
+                .replace("%M", &format!("{minute:02}"))
+                .replace("%S", &format!("{second:02}"))
+                .replace("%f", &format!("{micros:06}"))
+        }
+
+        fn elapsed(timestamps: &[Timestamp], formatter: fn(&Timestamp, &str) -> String) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_usize;
+            for timestamp in timestamps {
+                let value = formatter(black_box(timestamp), black_box(FORMAT));
+                digest = digest.wrapping_add(value.len());
+                digest ^= usize::from(value.as_bytes().first().copied().unwrap_or_default());
+                black_box(value);
+            }
+            black_box(digest);
+            started.elapsed().as_nanos()
+        }
+
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        let edge_timestamps = [
+            Timestamp::nat(),
+            Timestamp::from_nanos(i64::MIN + 1),
+            Timestamp::from_nanos(-1_234_567_890),
+            Timestamp::from_nanos(0),
+            Timestamp::from_nanos(1_735_732_800_123_456_789),
+            Timestamp::from_nanos(i64::MAX),
+        ];
+        let edge_formats = [
+            "",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y%Y%m%m%d%d%H%H%M%M%S%S%f%f",
+            "%%Y|%%%m|%Q|%|λ",
+            FORMAT,
+        ];
+        for timestamp in &edge_timestamps {
+            for format in edge_formats {
+                assert_eq!(former(timestamp, format), timestamp.strftime(format));
+            }
+        }
+
+        let timestamps = (0..ITEMS)
+            .map(|index| {
+                let centered = index as i64 - ITEMS as i64 / 2;
+                Timestamp::from_nanos(centered * 987_654_321_123_456)
+            })
+            .collect::<Vec<_>>();
+        for timestamp in &timestamps {
+            assert_eq!(former(timestamp, FORMAT), timestamp.strftime(FORMAT));
+        }
+
+        black_box(elapsed(&timestamps, former));
+        black_box(elapsed(&timestamps, Timestamp::strftime));
+
+        let mut former_samples = Vec::with_capacity(SAMPLES);
+        let mut public_samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_samples.push(elapsed(&timestamps, former));
+                public_samples.push(elapsed(&timestamps, Timestamp::strftime));
+            } else {
+                public_samples.push(elapsed(&timestamps, Timestamp::strftime));
+                former_samples.push(elapsed(&timestamps, former));
+            }
+        }
+        let former_p50 = percentile(&mut former_samples, 50);
+        let former_p95 = percentile(&mut former_samples, 95);
+        let public_p50 = percentile(&mut public_samples, 50);
+        let public_p95 = percentile(&mut public_samples, 95);
+        println!(
+            "TIMESTAMP_STRFTIME_AB items={ITEMS} samples={SAMPLES} former_p50_ns={former_p50} former_p95_ns={former_p95} public_p50_ns={public_p50} public_p95_ns={public_p95} p50_speedup={:.6} p95_speedup={:.6}",
+            former_p50 as f64 / public_p50 as f64,
+            former_p95 as f64 / public_p95 as f64,
+        );
+        println!("TIMESTAMP_STRFTIME_AB former_samples_ns={former_samples:?}");
+        println!("TIMESTAMP_STRFTIME_AB public_samples_ns={public_samples:?}");
     }
 
     #[test]
@@ -7109,6 +11495,71 @@ mod tests {
 
         assert_eq!(Timestamp::nat().day_name(), "NaT");
         assert_eq!(Timestamp::nat().month_name(), "NaT");
+    }
+
+    #[test]
+    fn timestamp_replace_validates_components_zw0y2() {
+        let ts = Timestamp::parse("2024-01-15T10:30:45.123456789").unwrap();
+        let replaced = ts.replace(
+            Some(2024),
+            Some(2),
+            Some(29),
+            Some(23),
+            Some(59),
+            Some(58),
+            Some(987_654),
+            Some(321),
+        );
+        assert_eq!(replaced.year(), Some(2024));
+        assert_eq!(replaced.month(), Some(2));
+        assert_eq!(replaced.day(), Some(29));
+        assert_eq!(replaced.hour(), Some(23));
+        assert_eq!(replaced.minute(), Some(59));
+        assert_eq!(replaced.second(), Some(58));
+        assert_eq!(replaced.microsecond(), Some(987_654));
+        assert_eq!(replaced.nanosecond(), Some(321));
+
+        let tz = Timestamp::from_nanos_tz(ts.nanos, "UTC");
+        assert_eq!(
+            tz.replace(None, Some(2), Some(29), None, None, None, None, None)
+                .tz
+                .as_deref(),
+            Some("UTC")
+        );
+
+        assert!(
+            ts.replace(None, Some(13), None, None, None, None, None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(Some(2023), Some(2), Some(29), None, None, None, None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, Some(24), None, None, None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, None, Some(60), None, None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, None, None, Some(60), None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, None, None, None, Some(1_000_000), None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, None, None, None, None, Some(1_000))
+                .is_nat()
+        );
+        assert!(
+            Timestamp::nat()
+                .replace(Some(2024), Some(1), Some(1), None, None, None, None, None)
+                .is_nat()
+        );
     }
 
     #[test]
@@ -7288,6 +11739,78 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_fromordinal_guards_nanosecond_overflow_ycvrd() {
+        const EPOCH_ORDINAL: i64 = 719_163;
+        let max_day_offset = i64::MAX / Timedelta::NANOS_PER_DAY;
+        let max_valid_ordinal = EPOCH_ORDINAL + max_day_offset;
+
+        let max_valid = Timestamp::fromordinal(max_valid_ordinal);
+        assert!(!max_valid.is_nat());
+        assert_eq!(max_valid.nanos, max_day_offset * Timedelta::NANOS_PER_DAY);
+
+        assert!(Timestamp::fromordinal(max_valid_ordinal + 1).is_nat());
+        assert!(Timestamp::fromordinal(i64::MAX).is_nat());
+    }
+
+    #[test]
+    fn timestamp_ordinal_matches_seeded_epoch_oracle_l2f0p() {
+        const EPOCH_ORDINAL: i64 = 719_163;
+        const DAY: i64 = Timedelta::NANOS_PER_DAY;
+
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn assert_ordinal_case(case: usize, day_offset: i64, subday_nanos: i64) {
+            let nanos = day_offset.saturating_mul(DAY).saturating_add(subday_nanos);
+            let ts = Timestamp::from_nanos(nanos);
+            let expected_day_offset = nanos.div_euclid(DAY);
+            let expected_ordinal = EPOCH_ORDINAL + expected_day_offset;
+
+            assert_eq!(
+                ts.toordinal(),
+                Some(expected_ordinal),
+                "case {case}: toordinal"
+            );
+
+            let midnight = Timestamp::fromordinal(expected_ordinal);
+            assert_eq!(
+                midnight.nanos,
+                expected_day_offset * DAY,
+                "case {case}: fromordinal nanos"
+            );
+            assert_eq!(
+                midnight.toordinal(),
+                Some(expected_ordinal),
+                "case {case}: fromordinal roundtrip"
+            );
+        }
+
+        assert_eq!(Timestamp::nat().toordinal(), None);
+        assert!(Timestamp::fromordinal(0).is_nat());
+        assert!(Timestamp::fromordinal(-1).is_nat());
+
+        assert_ordinal_case(usize::MAX, -1, DAY - 1);
+        assert_ordinal_case(usize::MAX - 1, 0, -1);
+        assert_ordinal_case(usize::MAX - 2, 19_723, 0);
+
+        let mut seed = 0x1f20_f0d1_0a11_0d1e_u64;
+        for case in 0..260 {
+            let day_offset = (next(&mut seed) % 40_001) as i64 - 10_000;
+            let subday_nanos = match case % 7 {
+                0 => 0,
+                1 => DAY - 1,
+                2 => -1,
+                _ => (next(&mut seed) % (2 * DAY as u64 - 1)) as i64 - (DAY - 1),
+            };
+            assert_ordinal_case(case, day_offset, subday_nanos);
+        }
+    }
+
+    #[test]
     fn timestamp_parse_iso8601_date_only() {
         let ts = Timestamp::parse("2024-01-15").unwrap();
         assert_eq!(ts.year(), Some(2024));
@@ -7334,6 +11857,18 @@ mod tests {
     fn timestamp_parse_offset_timezone() {
         let ts = Timestamp::parse("2024-01-15T10:30:45+05:30").unwrap();
         assert_eq!(ts.tz, Some("+05:30".to_string()));
+
+        let ts = Timestamp::parse("2024-01-15T10:30:45-05:30").unwrap();
+        assert_eq!(ts.tz, Some("-05:30".to_string()));
+    }
+
+    #[test]
+    fn timestamp_parse_rejects_invalid_timezone_offsets_0v676() {
+        assert!(Timestamp::parse("2024-01-15T10:30:45+bad").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45+0500").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45+24:00").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45+05:60").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45-25:00").is_err());
     }
 
     #[test]
@@ -7349,6 +11884,333 @@ mod tests {
         assert!(Timestamp::parse("not a date").is_err());
         assert!(Timestamp::parse("2024-13-01").is_err()); // invalid month
         assert!(Timestamp::parse("2024-01-32").is_err()); // invalid day
+    }
+
+    #[test]
+    fn timestamp_parse_rejects_invalid_fractional_seconds_87se2() {
+        assert!(Timestamp::parse("2024-01-15T10:30:45.").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45.abc").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45.-1").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45.１２３").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45.123456789x").is_err());
+
+        let ts = Timestamp::parse("2024-01-15T10:30:45.123456789987").unwrap();
+        assert_eq!(ts.second(), Some(45));
+        assert_eq!(ts.microsecond(), Some(123456));
+        assert_eq!(ts.nanosecond(), Some(789));
+    }
+
+    #[test]
+    #[ignore = "foreground profile-first A/B"]
+    fn timestamp_parse_fraction_digit_fold_profile_pdiku() {
+        use std::{hint::black_box, time::Instant};
+
+        const CALLS: usize = 131_072;
+        const SAMPLES: usize = 12;
+        type ParsedTime = Option<(u32, u32, u32, u64)>;
+        const VALID: [&str; 16] = [
+            "00:00:00.0",
+            "01:02:03.1",
+            "02:03:04.01",
+            "03:04:05.001",
+            "04:05:06.0001",
+            "05:06:07.00001",
+            "06:07:08.000001",
+            "07:08:09.0000001",
+            "08:09:10.00000001",
+            "09:10:11.000000001",
+            "10:11:12.123456789",
+            "11:12:13.999999999",
+            "12:13:14.123456789987",
+            "13:14:15.000000000001",
+            "14:15:16.101010101010",
+            "23:59:59.987654321234",
+        ];
+
+        #[inline(never)]
+        fn former(s: &str) -> ParsedTime {
+            let (time_str, frac_str) = match s.split_once('.') {
+                Some((time, frac)) => (time, Some(frac)),
+                None => (s, None),
+            };
+            let parts: Vec<&str> = time_str.split(':').collect();
+            if parts.is_empty() || parts.len() > 3 {
+                return None;
+            }
+            let hour: u32 = parts.first().and_then(|p| p.parse().ok())?;
+            let minute: u32 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+            let second: u32 = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
+
+            if hour > 23 || minute > 59 || second > 59 {
+                return None;
+            }
+
+            let nanos = match frac_str {
+                None => 0,
+                Some(frac) => {
+                    if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+                        return None;
+                    }
+                    let truncated = &frac[..frac.len().min(9)];
+                    let padded = format!("{truncated:0<9}");
+                    padded.parse::<u64>().ok()?
+                }
+            };
+
+            Some((hour, minute, second, nanos))
+        }
+
+        #[inline(never)]
+        fn candidate(s: &str) -> ParsedTime {
+            Timestamp::parse_time(s)
+        }
+
+        fn elapsed(inputs: &[&str], parser: fn(&str) -> ParsedTime) -> u128 {
+            let started = Instant::now();
+            for input in black_box(inputs) {
+                black_box(parser(black_box(*input)));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn percentile(samples: &[u128], percent: usize) -> u128 {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            let rank = (sorted.len() * percent).div_ceil(100).saturating_sub(1);
+            sorted[rank]
+        }
+
+        let invalid = [
+            "",
+            "24:00:00.1",
+            "12:60:00.1",
+            "12:00:60.1",
+            "12:00:00.",
+            "12:00:00.abc",
+            "12:00:00.-1",
+            "12:00:00.１２３",
+            "12:00:00.123456789x",
+            "12:00:00.1.2",
+            "12:00:00:01.1",
+        ];
+        for input in VALID.iter().chain(invalid.iter()) {
+            assert_eq!(candidate(input), former(input), "input={input:?}");
+        }
+
+        let inputs = (0..CALLS)
+            .map(|index| VALID[index % VALID.len()])
+            .collect::<Vec<_>>();
+        for _ in 0..2 {
+            black_box(elapsed(&inputs, former));
+            black_box(elapsed(&inputs, candidate));
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_ns.push(elapsed(&inputs, former));
+                candidate_ns.push(elapsed(&inputs, candidate));
+            } else {
+                candidate_ns.push(elapsed(&inputs, candidate));
+                former_ns.push(elapsed(&inputs, former));
+            }
+        }
+
+        let former_p50 = percentile(&former_ns, 50);
+        let former_p95 = percentile(&former_ns, 95);
+        let former_p99 = percentile(&former_ns, 99);
+        let candidate_p50 = percentile(&candidate_ns, 50);
+        let candidate_p95 = percentile(&candidate_ns, 95);
+        let candidate_p99 = percentile(&candidate_ns, 99);
+        println!(
+            "TIMESTAMP_FRACTION_PARSE calls={CALLS} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup_p50={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95} speedup_p95={:.6} former_p99_ns={former_p99} candidate_p99_ns={candidate_p99} speedup_p99={:.6} former_samples={former_ns:?} candidate_samples={candidate_ns:?}",
+            former_p50 as f64 / candidate_p50 as f64,
+            former_p95 as f64 / candidate_p95 as f64,
+            former_p99 as f64 / candidate_p99 as f64,
+        );
+    }
+
+    #[test]
+    fn timestamp_parse_matches_seeded_iso_component_oracle_1u7a0() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3935559000370003845)
+                .wrapping_add(2691343689449507681);
+            *seed
+        }
+
+        fn leap(year: i64) -> bool {
+            (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+        }
+
+        fn month_len(year: i64, month: u32) -> u32 {
+            match month {
+                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                4 | 6 | 9 | 11 => 30,
+                2 if leap(year) => 29,
+                2 => 28,
+                _ => 0,
+            }
+        }
+
+        struct Components {
+            year: i64,
+            month: u32,
+            day: u32,
+            hour: u32,
+            minute: u32,
+            second: u32,
+            nanos: u64,
+        }
+
+        fn assert_components(case: usize, text: &str, expected: Components) {
+            let ts = Timestamp::parse(text).expect("seeded valid timestamp");
+            let Components {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanos,
+            } = expected;
+            assert_eq!(ts.year(), Some(year), "case {case}: year");
+            assert_eq!(ts.month(), Some(month as i64), "case {case}: month");
+            assert_eq!(ts.day(), Some(day as i64), "case {case}: day");
+            assert_eq!(ts.hour(), Some(hour as i64), "case {case}: hour");
+            assert_eq!(ts.minute(), Some(minute as i64), "case {case}: minute");
+            assert_eq!(ts.second(), Some(second as i64), "case {case}: second");
+            assert_eq!(
+                ts.microsecond(),
+                Some((nanos / 1000) as i64),
+                "case {case}: microsecond"
+            );
+            assert_eq!(
+                ts.nanosecond(),
+                Some((nanos % 1000) as i64),
+                "case {case}: nanosecond"
+            );
+        }
+
+        assert!(Timestamp::parse("NaT").expect("NaT parses").is_nat());
+        assert!(
+            Timestamp::parse("nAt")
+                .expect("mixed-case NaT parses")
+                .is_nat()
+        );
+        assert!(Timestamp::parse("1900-02-29").is_err());
+        assert!(Timestamp::parse("2001-04-31").is_err());
+        assert!(Timestamp::parse("2024-00-15").is_err());
+
+        assert_components(
+            usize::MAX,
+            "2000-02-29",
+            Components {
+                year: 2000,
+                month: 2,
+                day: 29,
+                hour: 0,
+                minute: 0,
+                second: 0,
+                nanos: 0,
+            },
+        );
+        assert_components(
+            usize::MAX - 1,
+            "2024-02-29T23:59:59.000000001",
+            Components {
+                year: 2024,
+                month: 2,
+                day: 29,
+                hour: 23,
+                minute: 59,
+                second: 59,
+                nanos: 1,
+            },
+        );
+
+        let mut seed = 0x15e0_1d50_1f0a_cade_u64;
+        for case in 0..260 {
+            let year = 1900 + (next(&mut seed) % 201) as i64;
+            let month = 1 + (next(&mut seed) % 12) as u32;
+            let day = 1 + (next(&mut seed) % month_len(year, month) as u64) as u32;
+            let hour = (next(&mut seed) % 24) as u32;
+            let minute = (next(&mut seed) % 60) as u32;
+            let second = (next(&mut seed) % 60) as u32;
+            let nanos = next(&mut seed) % 1_000_000_000;
+
+            match case % 4 {
+                0 => {
+                    let text = format!("{year:04}-{month:02}-{day:02}");
+                    assert_components(
+                        case,
+                        &text,
+                        Components {
+                            year,
+                            month,
+                            day,
+                            hour: 0,
+                            minute: 0,
+                            second: 0,
+                            nanos: 0,
+                        },
+                    );
+                }
+                1 => {
+                    let text =
+                        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}");
+                    assert_components(
+                        case,
+                        &text,
+                        Components {
+                            year,
+                            month,
+                            day,
+                            hour,
+                            minute,
+                            second,
+                            nanos: 0,
+                        },
+                    );
+                }
+                2 => {
+                    let text =
+                        format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}");
+                    assert_components(
+                        case,
+                        &text,
+                        Components {
+                            year,
+                            month,
+                            day,
+                            hour,
+                            minute,
+                            second,
+                            nanos: 0,
+                        },
+                    );
+                }
+                _ => {
+                    let text = format!(
+                        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}"
+                    );
+                    assert_components(
+                        case,
+                        &text,
+                        Components {
+                            year,
+                            month,
+                            day,
+                            hour,
+                            minute,
+                            second,
+                            nanos,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -7425,5 +12287,195 @@ mod tests {
         assert!(Interval::parse("invalid").is_err());
         assert!(Interval::parse("[0]").is_err());
         assert!(Interval::parse("0, 1").is_err()); // missing brackets
+    }
+
+    fn interval_parse_error_profile(s: &str) -> super::TypeError {
+        super::TypeError::ValueNotParseable {
+            value: s.to_string(),
+            target: "Interval".to_string(),
+        }
+    }
+
+    #[inline(never)]
+    fn interval_parse_former_profile(s: &str) -> Result<Interval, super::TypeError> {
+        let s = std::hint::black_box(s).trim();
+        if s.len() < 5 {
+            return Err(interval_parse_error_profile(s));
+        }
+
+        let first_char = s.chars().next().unwrap();
+        let last_char = s.chars().last().unwrap();
+        let left_closed = match first_char {
+            '[' => true,
+            '(' => false,
+            _ => return Err(interval_parse_error_profile(s)),
+        };
+        let right_closed = match last_char {
+            ']' => true,
+            ')' => false,
+            _ => return Err(interval_parse_error_profile(s)),
+        };
+        let closed = match (left_closed, right_closed) {
+            (true, true) => IntervalClosed::Both,
+            (true, false) => IntervalClosed::Left,
+            (false, true) => IntervalClosed::Right,
+            (false, false) => IntervalClosed::Neither,
+        };
+
+        let inner = &s[1..s.len() - 1];
+        let parts: Vec<&str> = inner.split(',').collect();
+        if parts.len() != 2 {
+            return Err(interval_parse_error_profile(s));
+        }
+        let left = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| interval_parse_error_profile(s))?;
+        let right = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| interval_parse_error_profile(s))?;
+        Ok(Interval::new(left, right, closed))
+    }
+
+    #[inline(never)]
+    fn interval_parse_split_once_profile(s: &str) -> Result<Interval, super::TypeError> {
+        Interval::parse(std::hint::black_box(s))
+    }
+
+    fn assert_interval_parse_profile_parity(s: &str) {
+        match (
+            interval_parse_former_profile(s),
+            interval_parse_split_once_profile(s),
+        ) {
+            (Ok(former), Ok(candidate)) => {
+                assert_eq!(former.left.to_bits(), candidate.left.to_bits(), "left: {s}");
+                assert_eq!(
+                    former.right.to_bits(),
+                    candidate.right.to_bits(),
+                    "right: {s}"
+                );
+                assert_eq!(former.closed, candidate.closed, "closed: {s}");
+            }
+            (Err(former), Err(candidate)) => assert_eq!(former, candidate, "error: {s}"),
+            (former, candidate) => assert_eq!(
+                former.is_ok(),
+                candidate.is_ok(),
+                "parse result mismatch for {s}: {former:?} != {candidate:?}"
+            ),
+        }
+    }
+
+    #[inline(never)]
+    fn measure_interval_parser_profile(
+        parser: fn(&str) -> Result<Interval, super::TypeError>,
+        inputs: &[&str],
+        rounds: usize,
+    ) -> u128 {
+        use std::{hint::black_box, time::Instant};
+
+        let started = Instant::now();
+        let mut checksum = 0_u64;
+        for _ in 0..rounds {
+            for input in inputs {
+                let parsed = parser(black_box(input)).expect("profile input must parse");
+                let closed = match parsed.closed {
+                    IntervalClosed::Left => 1_u64,
+                    IntervalClosed::Right => 2,
+                    IntervalClosed::Both => 3,
+                    IntervalClosed::Neither => 4,
+                };
+                checksum = checksum
+                    .wrapping_add(parsed.left.to_bits().rotate_left(7))
+                    .wrapping_add(parsed.right.to_bits().rotate_right(11))
+                    .wrapping_add(closed);
+                black_box(parsed);
+            }
+        }
+        black_box(checksum);
+        started.elapsed().as_nanos()
+    }
+
+    #[test]
+    #[ignore = "release-only attribution probe for br-frankenpandas-81jjv"]
+    fn profile_interval_parse_endpoint_split_ab_81jjv() {
+        const VALID: [&str; 8] = [
+            "[0, 1]",
+            "(-0.0, 0.0]",
+            " [ -1.5e3 , 2.75E-4 ) ",
+            "(NaN, -0]",
+            "[-inf, inf)",
+            "[9.25, -7.5]",
+            "(4.9406564584124654e-324, 1.7976931348623157e308)",
+            "[-42, 17.125)",
+        ];
+        const INVALID: [&str; 12] = [
+            "invalid",
+            "[0]",
+            "0, 1",
+            "[0 1]",
+            "[0, 1, 2]",
+            "[0, 1,]",
+            "[0,,1]",
+            "[, 1]",
+            "[0, ]",
+            "{0, 1}",
+            "[0, 1}",
+            "  ⟦0, 1⟧  ",
+        ];
+        const ROUNDS: usize = 16_384;
+        const SAMPLES: usize = 10;
+
+        for input in VALID.iter().chain(INVALID.iter()) {
+            assert_interval_parse_profile_parity(input);
+        }
+        for _ in 0..2 {
+            measure_interval_parser_profile(interval_parse_former_profile, &VALID, ROUNDS);
+            measure_interval_parser_profile(interval_parse_split_once_profile, &VALID, ROUNDS);
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_ns.push(measure_interval_parser_profile(
+                    interval_parse_former_profile,
+                    &VALID,
+                    ROUNDS,
+                ));
+                candidate_ns.push(measure_interval_parser_profile(
+                    interval_parse_split_once_profile,
+                    &VALID,
+                    ROUNDS,
+                ));
+            } else {
+                candidate_ns.push(measure_interval_parser_profile(
+                    interval_parse_split_once_profile,
+                    &VALID,
+                    ROUNDS,
+                ));
+                former_ns.push(measure_interval_parser_profile(
+                    interval_parse_former_profile,
+                    &VALID,
+                    ROUNDS,
+                ));
+            }
+        }
+        former_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let candidate_p50 = candidate_ns[SAMPLES / 2];
+        let former_p95 = former_ns[SAMPLES - 1];
+        let candidate_p95 = candidate_ns[SAMPLES - 1];
+        println!("PROFILE_INTERVAL_PARSE_FORMER_NS={former_ns:?}");
+        println!("PROFILE_INTERVAL_PARSE_CANDIDATE_NS={candidate_ns:?}");
+        println!(
+            "PROFILE_INTERVAL_PARSE_P50_RATIO={:.6}",
+            former_p50 as f64 / candidate_p50 as f64
+        );
+        println!(
+            "PROFILE_INTERVAL_PARSE_P95_RATIO={:.6}",
+            former_p95 as f64 / candidate_p95 as f64
+        );
     }
 }

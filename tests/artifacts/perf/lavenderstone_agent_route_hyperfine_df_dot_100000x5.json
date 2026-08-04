@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-lavenderstone-agent-route/release-perf/examples/perf_profile df_dot 100000 5",
+      "mean": 0.6219190787400001,
+      "stddev": 0.014002382323864672,
+      "median": 0.6145382207400001,
+      "user": 12.14956364,
+      "system": 0.67669206,
+      "min": 0.61091582974,
+      "max": 0.64523618474,
+      "times": [
+        0.61091582974,
+        0.6145382207400001,
+        0.62459376674,
+        0.64523618474,
+        0.61431139174
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+n=12000 window=250
+rolling_skew: 9.100 ms checksum 6f4ee13001d85e37
+rolling_kurt: 7.548 ms checksum fcf2ade53dc4beb8
+expanding_skew: 155.673 ms checksum fe7ed19352f5a8c5
+expanding_kurt: 153.920 ms checksum 120ef936042f9b07
+total_ms 326.242 combined_checksum ff53e5eaa40edb2d

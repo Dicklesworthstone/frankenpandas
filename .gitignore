@@ -127,6 +127,9 @@ gemini.mcp.json
 .beads/*.rebuild_*
 .beads/recovery*/
 .beads_recovery/
+# Persistent machine-local FrankenSQLite namespace sidecars beside the Beads DB.
+.beads/*-fsqlite-ns-gate
+.beads/*-fsqlite-ns-use
 
 # Agent session ephemeral files
 SESSION_TODO.md
@@ -149,6 +152,9 @@ crates/*/target/
 # nanos + retry counter) — created by concurrent `rch` cargo invocations.
 .rch-target/
 .rch-target-*/
+.rch-targets-*/
+# The shared pool has no suffix at all, so the three patterns above miss it.
+.rch-targets/
 .rch-deploy-root/
 
 # cargo-fuzz output
@@ -174,3 +180,18 @@ crates/fp-conformance/fixtures/packets_scale/
 claude-upgrade-progress.json
 *.mcp.json
 .cargo-target-*/
+
+# === Ephemeral build & scratch artifacts (multi-repo cleanup 2026-06-18) ===
+# Stray out-of-tree compile outputs (normal builds live under target/, already ignored).
+*.rlib
+rust_out
+# One-off local CARGO_TARGET_DIR override directories (e.g. criterion micro-benches).
+**/local-target/
+
+# === Ephemeral perf/cargo artifacts (multi-repo cleanup 2026-06-18) ===
+# Machine-local cargo config override (sets target-dir / rch settings; never canonical).
+/.cargo/
+# Superseded perf-snapshot dumps: the swarm writes <name>.data, then renames the
+# prior run to <name>.data.old. The .old siblings are transient and must not be
+# committed (the live .data goldens under tests/artifacts/perf/ stay tracked).
+*.data.old

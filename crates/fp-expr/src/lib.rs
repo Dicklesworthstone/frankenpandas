@@ -383,6 +383,39 @@ impl EvalContext {
         Ok(context)
     }
 
+    fn from_dataframe_for_expr_with_locals(
+        frame: &fp_frame::DataFrame,
+        locals: &BTreeMap<String, Scalar>,
+        expr: &Expr,
+    ) -> Result<Self, ExprError> {
+        let mut referenced_series = std::collections::BTreeSet::new();
+        let mut referenced_locals = std::collections::BTreeSet::new();
+        MaterializedView::extract_bindings(expr, &mut referenced_series, &mut referenced_locals);
+
+        let mut context = Self {
+            series: BTreeMap::new(),
+            locals: referenced_locals
+                .into_iter()
+                .filter_map(|name| locals.get(&name).cloned().map(|value| (name, value)))
+                .collect(),
+            anchor_index: Some(frame.index().clone()),
+        };
+        for name in referenced_series {
+            // DataFrame columns shadow the synthetic index aliases, matching
+            // `from_dataframe_with_locals`, which inserts columns last.
+            if let Some(column) = frame.column(&name) {
+                let series = Series::new(name, frame.index().clone(), column.clone())?;
+                context.insert_series(series);
+            } else if name == "index"
+                || name == "ilevel_0"
+                || frame.index().name() == Some(name.as_str())
+            {
+                context.insert_index_series(&name, frame.index())?;
+            }
+        }
+        Ok(context)
+    }
+
     #[must_use]
     pub fn get_series(&self, name: &str) -> Option<&Series> {
         self.series.get(name)
@@ -416,6 +449,8 @@ impl EvalContext {
 fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(value) => Scalar::Int64(*value),
+        IndexLabel::Float64(value) => Scalar::Float64(value.0),
+        IndexLabel::Bool(value) => Scalar::Bool(*value),
         IndexLabel::Utf8(value) => Scalar::Utf8(value.clone()),
         IndexLabel::Timedelta64(value) => Scalar::Timedelta64(*value),
         IndexLabel::Datetime64(value) => Scalar::Datetime64(*value),
@@ -708,7 +743,7 @@ pub fn evaluate(
         }
         Expr::PctChange { expr, periods } => {
             let input = evaluate(expr, context, policy, ledger)?;
-            input.pct_change(*periods).map_err(ExprError::from)
+            input.pct_change(*periods as i64).map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -767,7 +802,7 @@ pub fn evaluate_on_dataframe(
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, ExprError> {
-    let context = EvalContext::from_dataframe(frame)?;
+    let context = EvalContext::from_dataframe_for_expr_with_locals(frame, &BTreeMap::new(), expr)?;
     evaluate(expr, &context, policy, ledger)
 }
 
@@ -778,7 +813,7 @@ pub fn evaluate_on_dataframe_with_locals(
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, ExprError> {
-    let context = EvalContext::from_dataframe_with_locals(frame, locals)?;
+    let context = EvalContext::from_dataframe_for_expr_with_locals(frame, locals, expr)?;
     evaluate(expr, &context, policy, ledger)
 }
 
@@ -1088,12 +1123,18 @@ impl MaterializedView {
         Ok(&self.result)
     }
 
-    fn extract_series(expr: &Expr, series_set: &mut std::collections::BTreeSet<String>) {
+    fn extract_bindings(
+        expr: &Expr,
+        series_set: &mut std::collections::BTreeSet<String>,
+        local_set: &mut std::collections::BTreeSet<String>,
+    ) {
         match expr {
             Expr::Series { name } => {
                 series_set.insert(name.0.clone());
             }
-            Expr::Local { .. } => {}
+            Expr::Local { name } => {
+                local_set.insert(name.clone());
+            }
             Expr::Add { left, right }
             | Expr::Sub { left, right }
             | Expr::Mul { left, right }
@@ -1105,39 +1146,41 @@ impl MaterializedView {
             | Expr::Or { left, right }
             | Expr::Compare { left, right, .. }
             | Expr::CombineFirst { left, right } => {
-                Self::extract_series(left, series_set);
-                Self::extract_series(right, series_set);
+                Self::extract_bindings(left, series_set, local_set);
+                Self::extract_bindings(right, series_set, local_set);
             }
-            Expr::IsIn { left, .. } => Self::extract_series(left, series_set),
+            Expr::IsIn { left, .. } => Self::extract_bindings(left, series_set, local_set),
             Expr::Not { expr }
             | Expr::Abs { expr }
             | Expr::Round { expr, .. }
             | Expr::Rank { expr, .. } => {
-                Self::extract_series(expr, series_set);
+                Self::extract_bindings(expr, series_set, local_set);
             }
-            Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::DropNa { expr } => Self::extract_series(expr, series_set),
-            Expr::SortValues { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::SortIndex { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::ArgSort { expr } => Self::extract_series(expr, series_set),
-            Expr::Mode { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::Duplicated { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::DropDuplicates { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::HeadTail { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::TopN { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::IsNull { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::FillNa { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::DropNa { expr } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::SortValues { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::SortIndex { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::ArgSort { expr } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::Mode { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::Duplicated { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::DropDuplicates { expr, .. } => {
+                Self::extract_bindings(expr, series_set, local_set);
+            }
+            Expr::HeadTail { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::TopN { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::Replace { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::Astype { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
             Expr::Where {
                 expr, cond, other, ..
             } => {
-                Self::extract_series(expr, series_set);
-                Self::extract_series(cond, series_set);
+                Self::extract_bindings(expr, series_set, local_set);
+                Self::extract_bindings(cond, series_set, local_set);
                 if let Some(other) = other {
-                    Self::extract_series(other, series_set);
+                    Self::extract_bindings(other, series_set, local_set);
                 }
             }
-            Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Between { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
             Expr::Clip { expr, .. }
             | Expr::Shift { expr, .. }
             | Expr::Diff { expr, .. }
@@ -1145,14 +1188,15 @@ impl MaterializedView {
             | Expr::CumProd { expr }
             | Expr::CumMin { expr }
             | Expr::CumMax { expr }
-            | Expr::PctChange { expr, .. } => Self::extract_series(expr, series_set),
+            | Expr::PctChange { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
             Expr::Literal { .. } => {}
         }
     }
 
     fn is_linear(expr: &Expr) -> bool {
         let mut series_set = std::collections::BTreeSet::new();
-        Self::extract_series(expr, &mut series_set);
+        let mut local_set = std::collections::BTreeSet::new();
+        Self::extract_bindings(expr, &mut series_set, &mut local_set);
         series_set.len() == 1 && Self::is_append_local(expr)
     }
 
@@ -1499,7 +1543,7 @@ fn evaluate_delta(
         }
         Expr::PctChange { expr, periods } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.pct_change(*periods).map_err(ExprError::from)
+            input.pct_change(*periods as i64).map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
@@ -6110,6 +6154,437 @@ mod tests {
     }
 
     #[test]
+    fn eval_str_reflected_arithmetic_methods_pizig() {
+        // br-frankenpandas-pizig: reflected method-call arithmetic (rsub/rfloordiv)
+        // swaps operands: a.rsub(b)==b-a. Seeded LCG, no mocks.
+        let mut st: u64 = 0x4ef1_e7a1_2b3c_4d5e;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        let policy = RuntimePolicy::hardened(Some(100));
+        for iter in 0..400u32 {
+            let n = (next() % 5) as usize + 1;
+            let a: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
+            let b: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
+            let mut ledger = EvidenceLedger::new();
+            let frame = fp_frame::DataFrame::from_series(vec![
+                fp_frame::Series::from_values(
+                    "a",
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    a.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                fp_frame::Series::from_values(
+                    "b",
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    b.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let geti = |s: &Scalar| -> i64 {
+                match s {
+                    Scalar::Int64(v) => *v,
+                    Scalar::Float64(v) => *v as i64,
+                    _ => i64::MIN,
+                }
+            };
+            let rsub = super::eval_str("a.rsub(b)", &frame, &policy, &mut ledger).unwrap();
+            for i in 0..n {
+                assert_eq!(
+                    geti(&rsub.values()[i]),
+                    b[i] - a[i],
+                    "rsub iter={iter} i={i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eval_str_true_division_float_8bnl8() {
+        // br-frankenpandas-8bnl8: expression-level true division a/b -> Float64
+        // (3j187 used %,// not /). Seeded LCG, no mocks.
+        let mut st: u64 = 0xd1f0_e7a1_2b3c_4d5e;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        let policy = RuntimePolicy::hardened(Some(100));
+        for iter in 0..400u32 {
+            let n = (next() % 5) as usize + 1;
+            let a: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
+            let b: Vec<i64> = (0..n).map(|_| ((next() % 5) as i64) + 1).collect(); // non-zero
+            let mut ledger = EvidenceLedger::new();
+            let frame = fp_frame::DataFrame::from_series(vec![
+                fp_frame::Series::from_values(
+                    "a",
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    a.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                fp_frame::Series::from_values(
+                    "b",
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    b.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let out = super::eval_str("a / b", &frame, &policy, &mut ledger).unwrap();
+            for i in 0..n {
+                let got = match &out.values()[i] {
+                    Scalar::Float64(x) => *x,
+                    Scalar::Int64(x) => *x as f64,
+                    _ => f64::NAN,
+                };
+                assert!(
+                    (got - a[i] as f64 / b[i] as f64).abs() < 1e-9,
+                    "div iter={iter} i={i} {}/{}",
+                    a[i],
+                    b[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eval_str_arithmetic_precedence_3j187() {
+        // End-to-end correctness oracle (br-frankenpandas-3j187): parse + evaluate
+        // arithmetic over a small Int64 frame, asserting per-row results computed
+        // by hand. Int operands keep Int64 (exact — no float fragility).
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let col = |name: &str, vals: Vec<i64>| {
+            fp_frame::Series::from_values(
+                name,
+                (0..vals.len() as i64).map(|i| i.into()).collect::<Vec<_>>(),
+                vals.into_iter().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        // Row0: a=10,b=3,c=2  Row1: a=20,b=4,c=5
+        let frame = fp_frame::DataFrame::from_series(vec![
+            col("a", vec![10, 20]),
+            col("b", vec![3, 4]),
+            col("c", vec![2, 5]),
+        ])
+        .unwrap();
+
+        let i = |x: i64, y: i64| vec![Scalar::Int64(x), Scalar::Int64(y)];
+        let mut ev = |e: &str| {
+            super::eval_str(e, &frame, &policy, &mut ledger)
+                .unwrap()
+                .values()
+                .to_vec()
+        };
+
+        assert_eq!(ev("a + b * c"), i(16, 40), "* binds tighter than +");
+        assert_eq!(
+            ev("(a + b) * c"),
+            i(26, 120),
+            "parentheses override precedence"
+        );
+        assert_eq!(ev("a - b - c"), i(5, 11), "- is left-associative");
+        assert_eq!(ev("a * b + c"), i(32, 85), "* before +");
+        assert_eq!(ev("a % b"), i(1, 0), "modulo");
+        assert_eq!(ev("a // b"), i(3, 5), "floor division");
+        assert_eq!(ev("-a"), i(-10, -20), "unary minus");
+        assert_eq!(
+            ev("a > b"),
+            vec![Scalar::Bool(true), Scalar::Bool(true)],
+            "comparison yields bool"
+        );
+    }
+
+    #[test]
+    fn query_str_parenthesized_boolean_rnyb3() {
+        // br-frankenpandas-rnyb3: parenthesized boolean grouping '(a>2) and (b<8)'.
+        let mut st: u64 = 0x4c02_e7a1_2b3c_4d5e;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        let policy = RuntimePolicy::hardened(Some(100));
+        for iter in 0..300u32 {
+            let n = (next() % 8) as usize + 1;
+            let a: Vec<i64> = (0..n).map(|_| (next() % 8) as i64).collect();
+            let b: Vec<i64> = (0..n).map(|_| (next() % 12) as i64).collect();
+            let mut ledger = EvidenceLedger::new();
+            let col = |name: &str, v: &[i64]| {
+                fp_frame::Series::from_values(
+                    name,
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    v.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+                )
+                .unwrap()
+            };
+            let frame = fp_frame::DataFrame::from_series(vec![col("a", &a), col("b", &b)]).unwrap();
+            let out =
+                super::query_str("(a > 2) and (b < 8)", &frame, &policy, &mut ledger).unwrap();
+            let got: Vec<i64> = out
+                .column("a")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(x) => *x,
+                    _ => i64::MIN,
+                })
+                .collect();
+            let exp: Vec<i64> = (0..n)
+                .filter(|&i| a[i] > 2 && b[i] < 8)
+                .map(|i| a[i])
+                .collect();
+            assert_eq!(got, exp, "paren query iter={iter}");
+        }
+    }
+
+    #[test]
+    fn query_str_compound_arith_comparison_1l96h() {
+        // br-frankenpandas-1l96h: query 'a + b > c' (arithmetic sub-expr then
+        // comparison). Seeded LCG, no mocks.
+        let mut st: u64 = 0x4c01_e7a1_2b3c_4d5e;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        let policy = RuntimePolicy::hardened(Some(100));
+        for iter in 0..300u32 {
+            let n = (next() % 8) as usize + 1;
+            let a: Vec<i64> = (0..n).map(|_| (next() % 20) as i64).collect();
+            let b: Vec<i64> = (0..n).map(|_| (next() % 20) as i64).collect();
+            let c: Vec<i64> = (0..n).map(|_| (next() % 30) as i64).collect();
+            let mut ledger = EvidenceLedger::new();
+            let col = |name: &str, v: &[i64]| {
+                fp_frame::Series::from_values(
+                    name,
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    v.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+                )
+                .unwrap()
+            };
+            let frame =
+                fp_frame::DataFrame::from_series(vec![col("a", &a), col("b", &b), col("c", &c)])
+                    .unwrap();
+            let out = super::query_str("a + b > c", &frame, &policy, &mut ledger).unwrap();
+            let got_a: Vec<i64> = out
+                .column("a")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(x) => *x,
+                    _ => i64::MIN,
+                })
+                .collect();
+            let exp_a: Vec<i64> = (0..n)
+                .filter(|&i| a[i] + b[i] > c[i])
+                .map(|i| a[i])
+                .collect();
+            assert_eq!(got_a, exp_a, "compound query iter={iter}");
+        }
+    }
+
+    #[test]
+    fn query_str_string_equality_x2nfn() {
+        // br-frankenpandas-x2nfn: query string-literal equality on a Utf8 column.
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "s",
+                (0..4i64).map(Into::into).collect::<Vec<_>>(),
+                vec![s("a"), s("b"), s("b"), s("c")],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let kept = |q: &str, ledger: &mut EvidenceLedger| -> Vec<String> {
+            super::query_str(q, &frame, &policy, ledger)
+                .unwrap()
+                .column("s")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Utf8(x) => x.clone(),
+                    _ => String::new(),
+                })
+                .collect()
+        };
+        assert_eq!(
+            kept("s == 'b'", &mut ledger),
+            vec!["b".to_string(), "b".to_string()],
+            "eq"
+        );
+        assert_eq!(
+            kept("s != 'b'", &mut ledger),
+            vec!["a".to_string(), "c".to_string()],
+            "ne"
+        );
+    }
+
+    #[test]
+    fn query_str_boolean_not_negation_flrzd() {
+        // br-frankenpandas-flrzd: query 'not' negation.
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "x",
+                (0..10).map(|i| (i as i64).into()).collect::<Vec<_>>(),
+                (0..10).map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let kept = |q: &str, ledger: &mut EvidenceLedger| -> Vec<i64> {
+            super::query_str(q, &frame, &policy, ledger)
+                .unwrap()
+                .column("x")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(v) => *v,
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
+        assert_eq!(
+            kept("not (x > 5)", &mut ledger),
+            vec![0, 1, 2, 3, 4, 5],
+            "not gt"
+        );
+        assert_eq!(
+            kept("not (x < 3 or x > 7)", &mut ledger),
+            vec![3, 4, 5, 6, 7],
+            "not (or)"
+        );
+    }
+
+    #[test]
+    fn query_str_boolean_filter_correctness_wo4wi() {
+        // End-to-end correctness oracle (br-frankenpandas-wo4wi): query_str must
+        // keep exactly the rows matching the boolean predicate. No rand, no mocks.
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "x",
+                (0..10).map(|i| (i as i64).into()).collect::<Vec<_>>(),
+                (0..10).map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let kept = |q: &str, ledger: &mut EvidenceLedger| -> Vec<i64> {
+            super::query_str(q, &frame, &policy, ledger)
+                .unwrap()
+                .column("x")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(v) => *v,
+                    // Sentinel: any non-Int64 would fail the equality assert below.
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
+
+        assert_eq!(kept("x < 2 or x > 7", &mut ledger), vec![0, 1, 8, 9], "or");
+        assert_eq!(kept("x > 2 and x < 6", &mut ledger), vec![3, 4, 5], "and");
+        assert_eq!(
+            kept("x >= 5 and x <= 5", &mut ledger),
+            vec![5],
+            "single row"
+        );
+    }
+
+    #[test]
+    fn query_str_membership_filter_correctness_8e5vp() {
+        // End-to-end correctness (br-frankenpandas-8e5vp): in / not in membership.
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                (0..7).map(|i| (i as i64).into()).collect::<Vec<_>>(),
+                (0..7).map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let kept = |q: &str, ledger: &mut EvidenceLedger| -> Vec<i64> {
+            super::query_str(q, &frame, &policy, ledger)
+                .unwrap()
+                .column("a")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(v) => *v,
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
+        assert_eq!(kept("a in [1, 3, 5]", &mut ledger), vec![1, 3, 5], "in");
+        assert_eq!(
+            kept("a not in [0, 2, 4, 6]", &mut ledger),
+            vec![1, 3, 5],
+            "not in"
+        );
+    }
+
+    #[test]
+    fn eval_query_with_locals_substitution_0qyro() {
+        // End-to-end (br-frankenpandas-0qyro): @local scalar bindings substitute
+        // into eval/query (the BTreeMap key omits the leading '@').
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut offset = std::collections::BTreeMap::new();
+        offset.insert("offset".to_string(), Scalar::Int64(100));
+        let r = super::eval_str_with_locals("a + @offset", &frame, &offset, &policy, &mut ledger)
+            .unwrap();
+        assert_eq!(
+            r.values(),
+            &[Scalar::Int64(110), Scalar::Int64(120), Scalar::Int64(130)],
+            "a + @offset"
+        );
+
+        let mut lo = std::collections::BTreeMap::new();
+        lo.insert("lo".to_string(), Scalar::Int64(15));
+        let q = super::query_str_with_locals("a > @lo", &frame, &lo, &policy, &mut ledger).unwrap();
+        let kept: Vec<_> = q.column("a").unwrap().values().to_vec();
+        assert_eq!(
+            kept,
+            vec![Scalar::Int64(20), Scalar::Int64(30)],
+            "a > @lo keeps {{20,30}}"
+        );
+    }
+
+    #[test]
     fn query_str_chained_comparison_and_ops_match_pandas() {
         let policy = RuntimePolicy::hardened(Some(100));
         let mut ledger = EvidenceLedger::new();
@@ -6143,10 +6618,20 @@ mod tests {
         // (verified vs pandas 2.2.3: a//b == [0,1,1,2,2], a%b == [1,0,1,0,1])
         let fdiv = super::eval_str("a // b", &frame, &policy, &mut ledger).unwrap();
         let fv: Vec<_> = fdiv.values().to_vec();
-        assert_eq!(fv[3], Scalar::Int64(2), "4 // 2 should be Int64(2); got {:?}", fv[3]);
+        assert_eq!(
+            fv[3],
+            Scalar::Int64(2),
+            "4 // 2 should be Int64(2); got {:?}",
+            fv[3]
+        );
         let md = super::eval_str("a % b", &frame, &policy, &mut ledger).unwrap();
         let mv: Vec<_> = md.values().to_vec();
-        assert_eq!(mv[0], Scalar::Int64(1), "1 % 2 should be Int64(1); got {:?}", mv[0]);
+        assert_eq!(
+            mv[0],
+            Scalar::Int64(1),
+            "1 % 2 should be Int64(1); got {:?}",
+            mv[0]
+        );
 
         // NOTE: `a ** 2` (int**int) currently returns Float64 in FrankenPandas
         // (fp-columnar Pow kernel uses powf), diverging from pandas's int64.
@@ -6156,13 +6641,19 @@ mod tests {
     fn surviving_a(frame: &fp_frame::DataFrame, expr: &str) -> Result<Vec<i64>, String> {
         let policy = RuntimePolicy::hardened(Some(100));
         let mut ledger = EvidenceLedger::new();
-        let r = super::query_str(expr, frame, &policy, &mut ledger).map_err(|e| format!("{e:?}"))?;
-        Ok(r
-            .column("a")
+        let r =
+            super::query_str(expr, frame, &policy, &mut ledger).map_err(|e| format!("{e:?}"))?;
+        Ok(r.column("a")
             .unwrap()
             .values()
             .iter()
-            .filter_map(|s| if let Scalar::Int64(v) = s { Some(*v) } else { None })
+            .filter_map(|s| {
+                if let Scalar::Int64(v) = s {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
             .collect())
     }
 
@@ -6178,24 +6669,59 @@ mod tests {
             fp_frame::Series::from_values(
                 "s",
                 (0..5).map(|i| (i as i64).into()).collect(),
-                ["x", "y", "x", "z", "y"].iter().map(|s| Scalar::Utf8((*s).into())).collect(),
+                ["x", "y", "x", "z", "y"]
+                    .iter()
+                    .map(|s| Scalar::Utf8((*s).into()))
+                    .collect(),
             )
             .unwrap(),
         ])
         .unwrap();
 
         // Each verified vs pandas 2.2.3 df.query(...)["a"].tolist().
-        assert_eq!(surviving_a(&frame, "a in [1, 3, 5]"), Ok(vec![1, 3, 5]), "a in list");
-        assert_eq!(surviving_a(&frame, "a not in [1, 3, 5]"), Ok(vec![2, 4]), "a not in list");
+        assert_eq!(
+            surviving_a(&frame, "a in [1, 3, 5]"),
+            Ok(vec![1, 3, 5]),
+            "a in list"
+        );
+        assert_eq!(
+            surviving_a(&frame, "a not in [1, 3, 5]"),
+            Ok(vec![2, 4]),
+            "a not in list"
+        );
         assert_eq!(surviving_a(&frame, "s == 'x'"), Ok(vec![1, 3]), "str eq");
-        assert_eq!(surviving_a(&frame, "s in ['x', 'z']"), Ok(vec![1, 3, 4]), "str in list");
-        assert_eq!(surviving_a(&frame, "a > 1 and a < 4"), Ok(vec![2, 3]), "logical and");
-        assert_eq!(surviving_a(&frame, "not (a > 3)"), Ok(vec![1, 2, 3]), "unary not");
-        assert_eq!(surviving_a(&frame, "a + 1 > 3"), Ok(vec![3, 4, 5]), "arith precedence");
+        assert_eq!(
+            surviving_a(&frame, "s in ['x', 'z']"),
+            Ok(vec![1, 3, 4]),
+            "str in list"
+        );
+        assert_eq!(
+            surviving_a(&frame, "a > 1 and a < 4"),
+            Ok(vec![2, 3]),
+            "logical and"
+        );
+        assert_eq!(
+            surviving_a(&frame, "not (a > 3)"),
+            Ok(vec![1, 2, 3]),
+            "unary not"
+        );
+        assert_eq!(
+            surviving_a(&frame, "a + 1 > 3"),
+            Ok(vec![3, 4, 5]),
+            "arith precedence"
+        );
         // pandas treats &/| in query as element-wise and/or with
         // comparison-level precedence: `a > 1 & a < 4` == `(a>1) & (a<4)`.
-        assert_eq!(surviving_a(&frame, "a > 1 & a < 4"), Ok(vec![2, 3]), "bitwise &");
-        assert_eq!(surviving_a(&frame, "a == 1 | a == 5"), Ok(vec![1, 5]), "bitwise |");
+        assert_eq!(
+            surviving_a(&frame, "a > 1 & a < 4"),
+            Ok(vec![2, 3]),
+            "bitwise &"
+        );
+        assert_eq!(
+            surviving_a(&frame, "a == 1 | a == 5"),
+            Ok(vec![1, 5]),
+            "bitwise |"
+        );
     }
 
     #[test]
@@ -8369,6 +8895,455 @@ mod tests {
             Err(ExprError::Frame(FrameError::CompatibilityRejected(message)))
                 if message.contains("scalar boolean query")
         ));
+    }
+
+    #[test]
+    fn referenced_binding_context_matches_full_context_wtdap() {
+        let frame = fp_frame::DataFrame::new(
+            fp_index::Index::from_i64_values(vec![10, 20, 30]).rename_index(Some("row")),
+            BTreeMap::from([
+                (
+                    "index".to_owned(),
+                    fp_columnar::Column::from_i64_values_owned(vec![1, 2, 3]),
+                ),
+                (
+                    "target".to_owned(),
+                    fp_columnar::Column::from_i64_values_owned(vec![4, 5, 6]),
+                ),
+                (
+                    "unused".to_owned(),
+                    fp_columnar::Column::from_i64_values_owned(vec![7, 8, 9]),
+                ),
+            ]),
+        )
+        .expect("frame");
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        for source in ["target + row", "target + ilevel_0", "index + 1"] {
+            let expr = super::parse_expr(source).expect("expression");
+            let full_context = EvalContext::from_dataframe(&frame).expect("full context");
+            let mut former_ledger = EvidenceLedger::new();
+            let former = evaluate(&expr, &full_context, &policy, &mut former_ledger)
+                .expect("full evaluation");
+            let mut candidate_ledger = EvidenceLedger::new();
+            let candidate =
+                super::evaluate_on_dataframe(&expr, &frame, &policy, &mut candidate_ledger)
+                    .expect("selective evaluation");
+
+            assert_eq!(candidate.name(), former.name());
+            assert_eq!(candidate.index(), former.index());
+            assert_eq!(candidate.values(), former.values());
+        }
+
+        let locals = BTreeMap::from([("threshold".to_owned(), Scalar::Int64(4))]);
+        let expr = super::parse_expr("target > @threshold").expect("local expression");
+        let full_context =
+            EvalContext::from_dataframe_with_locals(&frame, &locals).expect("full local context");
+        let mut former_ledger = EvidenceLedger::new();
+        let former = evaluate(&expr, &full_context, &policy, &mut former_ledger)
+            .expect("full local evaluation");
+        let mut candidate_ledger = EvidenceLedger::new();
+        let candidate = super::evaluate_on_dataframe_with_locals(
+            &expr,
+            &frame,
+            &locals,
+            &policy,
+            &mut candidate_ledger,
+        )
+        .expect("selective local evaluation");
+        assert_eq!(candidate.index(), former.index());
+        assert_eq!(candidate.values(), former.values());
+    }
+
+    #[test]
+    fn referenced_local_context_matches_full_context_o6w31() {
+        let frame = fp_frame::DataFrame::from_series(vec![
+            Series::from_values(
+                "target",
+                vec![10_i64.into(), 20_i64.into(), 30_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .expect("target series"),
+        ])
+        .expect("frame");
+        let locals = BTreeMap::from([
+            ("offset".to_owned(), Scalar::Int64(10)),
+            ("threshold".to_owned(), Scalar::Int64(11)),
+            ("unused_nan".to_owned(), Scalar::Float64(f64::NAN)),
+            ("unused_text".to_owned(), Scalar::Utf8("unused".repeat(32))),
+        ]);
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        for source in ["target + @offset > @threshold", "@offset + 1"] {
+            let expr = super::parse_expr(source).expect("expression");
+            let full_context =
+                EvalContext::from_dataframe_with_locals(&frame, &locals).expect("full context");
+            let selective_context =
+                EvalContext::from_dataframe_for_expr_with_locals(&frame, &locals, &expr)
+                    .expect("selective context");
+            let expected_locals = if source.contains("threshold") {
+                vec!["offset", "threshold"]
+            } else {
+                vec!["offset"]
+            };
+            assert_eq!(
+                selective_context
+                    .locals
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected_locals
+            );
+            assert_eq!(full_context.locals.len(), locals.len());
+
+            let mut former_ledger = EvidenceLedger::new();
+            let former = evaluate(&expr, &full_context, &policy, &mut former_ledger)
+                .expect("full evaluation");
+            let mut candidate_ledger = EvidenceLedger::new();
+            let candidate = evaluate(&expr, &selective_context, &policy, &mut candidate_ledger)
+                .expect("selective evaluation");
+            assert_eq!(candidate.name(), former.name());
+            assert_eq!(candidate.index(), former.index());
+            assert_eq!(candidate.values(), former.values());
+        }
+
+        let missing = super::parse_expr("target > @missing").expect("missing expression");
+        let selective = EvalContext::from_dataframe_for_expr_with_locals(&frame, &locals, &missing)
+            .expect("missing context");
+        let mut ledger = EvidenceLedger::new();
+        assert!(matches!(
+            evaluate(&missing, &selective, &policy, &mut ledger),
+            Err(ExprError::UnknownLocal(name)) if name == "missing"
+        ));
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn eval_context_referenced_binding_ab_wtdap() {
+        const ROWS: usize = 100_000;
+        const ROWS_I64: i64 = 100_000;
+        const SAMPLES: usize = 15;
+        let labels = (0..ROWS_I64).map(Into::into).collect::<Vec<_>>();
+        let values = (0..ROWS_I64).map(Scalar::Int64).collect::<Vec<_>>();
+        let series = [
+            "target", "unused_1", "unused_2", "unused_3", "unused_4", "unused_5", "unused_6",
+            "unused_7",
+        ]
+        .into_iter()
+        .map(|name| Series::from_values(name, labels.clone(), values.clone()).expect("series"))
+        .collect();
+        let frame = fp_frame::DataFrame::from_series(series).expect("frame");
+        let expr = super::parse_expr("target > 50000").expect("expression");
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        let measure_former = || {
+            let mut ledger = EvidenceLedger::new();
+            let started = std::time::Instant::now();
+            let context = EvalContext::from_dataframe(&frame).expect("context");
+            let result = evaluate(&expr, &context, &policy, &mut ledger).expect("evaluate");
+            let elapsed = started.elapsed().as_nanos();
+            assert_eq!(result.len(), ROWS);
+            elapsed
+        };
+        let measure_candidate = || {
+            let mut ledger = EvidenceLedger::new();
+            let started = std::time::Instant::now();
+            let result = super::evaluate_on_dataframe(&expr, &frame, &policy, &mut ledger)
+                .expect("selective evaluate");
+            let elapsed = started.elapsed().as_nanos();
+            assert_eq!(result.len(), ROWS);
+            elapsed
+        };
+
+        let full_context = EvalContext::from_dataframe(&frame).expect("full context");
+        let mut former_ledger = EvidenceLedger::new();
+        let former =
+            evaluate(&expr, &full_context, &policy, &mut former_ledger).expect("full evaluation");
+        let mut candidate_ledger = EvidenceLedger::new();
+        let candidate = super::evaluate_on_dataframe(&expr, &frame, &policy, &mut candidate_ledger)
+            .expect("selective evaluation");
+        assert_eq!(candidate.index(), former.index());
+        assert_eq!(candidate.values(), former.values());
+
+        for _ in 0..3 {
+            std::hint::black_box(measure_former());
+            std::hint::black_box(measure_candidate());
+        }
+        let mut former_a = Vec::with_capacity(SAMPLES);
+        let mut former_b = Vec::with_capacity(SAMPLES);
+        let mut candidate_a = Vec::with_capacity(SAMPLES);
+        let mut candidate_b = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_a.push(measure_former());
+                candidate_a.push(measure_candidate());
+                candidate_b.push(measure_candidate());
+                former_b.push(measure_former());
+            } else {
+                former_b.push(measure_former());
+                candidate_b.push(measure_candidate());
+                candidate_a.push(measure_candidate());
+                former_a.push(measure_former());
+            }
+        }
+        former_a.sort_unstable();
+        former_b.sort_unstable();
+        candidate_a.sort_unstable();
+        candidate_b.sort_unstable();
+        let former_a_p50 = former_a.get(SAMPLES / 2).copied().unwrap_or(0);
+        let former_b_p50 = former_b.get(SAMPLES / 2).copied().unwrap_or(0);
+        let candidate_a_p50 = candidate_a.get(SAMPLES / 2).copied().unwrap_or(0);
+        let candidate_b_p50 = candidate_b.get(SAMPLES / 2).copied().unwrap_or(0);
+        let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+        let candidate_mean = (candidate_a_p50 + candidate_b_p50) as f64 / 2.0;
+        println!("fp-expr referenced binding A/B: rows={ROWS} columns=8 samples={SAMPLES}");
+        println!("former eager-binding p50 A/B: {former_a_p50} / {former_b_p50} ns");
+        println!("candidate referenced-binding p50 A/B: {candidate_a_p50} / {candidate_b_p50} ns");
+        println!(
+            "former/candidate ratio: {:.6}x",
+            former_mean / candidate_mean
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground attribution probe"]
+    fn eval_context_local_clone_profile_o6w31() {
+        const LOCALS: usize = 4_096;
+        const SAMPLES: usize = 11;
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            Series::from_values(
+                "target",
+                (0..64_i64).map(Into::into).collect(),
+                (0..64_i64).map(Scalar::Int64).collect(),
+            )
+            .expect("target series"),
+        ])
+        .expect("frame");
+        let mut locals = (0..LOCALS)
+            .map(|idx| {
+                (
+                    format!("unused_{idx:04}"),
+                    Scalar::Utf8(format!("unused-value-{idx:04}-{}", "x".repeat(48))),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        locals.insert("threshold".to_owned(), Scalar::Int64(31));
+        let expr = super::parse_expr("target > @threshold").expect("expression");
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        let full = EvalContext::from_dataframe_for_expr_with_locals(&frame, &locals, &expr)
+            .expect("full locals context");
+        let selective_locals = BTreeMap::from([(
+            "threshold".to_owned(),
+            locals.get("threshold").cloned().expect("threshold"),
+        )]);
+        let selective =
+            EvalContext::from_dataframe_for_expr_with_locals(&frame, &selective_locals, &expr)
+                .expect("selective locals context");
+        let mut full_ledger = EvidenceLedger::new();
+        let full_result = evaluate(&expr, &full, &policy, &mut full_ledger).expect("full result");
+        let mut selective_ledger = EvidenceLedger::new();
+        let selective_result =
+            evaluate(&expr, &selective, &policy, &mut selective_ledger).expect("selective result");
+        assert_eq!(selective_result.index(), full_result.index());
+        assert_eq!(selective_result.values(), full_result.values());
+
+        let measure_full = || {
+            let started = std::time::Instant::now();
+            let context = EvalContext::from_dataframe_for_expr_with_locals(
+                std::hint::black_box(&frame),
+                std::hint::black_box(&locals),
+                std::hint::black_box(&expr),
+            )
+            .expect("full locals context");
+            std::hint::black_box(context);
+            started.elapsed().as_nanos()
+        };
+        let measure_clone = || {
+            let started = std::time::Instant::now();
+            let cloned = std::hint::black_box(&locals).clone();
+            std::hint::black_box(cloned);
+            started.elapsed().as_nanos()
+        };
+        let measure_selective = || {
+            let started = std::time::Instant::now();
+            let selective_locals = BTreeMap::from([(
+                "threshold".to_owned(),
+                std::hint::black_box(&locals)
+                    .get("threshold")
+                    .cloned()
+                    .expect("threshold"),
+            )]);
+            let context = EvalContext::from_dataframe_for_expr_with_locals(
+                std::hint::black_box(&frame),
+                &selective_locals,
+                std::hint::black_box(&expr),
+            )
+            .expect("selective locals context");
+            std::hint::black_box(context);
+            started.elapsed().as_nanos()
+        };
+
+        for _ in 0..2 {
+            std::hint::black_box(measure_full());
+            std::hint::black_box(measure_clone());
+            std::hint::black_box(measure_selective());
+        }
+        let full_ns = median((0..SAMPLES).map(|_| measure_full()).collect());
+        let clone_ns = median((0..SAMPLES).map(|_| measure_clone()).collect());
+        let selective_ns = median((0..SAMPLES).map(|_| measure_selective()).collect());
+        println!(
+            "FP_EXPR_LOCAL_PROFILE locals={} rows=64 full_context_ns={full_ns} locals_clone_ns={clone_ns} selective_context_ns={selective_ns} clone_share={:.6} directional_ratio={:.6}",
+            locals.len(),
+            clone_ns as f64 / full_ns as f64,
+            full_ns as f64 / selective_ns as f64
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B harness"]
+    fn eval_context_referenced_local_ab_o6w31() {
+        const LOCALS: usize = 4_096;
+        const BATCH: usize = 8;
+        const BLOCKS: usize = 9;
+
+        fn former_context(
+            frame: &fp_frame::DataFrame,
+            locals: &BTreeMap<String, Scalar>,
+            expr: &Expr,
+        ) -> Result<EvalContext, ExprError> {
+            let mut referenced_series = std::collections::BTreeSet::new();
+            let mut ignored_locals = std::collections::BTreeSet::new();
+            MaterializedView::extract_bindings(expr, &mut referenced_series, &mut ignored_locals);
+            let mut context = EvalContext {
+                series: BTreeMap::new(),
+                locals: locals.clone(),
+                anchor_index: Some(frame.index().clone()),
+            };
+            for name in referenced_series {
+                if let Some(column) = frame.column(&name) {
+                    let series = Series::new(name, frame.index().clone(), column.clone())?;
+                    context.insert_series(series);
+                } else if name == "index"
+                    || name == "ilevel_0"
+                    || frame.index().name() == Some(name.as_str())
+                {
+                    context.insert_index_series(&name, frame.index())?;
+                }
+            }
+            Ok(context)
+        }
+
+        fn evaluate_arm(
+            frame: &fp_frame::DataFrame,
+            locals: &BTreeMap<String, Scalar>,
+            expr: &Expr,
+            policy: &RuntimePolicy,
+            candidate: bool,
+        ) -> Series {
+            let mut ledger = EvidenceLedger::new();
+            if candidate {
+                super::evaluate_on_dataframe_with_locals(expr, frame, locals, policy, &mut ledger)
+                    .expect("candidate evaluation")
+            } else {
+                let context = former_context(frame, locals, expr).expect("former context");
+                evaluate(expr, &context, policy, &mut ledger).expect("former evaluation")
+            }
+        }
+
+        fn elapsed_ns(
+            frame: &fp_frame::DataFrame,
+            locals: &BTreeMap<String, Scalar>,
+            expr: &Expr,
+            policy: &RuntimePolicy,
+            candidate: bool,
+        ) -> u128 {
+            std::hint::black_box(evaluate_arm(frame, locals, expr, policy, candidate));
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(evaluate_arm(frame, locals, expr, policy, candidate));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        fn spread(a: u128, b: u128) -> f64 {
+            a.abs_diff(b) as f64 / ((a + b) as f64 / 2.0)
+        }
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            Series::from_values(
+                "target",
+                (0..64_i64).map(Into::into).collect(),
+                (0..64_i64).map(Scalar::Int64).collect(),
+            )
+            .expect("target series"),
+        ])
+        .expect("frame");
+        let mut locals = (0..LOCALS)
+            .map(|idx| {
+                (
+                    format!("unused_{idx:04}"),
+                    Scalar::Utf8(format!("unused-value-{idx:04}-{}", "x".repeat(48))),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        locals.insert("threshold".to_owned(), Scalar::Int64(31));
+        let expr = super::parse_expr("target > @threshold").expect("expression");
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        let former = evaluate_arm(&frame, &locals, &expr, &policy, false);
+        let candidate = evaluate_arm(&frame, &locals, &expr, &policy, true);
+        assert_eq!(candidate.name(), former.name());
+        assert_eq!(candidate.index(), former.index());
+        assert_eq!(candidate.values(), former.values());
+
+        let body_started = std::time::Instant::now();
+        let mut former_a = Vec::with_capacity(BLOCKS);
+        let mut former_b = Vec::with_capacity(BLOCKS);
+        let mut candidate_a = Vec::with_capacity(BLOCKS);
+        let mut candidate_b = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            let order = if block.is_multiple_of(2) {
+                [(false, 0), (true, 0), (true, 1), (false, 1)]
+            } else {
+                [(true, 1), (false, 1), (false, 0), (true, 0)]
+            };
+            for (candidate, duplicate) in order {
+                let elapsed = elapsed_ns(&frame, &locals, &expr, &policy, candidate);
+                match (candidate, duplicate) {
+                    (false, 0) => former_a.push(elapsed),
+                    (false, _) => former_b.push(elapsed),
+                    (true, 0) => candidate_a.push(elapsed),
+                    (true, _) => candidate_b.push(elapsed),
+                }
+            }
+        }
+
+        let former_a = median(former_a) / BATCH as u128;
+        let former_b = median(former_b) / BATCH as u128;
+        let candidate_a = median(candidate_a) / BATCH as u128;
+        let candidate_b = median(candidate_b) / BATCH as u128;
+        let former_mean = (former_a + former_b) as f64 / 2.0;
+        let candidate_mean = (candidate_a + candidate_b) as f64 / 2.0;
+        println!(
+            "FP_EXPR_LOCAL_AB locals={} rows=64 former_a_ns={former_a} former_b_ns={former_b} candidate_a_ns={candidate_a} candidate_b_ns={candidate_b} former_spread={:.6} candidate_spread={:.6} speedup={:.6} body_seconds={:.6}",
+            locals.len(),
+            spread(former_a, former_b),
+            spread(candidate_a, candidate_b),
+            former_mean / candidate_mean,
+            body_started.elapsed().as_secs_f64()
+        );
     }
 
     #[test]

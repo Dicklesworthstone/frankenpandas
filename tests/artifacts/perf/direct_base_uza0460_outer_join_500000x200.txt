@@ -1,0 +1,3 @@
+outer_join 500000 iterations 200
+baseline binary: /data/projects/.scratch/cargo-target-orangepeak-uza0460-base/release-perf/examples/perf_profile
+direct timing: 200 iterations in 2.193s, 10.967 ms/iter

@@ -1,0 +1,40 @@
+br-frankenpandas-m69y5 — Typed Float64 fast path for Series/DataFrame.ffill + bfill
+===================================================================================
+
+Fourth in the eydcr Scalar-bound-elementwise-ops family (after diff 30x,
+pct_change 38x, combine_first 5.6x). ffill/bfill materialized Vec<Scalar>,
+carried a &Scalar last/next-valid, cloned per element, and rebuilt via
+Column::new — ignoring the typed backing.
+
+LEVER (one — typed nullable carry-fill, both directions): read raw f64 + validity
+via Column::as_f64_slice_with_validity, carry the last (ffill) / next (bfill)
+valid value into a typed output buffer + validity mask, emit via
+from_f64_values_with_validity. DataFrame.ffill/bfill delegate per-column through
+apply_all_columns, so they benefit transitively.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter; machine loaded):
+  DataFrame.ffill:  61.156  ->  3.3  = 18.5x
+  DataFrame.bfill:  64.832  ->  3.3  = 19.4x
+
+SCORE: 18.5x / 19.4x >> 2.0 PASS.
+
+ISOMORPHISM (per-row carry — no f64 arithmetic, no reordering):
+  - valid row: keeps its value (present Float64), same as the general path.
+  - missing row within `limit` consecutive fills: takes the carried valid f64
+    (a present Float64) — the carry value equals the original `&Scalar`'s f64.
+  - missing row past `limit`, or before any valid value: stays missing — its
+    cleared validity bit + stored datum materialises Null(NaN) (non-NaN datum)
+    or Float64(NaN) (NaN datum), exactly the original `val.clone()` of the
+    missing slot under the LazyNullableFloat64 convention.
+  - `consecutive_fills` increments before the limit check and resets on a valid
+    value — identical to the general path.
+  - Index + name preserved.
+  - Golden sha256 (gap_hunt golden: diff/pct_change/combine_first + ffill/bfill
+    with and without limit over a nullable frame, n=5000 x4) UNCHANGED:
+      1e5679675b6da65d6bb594f4e69afc0c49ec3d0cd4f808a9ceb8db9fa13b46c0
+
+GATES (rch + local):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

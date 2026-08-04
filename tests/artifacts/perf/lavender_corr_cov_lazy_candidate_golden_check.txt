@@ -1,0 +1,2 @@
+tests/artifacts/perf/lavender_corr_cov_lazy_candidate_golden_df_corr_5000.txt: OK
+tests/artifacts/perf/lavender_corr_cov_lazy_candidate_golden_df_cov_5000.txt: OK

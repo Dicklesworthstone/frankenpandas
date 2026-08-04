@@ -1,0 +1,12 @@
+f64 groupby rank — per-group radix sort (was per-group comparison sort) (wgyn4)
+Golden bit-identical: groupby_rank_f64 sha256 80438464e219a2d5 before==after.
+A/B min-of-5: groupby_rank_f64 @200k 27.796 -> 10.216 ms/iter = 2.72x; @1M 28.117 -> 10.446 = 2.69x.
+Tests: fp-frame 2830 (incl 38 rank) + fp-columnar 383 green.
+Lever: rank_f64_slice_radix (fp-frame) uses fp_columnar::radix_argsort_f64 (stable) +
+tie-run walk, O(g) vs O(g log g) sort, typed f64 output. SeriesGroupBy/DataFrameGroupBy
+rank route all-valid no-NaN Float64 value cols here.
+Isomorphism: radix ascending == total_cmp order for non-(-0.0); == tie-grouping; "first"
+ties in original order both paths; directional math mirrors rank_i64_slice_histogram.
+-0.0 HAZARD: comparator sorts -0.0<+0.0 (total_cmp) but groups ties by == (equal);
+f64_radix_key normalizes -0.0->+0.0 so a mixed +-0 tie group would diverge on "first" =>
+gate returns None (comparison fallback) if any -0.0 present.

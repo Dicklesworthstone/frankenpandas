@@ -1,0 +1,9 @@
+vals
+2.0    2
+1.0    1
+Name: count, dtype: int64
+series_name= count
+index_name= vals
+index_class= Index
+index_dtype= float64
+index_values= [2.0, 1.0]

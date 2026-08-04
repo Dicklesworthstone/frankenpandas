@@ -77,13 +77,13 @@
 - **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
 - **Review date:** 2026-04-25
 
-### DISC-012: Mixed naive / tz-aware CSV parse_dates bails out and returns raw input strings
+### DISC-012: Mixed naive / tz-aware CSV parse_dates normalizes per value
 - **Reference:** Pandas handles a CSV column with mixed naive + tz-aware datetime strings by parsing each row independently (the naive rows produce `Timestamp` without tz; the aware rows produce `Timestamp` with tz). When converted to strings, both forms are reformatted into pandas' canonical `YYYY-MM-DD HH:MM:SS[±HH:MM]` shape.
-- **Our impl:** fp-frame's `to_datetime_with_options(infer_mixed_timezone=true)` infers ONE tz pattern (Naive or Aware) from the FIRST non-null row. Rows that don't match that pattern are coerced to `NaT`. fp-io's `parse_csv_datetime_column` then sees the partial-parse failure and returns `None`, leaving the entire column as the raw input strings. So the second row in a mixed-tz column keeps its original `2024-01-15T10:30:00Z` form even though our `format_aware_datetime` would have rendered it correctly as `2024-01-15 10:30:00+00:00`.
-- **Impact:** Conformance packet `FP-P2D-429` (`csv_read_frame_parse_dates_mixed_timezone_strict`) fails: `actual=Utf8("2024-01-15T10:30:00Z"), expected=Utf8("2024-01-15 10:30:00+00:00")`. The actual form is the unmodified CSV input; the expected form is what pandas would emit after parsing.
-- **Resolution:** ACCEPTED for now — fix requires `to_datetime_with_options` to parse each row independently when input is mixed (not pick a single inferred pattern), and `parse_csv_datetime_column` to keep partial successes instead of bailing out. NB: the current coerce-to-NaT behavior is **explicitly documented** by tests `to_datetime_mixed_naive_and_aware_strings_coerces_format_mismatch` and `to_datetime_with_options_utc_coerces_mixed_naive_offset_sequence` in fp-frame, so flipping the per-row dispatch needs coordinated review (those test assertions need to update too). br-frankenpandas-tem9 (fd90.79) prototyped the per-row dispatch fix and confirmed it makes FP-P2D-429 green but breaks the 2 fail-closed tests above — reverted pending design decision. Tracked as a future fp-frame slice. Per br-frankenpandas-xp63 (fd90.77) / br-frankenpandas-gsrv (fd90.78) / br-frankenpandas-tem9 (fd90.79, reverted).
-- **Tests affected:** `packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet`.
-- **Review date:** 2026-04-26
+- **Our impl:** fp-io now parses `read_csv(parse_dates=[...])` mixed naive + tz-aware columns per value by calling `to_datetime_values_with_options` with `infer_mixed_timezone=false` and `mixed_tz_as_object=true`. The column remains object-like (`Utf8`) because pandas cannot unify mixed tz-naive/tz-aware values into one `datetime64[ns]` dtype, but each value is normalized to the pandas object-string form.
+- **Impact:** Conformance packet `FP-P2D-429` (`csv_read_frame_parse_dates_mixed_timezone_strict`) now matches the fixture: the aware row is normalized from `2024-01-15T10:30:00Z` to `2024-01-15 10:30:00+00:00`.
+- **Resolution:** RESOLVED — covered by fp-io test `csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value`; the stale accepted-divergence note was superseded by the per-value parse path used by `parse_csv_datetime_values`.
+- **Tests affected:** none expected; historical coverage remains `packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet`.
+- **Review date:** 2026-06-17
 
 ### DISC-015: memory_usage exact bytes differ from pandas (structural divergence)
 - **Reference:** pandas `DataFrame.memory_usage()` reports exact bytes consumed by numpy-backed columns. For the test frame in `FP-P2D-364`, pandas returns 234 bytes (index + column overhead + numpy array backing).
@@ -130,6 +130,24 @@
 - **Resolution:** RESOLVED - no code change required; FP already matches pandas. This entry corrects the prior incorrect WILL-FIX premise, which conflated this case with the genuinely-open DISC-011 (Int64 column that actually *receives* a null). Oracle-verified 2026-06-01.
 - **Tests affected:** `conformance_series::conformance_series_add_duplicate_labels` (passing).
 - **Review date:** 2026-06-01
+
+### DISC-016: RangeIndex set-operation result ordering (all four ops RESOLVED)
+- **Reference:** pandas 2.2.3 `RangeIndex` set operations use different default `sort` semantics:
+  - `union` / `difference` / `symmetric_difference`: `sort=None` — result is ascending-sorted EXCEPT when an operand is empty or the two operands are value-equal, where the surviving operand passes through unchanged (order preserved).
+  - `intersection`: `sort=False` — result is ascending EXCEPT when BOTH operands are descending (`step < 0`), where it is descending. (Verified vs pandas 2.2.3 over 150k random pairs.)
+- **Our impl:** RESOLVED for all four. Previously fp returned every set op in self/discovery order (matching pandas only where the affine fast paths happened to already be in pandas' order), diverging for both-non-empty operands with descending or non-aligned (interleaving) lattices — union/difference/symmetric_difference for ~any descending/interleaved input, and intersection for self-descending ∩ other-ascending (≈23.5% of multi-element intersections). fp now normalizes operands to their ascending equivalent so the fast paths and fallbacks produce pandas' order, sorts the interleaving union/symmetric_difference fallbacks, and routes both-descending intersection through the operands as-is (self-order yields descending). Empty-operand and value-equal passthrough preserved; lazy affine / two-affine-run backing retained for the aligned common case (only reordered cases materialize).
+- **Impact:** all four ops now bit-match pandas across a 263-case randomized differential (descending, non-aligned, empty, value-equal, disjoint, subset), plus 150k-pair Python sweeps confirming the ordering rules.
+- **Resolution:** FIXED (DustySummit, br-frankenpandas). union/difference/symmetric_difference in commit 88e2a8487; intersection ordering in the follow-up commit.
+- **Tests affected:** `range_index_set_ops_match_pandas_2_2_3_differential_dustysummit` (data-driven from `testdata_rangeset_pandas_cases.rs`, all four ops); `range_index_set_ops_use_direct_values_b7nxg`, `range_index_set_ops_closed_form_membership_preserves_order_iatnc`, `range_index_set_ops_return_affine_spans_iatnc` (refreshed to pandas-correct ordering).
+- **Review date:** 2026-07-23
+
+### DISC-017: RangeIndex.slice_locs / searchsorted reject monotonic-decreasing (step < 0) ranges
+- **Reference:** pandas 2.2.3 permits `RangeIndex(10,0,-1).slice_locs(8,3)` → `(2, 8)` and `RangeIndex(10,0,-1).searchsorted(5)` → `0` on descending ranges.
+- **Our impl:** ACCEPTED divergence — fp returns an explicit `InvalidArgument` error for `slice_locs` and `searchsorted` when `step < 0` ("requires a monotonic[ally-]increasing RangeIndex"), rather than replicating pandas' behavior. get_loc / get_indexer / get_indexer_non_unique / reindex (direction-agnostic value→position lookups) DO work correctly on descending ranges; only the two ordering-boundary ops refuse.
+- **Impact:** Rationale for refusing rather than matching: pandas' `searchsorted` on a descending index is a numpy artifact — numpy `searchsorted` assumes an ascending array, so `desc.searchsorted(5) = 0` is a meaningless insertion point, not a correct one. pandas' descending `slice_locs` inherits the same ascending-assuming `get_slice_bound`, producing quirky edge results (e.g. `[7].slice_locs(8,-9) = (1,0)` — an EMPTY slice for a value that is in `[-9, 8]`). A randomized 40k-pair differential found no simple closed form matching pandas' descending slice_locs (≈7.6% of a naive `value<=start` / `value<end` closed form diverged, all in boundary/single-element cases). fp's explicit error avoids silently reproducing these numpy quirks; callers needing a descending slice can reverse the index first.
+- **Resolution:** ACCEPTED (DustySummit, 2026-07-23). Revisit only if a use case needs pandas-bug-compatible descending `slice_locs`; it would require replicating pandas' `get_slice_bound` direction handling, not a closed form.
+- **Tests affected:** none (fp's error path is covered by existing RangeIndex tests; no descending slice_locs/searchsorted parity test is asserted).
+- **Review date:** 2026-07-23
 
 ## Rules
 

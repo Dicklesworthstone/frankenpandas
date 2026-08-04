@@ -1,0 +1,7 @@
+Series.drop_duplicates string byte-span FxHash dedup (vcstr)
+Golden bit-identical: str_drop_duplicates sha256 b18cb2af31296bfb before==after.
+A/B min-of-5 @200k (card 1000): 7.431 -> 2.498 ms/iter = 2.97x.
+Tests: fp-frame 2830 (incl 78 drop_dup/duplicated) green.
+Lever: drop_duplicates_keep on all-valid contiguous-Utf8 computes kept indices via FxHashMap<&[u8],_>
+spans (First/Last/None), gathers column+index via typed take_positions — no Scalar materialize / ScalarKey
+/ SipHash. Bit-identical kept-index set + values. All-valid => no NullKind keying.

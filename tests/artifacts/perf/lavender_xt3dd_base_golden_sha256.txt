@@ -1,0 +1,1 @@
+a4a683548faa65c8dacfa36caa966b8141dec65629d16ed86a0c8ce0478ce7ee  tests/artifacts/perf/lavender_xt3dd_base_golden_groupby_agg_multi_int2_5000.txt

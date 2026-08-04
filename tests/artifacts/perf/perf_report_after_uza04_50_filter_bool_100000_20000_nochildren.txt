@@ -1,0 +1,768 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 211  of event 'cycles:P'
+# Event count (approx.): 504928243
+#
+# Overhead  Command       Shared Object     Symbol                                                                                                                                                                                                                                                                                                                                                             
+# ........  ............  ................  ...................................................................................................................................................................................................................................................................................................................................................................
+#
+    49.86%  perf_profile  perf_profile      [.] <fp_frame::DataFrame>::loc_bool
+            |          
+            |--31.91%--<fp_frame::DataFrame>::loc_bool
+            |          |          
+            |          |--10.37%--affine_boolean_mask_span (inlined)
+            |          |          loc_bool (inlined)
+            |          |          |          
+            |          |          |--8.03%--0x2
+            |          |          |          
+            |          |          |--0.83%--0xff14fffffffffffe
+            |          |          |          
+            |          |           --0.79%--<fp_frame::DataFrame>::new_with_axes
+            |          |                     <fp_frame::DataFrame>::loc_bool
+            |          |                     loc_bool (inlined)
+            |          |          
+            |          |--7.21%--eq<bool, bool> (inlined)
+            |          |          ne<[bool], [bool]> (inlined)
+            |          |          ne<[bool], [bool]> (inlined)
+            |          |          period2_boolean_mask_span (inlined)
+            |          |          affine_boolean_mask_span (inlined)
+            |          |          loc_bool (inlined)
+            |          |          |          
+            |          |           --5.45%--0x2
+            |          |          
+            |          |--6.04%--split_at_unchecked<bool> (inlined)
+            |          |          split_at_checked<bool> (inlined)
+            |          |          next<bool> (inlined)
+            |          |          next<core::slice::iter::ChunksExact<bool>> (inlined)
+            |          |          period2_boolean_mask_span (inlined)
+            |          |          affine_boolean_mask_span (inlined)
+            |          |          loc_bool (inlined)
+            |          |          |          
+            |          |          |--5.03%--0x2
+            |          |          |          
+            |          |           --1.02%--0xff5fffff6bfffffe
+            |          |          
+            |          |--4.79%--next<bool> (inlined)
+            |          |          next<core::slice::iter::ChunksExact<bool>> (inlined)
+            |          |          period2_boolean_mask_span (inlined)
+            |          |          affine_boolean_mask_span (inlined)
+            |          |          loc_bool (inlined)
+            |          |          |          
+            |          |          |--3.34%--0x2
+            |          |          |          
+            |          |           --0.72%--0x1869f
+            |          |          
+            |          |--1.86%--search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          |          search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+            |          |          get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          |          take_rows_by_affine_selection_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          |          
+            |          |           --0.89%--0x8
+            |          |          
+            |          |--0.88%--next<alloc::string::String> (inlined)
+            |          |          next<core::slice::iter::Iter<alloc::string::String>> (inlined)
+            |          |          find_key_index<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          |          search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          |          search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+            |          |          get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          |          take_rows_by_affine_selection_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          0x7ffe00000002
+            |          |          
+            |           --0.76%--cmp<u8> (inlined)
+            |                     cmp<u8, alloc::alloc::Global> (inlined)
+            |                     cmp (inlined)
+            |                     find_key_index<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |                     search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |                     search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+            |                     get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |                     take_rows_by_affine_selection_unchecked (inlined)
+            |                     loc_bool (inlined)
+            |                     0x9
+            |          
+            |--13.63%--equal_same_length<bool, bool> (inlined)
+            |          eq<bool, bool> (inlined)
+            |          ne<[bool], [bool]> (inlined)
+            |          ne<[bool], [bool]> (inlined)
+            |          period2_boolean_mask_span (inlined)
+            |          affine_boolean_mask_span (inlined)
+            |          loc_bool (inlined)
+            |          |          
+            |          |--12.89%--0x2
+            |          |          
+            |           --0.74%--<fp_frame::DataFrame>::new_with_axes
+            |                     <fp_frame::DataFrame>::loc_bool
+            |                     loc_bool (inlined)
+            |          
+            |--2.30%--compare<u8> (inlined)
+            |          cmp<u8> (inlined)
+            |          cmp<u8, alloc::alloc::Global> (inlined)
+            |          cmp (inlined)
+            |          find_key_index<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+            |          get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          take_rows_by_affine_selection_unchecked (inlined)
+            |          loc_bool (inlined)
+            |          |          
+            |          |--0.84%--0x9
+            |          |          
+            |          |--0.75%--0x7ffe00000002
+            |          |          
+            |           --0.72%--0xc34f
+            |          
+            |--1.35%--find_key_index<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+            |          get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          take_rows_by_affine_selection_unchecked (inlined)
+            |          loc_bool (inlined)
+            |          |          
+            |           --0.78%--0xc34f
+            |          
+             --0.67%--core::ptr::copy_nonoverlapping::<u8> (inlined)
+                       <*const u8>::copy_to_nonoverlapping (inlined)
+                       <u8 as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global> (inlined)
+                       <[u8]>::to_vec_in::<alloc::alloc::Global> (inlined)
+                       <alloc::vec::Vec<u8> as core::clone::Clone>::clone (inlined)
+                       <alloc::string::String as core::clone::Clone>::clone (inlined)
+                       take_rows_by_affine_selection_unchecked (inlined)
+                       loc_bool (inlined)
+                       0xc34f
+
+     7.29%  perf_profile  perf_profile      [.] <fp_frame::DataFrame>::new_with_axes
+            |          
+            |--5.26%--<fp_frame::DataFrame>::new_with_axes
+            |          |          
+            |          |--1.82%--search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          |          search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+            |          |          get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          |          contains_key<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          |          normalize_column_order (inlined)
+            |          |          new_with_axes (inlined)
+            |          |          |          
+            |          |          |--0.99%--0x2
+            |          |          |          
+            |          |           --0.83%--0x1
+            |          |          
+            |          |--1.09%--from_base_index<(&str, usize)> (inlined)
+            |          |          bucket<(&str, usize), alloc::alloc::Global> (inlined)
+            |          |          insert_tagged_at_index<(&str, usize), alloc::alloc::Global> (inlined)
+            |          |          insert_at_index<(&str, usize), alloc::alloc::Global> (inlined)
+            |          |          insert<&str, usize, std::hash::random::RandomState, alloc::alloc::Global> (inlined)
+            |          |          insert<&str, usize, std::hash::random::RandomState, alloc::alloc::Global> (inlined)
+            |          |          normalize_column_order (inlined)
+            |          |          new_with_axes (inlined)
+            |          |          
+            |          |--0.82%--cmp<u8> (inlined)
+            |          |          cmp<u8, alloc::alloc::Global> (inlined)
+            |          |          cmp (inlined)
+            |          |          find_key_index<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          |          search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          |          search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+            |          |          get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          |          contains_key<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          |          normalize_column_order (inlined)
+            |          |          new_with_axes (inlined)
+            |          |          
+            |          |--0.79%--set_ctrl (inlined)
+            |          |          record_item_insert_at (inlined)
+            |          |          insert_tagged_at_index<(&str, usize), alloc::alloc::Global> (inlined)
+            |          |          insert_at_index<(&str, usize), alloc::alloc::Global> (inlined)
+            |          |          insert<&str, usize, std::hash::random::RandomState, alloc::alloc::Global> (inlined)
+            |          |          insert<&str, usize, std::hash::random::RandomState, alloc::alloc::Global> (inlined)
+            |          |          normalize_column_order (inlined)
+            |          |          new_with_axes (inlined)
+            |          |          0x6bf
+            |          |          
+            |           --0.69%--new_with_axes (inlined)
+            |          
+            |--1.29%--compare<u8> (inlined)
+            |          cmp<u8> (inlined)
+            |          cmp<u8, alloc::alloc::Global> (inlined)
+            |          cmp (inlined)
+            |          find_key_index<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+            |          search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+            |          get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          contains_key<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+            |          normalize_column_order (inlined)
+            |          |          
+            |           --0.84%--<fp_frame::DataFrame>::new_with_axes
+            |                     0x3
+            |          
+             --0.74%--core::ptr::copy_nonoverlapping::<u8> (inlined)
+                       <*const u8>::copy_to_nonoverlapping (inlined)
+                       <u8 as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global> (inlined)
+                       <[u8]>::to_vec_in::<alloc::alloc::Global> (inlined)
+                       <alloc::vec::Vec<u8> as core::clone::Clone>::clone (inlined)
+                       <alloc::string::String as core::clone::Clone>::clone (inlined)
+                       normalize_column_order (inlined)
+                       new_with_axes (inlined)
+
+     6.12%  perf_profile  libc.so.6         [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+               |          
+               |--0.83%--compare<u8> (inlined)
+               |          cmp<u8> (inlined)
+               |          cmp<u8, alloc::alloc::Global> (inlined)
+               |          cmp (inlined)
+               |          find_key_index<alloc::collections::btree::node::marker::Mut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+               |          search_node<alloc::collections::btree::node::marker::Mut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+               |          search_tree<alloc::collections::btree::node::marker::Mut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+               |          entry<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          insert<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          0x142a81836dfe7d0f
+               |          
+               |--0.80%--0xc34f
+               |          __libc_malloc2
+               |          <std::alloc::System as core::alloc::global::GlobalAlloc>::alloc (inlined)
+               |          __rustc::__rdl_alloc (inlined)
+               |          alloc::alloc::alloc (inlined)
+               |          <alloc::alloc::Global>::alloc_impl_runtime (inlined)
+               |          <alloc::alloc::Global>::alloc_impl (inlined)
+               |          <alloc::alloc::Global as core::alloc::Allocator>::allocate (inlined)
+               |          <alloc::raw_vec::RawVecInner>::try_allocate_in (inlined)
+               |          <alloc::raw_vec::RawVecInner>::with_capacity_in (inlined)
+               |          <alloc::raw_vec::RawVec<u8>>::with_capacity_in (inlined)
+               |          <alloc::vec::Vec<u8>>::with_capacity_in (inlined)
+               |          <u8 as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global> (inlined)
+               |          <[u8]>::to_vec_in::<alloc::alloc::Global> (inlined)
+               |          <alloc::vec::Vec<u8> as core::clone::Clone>::clone (inlined)
+               |          <alloc::string::String as core::clone::Clone>::clone (inlined)
+               |          take_rows_by_affine_selection_unchecked (inlined)
+               |          loc_bool (inlined)
+               |          
+               |--0.78%--0x7300dc8b5d0f
+               |          0x7fffffffffffffff
+               |          
+               |--0.78%--<fp_frame::DataFrame>::loc_bool
+               |          cmp<u8> (inlined)
+               |          cmp<u8, alloc::alloc::Global> (inlined)
+               |          cmp (inlined)
+               |          find_key_index<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+               |          search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+               |          search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+               |          get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+               |          take_rows_by_affine_selection_unchecked (inlined)
+               |          loc_bool (inlined)
+               |          
+               |--0.69%--0x3434343434343433
+               |          <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               |          __rustc::__rdl_dealloc (inlined)
+               |          dealloc_nonnull (inlined)
+               |          deallocate_impl_runtime (inlined)
+               |          deallocate_impl (inlined)
+               |          deallocate (inlined)
+               |          deallocate<alloc::alloc::Global> (inlined)
+               |          drop<u8, alloc::alloc::Global> (inlined)
+               |          drop_in_place<alloc::raw_vec::RawVec<u8, alloc::alloc::Global>> (inlined)
+               |          drop_in_place<alloc::vec::Vec<u8, alloc::alloc::Global>> (inlined)
+               |          drop_in_place<alloc::string::String> (inlined)
+               |          drop_in_place<[alloc::string::String]> (inlined)
+               |          drop<alloc::string::String, alloc::alloc::Global> (inlined)
+               |          drop_in_place<alloc::vec::Vec<alloc::string::String, alloc::alloc::Global>> (inlined)
+               |          normalize_column_order (inlined)
+               |          <fp_frame::DataFrame>::new_with_axes
+               |          take_rows_by_affine_selection_unchecked (inlined)
+               |          loc_bool (inlined)
+               |          
+                --0.68%--0x1
+
+     4.12%  perf_profile  libc.so.6         [.] _int_malloc
+            |
+            ---_int_malloc
+               |          
+                --1.55%--0x7fffffffffffffff
+
+     3.17%  perf_profile  perf_profile      [.] <fp_columnar::Column>::affine_all_valid_float64_source_len
+            |
+            ---<fp_columnar::Column>::affine_all_valid_float64_source_len
+               |          
+               |--0.91%--ne<fp_types::DType, fp_types::DType> (inlined)
+               |          <fp_columnar::Column>::affine_all_valid_float64_source_len
+               |          
+               |--0.82%--0x597c7f52e7cf
+               |          0x7fffffffffffffff
+               |          
+               |--0.76%--inner<alloc::vec::Vec<f64, alloc::alloc::Global>, alloc::alloc::Global> (inlined)
+               |          clone<alloc::vec::Vec<f64, alloc::alloc::Global>, alloc::alloc::Global> (inlined)
+               |          <fp_columnar::Column>::affine_all_valid_float64_source_len
+               |          0x1
+               |          
+                --0.68%--0x4747474747474746
+
+     2.50%  perf_profile  perf_profile      [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |
+            ---<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+               |          
+               |--1.05%--slice_insert<alloc::string::String> (inlined)
+               |          insert_fit<alloc::string::String, fp_columnar::Column> (inlined)
+               |          insert<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          insert_recursing<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::collections::btree::map::entry::{impl#8}::insert_entry::{closure_env#0}<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               |          insert_entry<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          insert<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          insert<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          0x2
+               |          
+               |--0.76%--cmp<u8> (inlined)
+               |          cmp<u8, alloc::alloc::Global> (inlined)
+               |          cmp (inlined)
+               |          find_key_index<alloc::collections::btree::node::marker::Mut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+               |          search_node<alloc::collections::btree::node::marker::Mut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+               |          search_tree<alloc::collections::btree::node::marker::Mut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+               |          entry<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          insert<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          0x597c6e140cff4efe
+               |          
+                --0.70%--insert_recursing<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::collections::btree::map::entry::{impl#8}::insert_entry::{closure_env#0}<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+                          insert_entry<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+                          insert<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+                          insert<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+
+     2.29%  perf_profile  perf_profile      [.] <alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+            |
+            ---<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+               |          
+                --0.79%--replace<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>, alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::collections::btree::node::marker::KV>, alloc::collections::btree::navigate::{impl#24}::deallocating_next_unchecked::{closure_env#0}<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+                          deallocating_next_unchecked<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+                          deallocating_next_unchecked<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+                          <alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+
+     2.06%  perf_profile  libc.so.6         [.] malloc_consolidate
+            |
+            ---malloc_consolidate
+               |          
+                --0.67%--__libc_malloc2
+                          <std::alloc::System as core::alloc::global::GlobalAlloc>::alloc (inlined)
+                          __rustc::__rdl_alloc (inlined)
+                          alloc::alloc::alloc (inlined)
+                          <alloc::alloc::Global>::alloc_impl_runtime (inlined)
+                          <alloc::alloc::Global>::alloc_impl (inlined)
+                          <alloc::alloc::Global as core::alloc::Allocator>::allocate (inlined)
+                          <alloc::raw_vec::RawVecInner>::try_allocate_in (inlined)
+                          <alloc::raw_vec::RawVecInner>::with_capacity_in (inlined)
+                          <alloc::raw_vec::RawVec<u8>>::with_capacity_in (inlined)
+                          <alloc::vec::Vec<u8>>::with_capacity_in (inlined)
+                          <u8 as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global> (inlined)
+                          <[u8]>::to_vec_in::<alloc::alloc::Global> (inlined)
+                          <alloc::vec::Vec<u8> as core::clone::Clone>::clone (inlined)
+                          <alloc::string::String as core::clone::Clone>::clone (inlined)
+                          to_vec<alloc::string::String, alloc::alloc::Global> (inlined)
+                          to_vec_in<alloc::string::String, alloc::alloc::Global> (inlined)
+                          clone<alloc::string::String, alloc::alloc::Global> (inlined)
+                          0x9
+
+     1.72%  perf_profile  perf_profile      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |
+            ---<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+               |          
+               |--0.84%--0x1
+               |          
+                --0.83%--write<core::hash::sip::Sip13Rounds> (inlined)
+                          0x1
+
+     1.67%  perf_profile  perf_profile      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&&str>
+            |
+            ---<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&&str>
+               |          
+               |--0.84%--finish<core::hash::sip::Sip13Rounds> (inlined)
+               |          finish (inlined)
+               |          finish (inlined)
+               |          hash_one<std::hash::random::RandomState, &&str> (inlined)
+               |          0x7
+               |          
+                --0.83%--write_str<core::hash::sip::Sip13Rounds> (inlined)
+                          write_str (inlined)
+                          write_str (inlined)
+                          hash<std::hash::random::DefaultHasher> (inlined)
+                          hash<str, std::hash::random::DefaultHasher> (inlined)
+                          hash<&str, std::hash::random::DefaultHasher> (inlined)
+                          hash_one<std::hash::random::RandomState, &&str> (inlined)
+                          _int_malloc
+                          __libc_malloc2
+                          core::ptr::copy_nonoverlapping::<u8> (inlined)
+                          <*const u8>::copy_to_nonoverlapping (inlined)
+                          <u8 as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global> (inlined)
+                          <[u8]>::to_vec_in::<alloc::alloc::Global> (inlined)
+                          <alloc::vec::Vec<u8> as core::clone::Clone>::clone (inlined)
+                          <alloc::string::String as core::clone::Clone>::clone (inlined)
+                          to_vec<alloc::string::String, alloc::alloc::Global> (inlined)
+                          to_vec_in<alloc::string::String, alloc::alloc::Global> (inlined)
+                          clone<alloc::string::String, alloc::alloc::Global> (inlined)
+                          0x9
+
+     1.60%  perf_profile  libc.so.6         [.] __memmove_avx_unaligned_erms
+            |
+            ---__memcpy_avx_unaligned_erms (inlined)
+               |          
+               |--0.91%--0x1
+               |          
+                --0.69%--core::ptr::copy_nonoverlapping::<u8> (inlined)
+                          <*const u8>::copy_to_nonoverlapping (inlined)
+                          <u8 as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global> (inlined)
+                          <[u8]>::to_vec_in::<alloc::alloc::Global> (inlined)
+                          <alloc::vec::Vec<u8> as core::clone::Clone>::clone (inlined)
+                          <alloc::string::String as core::clone::Clone>::clone (inlined)
+                          normalize_column_order (inlined)
+                          new_with_axes (inlined)
+                          0x6bf
+
+     1.57%  perf_profile  libc.so.6         [.] cfree@GLIBC_2.2.5
+            |
+            ---__GI___libc_free (inlined)
+
+     1.56%  perf_profile  perf_profile      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+            |
+            ---<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+               |          
+               |--0.81%--finish<core::hash::sip::Sip13Rounds> (inlined)
+               |          finish (inlined)
+               |          finish (inlined)
+               |          hash_one<std::hash::random::RandomState, &str> (inlined)
+               |          _int_free_chunk
+               |          <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               |          __rustc::__rdl_dealloc (inlined)
+               |          dealloc_nonnull (inlined)
+               |          deallocate_impl_runtime (inlined)
+               |          deallocate_impl (inlined)
+               |          deallocate (inlined)
+               |          deallocate_and_ascend<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          deallocating_end<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          deallocating_end<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          <alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+               |          
+                --0.75%--c_rounds (inlined)
+                          finish<core::hash::sip::Sip13Rounds> (inlined)
+                          finish (inlined)
+                          finish (inlined)
+                          hash_one<std::hash::random::RandomState, &str> (inlined)
+
+     1.55%  perf_profile  perf_profile      [.] <fp_columnar::Column>::from_values
+            |          
+            |--0.98%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          
+             --0.56%--<fp_columnar::Column>::from_values
+                       |          
+                        --0.56%--drop_in_place<[fp_types::Scalar]> (inlined)
+                                  drop<fp_types::Scalar, alloc::alloc::Global> (inlined)
+                                  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                                  <fp_columnar::Column>::from_values
+
+     1.20%  perf_profile  [unknown]         [k] 0xffffffff8621b2b7
+            |          
+            |--0.63%--0xffffffff85455498
+            |          0xffffffff853a5723
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          write<fp_types::Scalar> (inlined)
+            |          {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+            |          {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>> (inlined)
+            |          {closure#0}<usize, fp_types::Scalar, (), perf_profile::build_numeric_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>> (inlined)
+            |          fold<core::ops::range::Range<usize>, (), core::iter::adapters::map::map_fold::{closure_env#0}<usize, fp_types::Scalar, (), perf_profile::build_numeric_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>>> (inlined)
+            |          fold<fp_types::Scalar, core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>> (inlined)
+            |          for_each<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>> (inlined)
+            |          extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+            |          spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::alloc::Global> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+            |          collect<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |          build_numeric_frame (inlined)
+            |          0xfff
+            |          
+             --0.56%--0xffffffff854529c1
+                       0xffffffff85452e38
+                       0xffffffff853b9650
+                       0xffffffff853bb5d6
+                       0xffffffff8539ec11
+                       0xffffffff8539ef3b
+                       0xffffffff8539f862
+                       0xffffffff853a4d51
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       elf_machine_rela_relative (inlined)
+                       elf_dynamic_do_Rela (inlined)
+                       _dl_relocate_object_no_relro
+                       _dl_relocate_object
+                       dl_main
+                       _dl_sysdep_start
+                       _dl_start_final (inlined)
+                       _dl_start
+                       _start
+
+     0.95%  perf_profile  [unknown]         [k] 0xffffffff853d8daa
+            |
+            ---0xffffffff853a4d0b
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               <fp_columnar::Column>::from_values
+               push_mut<f64, alloc::alloc::Global> (inlined)
+               push<f64, alloc::alloc::Global> (inlined)
+               <fp_columnar::Column>::from_values
+
+     0.93%  perf_profile  [unknown]         [k] 0xffffffff84d04109
+            |
+            ---period2_boolean_mask_span (inlined)
+               affine_boolean_mask_span (inlined)
+               loc_bool (inlined)
+               0x2
+
+     0.84%  perf_profile  [unknown]         [k] 0xffffffff853d43ca
+            |
+            ---0xffffffff85340fb1
+               0xffffffff853436a3
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __GI___sbrk (inlined)
+               __glibc_morecore (inlined)
+               systrim (inlined)
+               _int_free_chunk
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               __rustc::__rdl_dealloc (inlined)
+               dealloc_nonnull (inlined)
+               deallocate_impl_runtime (inlined)
+               deallocate_impl (inlined)
+               deallocate (inlined)
+               deallocate<alloc::alloc::Global> (inlined)
+               drop<f64, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::raw_vec::RawVec<f64, alloc::alloc::Global>> (inlined)
+               drop_in_place<alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+               drop_slow<alloc::vec::Vec<f64, alloc::alloc::Global>, alloc::alloc::Global> (inlined)
+
+     0.84%  perf_profile  [unknown]         [k] 0xffffffff85452a61
+            |
+            ---0xffffffff8539b7d0
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI_munmap (inlined)
+               _int_free_chunk
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               __rustc::__rdl_dealloc (inlined)
+               dealloc_nonnull (inlined)
+               deallocate_impl_runtime (inlined)
+               deallocate_impl (inlined)
+               deallocate (inlined)
+               deallocate<alloc::alloc::Global> (inlined)
+               drop<fp_index::IndexLabel, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::raw_vec::RawVec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+               drop_in_place<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+               assume_init_drop<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+               drop<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+               drop_in_place<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>>> (inlined)
+               drop_in_place<fp_index::IndexLabels> (inlined)
+               drop_in_place<fp_index::Index> (inlined)
+
+     0.83%  perf_profile  perf_profile      [.] core::ptr::drop_in_place::<core::option::Option<fp_index::MultiIndex>>
+            |
+            ---core::ptr::drop_in_place::<core::option::Option<fp_index::MultiIndex>>
+               0x7fffffffffffffff
+
+     0.82%  perf_profile  [unknown]         [k] 0xffffffff85300d6b
+            |
+            ---0xffffffff8509145e
+               0xffffffff850919bc
+               0xffffffff85079d0c
+               0xffffffff85137e40
+               0xffffffff851524f6
+               0xffffffff85139003
+               0xffffffff85139f5d
+               0xffffffff84fc4bc8
+               0xffffffff86227724
+               0xffffffff84c00f0b
+               period2_boolean_mask_span (inlined)
+               affine_boolean_mask_span (inlined)
+               loc_bool (inlined)
+               0x2
+
+     0.72%  perf_profile  libc.so.6         [.] _int_free_chunk
+            |
+            ---_int_free_chunk
+               0x7fffffffffffffff
+
+     0.71%  perf_profile  libc.so.6         [.] unlink_chunk.isra.0
+            |
+            ---unlink_chunk (inlined)
+
+     0.70%  perf_profile  perf_profile      [.] perf_profile::build_numeric_frame
+            |
+            ---0xffffffff8621b2b7
+               0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+
+     0.68%  perf_profile  [unknown]         [k] 0xffffffff84c01192
+            |          
+             --0.68%--<fp_columnar::Column>::from_values
+                       |          
+                        --0.62%--0x400000003
+
+     0.68%  perf_profile  libc.so.6         [.] _int_free_merge_chunk
+            |
+            ---_int_free_merge_chunk
+               0x7fffffffffffffff
+
+     0.63%  perf_profile  [unknown]         [k] 0xffffffff85458fb2
+            |
+            ---perf_profile::build_numeric_frame
+               {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>> (inlined)
+               {closure#0}<usize, fp_types::Scalar, (), perf_profile::build_numeric_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>> (inlined)
+               fold<core::ops::range::Range<usize>, (), core::iter::adapters::map::map_fold::{closure_env#0}<usize, fp_types::Scalar, (), perf_profile::build_numeric_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>>> (inlined)
+               fold<fp_types::Scalar, core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>> (inlined)
+               extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::alloc::Global> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               collect<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               build_numeric_frame (inlined)
+               0xfff
+
+     0.63%  perf_profile  perf_profile      [.] <fp_columnar::Column>::from_f64_values
+            |
+            ---<fp_columnar::Column>::from_f64_values
+               |          
+                --0.63%--{closure#0} (inlined)
+                          any<f64, fp_columnar::{impl#17}::from_f64_values::{closure_env#0}> (inlined)
+                          from_f64_values (inlined)
+                          0xfff
+
+     0.63%  perf_profile  [unknown]         [k] 0xffffffff853d8e38
+            |
+            ---0xffffffff853a4d07
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               perf_profile::build_numeric_frame
+               {closure#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>> (inlined)
+               {closure#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>>> (inlined)
+               {closure#0}<usize, fp_index::IndexLabel, (), perf_profile::build_numeric_frame::{closure_env#0}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>>>> (inlined)
+               fold<core::ops::range::Range<usize>, (), core::iter::adapters::map::map_fold::{closure_env#0}<usize, fp_index::IndexLabel, (), perf_profile::build_numeric_frame::{closure_env#0}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>>>>> (inlined)
+               fold<fp_index::IndexLabel, core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>>> (inlined)
+               extend_trusted<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>> (inlined)
+               spec_extend<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>, alloc::alloc::Global> (inlined)
+               from_iter<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>> (inlined)
+               from_iter<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>> (inlined)
+               from_iter<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>> (inlined)
+               collect<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#0}>, alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+               build_numeric_frame (inlined)
+
+     0.52%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64>>>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64>>>>>::get_or_init<<fp_index::IndexLabels>::int64_view::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64>>>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64>>>>>::get_or_init<<fp_index::IndexLabels>::int64_view::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               push_mut<i64, alloc::alloc::Global> (inlined)
+               push<i64, alloc::alloc::Global> (inlined)
+               {closure#0} (inlined)
+               {closure#0}<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64, alloc::alloc::Global>, alloc::alloc::Global>>, fp_index::{impl#7}::int64_view::{closure_env#0}> (inlined)
+               {closure#0}<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64, alloc::alloc::Global>, alloc::alloc::Global>>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64, alloc::alloc::Global>, alloc::alloc::Global>>, fp_index::{impl#7}::int64_view::{closure_env#0}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64, alloc::alloc::Global>, alloc::alloc::Global>>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64, alloc::alloc::Global>, alloc::alloc::Global>>, fp_index::{impl#7}::int64_view::{closure_env#0}>, !>> (inlined)
+               0x7300dc82a88f
+
+     0.23%  perf_profile  [unknown]         [k] 0xffffffff853d43cc
+     0.08%  perf_profile  [unknown]         [k] 0xffffffff853a37ad
+     0.07%  perf_profile  [unknown]         [k] 0xffffffff85392d37
+     0.07%  perf_profile  [unknown]         [k] 0xffffffff854529b0
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853dda93
+     0.05%  perf_profile  perf_profile      [.] <fp_index::Index as core::clone::Clone>::clone
+     0.03%  perf_profile  [unknown]         [k] 0xffffffff8519f720
+     0.01%  perf_profile  [unknown]         [k] 0xffffffff853a4d3b
+     0.01%  perf_profile  [unknown]         [k] 0xffffffff86228a46
+     0.01%  perf_profile  [unknown]         [k] 0xffffffff853d43d3
+     0.00%  perf_profile  perf_profile      [.] <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85456ecb
+     0.00%  perf_profile  libc.so.6         [.] malloc
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850b2c14
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85454dd5
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84c0188e
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85305814
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300fbd
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8531466c
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8621c6a9
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff84c0185b
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8621ff13
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86224c51
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2bc
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d280
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d285
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84d0410b
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcb
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d286
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2c3
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850c2906
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850c2910
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b66
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff862251d0
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d285
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2c3
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2cc
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85104b45
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b65
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2b7
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2cc
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86228550
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86228551
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

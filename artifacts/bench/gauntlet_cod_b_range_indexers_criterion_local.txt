@@ -1,0 +1,129 @@
+warning: /data/projects/frankenpandas/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling fp-types v0.1.0 (/data/projects/frankenpandas/crates/fp-types)
+   Compiling fp-index v0.1.0 (/data/projects/frankenpandas/crates/fp-index)
+    Finished `bench` profile [optimized] target(s) in 13.46s
+     Running benches/range_index_indexers.rs (/data/projects/.rch-targets/frankenpandas-cod-b/release/deps/range_index_indexers-aafe683de51e2d5e)
+Benchmarking range_index_indexers/current_get_indexer_miss_heavy/100000
+Benchmarking range_index_indexers/current_get_indexer_miss_heavy/100000: Warming up for 1.0000 s
+Benchmarking range_index_indexers/current_get_indexer_miss_heavy/100000: Collecting 20 samples in estimated 3.0794 s (2310 iterations)
+Benchmarking range_index_indexers/current_get_indexer_miss_heavy/100000: Analyzing
+range_index_indexers/current_get_indexer_miss_heavy/100000
+                        time:   [1.2886 ms 1.3358 ms 1.3872 ms]
+                        change: [+17.110% +23.942% +30.577%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking range_index_indexers/legacy_get_loc_loop_miss_heavy/100000
+Benchmarking range_index_indexers/legacy_get_loc_loop_miss_heavy/100000: Warming up for 1.0000 s
+Benchmarking range_index_indexers/legacy_get_loc_loop_miss_heavy/100000: Collecting 20 samples in estimated 3.3214 s (630 iterations)
+Benchmarking range_index_indexers/legacy_get_loc_loop_miss_heavy/100000: Analyzing
+range_index_indexers/legacy_get_loc_loop_miss_heavy/100000
+                        time:   [5.0902 ms 5.1839 ms 5.2822 ms]
+                        change: [−0.3339% +6.4561% +13.242%] (p = 0.06 > 0.05)
+                        No change in performance detected.
+Benchmarking range_index_indexers/current_reindex_all_miss/100000
+Benchmarking range_index_indexers/current_reindex_all_miss/100000: Warming up for 1.0000 s
+Benchmarking range_index_indexers/current_reindex_all_miss/100000: Collecting 20 samples in estimated 3.0473 s (2520 iterations)
+Benchmarking range_index_indexers/current_reindex_all_miss/100000: Analyzing
+range_index_indexers/current_reindex_all_miss/100000
+                        time:   [1.1246 ms 1.1488 ms 1.1796 ms]
+                        change: [−8.8144% −1.4512% +6.7728%] (p = 0.73 > 0.05)
+                        No change in performance detected.
+Benchmarking range_index_indexers/legacy_get_loc_reindex_all_miss/100000
+Benchmarking range_index_indexers/legacy_get_loc_reindex_all_miss/100000: Warming up for 1.0000 s
+Benchmarking range_index_indexers/legacy_get_loc_reindex_all_miss/100000: Collecting 20 samples in estimated 3.4750 s (630 iterations)
+Benchmarking range_index_indexers/legacy_get_loc_reindex_all_miss/100000: Analyzing
+range_index_indexers/legacy_get_loc_reindex_all_miss/100000
+                        time:   [5.2033 ms 5.3003 ms 5.4313 ms]
+                        change: [−4.6319% +5.3453% +18.965%] (p = 0.38 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking range_index_indexers/current_get_indexer_miss_heavy/1000000
+Benchmarking range_index_indexers/current_get_indexer_miss_heavy/1000000: Warming up for 1.0000 s
+Benchmarking range_index_indexers/current_get_indexer_miss_heavy/1000000: Collecting 20 samples in estimated 4.9020 s (420 iterations)
+Benchmarking range_index_indexers/current_get_indexer_miss_heavy/1000000: Analyzing
+range_index_indexers/current_get_indexer_miss_heavy/1000000
+                        time:   [10.973 ms 11.530 ms 11.982 ms]
+                        change: [−5.2541% −0.7644% +3.9512%] (p = 0.75 > 0.05)
+                        No change in performance detected.
+Benchmarking range_index_indexers/legacy_get_loc_loop_miss_heavy/1000000
+Benchmarking range_index_indexers/legacy_get_loc_loop_miss_heavy/1000000: Warming up for 1.0000 s
+Benchmarking range_index_indexers/legacy_get_loc_loop_miss_heavy/1000000: Collecting 20 samples in estimated 3.9048 s (80 iterations)
+Benchmarking range_index_indexers/legacy_get_loc_loop_miss_heavy/1000000: Analyzing
+range_index_indexers/legacy_get_loc_loop_miss_heavy/1000000
+                        time:   [49.117 ms 50.662 ms 52.487 ms]
+                        change: [+5.6323% +10.971% +16.222%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking range_index_indexers/current_reindex_all_miss/1000000
+Benchmarking range_index_indexers/current_reindex_all_miss/1000000: Warming up for 1.0000 s
+Benchmarking range_index_indexers/current_reindex_all_miss/1000000: Collecting 20 samples in estimated 5.7924 s (420 iterations)
+Benchmarking range_index_indexers/current_reindex_all_miss/1000000: Analyzing
+range_index_indexers/current_reindex_all_miss/1000000
+                        time:   [11.838 ms 12.395 ms 13.018 ms]
+                        change: [+3.6348% +11.893% +20.119%] (p = 0.01 < 0.05)
+                        Performance has regressed.
+Benchmarking range_index_indexers/legacy_get_loc_reindex_all_miss/1000000
+Benchmarking range_index_indexers/legacy_get_loc_reindex_all_miss/1000000: Warming up for 1.0000 s
+Benchmarking range_index_indexers/legacy_get_loc_reindex_all_miss/1000000: Collecting 20 samples in estimated 3.0245 s (60 iterations)
+Benchmarking range_index_indexers/legacy_get_loc_reindex_all_miss/1000000: Analyzing
+range_index_indexers/legacy_get_loc_reindex_all_miss/1000000
+                        time:   [49.947 ms 51.108 ms 52.371 ms]
+                        change: [−12.045% −6.4551% −0.2072%] (p = 0.06 > 0.05)
+                        No change in performance detected.

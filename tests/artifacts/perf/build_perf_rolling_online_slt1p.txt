@@ -1,0 +1,34 @@
+Lever: O(n) online roll_sum / roll_mean (pandas-faithful compensated sweep)
+File: crates/fp-frame/src/lib.rs  (Rolling::rolling_online_sum_mean)
+Bead: br-frankenpandas-slt1p
+
+BEFORE: Rolling::sum/mean routed through apply_rolling — per output i it
+re-sliced vals[start..=i], filtered non-missing, and naive-folded. O(n*w).
+
+AFTER: a single two-pointer add/remove sweep over window_bounds (non-decreasing
+start AND end for trailing + centered), maintaining a Kahan-compensated running
+sum (separate comp_add / comp_remove), live non-missing count nobs, sign count
+neg_ct, and the num_consecutive_same_value / prev_value exactness heuristic.
+Bit-for-bit faithful to pandas _libs/window/aggregations.pyx roll_sum/roll_mean
+(incl. all-positive/all-negative zero clamps and constant-window exactness).
+All-valid Float64 borrows the typed slice (no Scalar materialization).
+
+ISOMORPHISM:
+  - rolling_online_sum_mean_matches_naive_reference (NEW): online == naive
+    per-window reference within 1e-9 rel, NaN/missing positions exact, across
+    window in {1,2,3,7,50,200} x min_periods {None,0,1,<=3,window} x
+    {trailing,centered} x {sum,mean} over 200 pts w/ ~9% missing.
+  - fp-frame lib: 2829 passed / 0 failed (incl. rolling mean/sum text goldens).
+  - fp-conformance rolling (live pandas-parity + fuzz seeds): 59 passed / 0.
+  - mean/sum text goldens are integer-valued => reassociation-invariant.
+  - live-oracle Float64 compare = semantic_eq REL TOLERANCE 1e-14 (not bits),
+    so matching pandas' online algo is the correct parity target.
+  Caught + fixed in dev: min_periods as i64 wrapped for usize::MAX window
+  (fuzz window_max) — compare nobs in usize.
+
+BENCH (bench_runner p50, min of 3; pandas 2.2.3 baseline):
+  op                  n        before     after   speedup   after/pandas
+  rolling/mean   100000      59.043ms   1.457ms   40.52x      1.66x
+  rolling/mean    10000       4.990ms   0.151ms   33.05x      1.10x
+  (rolling/sum not in bench_runner; same kernel. std/var still naive — slt1p
+   follow-up: needs Welford online + ULP-sensitive var/std goldens.)

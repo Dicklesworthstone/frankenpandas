@@ -1,0 +1,204 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 16  of event 'cycles:P'
+# Event count (approx.): 564687819
+#
+# Overhead  Command       Shared Object     Symbol                                                                                                                                                                                                                                                                                                                                                                              IPC   [IPC Coverage]
+# ........  ............  ................  ..................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    22.72%  perf_profile  [unknown]         [k] 0xffffffff85392dcf                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8621b2b7
+               0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               perf_profile::build_str_join_frame
+               push_mut<usize, alloc::alloc::Global> (inlined)
+               push<usize, alloc::alloc::Global> (inlined)
+               build_str_join_frame (inlined)
+               0x5ce69863f04f
+               0x1387
+
+     8.69%  perf_profile  [unknown]         [k] 0xffffffff8539ba13                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8539b7d0
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI_munmap (inlined)
+               _int_free_chunk
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               __rustc::__rdl_dealloc (inlined)
+               dealloc_nonnull (inlined)
+               deallocate_impl_runtime (inlined)
+               deallocate_impl (inlined)
+               deallocate (inlined)
+               deallocate<alloc::alloc::Global> (inlined)
+               deallocate<&alloc::alloc::Global> (inlined)
+               drop<u8, &alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::raw_vec::RawVec<u8, &alloc::alloc::Global>> (inlined)
+               drop_in_place<alloc::vec::Vec<u8, &alloc::alloc::Global>> (inlined)
+               from<u8, alloc::alloc::Global> (inlined)
+               lazy_contiguous_utf8 (inlined)
+               0xf423ff
+
+     7.86%  perf_profile  [unknown]         [k] 0xffffffff85452a65                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8539b7d0
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI_munmap (inlined)
+               _int_free_chunk
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               __rustc::__rdl_dealloc (inlined)
+               dealloc_nonnull (inlined)
+               deallocate_impl_runtime (inlined)
+               deallocate_impl (inlined)
+               deallocate (inlined)
+               deallocate<alloc::alloc::Global> (inlined)
+               deallocate<&alloc::alloc::Global> (inlined)
+               drop<f64, &alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::raw_vec::RawVec<f64, &alloc::alloc::Global>> (inlined)
+               drop_in_place<alloc::vec::Vec<f64, &alloc::alloc::Global>> (inlined)
+               from<f64, alloc::alloc::Global> (inlined)
+               lazy_all_valid_float64 (inlined)
+               from_f64_values (inlined)
+               0x784b
+
+     7.66%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -            
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               next<u8> (inlined)
+               parse_fixed_width_lower_hex (inlined)
+               contiguous_utf8_lower_hex_sequence (inlined)
+               {closure#2} (inlined)
+               {closure#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#2}> (inlined)
+               {closure#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#2}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#2}>, !>> (inlined)
+
+     7.65%  perf_profile  [unknown]         [k] 0xffffffff85341534                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff84c00b90
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::ScalarValues>::lazy_contiguous_utf8
+               from<u8, alloc::alloc::Global> (inlined)
+               lazy_contiguous_utf8 (inlined)
+               0xf423ff
+
+     7.64%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}                                                                                                       -      -            
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               chaining_ge<u8> (inlined)
+               __chaining_ge<u8> (inlined)
+               ge<u8> (inlined)
+               ge<[u8], [u8]> (inlined)
+               contiguous_utf8_offsets_are_strictly_increasing (inlined)
+               {closure#0} (inlined)
+               {closure#0}<bool, fp_columnar::{impl#18}::as_strictly_increasing_utf8_contiguous::{closure_env#0}> (inlined)
+               {closure#0}<bool, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<bool, fp_columnar::{impl#18}::as_strictly_increasing_utf8_contiguous::{closure_env#0}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<bool, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<bool, fp_columnar::{impl#18}::as_strictly_increasing_utf8_contiguous::{closure_env#0}>, !>> (inlined)
+
+     7.62%  perf_profile  [unknown]         [k] 0xffffffff853a56b1                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff85104b41
+               0xffffffff853a33ec
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               perf_profile::build_str_join_frame
+               push_mut<u8, alloc::alloc::Global> (inlined)
+               push<u8, alloc::alloc::Global> (inlined)
+               push_id_lower_hex_8 (inlined)
+               build_str_join_frame (inlined)
+               0x5ce69863f04f
+               0x1387
+
+     7.62%  perf_profile  libc.so.6         [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                                                                                                                             -      -            
+            |
+            ---__memcmp_avx2_movbe
+
+     7.52%  perf_profile  [unknown]         [k] 0xffffffff853b8462                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---perf_profile::build_str_join_frame
+               push_id_lower_hex_8 (inlined)
+               build_str_join_frame (inlined)
+               0x5ce69863f04f
+               0x1387
+
+     7.51%  perf_profile  perf_profile      [.] <alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>::drop_slow                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---<alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>::drop_slow
+               drop<fp_index::IndexLabel, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+               drop_slow<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>, alloc::alloc::Global> (inlined)
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+
+     7.18%  perf_profile  [unknown]         [k] 0xffffffff8541df51                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff84c00b90
+               perf_profile::build_str_join_frame
+               {closure#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>> (inlined)
+               {closure#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>>> (inlined)
+               {closure#0}<usize, fp_index::IndexLabel, (), perf_profile::build_str_join_frame::{closure_env#0}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>>>> (inlined)
+               fold<core::ops::range::Range<usize>, (), core::iter::adapters::map::map_fold::{closure_env#0}<usize, fp_index::IndexLabel, (), perf_profile::build_str_join_frame::{closure_env#0}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>>>>> (inlined)
+               fold<fp_index::IndexLabel, core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>>> (inlined)
+               extend_trusted<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>> (inlined)
+               spec_extend<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>, alloc::alloc::Global> (inlined)
+               from_iter<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>> (inlined)
+               from_iter<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>> (inlined)
+               from_iter<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>> (inlined)
+               collect<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#0}>, alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+               build_str_join_frame (inlined)
+               0x5ce69863f04f
+               0x1387
+
+     0.32%  perf_profile  [unknown]         [k] 0xffffffff8621b2b7                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f8af6d                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d285                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2c3                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2cc                                                                                                                                                                                                                                                                                                                                                              -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

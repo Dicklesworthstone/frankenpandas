@@ -7,10 +7,11 @@
 //! alternation (Aho-Corasick under the hood) scans each string once: O(L).
 //! Boolean output is identical (contains any pattern as a substring).
 
+use std::time::Instant;
+
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::Scalar;
-use std::time::Instant;
 
 fn s_from(strings: Vec<&str>) -> Series {
     let idx: Vec<IndexLabel> = (0..strings.len() as i64).map(IndexLabel::Int64).collect();

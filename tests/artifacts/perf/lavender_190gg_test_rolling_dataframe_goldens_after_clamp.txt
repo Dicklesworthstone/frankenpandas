@@ -1,0 +1,283 @@
+  [2m2026-06-15T06:06:09.924574Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1227854 at root@109.123.245.77 (3 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:10.293280Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenpandas (hash: b94ac09f9a5c4827)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:10.293398Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 15 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:12.352102Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1227854...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:12.352166Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas -> /data/projects/frankenpandas on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:16.301992Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3949ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:16.302062Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-bench -> /data/projects/frankenpandas/crates/fp-bench on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:18.204178Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1902ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:18.204269Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-columnar -> /data/projects/frankenpandas/crates/fp-columnar on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:20.151925Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1947ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:20.152011Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-conformance -> /data/projects/frankenpandas/crates/fp-conformance on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:22.401554Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2249ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:22.401634Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-expr -> /data/projects/frankenpandas/crates/fp-expr on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:24.274885Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1873ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:24.274988Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-frame -> /data/projects/frankenpandas/crates/fp-frame on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:26.270844Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1995ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:26.270986Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-frankentui -> /data/projects/frankenpandas/crates/fp-frankentui on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:28.125262Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1854ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:28.125364Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-groupby -> /data/projects/frankenpandas/crates/fp-groupby on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:30.034109Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1908ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:30.034192Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-index -> /data/projects/frankenpandas/crates/fp-index on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:32.063693Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2029ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:32.063795Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-io -> /data/projects/frankenpandas/crates/fp-io on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:33.946585Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1882ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:33.946661Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-join -> /data/projects/frankenpandas/crates/fp-join on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:35.878000Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1931ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:35.878080Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-python -> /data/projects/frankenpandas/crates/fp-python on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:37.840045Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1961ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:37.840116Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-runtime -> /data/projects/frankenpandas/crates/fp-runtime on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:39.636805Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1796ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:39.636881Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-types -> /data/projects/frankenpandas/crates/fp-types on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:41.544096Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1907ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:41.544181Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/frankenpandas -> /data/projects/frankenpandas/crates/frankenpandas on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:43.450993Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1906ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:43.451041Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 16216 files, 624825 bytes in 31089ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:47.764746Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo test -p fp-frame rolling_dataframe -- --nocapture[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:06:47.764795Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/cargo-target -> /data/projects/frankenpandas/.rch-target-vmi1227854-job-29884606035532750-1781503572352095411-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+warning: /data/projects/frankenpandas/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cfg-if v1.0.4
+  Downloaded autocfg v1.5.0
+  Downloaded block-buffer v0.12.0
+  Downloaded chrono v0.4.45
+  Downloaded siphasher v1.0.2
+  Downloaded phf_shared v0.12.1
+  Downloaded aho-corasick v1.1.4
+  Downloaded unicode-casefold v0.2.0
+  Downloaded cpufeatures v0.3.0
+  Downloaded equivalent v1.0.2
+  Downloaded itoa v1.0.18
+  Downloaded crypto-common v0.2.1
+  Downloaded rustc-hash v2.1.2
+  Downloaded unicode-ident v1.0.24
+  Downloaded quote v1.0.45
+  Downloaded tinyvec_macros v0.1.1
+  Downloaded digest v0.11.2
+  Downloaded thiserror v2.0.18
+  Downloaded zmij v1.0.21
+  Downloaded hybrid-array v0.4.10
+  Downloaded phf v0.12.1
+  Downloaded sha2 v0.11.0
+  Downloaded thiserror-impl v2.0.18
+  Downloaded tinyvec v1.11.0
+  Downloaded proc-macro2 v1.0.106
+  Downloaded num-traits v0.2.19
+  Downloaded serde_core v1.0.228
+  Downloaded serde_derive v1.0.228
+  Downloaded const-oid v0.10.2
+  Downloaded serde v1.0.228
+  Downloaded memchr v2.8.0
+  Downloaded indexmap v2.14.0
+  Downloaded serde_json v1.0.150
+  Downloaded typenum v1.20.0
+  Downloaded unicode-normalization v0.1.25
+  Downloaded hashbrown v0.17.0
+  Downloaded regex v1.12.3
+  Downloaded ucd v0.1.1
+  Downloaded syn v2.0.117
+  Downloaded regex-syntax v0.8.10
+  Downloaded regex-automata v0.4.14
+  Downloaded chrono-tz v0.10.4
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling serde_core v1.0.228
+   Compiling thiserror v2.0.18
+   Compiling typenum v1.20.0
+   Compiling autocfg v1.5.0
+   Compiling serde v1.0.228
+   Compiling memchr v2.8.0
+   Compiling zmij v1.0.21
+   Compiling equivalent v1.0.2
+   Compiling const-oid v0.10.2
+   Compiling serde_json v1.0.150
+   Compiling siphasher v1.0.2
+   Compiling rustc-hash v2.1.2
+   Compiling hashbrown v0.17.0
+   Compiling num-traits v0.2.19
+   Compiling phf_shared v0.12.1
+   Compiling aho-corasick v1.1.4
+   Compiling chrono-tz v0.10.4
+   Compiling cfg-if v1.0.4
+   Compiling cpufeatures v0.3.0
+   Compiling regex-syntax v0.8.10
+   Compiling itoa v1.0.18
+   Compiling tinyvec_macros v0.1.1
+   Compiling tinyvec v1.11.0
+   Compiling hybrid-array v0.4.10
+   Compiling phf v0.12.1
+   Compiling syn v2.0.117
+   Compiling indexmap v2.14.0
+   Compiling unicode-casefold v0.2.0
+   Compiling ucd v0.1.1
+   Compiling unicode-normalization v0.1.25
+   Compiling chrono v0.4.45
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling regex-automata v0.4.14
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling regex v1.12.3
+   Compiling fp-types v0.1.0 (/data/projects/frankenpandas/crates/fp-types)
+   Compiling fp-runtime v0.1.0 (/data/projects/frankenpandas/crates/fp-runtime)
+   Compiling fp-columnar v0.1.0 (/data/projects/frankenpandas/crates/fp-columnar)
+   Compiling fp-index v0.1.0 (/data/projects/frankenpandas/crates/fp-index)
+   Compiling fp-frame v0.1.0 (/data/projects/frankenpandas/crates/fp-frame)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 44.77s
+     Running unittests src/lib.rs (.rch-target-vmi1227854-job-29884606035532750-1781503572352095411-0/debug/deps/fp_frame-499063227962f068)
+
+running 2 tests
+test tests::rolling_dataframe_cov_with_golden_basic ... ok
+test tests::rolling_dataframe_corr_with_golden_basic ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2904 filtered out; finished in 0.00s
+
+  [2m2026-06-15T06:07:34.238306Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 46473ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:07:34.238633Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:07:34.238672Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenpandas on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:07:36.231012Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1992ms (1 files, 3341 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T06:07:36.231042Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 3341 bytes in 1992ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1227854 (86.3s)

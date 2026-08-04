@@ -1,0 +1,7 @@
+Series.factorize string byte-span FxHash codes (vcstr)
+Golden bit-identical: str_factorize sha256 a7215fdcfde8c0b9 before==after.
+A/B min-of-5 @200k (card 1000): 15.727 -> 3.092 ms/iter = 5.09x.
+Tests: fp-frame 2830 (incl 10 factorize) green.
+Lever: factorize on all-valid contiguous-Utf8 assigns codes via FxHashMap<&[u8],i64> (first-seen),
+codes via typed Int64 ctor, uniques Scalar::Utf8 built once — vs n Scalar materialize + ScalarKey +
+std SipHash + Vec<Scalar::Int64> codes. All-valid => no -1 codes. Bit-identical.

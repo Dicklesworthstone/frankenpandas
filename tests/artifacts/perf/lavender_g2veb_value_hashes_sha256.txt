@@ -1,0 +1,2 @@
+fe1a5e8a4d0fb2d9d1c890ed01428568ff60991b177fb6c959c8a91a41b0b8d5  tests/artifacts/perf/lavender_g2veb_base_value_hashes.txt
+fe1a5e8a4d0fb2d9d1c890ed01428568ff60991b177fb6c959c8a91a41b0b8d5  tests/artifacts/perf/lavender_g2veb_candidate_value_hashes.txt

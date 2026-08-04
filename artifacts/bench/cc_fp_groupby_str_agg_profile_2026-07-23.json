@@ -1,0 +1,582 @@
+{
+  "schema_version": "v3",
+  "timestamp": "2026-07-23T21:32:13.167359+00:00",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.0",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle"
+    }
+  },
+  "parameters": {
+    "sizes": [
+      "100k",
+      "1M"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "groupby"
+    ],
+    "cv_threshold": 5.0,
+    "min_iterations": 10,
+    "warmup_iterations": 3
+  },
+  "results": [
+    {
+      "workload": "groupby_median_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 2516.09,
+        "p95_us": 2528.44,
+        "p99_us": 2537.11,
+        "mean_us": 2517.09,
+        "stddev_us": 8.09,
+        "cv_pct": 0.32,
+        "throughput_rows_sec": 39744238,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 1387.2,
+        "p95_us": 1408.43,
+        "p99_us": 1409.26,
+        "mean_us": 1388.27,
+        "stddev_us": 12.28,
+        "cv_pct": 0.88,
+        "throughput_rows_sec": 72087737,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 0.551,
+      "verdict": "SLOWER"
+    },
+    {
+      "workload": "groupby_median_str",
+      "category": "groupby",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 27687.92,
+        "p95_us": 30211.44,
+        "p99_us": 30953.62,
+        "mean_us": 28048.13,
+        "stddev_us": 1192.93,
+        "cv_pct": 4.25,
+        "throughput_rows_sec": 36116832,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 17295.74,
+        "p95_us": 19958.69,
+        "p99_us": 20575.15,
+        "mean_us": 17332.74,
+        "stddev_us": 1515.62,
+        "cv_pct": 8.74,
+        "throughput_rows_sec": 57817715,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "groupby_std_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 1252.11,
+        "p95_us": 1305.1,
+        "p99_us": 1429.72,
+        "mean_us": 1264.75,
+        "stddev_us": 46.52,
+        "cv_pct": 3.68,
+        "throughput_rows_sec": 79864996,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 359.29,
+        "p95_us": 376.08,
+        "p99_us": 383.98,
+        "mean_us": 361.24,
+        "stddev_us": 9.36,
+        "cv_pct": 2.59,
+        "throughput_rows_sec": 278325538,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 0.287,
+      "verdict": "SLOWER"
+    },
+    {
+      "workload": "groupby_std_str",
+      "category": "groupby",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 13195.57,
+        "p95_us": 14088.69,
+        "p99_us": 14257.33,
+        "mean_us": 13205.95,
+        "stddev_us": 430.44,
+        "cv_pct": 3.26,
+        "throughput_rows_sec": 75783026,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 3329.24,
+        "p95_us": 3819.43,
+        "p99_us": 4097.93,
+        "mean_us": 3411.42,
+        "stddev_us": 192.12,
+        "cv_pct": 5.63,
+        "throughput_rows_sec": 300368447,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "groupby_var_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 1270.2,
+        "p95_us": 1747.18,
+        "p99_us": 1759.43,
+        "mean_us": 1393.29,
+        "stddev_us": 193.92,
+        "cv_pct": 13.92,
+        "throughput_rows_sec": 78727945,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 366.56,
+        "p95_us": 477.51,
+        "p99_us": 555.05,
+        "mean_us": 382.57,
+        "stddev_us": 42.35,
+        "cv_pct": 11.07,
+        "throughput_rows_sec": 272802914,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "groupby_var_str",
+      "category": "groupby",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 12661.03,
+        "p95_us": 12981.06,
+        "p99_us": 13104.64,
+        "mean_us": 12686.49,
+        "stddev_us": 196.56,
+        "cv_pct": 1.55,
+        "throughput_rows_sec": 78982491,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 3271.55,
+        "p95_us": 3468.89,
+        "p99_us": 3573.46,
+        "mean_us": 3310.18,
+        "stddev_us": 103.16,
+        "cv_pct": 3.12,
+        "throughput_rows_sec": 305665977,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 0.258,
+      "verdict": "SLOWER"
+    },
+    {
+      "workload": "groupby_min_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 1143.86,
+        "p95_us": 1169.55,
+        "p99_us": 1270.19,
+        "mean_us": 1152.93,
+        "stddev_us": 31.74,
+        "cv_pct": 2.75,
+        "throughput_rows_sec": 87423439,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 251.7,
+        "p95_us": 334.56,
+        "p99_us": 355.1,
+        "mean_us": 262.11,
+        "stddev_us": 25.76,
+        "cv_pct": 9.83,
+        "throughput_rows_sec": 397295214,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "groupby_min_str",
+      "category": "groupby",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 11950.3,
+        "p95_us": 12493.91,
+        "p99_us": 12606.56,
+        "mean_us": 11988.94,
+        "stddev_us": 323.96,
+        "cv_pct": 2.7,
+        "throughput_rows_sec": 83679929,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 1847.88,
+        "p95_us": 1965.44,
+        "p99_us": 1974.4,
+        "mean_us": 1865.32,
+        "stddev_us": 56.74,
+        "cv_pct": 3.04,
+        "throughput_rows_sec": 541161706,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 0.155,
+      "verdict": "SLOWER"
+    },
+    {
+      "workload": "groupby_max_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 1147.73,
+        "p95_us": 1299.62,
+        "p99_us": 1350.77,
+        "mean_us": 1173.45,
+        "stddev_us": 61.25,
+        "cv_pct": 5.22,
+        "throughput_rows_sec": 87128885,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 263.42,
+        "p95_us": 334.57,
+        "p99_us": 372.22,
+        "mean_us": 271.04,
+        "stddev_us": 24.51,
+        "cv_pct": 9.04,
+        "throughput_rows_sec": 379616132,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "groupby_max_str",
+      "category": "groupby",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 13849.49,
+        "p95_us": 15615.77,
+        "p99_us": 15907.82,
+        "mean_us": 13960.04,
+        "stddev_us": 903.79,
+        "cv_pct": 6.47,
+        "throughput_rows_sec": 72204846,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 1947.24,
+        "p95_us": 2121.76,
+        "p99_us": 2143.31,
+        "mean_us": 1988.85,
+        "stddev_us": 80.17,
+        "cv_pct": 4.03,
+        "throughput_rows_sec": 513548699,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "groupby_prod_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 1177.55,
+        "p95_us": 1285.21,
+        "p99_us": 1343.59,
+        "mean_us": 1190.83,
+        "stddev_us": 50.3,
+        "cv_pct": 4.22,
+        "throughput_rows_sec": 84922012,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 199.49,
+        "p95_us": 219.06,
+        "p99_us": 223.45,
+        "mean_us": 202.81,
+        "stddev_us": 8.96,
+        "cv_pct": 4.42,
+        "throughput_rows_sec": 501283285,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 0.169,
+      "verdict": "SLOWER"
+    },
+    {
+      "workload": "groupby_prod_str",
+      "category": "groupby",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 12009.71,
+        "p95_us": 15777.71,
+        "p99_us": 17768.5,
+        "mean_us": 12598.83,
+        "stddev_us": 1595.64,
+        "cv_pct": 12.66,
+        "throughput_rows_sec": 83265957,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 1686.34,
+        "p95_us": 1777.93,
+        "p99_us": 1779.35,
+        "mean_us": 1705.88,
+        "stddev_us": 47.5,
+        "cv_pct": 2.78,
+        "throughput_rows_sec": 592999874,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "groupby_sem_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 1448.65,
+        "p95_us": 1508.4,
+        "p99_us": 1513.5,
+        "mean_us": 1457.18,
+        "stddev_us": 26.82,
+        "cv_pct": 1.84,
+        "throughput_rows_sec": 69029977,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 361.62,
+        "p95_us": 369.21,
+        "p99_us": 369.41,
+        "mean_us": 361.98,
+        "stddev_us": 5.71,
+        "cv_pct": 1.58,
+        "throughput_rows_sec": 276529554,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 0.25,
+      "verdict": "SLOWER"
+    },
+    {
+      "workload": "groupby_sem_str",
+      "category": "groupby",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 15007.05,
+        "p95_us": 16019.55,
+        "p99_us": 16082.41,
+        "mean_us": 15171.75,
+        "stddev_us": 430.93,
+        "cv_pct": 2.84,
+        "throughput_rows_sec": 66635348,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 3404.62,
+        "p95_us": 3839.98,
+        "p99_us": 3867.64,
+        "mean_us": 3489.2,
+        "stddev_us": 173.07,
+        "cv_pct": 4.96,
+        "throughput_rows_sec": 293718794,
+        "iterations": 20,
+        "valid": true
+      },
+      "ratio": 0.227,
+      "verdict": "SLOWER"
+    },
+    {
+      "workload": "groupby_skew_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 1465.11,
+        "p95_us": 1551.18,
+        "p99_us": 1676.96,
+        "mean_us": 1479.51,
+        "stddev_us": 56.61,
+        "cv_pct": 3.83,
+        "throughput_rows_sec": 68254401,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 489.36,
+        "p95_us": 493.33,
+        "p99_us": 493.99,
+        "mean_us": 488.72,
+        "stddev_us": 3.88,
+        "cv_pct": 0.79,
+        "throughput_rows_sec": 204347493,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 0.334,
+      "verdict": "SLOWER"
+    },
+    {
+      "workload": "groupby_skew_str",
+      "category": "groupby",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 17024.39,
+        "p95_us": 19026.9,
+        "p99_us": 20769.7,
+        "mean_us": 17271.39,
+        "stddev_us": 1241.55,
+        "cv_pct": 7.19,
+        "throughput_rows_sec": 58739246,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 4446.39,
+        "p95_us": 4703.84,
+        "p99_us": 4778.46,
+        "mean_us": 4480.78,
+        "stddev_us": 129.8,
+        "cv_pct": 2.9,
+        "throughput_rows_sec": 224901499,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "groupby_nunique_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 3273.03,
+        "p95_us": 3462.22,
+        "p99_us": 3517.46,
+        "mean_us": 3301.22,
+        "stddev_us": 73.99,
+        "cv_pct": 2.24,
+        "throughput_rows_sec": 30552701,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 3999.4,
+        "p95_us": 4277.54,
+        "p99_us": 4310.46,
+        "mean_us": 4037.45,
+        "stddev_us": 133.52,
+        "cv_pct": 3.31,
+        "throughput_rows_sec": 25003754,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 1.222,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "groupby_nunique_str",
+      "category": "groupby",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 42718.14,
+        "p95_us": 44649.81,
+        "p99_us": 50280.42,
+        "mean_us": 43202.13,
+        "stddev_us": 2041.82,
+        "cv_pct": 4.73,
+        "throughput_rows_sec": 23409256,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 98026.76,
+        "p95_us": 109350.44,
+        "p99_us": 120587.61,
+        "mean_us": 98970.94,
+        "stddev_us": 7375.88,
+        "cv_pct": 7.45,
+        "throughput_rows_sec": 10201296,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    }
+  ],
+  "summary": {
+    "total_workloads": 18,
+    "valid_workloads": 9,
+    "dropped_high_cv": 9,
+    "category_scores": {
+      "groupby": 0.308
+    },
+    "weighted_score": 1.162,
+    "claim_validated": false
+  }
+}

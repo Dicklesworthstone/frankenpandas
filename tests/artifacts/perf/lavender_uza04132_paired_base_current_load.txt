@@ -1,0 +1,54 @@
+binary=/data/projects/frankenpandas/.rch-target-lavenderstone-uza04132-base/release-perf/examples/perf_profile
+## binary stat
+2026-06-14 18:43:09.901419325 -0400 23951048 /data/projects/frankenpandas/.rch-target-lavenderstone-uza04132-base/release-perf/examples/perf_profile
+## golden csv_parse_dates_dt_year 1000
+1442f9e26ae81e28ccfb59d5019f76af6c0306db9be04a084b339fb91fb6b90e  /tmp/lavender_uza04132_paired_base_golden_csv_parse_dates_dt_year_1000.txt
+## golden csv_parse_dates_dt_year 100000
+cb6f4f743000dff6f84ca63c1c0f0e749c4be0c500dd9034402dcdb5321c7bdd  /tmp/lavender_uza04132_paired_base_golden_csv_parse_dates_dt_year_100000.txt
+## internal paired base
+perf_profile: scenario=csv_parse_dates_dt_year n=100000 iters=5
+perf_profile: done 5 iters in 1.880s (375.959 ms/iter), sink=500000
+## hyperfine paired base
+Benchmark 1: /data/projects/frankenpandas/.rch-target-lavenderstone-uza04132-base/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 5
+  Time (mean ± σ):      1.790 s ±  0.088 s    [User: 1.639 s, System: 0.081 s]
+  Range (min … max):    1.694 s …  1.959 s    10 runs
+ 
+## hyperfine json
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenpandas/.rch-target-lavenderstone-uza04132-base/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 5",
+      "mean": 1.7899638364800001,
+      "stddev": 0.08822740212046187,
+      "median": 1.75985606808,
+      "user": 1.63910766,
+      "system": 0.08084887999999998,
+      "min": 1.69381289358,
+      "max": 1.95864433058,
+      "times": [
+        1.81446840958,
+        1.9110773675800001,
+        1.72165552258,
+        1.76024711358,
+        1.7053634715800001,
+        1.74597640258,
+        1.7594650225800001,
+        1.95864433058,
+        1.82892783058,
+        1.69381289358
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

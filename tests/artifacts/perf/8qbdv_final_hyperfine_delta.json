@@ -1,0 +1,7 @@
+{
+  "base_mean_ms": 439.4194532800001,
+  "base_std_ms": 34.4283493041778,
+  "after_final_mean_ms": 367.90382345999996,
+  "after_final_std_ms": 10.693906512555369,
+  "speedup_mean": 1.194386753438499
+}

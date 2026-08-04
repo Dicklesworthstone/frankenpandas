@@ -1,0 +1,21 @@
+baseline_artifact=tests/artifacts/perf/lavender_0mtac_base_fp_bench_1m_str_groupby_sum.txt
+baseline_json_sha256=945e515585ceafcb94dc18fd6186fcd111b0515a9530ebae44cceae099b5ace7
+{
+  "mean_us": 63533.959400000014,
+  "median_us": 62249.691000000006,
+  "min_us": 54601.574,
+  "max_us": 78062.723,
+  "n": 25
+}
+candidate_artifact=tests/artifacts/perf/lavender_0mtac_fpbench_valonly_candidate_1m_str_groupby_sum.txt
+candidate_json_sha256=eae32963af4212b0e958e8bdc3a2acf517a430f0692e1680817d426ec2f2eecf
+{
+  "mean_us": 6982.682999999999,
+  "median_us": 6671.103999999999,
+  "min_us": 6135.9800000000005,
+  "max_us": 9066.243,
+  "n": 25
+}
+golden_sha256=a322aff6215a3d47fd08c8052c21e7f37223d9cdcc92b2d52c96e3d901ff8f19
+mean_speedup=9.098789
+median_speedup=9.331243

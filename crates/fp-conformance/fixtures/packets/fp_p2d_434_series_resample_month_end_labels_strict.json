@@ -1,0 +1,39 @@
+{
+  "packet_id": "FP-P2D-434",
+  "case_id": "series_resample_month_end_labels_strict",
+  "mode": "strict",
+  "operation": "series_resample_sum",
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "8638bced4347d38325e9ee5135482ff8251f93cf506dda12e238596c7aec7760",
+    "generated_at": "2026-06-17T23:45:00Z"
+  },
+  "resample_freq": "M",
+  "left": {
+    "name": "vals",
+    "index": [
+      { "kind": "utf8", "value": "2024-01-15" },
+      { "kind": "utf8", "value": "2024-02-10" },
+      { "kind": "utf8", "value": "2024-04-20" }
+    ],
+    "values": [
+      { "kind": "float64", "value": 1.0 },
+      { "kind": "float64", "value": 2.0 },
+      { "kind": "float64", "value": 4.0 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "2024-01-31" },
+      { "kind": "utf8", "value": "2024-02-29" },
+      { "kind": "utf8", "value": "2024-03-31" },
+      { "kind": "utf8", "value": "2024-04-30" }
+    ],
+    "values": [
+      { "kind": "float64", "value": 1.0 },
+      { "kind": "float64", "value": 2.0 },
+      { "kind": "float64", "value": 0.0 },
+      { "kind": "float64", "value": 4.0 }
+    ]
+  }
+}

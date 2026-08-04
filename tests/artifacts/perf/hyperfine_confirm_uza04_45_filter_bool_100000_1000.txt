@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza04-45-pass1-worker/release-perf/examples/perf_profile filter_bool 100000 1000
+  Time (mean ± σ):     462.6 ms ±  29.6 ms    [User: 436.6 ms, System: 24.5 ms]
+  Range (min … max):   434.5 ms … 546.0 ms    20 runs
+
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-uza04-45-after/release-perf/examples/perf_profile filter_bool 100000 1000
+  Time (mean ± σ):     434.5 ms ±  10.7 ms    [User: 408.1 ms, System: 25.1 ms]
+  Range (min … max):   417.1 ms … 456.8 ms    20 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-uza04-45-after/release-perf/examples/perf_profile filter_bool 100000 1000 ran
+    1.06 ± 0.07 times faster than /data/projects/.scratch/cargo-target-orangepeak-uza04-45-pass1-worker/release-perf/examples/perf_profile filter_bool 100000 1000

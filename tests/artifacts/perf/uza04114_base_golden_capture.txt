@@ -1,0 +1,6 @@
+  [2m2026-06-13T21:58:58.753577Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -lc 'BIN=/data/projects/.scratch/cargo-target-lavenderstone-uza04114-base/release-perf/examples/perf_profile; for n in 2000 5000 20000; do "$BIN" golden df_kendall "$n" > "tests/artifacts/perf/uza04114_base_golden_df_kendall_${n}.txt"; done; sha256sum tests/artifacts/perf/uza04114_base_golden_df_kendall_2000.txt tests/artifacts/perf/uza04114_base_golden_df_kendall_5000.txt tests/artifacts/perf/uza04114_base_golden_df_kendall_20000.txt > tests/artifacts/perf/uza04114_base_golden_sha256.txt; cat tests/artifacts/perf/uza04114_base_golden_sha256.txt'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+acf366c266b66f8497fb55734ed1b4ec40952a7c014f43db262c7c1e625e15e1  tests/artifacts/perf/uza04114_base_golden_df_kendall_2000.txt
+031978ba431260b942dd36d9be055064a7453118a7c00888c35747644d33d99e  tests/artifacts/perf/uza04114_base_golden_df_kendall_5000.txt
+f164fa86300fbea93e46aa99a5e0f7413fa8c0baf2ee49c6a689ed92652a4c3b  tests/artifacts/perf/uza04114_base_golden_df_kendall_20000.txt

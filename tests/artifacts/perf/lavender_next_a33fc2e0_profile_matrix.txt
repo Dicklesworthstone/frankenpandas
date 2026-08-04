@@ -1,0 +1,60 @@
+
+### df_dot 100000 1
+perf_profile: scenario=df_dot n=100000 iters=1
+perf_profile: done 1 iters in 0.314s (313.602 ms/iter), sink=100000
+
+### df_corr 100000 1
+perf_profile: scenario=df_corr n=100000 iters=1
+perf_profile: done 1 iters in 0.107s (107.116 ms/iter), sink=64
+
+### df_kendall 20000 1
+perf_profile: scenario=df_kendall n=20000 iters=1
+perf_profile: done 1 iters in 0.018s (17.894 ms/iter), sink=32
+
+### csv_read 100000 5
+perf_profile: scenario=csv_read n=100000 iters=5
+perf_profile: done 5 iters in 0.073s (14.661 ms/iter), sink=500000
+
+### csv_read_options 100000 5
+perf_profile: scenario=csv_read_options n=100000 iters=5
+perf_profile: done 5 iters in 0.063s (12.545 ms/iter), sink=500000
+
+### csv_read_no_na_filter 100000 5
+perf_profile: scenario=csv_read_no_na_filter n=100000 iters=5
+perf_profile: done 5 iters in 0.063s (12.683 ms/iter), sink=500000
+
+### series_add_align 100000 10
+perf_profile: scenario=series_add_align n=100000 iters=10
+perf_profile: done 10 iters in 0.025s (2.491 ms/iter), sink=1000010
+
+### filter_bool 100000 50
+perf_profile: scenario=filter_bool n=100000 iters=50
+perf_profile: done 50 iters in 0.013s (0.269 ms/iter), sink=2500000
+
+### inner_join 100000 5
+perf_profile: scenario=inner_join n=100000 iters=5
+perf_profile: done 5 iters in 0.035s (7.040 ms/iter), sink=97656800
+
+### str_inner_join 100000 20
+perf_profile: scenario=str_inner_join n=100000 iters=20
+perf_profile: done 20 iters in 0.016s (0.778 ms/iter), sink=200000
+
+### str_left_join 100000 5
+perf_profile: scenario=str_left_join n=100000 iters=5
+perf_profile: done 5 iters in 0.157s (31.480 ms/iter), sink=500000
+
+### str_outer_join 100000 5
+perf_profile: scenario=str_outer_join n=100000 iters=5
+perf_profile: done 5 iters in 0.200s (40.077 ms/iter), sink=750000
+
+### str_sort_chain 100000 3
+perf_profile: scenario=str_sort_chain n=100000 iters=3
+perf_profile: done 3 iters in 0.063s (21.086 ms/iter), sink=300000
+
+### str_groupby_sum 100000 20
+perf_profile: scenario=str_groupby_sum n=100000 iters=20
+perf_profile: done 20 iters in 0.021s (1.064 ms/iter), sink=1280
+
+### groupby_transform_median 100000 5
+perf_profile: scenario=groupby_transform_median n=100000 iters=5
+perf_profile: done 5 iters in 0.027s (5.481 ms/iter), sink=500000

@@ -1,0 +1,14 @@
+br-frankenpandas-jbyuc.1.1.1 — zero-copy LazyUtf8Slice view for contiguous-range take
+
+Golden: perf_profile golden str_inner_join 5000 (deterministic output dump sha256).
+  baseline (eager gather, origin/main w/ Arc buffers): 55882afccf750e1be9319b42140b784d42be7ca9d581a0f070cc256271d3b49c
+  after    (zero-copy view):                           55882afccf750e1be9319b42140b784d42be7ca9d581a0f070cc256271d3b49c
+  IDENTICAL => bit-identical join output.
+
+Same-command A/B: perf_profile str_inner_join 1000000 1000 (reads out.index.len()
+only — exercises deferred materialization), min of 5 runs:
+  baseline: 0.924 0.945 0.948 0.968 0.979  -> min 0.924 ms/iter
+  after:    0.442 0.443 0.448 0.457 0.459  -> min 0.442 ms/iter
+  2.09x (median 0.948/0.448 = 2.12x).
+
+Validation: fp-columnar 380 tests pass / 0 failed; fp-frame 2829 tests pass / 0 failed.

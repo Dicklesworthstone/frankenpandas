@@ -1,0 +1,14 @@
+  [2m2026-06-08T14:17:47.838672Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 3 --runs 15 --export-json tests/artifacts/perf/hyperfine_ab_total_str_inner_join_jbyuc11.json '/data/projects/.scratch/cargo-target-orangepeak-jbyuc11-base-20260608T1006/release-perf/examples/perf_profile str_inner_join 1000000 10' '/data/projects/.scratch/cargo-target-orangepeak-jbyuc11-after-20260608T1015/release-perf/examples/perf_profile str_inner_join 1000000 10'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-jbyuc11-base-20260608T1006/release-perf/examples/perf_profile str_inner_join 1000000 10
+  Time (mean ± σ):     106.0 ms ±   3.6 ms    [User: 51.1 ms, System: 54.6 ms]
+  Range (min … max):   101.1 ms … 115.5 ms    15 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-jbyuc11-after-20260608T1015/release-perf/examples/perf_profile str_inner_join 1000000 10
+  Time (mean ± σ):     103.5 ms ±   4.9 ms    [User: 49.8 ms, System: 53.4 ms]
+  Range (min … max):    95.9 ms … 111.1 ms    15 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-jbyuc11-after-20260608T1015/release-perf/examples/perf_profile str_inner_join 1000000 10 ran
+    1.02 ± 0.06 times faster than /data/projects/.scratch/cargo-target-orangepeak-jbyuc11-base-20260608T1006/release-perf/examples/perf_profile str_inner_join 1000000 10

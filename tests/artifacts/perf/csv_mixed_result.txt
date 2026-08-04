@@ -1,0 +1,17 @@
+to_csv typed fast path extended to mixed (numeric + Utf8) frames
+
+Byte-identity (golden): write_csv_string output FNV-1a-64 IDENTICAL between the
+general csv-crate path (env CSV_NO_FAST=1) and the fast path, on a 500000x7 frame
+(4 f64, 2 i64, 1 contiguous-Utf8 with values exercising QUOTE_MINIMAL: plain,
+"a,b", he said "hi", embedded newline):
+  general: BIG_FNV 7bf41a97467e87da len=25111062
+  fast:    BIG_FNV 7bf41a97467e87da len=25111062
+Same-binary A/B, min of 5:
+  general: 353.3 ms/iter
+  fast:    176.2 ms/iter
+  = 2.00x.
+Lever: extend the all-valid-numeric fast path to also accept all-valid contiguous
+Utf8 columns (as_utf8_contiguous) — read the byte spans directly and apply CSV
+QUOTE_MINIMAL (quote iff delimiter/quote/CR/LF, internal quotes doubled), skipping
+the per-column Vec<Scalar> materialization + per-cell String + csv-crate record
+machinery. Covers real-world mixed CSVs, not just all-numeric.

@@ -1,0 +1,47 @@
+br-frankenpandas-0loqz — Typed Float64 + Fx-hashed tally for Series/DataFrame.mode
+==================================================================================
+
+A sixth gap_hunt probe wave (mode/sem/prod) found mode 56ms (the biggest fresh
+gap). Series::mode_with_dropna (which DataFrame.mode calls per column) already had
+an Int64 direct-address tally and a Utf8 byte-span FxHash tally, but a Float64
+column fell to the generic ScalarKey SipHash HashMap over col.values().
+
+LEVER (one, same family as the nunique win): typed Float64 branch — an
+FxHashMap<u64, idx> tally of normalized bits over the f64 + validity slices, no
+Vec<Scalar> materialization and no SipHash.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-4; loaded):
+  DataFrame.mode:  56  ->  18.2  = 3.08x
+
+SCORE: 3.08x >= 2.0 PASS.
+
+ISOMORPHISM (produces the identical (value, count) SET, which is all that matters —
+the mode result is sorted + max-count-filtered downstream, so tally order is moot):
+  - A value is tallied iff its materialized Scalar is Float64(finite) — validity set
+    AND datum not NaN. Its key is FloatBits of the -0.0 -> +0.0 normalized datum,
+    exactly scalar_key_allow_missing's Float64 arm (so +0.0/-0.0 collapse to one
+    key); the stored value is the FIRST-seen original Float64, matching the
+    ScalarKey path's value.clone() of the first occurrence.
+  - Gated to dropna OR all-valid: the only missing-value bucket arises with
+    !dropna AND missing present, which is left to the ScalarKey path (so the
+    materialized first-seen missing Scalar is reproduced exactly there). With
+    dropna (the df.mode() default) all missing are skipped — identical to the
+    ScalarKey path's `if dropna && is_missing { continue }`.
+  - Int64 (direct-address) and Utf8 (byte-span) fast paths are untouched.
+  - Golden sha256 (gap_hunt golden: full elementwise/reduction family + mode over a
+    period-9973 repeated-value frame (real modes, count>1), its nullable variant,
+    and an all-distinct frame (every value a mode), n=5000-20000) UNCHANGED:
+      28c1388742fc4b4cef0b97484ac42e44de75334801fa9285c924d763ed406785
+
+GATES (rch + local):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2831 passed
+  cargo test   -p fp-conformance: 0 failures
+
+SESSION NOTE: a register-blocked centered-rank Gram for df.corr(spearman) (251ms,
+bead vhrv5) was attempted and REJECTED — at 64 cols x 200k rows the dot is
+memory/latency-bound, so the blocked kernel's strided i-reads were SLOWER than the
+naive 2-column streaming dots (295 vs 251ms). The bandwidth-cutting reorder
+(row-blocking) reassociates the f64 sum and breaks the bit-exact golden; that is
+the FMA build-decision wall (bh7iy). Reverted, golden bda4fe28 restored.

@@ -1,0 +1,13 @@
+LazyNullableUtf8 typed backing — null-introducing Utf8 gather in reindex_by_positions (cmxjz)
+Bit-identical (before==after) goldens @5000:
+  reindex_str    884a3449...
+  str_left_join  995b9ca3...
+  str_outer_join 72546ef6...
+A/B (min-of-5, 200k):
+  str_outer_join 152.9 -> 90.0 ms/iter = 1.70x  (all 12 Utf8 cols null-introduce)
+  str_left_join   38.9 -> 23.2 ms/iter = 1.68x (unloaded); 1.50x under heavy machine load (6 right cols null-introduce)
+Tests: fp-columnar 383 + fp-join 108 + fp-frame 2830 green.
+Isomorphism: valid slot = Utf8(span) (valid bit); missing slot = empty span + cleared bit
+=> materializes Null(NullKind::Null) = missing_for_dtype(Utf8), exactly the Scalar fallback.
+Only fires for an all-valid Utf8 source (no NaN/null ambiguity). Live for every left/right/
+outer merge with Utf8 payload (non-i64-dense path) + Series.reindex/align/combine_first.

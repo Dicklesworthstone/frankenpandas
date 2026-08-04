@@ -1,0 +1,11 @@
+Benchmark 1: candidate_corr
+  Time (mean ± σ):     287.9 ms ±   6.9 ms    [User: 569.6 ms, System: 245.1 ms]
+  Range (min … max):   279.7 ms … 303.3 ms    10 runs
+ 
+Benchmark 2: base_corr
+  Time (mean ± σ):     287.6 ms ±  11.9 ms    [User: 516.1 ms, System: 246.7 ms]
+  Range (min … max):   275.2 ms … 316.2 ms    10 runs
+ 
+Summary
+  base_corr ran
+    1.00 ± 0.05 times faster than candidate_corr

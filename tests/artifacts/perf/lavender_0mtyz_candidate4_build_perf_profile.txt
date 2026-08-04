@@ -1,0 +1,92 @@
+warning: /data/projects/frankenpandas/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling syn v2.0.117
+   Compiling autocfg v1.5.0
+   Compiling num-traits v0.2.19
+   Compiling zerocopy-derive v0.8.48
+   Compiling zerocopy v0.8.48
+   Compiling num-integer v0.1.46
+   Compiling chrono v0.4.45
+   Compiling getrandom v0.3.4
+   Compiling num-bigint v0.4.6
+   Compiling half v2.7.1
+   Compiling chrono-tz v0.10.4
+   Compiling serde_derive v1.0.228
+   Compiling indexmap v2.14.0
+   Compiling serde v1.0.228
+   Compiling arrow-buffer v58.3.0
+   Compiling num-complex v0.4.6
+   Compiling arrow-data v58.3.0
+   Compiling ahash v0.8.12
+   Compiling arrow-array v58.3.0
+   Compiling regex-automata v0.4.14
+   Compiling serde_json v1.0.150
+   Compiling thiserror v2.0.18
+   Compiling regex v1.12.3
+   Compiling arrow-select v58.3.0
+   Compiling thiserror-impl v2.0.18
+error[E0463]: can't find crate for `syn`
+  --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-2.0.18/src/expand.rs:10:5
+   |
+10 | use syn::{DeriveInput, GenericArgument, PathArguments, Result, Token, Type};
+   |     ^^^ can't find crate
+
+For more information about this error, try `rustc --explain E0463`.
+error: could not compile `thiserror-impl` (lib) due to 1 previous error

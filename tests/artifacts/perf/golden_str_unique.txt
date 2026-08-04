@@ -1,0 +1,7 @@
+Series.unique / nunique string byte-span FxHash dedup (vcstr)
+Golden bit-identical: str_unique sha256 00d212330b0cdb59 before==after.
+A/B min-of-5 @200k (card 1000): str_unique 7.439 -> 2.509 ms/iter = 2.96x.
+Tests: fp-frame 2830 (incl 61 unique/nunique) green.
+Lever: unique/nunique on all-valid contiguous-Utf8 dedup raw &[u8] spans with FxHash (first-seen
+order for unique; count for nunique) instead of materializing n Scalar::Utf8 + ScalarKey + std SipHash.
+Bit-identical (same first-seen order/values; all-valid => no NullKind keying / dropna moot).

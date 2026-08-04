@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-3wo1d-base/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --iters 20
+  Time (mean ± σ):     159.6 ms ±   5.6 ms    [User: 96.9 ms, System: 59.6 ms]
+  Range (min … max):   150.9 ms … 167.7 ms    8 runs
+ 

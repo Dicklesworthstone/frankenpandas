@@ -7,10 +7,11 @@
 //! O(total_chars). First occurrence in `from` wins (same as the linear scan);
 //! a source char beyond `to`'s length is deleted; unmapped chars pass through.
 
+use std::time::Instant;
+
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::Scalar;
-use std::time::Instant;
 
 fn s_from(strings: Vec<&str>) -> Series {
     let idx: Vec<IndexLabel> = (0..strings.len() as i64).map(IndexLabel::Int64).collect();

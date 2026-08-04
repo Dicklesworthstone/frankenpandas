@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/frankenpandas-orangepeak-opt-20260609-jbyuc1111111-after/release-perf/examples/perf_profile str_inner_join 1000000 5000
+  Time (mean ± σ):     147.3 ms ±   5.4 ms    [User: 74.0 ms, System: 72.7 ms]
+  Range (min … max):   139.3 ms … 156.1 ms    10 runs
+ 

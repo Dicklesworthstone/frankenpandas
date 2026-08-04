@@ -1,0 +1,41 @@
+br-frankenpandas-igxsj — Typed Float64 fast path for Series/DataFrame.diff
+==========================================================================
+
+DISCOVERY (Phase B generative): a new probe (crates/fp-conformance/examples/
+gap_hunt.rs) timed un-benchmarked DataFrame ops with TYPED columns (n=200k x 8)
+and surfaced a whole family of Scalar-bound elementwise ops running 20-100x slow
+— they materialize Vec<Scalar> + per-element to_f64 dispatch + Column::new
+revalidation instead of using the typed as_f64_slice backing. (cumsum is already
+typed at 2.5ms, proving the pattern.) Filed umbrella bead eydcr for the rest.
+
+LEVER (one): Series::diff typed Float64 fast path. An as_f64_slice column is
+all-valid Float64 (no NaN, no Timedelta64/Bool case, no missing inputs), so diff
+is a single f64 pass into a typed buffer (out[i] = data[i] - data[j]; out-of-range
+partner -> cleared validity bit) emitted via from_f64_values_with_validity —
+skipping the Vec<Scalar> materialization, per-element to_f64, and Column::new
+revalidation. DataFrame.diff delegates per-column so it benefits transitively.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter):
+  DataFrame.diff(1):  53.865  ->  1.774  = 30.4x
+
+SCORE: 30.4x >> 2.0 PASS.
+
+ISOMORPHISM:
+  - Each in-range pair yields Float64(data[i]-data[j]) — the identical f64
+    subtraction the Scalar path computes via vals[i].to_f64() - vals[j].to_f64().
+  - A row whose partner is out of range (first `periods` rows, or beyond the end
+    for negative periods) yields Null(NullKind::NaN): the 0.0-datum + cleared-bit
+    convention of from_f64_values_with_validity materializes exactly that, same
+    as the Scalar path's `_ => Null(NaN)`.
+  - as_f64_slice => all-valid no-NaN Float64, so the "not missing" guard always
+    holds and there is no Timedelta64/Bool branch to take — gating is exact.
+  - Index + name preserved (self.index.clone(), self.name.clone()).
+  - Golden sha256 (gap_hunt golden: diff(1)/diff(3)/diff(-2)/nullable diff +
+    pct_change, n=5000 x4) UNCHANGED before/after:
+      1b3c99729b974309bed453d9b83439e4ae6d9b6d4c18467da6931f2d82b24d61
+
+GATES (rch, crate-scoped):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

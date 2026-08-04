@@ -1,0 +1,45 @@
+br-frankenpandas-p1725 — Typed Float64 fast path for DataFrame frame-vs-frame comparison
+=========================================================================================
+
+eydcr third-wave op. A widened gap_hunt probe (comparison/where/mask/isin/scalar
+arith) found frame-vs-frame gt 157ms (the biggest gap surfaced across all waves),
+mask 69ms, where_cond 58ms, isin 43ms next (add_scalar/mul_scalar already typed at
+~2ms; rank's 40ms is legitimate radix cost). binary_cmp_op (shared by gt/lt/ge/le/
+eq/ne) aligned both frames Outer (materializing both operands via reindex) then
+ran a manual per-element Scalar to_f64 comparison + Column::new.
+
+LEVER (one): identical index + same column order + every column Float64 on both
+sides => the Outer alignment is the identity, so compare each column straight from
+the f64 + validity slices (no align, no input Scalar materialization, no per-element
+to_f64). One fast path serves all six comparison ops.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-5; loaded):
+  DataFrame.gt(frame):  157  ->  57.5  = 2.73x
+
+SCORE: 2.73x >= 2.0 PASS.
+
+ISOMORPHISM:
+  - A pair is missing iff EITHER side is missing — validity clear OR a valid-bit
+    NaN (which Scalar::is_missing treats as missing), matching the general path's
+    `if lv.is_missing() || rv.is_missing()` -> Null(NullKind::Null).
+  - Otherwise `l <op> r` over the identical present f64s — the same numeric arm the
+    general path takes via to_f64 (Float64 operands never reach the string arm).
+  - Output column is built the same way: from_values of the [Bool / Null(Null)]
+    vector when any pair is missing; from_bool_values when none is (an all-valid
+    Bool that materializes to the same Bool scalars).
+  - Gated to identical index + identical column order + all-Float64 both sides; any
+    other shape/dtype keeps the exact align + Scalar path.
+  - Golden sha256 (gap_hunt golden: full elementwise family + gt/lt/eq all-valid-vs
+    -nullable, ge all-valid-vs-all-valid, ne nullable-vs-nullable, n=5000 x4)
+    UNCHANGED before/after:
+      48a0f8ce8783acfdac8c37ce137e407f8085da0710e8702b019698165089dd08
+
+FOLLOWUP: the nullable-Bool result still builds Vec<Scalar> + from_values (the
+residual ~57ms) — a typed nullable-Bool backing in fp-columnar would type the
+output too (and help isin/where/mask). Filed separately.
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

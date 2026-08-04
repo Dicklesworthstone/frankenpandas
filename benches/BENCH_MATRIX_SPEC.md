@@ -1,8 +1,8 @@
 # FrankenPandas vs Pandas Benchmark Matrix Specification
 
 **Bead:** br-frankenpandas-rg8ys.7.1
-**Version:** v3
-**Date:** 2026-05-25
+**Version:** v4
+**Date:** 2026-07-25
 
 ## Purpose
 
@@ -58,9 +58,9 @@ Define comprehensive head-to-head benchmark coverage to validate (or disprove) t
 
 | Workload | Description | Sizes |
 |----------|-------------|-------|
-| merge_inner | Inner join on key | 10k/100k |
-| merge_left | Left join | 10k/100k |
-| merge_outer | Outer join | 10k/100k |
+| merge_inner | Inner join on key | 10k/100k/1M |
+| merge_left | Left join | 10k/100k/1M |
+| merge_outer | Outer join | 10k/100k/1M |
 | merge_asof | Time-series asof join | 10k/100k |
 | concat_axis0 | Vertical concatenation | 10k/100k/1M |
 | concat_axis1 | Horizontal concatenation | 10k/100k |
@@ -99,39 +99,93 @@ Each numeric workload runs with:
 - `float64_nan10`: 10% NaN density
 - `float64_nan50`: 50% NaN density
 
-## JSON Result Schema (v3)
+## Measurement Contract
+
+Every engine invocation:
+
+1. Reports the SHA-256, byte length, and path of the executable that is actually running.
+2. Runs 25 interleaved, order-alternating A/A pairs in that same invocation.
+3. Computes a deterministic 10,000-resample bootstrap 95% CI for the median A/A ratio.
+4. Decides `FASTER` or `SLOWER` only when the absolute log effect is at least twice the
+   widest engine null-CI log half-width.
+
+CV remains in the artifact as provenance. It is never a keep, reject, drop, or quarantine gate.
+
+## JSON Result Schema (v4)
 
 ```json
 {
-  "schema_version": "v3",
-  "engine": {
-    "name": "frankenpandas|pandas",
-    "version": "0.1.0|2.2.3",
-    "platform": "linux-x86_64",
-    "compiled_flags": ["release", "lto"]
+  "schema_version": "v4",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.2",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle",
+      "executable": {
+        "sha256": "64 lowercase hex characters",
+        "bytes": 18200,
+        "path": "/usr/bin/python3"
+      }
+    }
   },
-  "timestamp": "2026-05-25T12:00:00Z",
+  "timestamp": "2026-07-25T12:00:00Z",
   "results": [
     {
       "category": "io",
       "workload": "csv_read",
       "size": "100k",
       "dtype": "float64",
-      "iterations": 100,
-      "metrics": {
+      "frankenpandas": {
         "p50_us": 12500,
         "p95_us": 14200,
         "p99_us": 15800,
         "mean_us": 12800,
         "stddev_us": 890,
         "cv_pct": 6.95,
-        "throughput_rows_sec": 7812500
-      }
+        "throughput_rows_sec": 7812500,
+        "checksum": "eaf051ec8ae24d70",
+        "executable": {
+          "sha256": "64 lowercase hex characters",
+          "bytes": 69671288,
+          "path": "/remote/target/release-perf/fp-bench"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 1.0021,
+          "median_ci_95": [0.9918, 1.0114],
+          "log_half_width": 0.01134,
+          "two_x_decidable_interval": [0.9776, 1.0229]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 45200,
+        "cv_pct": 8.41,
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 0.9987,
+          "median_ci_95": [0.9895, 1.0091]
+        },
+        "valid": true
+      },
+      "ratio": 3.616,
+      "median_ci_gate": {
+        "decidable": true,
+        "margin_multiplier": 2.0,
+        "cv_is_provenance_only": true
+      },
+      "verdict": "FASTER"
     }
   ],
   "summary": {
     "total_workloads": 42,
-    "total_iterations": 4200,
+    "contract_valid_workloads": 42,
+    "decidable_workloads": 41,
+    "null_undecidable_workloads": 1,
     "weighted_score": 1.0
   }
 }
@@ -167,13 +221,15 @@ claim_validated = weighted_score > 1.0 for ALL categories
 
 ### Verdict Categories
 
-- **FASTER**: FP is >1.05x faster (exceeds pandas)
-- **PARITY**: FP is 0.95x-1.05x (equivalent)
-- **SLOWER**: FP is <0.95x (pandas wins)
+- **FASTER**: FP is faster and the effect clears the 2× median-CI null margin
+- **SLOWER**: pandas is faster and the effect clears the 2× median-CI null margin
+- **NULL_UNDECIDABLE**: both measurements are contract-valid, but the effect does not clear the null margin
+- **CONTRACT_INVALID**: identity, checksum, timings, or A/A data are missing
+- **INCOMPLETE**: one engine did not produce a result
 
 ## DoD Checklist
 
 - [x] Spec committed with 6 categories, weights, workloads
-- [x] JSON v3 schema defined
+- [x] JSON v4 schema and median-CI decision contract defined
 - [x] Scoring formula documented
 - [ ] Reviewed before T7_HARNESS implementation

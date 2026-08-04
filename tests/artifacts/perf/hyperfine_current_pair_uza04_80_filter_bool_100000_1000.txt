@@ -1,0 +1,11 @@
+Benchmark 1: before-current-main
+  Time (mean ± σ):      48.4 ms ±   5.5 ms    [User: 22.2 ms, System: 25.9 ms]
+  Range (min … max):    42.0 ms …  57.0 ms    10 runs
+ 
+Benchmark 2: after-float64-fast-path
+  Time (mean ± σ):      23.9 ms ±   2.3 ms    [User: 11.2 ms, System: 12.3 ms]
+  Range (min … max):    20.1 ms …  27.7 ms    10 runs
+ 
+Summary
+  after-float64-fast-path ran
+    2.03 ± 0.30 times faster than before-current-main

@@ -1,0 +1,317 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 8K of event 'cycles:u'
+# Event count (approx.): 18201702711
+#
+# Overhead  Command   Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               IPC   [IPC Coverage]
+# ........  ........  ....................  ...................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    96.51%  fp-bench  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+            |--94.33%--<fp_columnar::Column>::abs
+            |          |          
+            |          |--51.64%--{closure#1} (inlined)
+            |          |          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+            |          |          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+            |          |          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+            |          |          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+            |          |          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          |          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+            |          |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+            |          |          abs (inlined)
+            |          |          0x4
+            |          |          
+            |          |--31.23%--{closure#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          |          {closure#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+            |          |          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+            |          |          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+            |          |          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+            |          |          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+            |          |          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          |          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+            |          |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+            |          |          abs (inlined)
+            |          |          0x7fffffffffffffff
+            |          |          
+            |           --11.46%--fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+            |                     fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+            |                     for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+            |                     extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |                     spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+            |                     from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |                     from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |                     from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |                     collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+            |                     abs (inlined)
+            |                     0x7fffffffffffffff
+            |          
+            |--1.98%--write<f64> (inlined)
+            |          {closure#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          {closure#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+            |          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+            |          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+            |          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+            |          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+            |          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+            |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+            |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+            |          abs (inlined)
+            |          0x7fffffffffffffff
+            |          
+             --0.20%--abs (inlined)
+                       {closure#1} (inlined)
+                       {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                       fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                       fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                       for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                       extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                       from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                       abs (inlined)
+
+     0.36%  :3827525  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+             --0.34%--<fp_columnar::Column>::abs
+                       |          
+                       |--0.20%--{closure#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       |          {closure#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                       |          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                       |          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                       |          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                       |          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                       |          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       |          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                       |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                       |          abs (inlined)
+                       |          0x7fffffffffffffff
+                       |          
+                        --0.14%--{closure#1} (inlined)
+                                  {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                                  fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                                  fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                                  for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                                  extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                                  abs (inlined)
+                                  0x4
+
+     0.35%  :3827530  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---<fp_columnar::Column>::abs
+               |          
+               |--0.22%--{closure#1} (inlined)
+               |          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+               |          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+               |          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+               |          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+               |          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+               |          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+               |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+               |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+               |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+               |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+               |          abs (inlined)
+               |          0x4
+               |          
+                --0.11%--{closure#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          {closure#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                          abs (inlined)
+                          0x7fffffffffffffff
+
+     0.34%  :3827529  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+             --0.34%--<fp_columnar::Column>::abs
+                       |          
+                       |--0.15%--{closure#1} (inlined)
+                       |          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                       |          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                       |          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                       |          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                       |          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       |          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                       |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                       |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                       |          abs (inlined)
+                       |          0x4
+                       |          
+                        --0.11%--{closure#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  {closure#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                                  {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                                  fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                                  fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                                  for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                                  extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                                  abs (inlined)
+                                  0x7fffffffffffffff
+
+     0.34%  :3827531  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---<fp_columnar::Column>::abs
+               |          
+                --0.24%--{closure#1} (inlined)
+                          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                          abs (inlined)
+                          0x4
+
+     0.33%  :3827532  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---<fp_columnar::Column>::abs
+               |          
+               |--0.16%--{closure#1} (inlined)
+               |          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+               |          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+               |          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+               |          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+               |          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+               |          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+               |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+               |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+               |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+               |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+               |          abs (inlined)
+               |          0x4
+               |          
+                --0.14%--{closure#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          {closure#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                          abs (inlined)
+                          0x7fffffffffffffff
+
+     0.31%  :3827523  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---<fp_columnar::Column>::abs
+               |          
+                --0.23%--{closure#1} (inlined)
+                          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                          abs (inlined)
+                          0x4
+
+     0.25%  :3827526  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+             --0.25%--<fp_columnar::Column>::abs
+
+     0.25%  :3827528  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+             --0.23%--<fp_columnar::Column>::abs
+                       |          
+                        --0.14%--{closure#1} (inlined)
+                                  {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                                  fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                                  fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                                  for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                                  extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                                  abs (inlined)
+                                  0x4
+
+     0.24%  :3827524  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+             --0.23%--<fp_columnar::Column>::abs
+                       |          
+                        --0.19%--{closure#1} (inlined)
+                                  {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                                  fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                                  fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                                  for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                                  extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                                  collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                                  abs (inlined)
+                                  0x4
+
+     0.16%  :3827527  fp-bench              [.] <fp_columnar::Column>::abs                                                                                                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---<fp_columnar::Column>::abs
+               |          
+                --0.10%--{closure#1} (inlined)
+                          {closure#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          fold<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<&f64, f64, (), fp_columnar::{impl#29}::abs::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>>> (inlined)
+                          fold<f64, core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>>> (inlined)
+                          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>>> (inlined)
+                          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::alloc::Global> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>> (inlined)
+                          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<f64>, fp_columnar::{impl#29}::abs::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+                          abs (inlined)
+                          0x4
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

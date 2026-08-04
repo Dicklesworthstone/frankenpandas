@@ -1,0 +1,48 @@
+br-frankenpandas-yiqv5 — Deferred null-introducing Utf8 gather (lazy join value lanes)
+======================================================================================
+
+LEVER (one): reindex_by_positions' all-valid-Eager Utf8 null path now returns a
+new LazyGatherUtf8 backing instead of eagerly gathering bytes. It shares the
+source Scalar Arc (O(1), post-cfr08 Eager is Arc<[Scalar]>) and captures only
+the position plan (usize::MAX == missing) + an eagerly-built validity bitset
+(O(output) bits, cheap). The gathered string Scalars materialize once on demand
+— so a null-introducing string join whose value lanes are only counted
+(index/shape consulted, bytes never read) skips the O(output) byte memmove +
+per-column buffer alloc/offsets/drop entirely. Mirrors the inner-join lazy-lane
+win (ddb4c8e9) for the cmxjz Utf8 gather path. Contiguous / nullable sources
+keep the existing eager cmxjz path; non-Utf8 keep their typed fast paths.
+
+WHY str_outer was neutral after cfr08: both sides null-introduce, so all 12 Utf8
+value lanes gather through reindex_by_positions' null path (cmxjz) — that is NOT
+the kept-lane clone cfr08 fixed; it is the byte materialization, now deferred.
+
+BENCH (perf_profile, release-perf, n=100000, 100 iters/run, ms/iter, min-of-5):
+  str_outer_join: baseline 41.657 -> after 15.462  = 2.70x
+  str_left_join : baseline  7.635 -> after  3.134  = 2.43x further
+                  (vs pre-cfr08 baseline 24.406 = 7.79x total)
+  str_inner_join: unaffected (inner = all-present -> take_positions, not the null path)
+  inner_join    : unaffected (i64 typed lanes)
+
+SCORE: str_outer 2.70x and str_left 2.43x both >= 2.0 PASS.
+
+ISOMORPHISM:
+  - Materialized values byte-identical to the eager cmxjz gather: present slot ==
+    source[pos].clone(); missing slot == Scalar::Null(NullKind::Null) ==
+    missing_for_dtype(Utf8) (same as the LazyNullableUtf8 sibling + Scalar fallback).
+  - Validity mask built eagerly, bit set iff position present and in range —
+    identical to the cmxjz `words` mask.
+  - Ordering preserved: positions consumed in output order; no reordering.
+  - Gated on all-valid (self.validity.all()) Eager source, so every present
+    position is a real Utf8 string and its bit is correctly set.
+  - Golden sha256 (perf_profile golden n=5000) UNCHANGED before/after:
+      str_left_join  995b9ca366dacc4d808be3f5b99d027fd0b7d8f6adffd2ff9f91a43e92628006
+      str_outer_join 72546ef6396c90dd2a9a33b8da723079a5db22d449a7607ded73287b9818741c
+      inner_join     be7d17114e5a2a88607bdc65228751789e208ebbd9ac2f5d0c616cdf64e641f1
+
+GATES (rch, crate-scoped):
+  cargo check  -p fp-columnar: OK
+  cargo clippy -p fp-columnar: clean
+  cargo test   -p fp-columnar: 386 passed
+  cargo test   -p fp-join    : 113 passed
+  cargo test   -p fp-frame + fp-conformance: 4877 passed, 0 failed
+  cargo test   -p fp-groupby : 71 passed

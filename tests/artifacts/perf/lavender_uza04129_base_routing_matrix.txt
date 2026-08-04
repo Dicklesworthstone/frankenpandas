@@ -1,0 +1,2 @@
+2026-06-14T05:58:12-04:00
+binary=/data/projects/.scratch/cargo-target-lavender-fp-current/release-perf/examples/perf_profile

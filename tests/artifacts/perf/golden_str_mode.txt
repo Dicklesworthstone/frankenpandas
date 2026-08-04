@@ -1,0 +1,6 @@
+Series.mode string byte-span FxHash tally (vcstr) — completes the string dedup/tally family
+Golden bit-identical: str_mode sha256 c1d13d56719c823c before==after.
+A/B min-of-5 @200k (card 1000): 7.294 -> 2.817 ms/iter = 2.59x.
+Tests: fp-frame 2830 (incl 37 mode) green.
+Lever: mode on all-valid contiguous-Utf8 tallies raw &[u8] spans with FxHash; max-count filter + sort
+unchanged (tally order irrelevant => bit-identical). all-valid => dropna moot. No Scalar materialize / ScalarKey / SipHash.

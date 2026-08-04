@@ -1,0 +1,11 @@
+Benchmark 1: ./.rch-target-lavenderstone-panel-after/release-perf/examples/perf_profile df_dot 100000 6
+  Time (mean ± σ):     740.8 ms ±  15.3 ms    [User: 17983.3 ms, System: 687.8 ms]
+  Range (min … max):   707.5 ms … 756.7 ms    8 runs
+
+Benchmark 2: ./.rch-target-lavenderstone-panel-base/release-perf/examples/perf_profile df_dot 100000 6
+  Time (mean ± σ):     964.8 ms ±  17.4 ms    [User: 17490.9 ms, System: 3532.7 ms]
+  Range (min … max):   937.1 ms … 988.3 ms    8 runs
+
+Summary
+  ./.rch-target-lavenderstone-panel-after/release-perf/examples/perf_profile df_dot 100000 6 ran
+    1.30 ± 0.04 times faster than ./.rch-target-lavenderstone-panel-base/release-perf/examples/perf_profile df_dot 100000 6

@@ -1,0 +1,89 @@
+--- a/crates/fp-index/src/lib.rs
++++ b/crates/fp-index/src/lib.rs
+@@ -216,6 +216,42 @@
+     }
+ }
+ 
++/// Hand-rolled decimal itoa straight into a byte buffer, bit-identical to
++/// `v.to_string()` (and therefore to `write!(buf, "{v}")`) for every `i64`.
++/// Mirrored from `fp-columnar`'s proven `push_i64_decimal`; `fp-index` depends
++/// only on `fp-types`, so it cannot reuse that one directly.
++#[inline]
++fn push_i64_decimal(buf: &mut Vec<u8>, v: i64) {
++    const LUT: &[u8; 200] = b"0001020304050607080910111213141516171819\
++20212223242526272829303132333435363738394041424344454647484950515253545556575859\
++60616263646566676869707172737475767778798081828384858687888990919293949596979899";
++    let mut n: u64 = if v < 0 {
++        buf.push(b'-');
++        v.unsigned_abs()
++    } else {
++        v as u64
++    };
++    let mut tmp = [0u8; 20];
++    let mut i = 20usize;
++    while n >= 100 {
++        let r = (n % 100) as usize * 2;
++        n /= 100;
++        i -= 2;
++        tmp[i] = LUT[r];
++        tmp[i + 1] = LUT[r + 1];
++    }
++    if n >= 10 {
++        let r = (n as usize) * 2;
++        i -= 2;
++        tmp[i] = LUT[r];
++        tmp[i + 1] = LUT[r + 1];
++    } else {
++        i -= 1;
++        tmp[i] = b'0' + n as u8;
++    }
++    buf.extend_from_slice(&tmp[i..]);
++}
++
+ impl fmt::Display for IndexLabel {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         match self {
+@@ -18704,19 +18740,39 @@
+         // / unstack / set_index_multi; CPU-bound per-thread-buffer parallelism scales
+         // even on a loaded box (no shared-allocator/bandwidth contention).
+         let levels = &self.levels;
++        // The per-level `write!(buf, "{}", level[i])` above was the LAST piece of
++        // `core::fmt` left inside this already-parallel, already-contiguous build:
++        // an `IndexLabel` Display + `Formatter::pad` dispatch per LEVEL per ROW,
++        // and this loop does no other work. Dispatch straight off the variant
++        // instead. BIT-IDENTICAL by construction against `impl Display for
++        // IndexLabel`: `Int64(v) => write!(f, "{v}")` is plain decimal, which is
++        // exactly `push_i64_decimal`; `Utf8(v) => write!(f, "{v}")` is exactly the
++        // string's bytes. Every other variant (Float64 "%.1f"-style ".0" fixup,
++        // Bool "True"/"False", Null, temporal) keeps the verbatim Display path
++        // through a REUSED scratch String, which also drops that variant's per-row
++        // allocation. Same bytes, same offsets, same order.
+         let build = |lo: usize, hi: usize| -> (Vec<u8>, Vec<usize>) {
+-            let mut buf = String::new();
++            let mut buf: Vec<u8> = Vec::new();
+             let mut offs: Vec<usize> = Vec::with_capacity(hi - lo);
++            let mut scratch = String::new();
+             for i in lo..hi {
+                 for (li, level) in levels.iter().enumerate() {
+                     if li > 0 {
+-                        buf.push_str(sep);
++                        buf.extend_from_slice(sep.as_bytes());
++                    }
++                    match &level[i] {
++                        IndexLabel::Int64(v) => push_i64_decimal(&mut buf, *v),
++                        IndexLabel::Utf8(s) => buf.extend_from_slice(s.as_bytes()),
++                        other => {
++                            scratch.clear();
++                            let _ = write!(scratch, "{other}");
++                            buf.extend_from_slice(scratch.as_bytes());
++                        }
+                     }
+-                    let _ = write!(buf, "{}", level[i]);
+                 }
+                 offs.push(buf.len());
+             }
+-            (buf.into_bytes(), offs)
++            (buf, offs)
+         };
+         const FLATIDX_PAR_MIN_ROWS: usize = 50_000;
+         const FLATIDX_PAR_MIN_PER_WORKER: usize = 16_384;

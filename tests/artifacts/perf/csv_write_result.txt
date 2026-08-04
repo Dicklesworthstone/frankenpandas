@@ -1,0 +1,17 @@
+br-frankenpandas-qk2i9 — all-numeric to_csv fast path
+
+Byte-identity (golden): write_csv_string output FNV-1a-64 UNCHANGED before/after:
+  small (20x6): 690ef22569464a84 (len 768)
+  big (500000x6): 54eeed96e3829bd3 (len 20611060)
+Same-binary A/B (env-gated general path vs fast), 500000x6 numeric frame, min of 5:
+  baseline (general csv path): 282.9 ms/iter
+  fast (typed slices + write_pandas_float into buffer): 151.2 ms/iter
+  = 1.87x.
+Validation: fp-io csv tests 123 passed / 0 failed.
+Lever: skip per-column Vec<Scalar> materialization (OnceLock) + per-cell String +
+Vec<String> row + csv-crate quoting/record machinery for all-valid Int64/Float64
+frames; read as_f64_slice/as_i64_slice and format with the SAME formatter
+(write_pandas_float = Python str(float), Int64 Display) straight into the output.
+Numeric fields never need CSV quoting; gated off when index/non-numeric/quote-y
+names. Floats use {:?} (keeps ".0", sci at Python boundaries) so the faster
+formatter stays byte-identical (ryu would diverge).

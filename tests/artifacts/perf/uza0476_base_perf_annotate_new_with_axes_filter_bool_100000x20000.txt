@@ -1,0 +1,2008 @@
+ Percent |	Source code & Disassembly of perf_profile for cycles:P (1 samples, percent: local period)
+---------------------------------------------------------------------------------------------------------
+         :
+         :
+         :
+         : 3      Disassembly of section .text:
+         :
+         : 5      000000000028d450 <<fp_frame::DataFrame>::new_with_axes>:
+         : 6      } else {
+         : 7      labels.iter().map(index_label_to_scalar).collect()
+         : 8      }
+         : 9      }
+         :
+         : 11     fn new_with_axes(
+    0.00 :   28d450: push   %rbp
+    0.00 :   28d451: mov    %rsp,%rbp
+    0.00 :   28d454: push   %r15
+    0.00 :   28d456: push   %r14
+    0.00 :   28d458: push   %r13
+    0.00 :   28d45a: push   %r12
+    0.00 :   28d45c: push   %rbx
+    0.00 :   28d45d: sub    $0x408,%rsp
+    0.00 :   28d464: mov    %r9,-0x80(%rbp)
+    0.00 :   28d468: mov    %r8,-0x30(%rbp)
+    0.00 :   28d46c: mov    %rdx,%r13
+    0.00 :   28d46f: mov    %rdi,-0x90(%rbp)
+         : 24     /// let (first_key, first_value) = map.iter().next().unwrap();
+         : 25     /// assert_eq!((*first_key, *first_value), (1, "a"));
+         : 26     /// ```
+         : 27     #[stable(feature = "rust1", since = "1.0.0")]
+         : 28     pub fn iter(&self) -> Iter<'_, K, V> {
+         : 29     if let Some(root) = &self.root {
+    0.00 :   28d476: mov    (%rcx),%rax
+    0.00 :   28d479: mov    0x8(%rcx),%rbx
+    0.00 :   28d47d: test   %rax,%rax
+    0.00 :   28d480: setne  %dil
+    0.00 :   28d484: mov    %rcx,-0x78(%rbp)
+    0.00 :   28d488: mov    0x10(%rcx),%r14
+    0.00 :   28d48c: mov    %r14,-0x100(%rbp)
+         : 37     for column in columns.values() {
+    0.00 :   28d493: cmove  %rax,%r14
+    0.00 :   28d497: mov    %rsi,-0x40(%rbp)
+    0.00 :   28d49b: lea    0x38(%rsi),%rcx
+    0.00 :   28d49f: mov    %rcx,-0x38(%rbp)
+    0.00 :   28d4a3: xor    %r12d,%r12d
+    0.00 :   28d4a6: mov    %r14,-0xa0(%rbp)
+    0.00 :   28d4ad: mov    %rax,-0x58(%rbp)
+    0.00 :   28d4b1: mov    %rbx,-0xa8(%rbp)
+    0.00 :   28d4b8: mov    %rdx,-0x50(%rbp)
+    0.00 :   28d4bc: jmp    28d4d9 <<fp_frame::DataFrame>::new_with_axes+0x89>
+    0.00 :   28d4be: xchg   %ax,%ax
+         : 49     })
+         : 50     .as_slice()
+         : 51     }
+         :
+         : 53     fn len(&self) -> usize {
+         : 54     if let Some(range) = self.int64_unit_range {
+    0.00 :   28d4c0: mov    0x10(%rcx),%rdx
+    0.00 :   28d4c4: mov    $0x1,%dil
+    0.00 :   28d4c7: mov    $0x0,%eax
+         : 58     if column.len() != index.len() {
+    0.00 :   28d4cc: cmp    %rdx,%r13
+    0.00 :   28d4cf: mov    -0x50(%rbp),%r13
+    0.00 :   28d4d3: jne    28d76a <<fp_frame::DataFrame>::new_with_axes+0x31a>
+         : 62     if self.length == 0 {
+    0.00 :   28d4d9: sub    $0x1,%r14
+    0.00 :   28d4dd: jb     28d733 <<fp_frame::DataFrame>::new_with_axes+0x2e3>
+         :
+         : 66     impl<BorrowType: marker::BorrowType, K, V> LazyLeafRange<BorrowType, K, V> {
+         : 67     fn init_front(
+         : 68     &mut self,
+         : 69     ) -> Option<&mut Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>> {
+         : 70     if let Some(LazyLeafHandle::Root(root)) = &self.front {
+    0.00 :   28d4e3: test   $0x1,%dil
+    0.00 :   28d4e7: je     28ea95 <<fp_frame::DataFrame>::new_with_axes+0x1645>
+    0.00 :   28d4ed: test   %r12,%r12
+    0.00 :   28d4f0: je     28d510 <<fp_frame::DataFrame>::new_with_axes+0xc0>
+         : 75     /// Note that, despite being safe, calling this function can have the side effect
+         : 76     /// of invalidating mutable references that unsafe code has created.
+         : 77     pub(super) fn len(&self) -> usize {
+         : 78     // Crucially, we only access the `len` field here. If BorrowType is marker::ValMut,
+         : 79     // there might be outstanding mutable references to values that we must not invalidate.
+         : 80     unsafe { usize::from((*Self::as_leaf_ptr(self)).len) }
+    0.00 :   28d4f2: movzwl 0xb0a(%r12),%ecx
+         : 82     }
+         :
+         : 84     pub(super) fn right_kv(
+         : 85     self,
+         : 86     ) -> Result<Handle<NodeRef<BorrowType, K, V, NodeType>, marker::KV>, Self> {
+         : 87     if self.idx < self.node.len() {
+    0.00 :   28d4fb: cmp    %rcx,%rbx
+    0.00 :   28d4fe: jae    28d5c0 <<fp_frame::DataFrame>::new_with_axes+0x170>
+    0.00 :   28d504: mov    %r12,%rcx
+    0.00 :   28d507: mov    %rbx,%rdx
+    0.00 :   28d50a: jmp    28d5e5 <<fp_frame::DataFrame>::new_with_axes+0x195>
+    0.00 :   28d50f: nop
+         : 94     if self.height == 0 {
+    0.00 :   28d510: test   %rbx,%rbx
+    0.00 :   28d513: je     28d54e <<fp_frame::DataFrame>::new_with_axes+0xfe>
+    0.00 :   28d515: mov    %rbx,%rcx
+    0.00 :   28d518: mov    %rax,%r12
+    0.00 :   28d51b: and    $0x7,%rcx
+    0.00 :   28d51f: je     28d553 <<fp_frame::DataFrame>::new_with_axes+0x103>
+    0.00 :   28d521: xor    %edx,%edx
+    0.00 :   28d523: data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+         : 103    self.front = Some(LazyLeafHandle::Edge(unsafe { ptr::read(root) }.first_leaf_edge()));
+    0.00 :   28d530: mov    0xb10(%r12),%r12
+    0.00 :   28d538: inc    %rdx
+    0.00 :   28d53b: cmp    %rdx,%rcx
+    0.00 :   28d53e: jne    28d530 <<fp_frame::DataFrame>::new_with_axes+0xe0>
+    0.00 :   28d540: mov    %rbx,%rax
+    0.00 :   28d543: sub    %rdx,%rax
+    0.00 :   28d546: cmp    $0x8,%rbx
+    0.00 :   28d54a: jae    28d560 <<fp_frame::DataFrame>::new_with_axes+0x110>
+    0.00 :   28d54c: jmp    28d59f <<fp_frame::DataFrame>::new_with_axes+0x14f>
+    0.00 :   28d54e: mov    %rax,%r12
+    0.00 :   28d551: jmp    28d59f <<fp_frame::DataFrame>::new_with_axes+0x14f>
+    0.00 :   28d553: mov    %rbx,%rax
+    0.00 :   28d556: cmp    $0x8,%rbx
+    0.00 :   28d55a: jb     28d59f <<fp_frame::DataFrame>::new_with_axes+0x14f>
+    0.00 :   28d55c: nopl   0x0(%rax)
+    0.00 :   28d560: mov    0xb10(%r12),%rcx
+    0.00 :   28d568: mov    0xb10(%rcx),%rcx
+    0.00 :   28d56f: mov    0xb10(%rcx),%rcx
+    0.00 :   28d576: mov    0xb10(%rcx),%rcx
+    0.00 :   28d57d: mov    0xb10(%rcx),%rcx
+    0.00 :   28d584: mov    0xb10(%rcx),%rcx
+    0.00 :   28d58b: mov    0xb10(%rcx),%rcx
+    0.00 :   28d592: mov    0xb10(%rcx),%r12
+    0.00 :   28d599: add    $0xfffffffffffffff8,%rax
+    0.00 :   28d59d: jne    28d560 <<fp_frame::DataFrame>::new_with_axes+0x110>
+    0.00 :   28d59f: xor    %eax,%eax
+    0.00 :   28d5a1: xor    %ebx,%ebx
+         : 131    unsafe { usize::from((*Self::as_leaf_ptr(self)).len) }
+    0.00 :   28d5a3: movzwl 0xb0a(%r12),%ecx
+         : 133    if self.idx < self.node.len() {
+    0.00 :   28d5ac: cmp    %rcx,%rbx
+    0.00 :   28d5af: jb     28d504 <<fp_frame::DataFrame>::new_with_axes+0xb4>
+    0.00 :   28d5b5: data16 cs nopw 0x0(%rax,%rax,1)
+         : 137    unsafe { (*leaf_ptr).parent }
+    0.00 :   28d5c0: mov    (%r12),%rcx
+         : 139    /// ```
+         : 140    #[inline]
+         : 141    #[rustc_const_stable(feature = "const_option_basics", since = "1.48.0")]
+         : 142    #[stable(feature = "rust1", since = "1.0.0")]
+         : 143    pub const fn as_ref(&self) -> Option<&T> {
+         : 144    match *self {
+    0.00 :   28d5c4: test   %rcx,%rcx
+    0.00 :   28d5c7: je     28ea65 <<fp_frame::DataFrame>::new_with_axes+0x1615>
+         : 147    node: NodeRef::from_internal(*parent, self.height + 1),
+    0.00 :   28d5cd: inc    %rax
+         : 149    idx: unsafe { usize::from((*leaf_ptr).parent_idx.assume_init()) },
+    0.00 :   28d5d0: movzwl 0xb08(%r12),%edx
+    0.00 :   28d5d9: mov    %rcx,%r12
+         : 152    if self.idx < self.node.len() {
+    0.00 :   28d5dc: cmp    0xb0a(%rcx),%dx
+    0.00 :   28d5e3: jae    28d5c0 <<fp_frame::DataFrame>::new_with_axes+0x170>
+         : 155    if self.height == 0 {
+    0.00 :   28d5e5: test   %rax,%rax
+    0.00 :   28d5e8: je     28d680 <<fp_frame::DataFrame>::new_with_axes+0x230>
+         : 158    // so the call to `add` is safe.
+         : 159    unsafe {
+         : 160    // Use intrinsics::assume instead of hint::assert_unchecked so that we don't check the
+         : 161    // precondition of this function twice.
+         : 162    crate::intrinsics::assume(self < slice.len());
+         : 163    slice_get_unchecked(slice, self)
+    0.00 :   28d5ee: lea    (%rcx,%rdx,8),%rsi
+    0.00 :   28d5f2: add    $0xb18,%rsi
+         : 166    #[inline]
+         : 167    pub(super) fn first_leaf_edge(
+         : 168    self,
+         : 169    ) -> Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> {
+         : 170    let mut node = self;
+         : 171    loop {
+    0.00 :   28d5f9: mov    %rax,%rdi
+    0.00 :   28d5fc: and    $0x7,%rdi
+    0.00 :   28d600: je     28d6d0 <<fp_frame::DataFrame>::new_with_axes+0x280>
+    0.00 :   28d606: xor    %r8d,%r8d
+    0.00 :   28d609: nopl   0x0(%rax)
+         : 177    ) -> Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> {
+         : 178    match self.force() {
+         : 179    Leaf(leaf_kv) => leaf_kv.right_edge(),
+         : 180    Internal(internal_kv) => {
+         : 181    let next_internal_edge = internal_kv.right_edge();
+         : 182    next_internal_edge.descend().first_leaf_edge()
+    0.00 :   28d610: mov    (%rsi),%r12
+         : 184    // height field because that value is copied. Beware that, once the
+         : 185    // node pointer is dereferenced, we access the edges array with a
+         : 186    // reference (Rust issue #73987) and invalidate any other references
+         : 187    // to or inside the array, should any be around.
+         : 188    let parent_ptr = NodeRef::as_internal_ptr(&self.node);
+         : 189    let node = unsafe { (*parent_ptr).edges.get_unchecked(self.idx).assume_init_read() };
+    0.00 :   28d613: lea    0xb10(%r12),%rsi
+         : 191    if self.height == 0 {
+    0.00 :   28d61b: inc    %r8
+    0.00 :   28d61e: cmp    %r8,%rdi
+    0.00 :   28d621: jne    28d610 <<fp_frame::DataFrame>::new_with_axes+0x1c0>
+         : 195    loop {
+    0.00 :   28d623: mov    %rax,%rdi
+    0.00 :   28d626: sub    %r8,%rdi
+    0.00 :   28d629: cmp    $0x8,%rax
+    0.00 :   28d62d: jb     28d672 <<fp_frame::DataFrame>::new_with_axes+0x222>
+    0.00 :   28d62f: nop
+         : 201    next_internal_edge.descend().first_leaf_edge()
+    0.00 :   28d630: mov    (%rsi),%rax
+    0.00 :   28d633: mov    0xb10(%rax),%rax
+    0.00 :   28d63a: mov    0xb10(%rax),%rax
+    0.00 :   28d641: mov    0xb10(%rax),%rax
+    0.00 :   28d648: mov    0xb10(%rax),%rax
+    0.00 :   28d64f: mov    0xb10(%rax),%rax
+    0.00 :   28d656: mov    0xb10(%rax),%rax
+    0.00 :   28d65d: mov    0xb10(%rax),%r12
+         : 210    let node = unsafe { (*parent_ptr).edges.get_unchecked(self.idx).assume_init_read() };
+    0.00 :   28d664: lea    0xb10(%r12),%rsi
+         : 212    if self.height == 0 {
+    0.00 :   28d66c: add    $0xfffffffffffffff8,%rdi
+    0.00 :   28d670: jne    28d630 <<fp_frame::DataFrame>::new_with_axes+0x1e0>
+    0.00 :   28d672: xor    %ebx,%ebx
+    0.00 :   28d674: jmp    28d687 <<fp_frame::DataFrame>::new_with_axes+0x237>
+    0.00 :   28d676: cs nopw 0x0(%rax,%rax,1)
+         : 218    unsafe { Handle::new_edge(self.node, self.idx + 1) }
+    0.00 :   28d680: lea    0x1(%rdx),%rbx
+    0.00 :   28d684: mov    %rcx,%r12
+    0.00 :   28d687: imul   $0xe8,%rdx,%rax
+         : 222    }
+         : 223    }
+         :
+         : 225    #[must_use]
+         : 226    pub fn len(&self) -> usize {
+         : 227    self.values.len()
+    0.00 :   28d68e: lea    (%rcx,%rax,1),%r15
+    0.00 :   28d692: add    $0x160,%r15
+    0.00 :   28d699: mov    %r15,%rdi
+    0.00 :   28d69c: call   2180e0 <<fp_columnar::ScalarValues>::len>
+    0.00 :   28d6a1: mov    %rax,%r13
+    0.00 :   28d6a4: mov    -0x40(%rbp),%rcx
+    0.00 :   28d6a8: cmpl   $0x1,(%rcx)
+    0.00 :   28d6ab: je     28d4c0 <<fp_frame::DataFrame>::new_with_axes+0x70>
+         : 236    return range.len;
+         : 237    }
+         : 238    if let Some(range) = self.int64_affine {
+    0.00 :   28d6b1: cmpl   $0x1,0x18(%rcx)
+    0.00 :   28d6b5: jne    28d6c0 <<fp_frame::DataFrame>::new_with_axes+0x270>
+    0.00 :   28d6b7: mov    0x30(%rcx),%rdx
+    0.00 :   28d6bb: jmp    28d4c4 <<fp_frame::DataFrame>::new_with_axes+0x74>
+         : 243    return range.len;
+         : 244    }
+         : 245    if let Some(strided) = &self.int64_strided {
+    0.00 :   28d6c0: cmpq   $0x0,0x48(%rcx)
+    0.00 :   28d6c5: je     28d6de <<fp_frame::DataFrame>::new_with_axes+0x28e>
+         : 248    return strided.len;
+    0.00 :   28d6c7: mov    0x60(%rcx),%rdx
+    0.00 :   28d6cb: jmp    28d4c4 <<fp_frame::DataFrame>::new_with_axes+0x74>
+    0.00 :   28d6d0: mov    %rax,%rdi
+         : 252    loop {
+    0.00 :   28d6d3: cmp    $0x8,%rax
+    0.00 :   28d6d7: jb     28d672 <<fp_frame::DataFrame>::new_with_axes+0x222>
+    0.00 :   28d6d9: jmp    28d630 <<fp_frame::DataFrame>::new_with_axes+0x1e0>
+         : 256    }
+         : 257    if let Some((_, offsets)) = &self.utf8_contiguous {
+    0.00 :   28d6de: cmpq   $0x0,0x78(%rcx)
+    0.00 :   28d6e3: je     28d6f4 <<fp_frame::DataFrame>::new_with_axes+0x2a4>
+         : 260    #[inline(always)]
+         : 261    pub const unsafe fn as_ref<'a>(&self) -> &'a T {
+         : 262    // SAFETY: the caller must guarantee that `self` meets all the
+         : 263    // requirements for a reference.
+         : 264    // `cast_const` avoids a mutable raw pointer deref.
+         : 265    unsafe { &*self.as_ptr().cast_const() }
+    0.00 :   28d6e5: mov    0x90(%rcx),%rdx
+         : 267    return offsets.len() - 1;
+    0.00 :   28d6ec: dec    %rdx
+    0.00 :   28d6ef: jmp    28d4c4 <<fp_frame::DataFrame>::new_with_axes+0x74>
+         : 270    unsafe fn atomic_load<T: Copy>(dst: *const T, order: Ordering) -> T {
+         : 271    // SAFETY: the caller must uphold the safety contract for `atomic_load`.
+         : 272    unsafe {
+         : 273    match order {
+         : 274    Relaxed => intrinsics::atomic_load::<T, { AO::Relaxed }>(dst),
+         : 275    Acquire => intrinsics::atomic_load::<T, { AO::Acquire }>(dst),
+    0.00 :   28d6f4: mov    0x40(%rcx),%eax
+         : 277    /// This method never blocks.
+         : 278    #[inline]
+         : 279    #[stable(feature = "once_cell", since = "1.70.0")]
+         : 280    #[rustc_should_not_be_called_on_const_items]
+         : 281    pub fn get(&self) -> Option<&T> {
+         : 282    if self.initialized() {
+    0.00 :   28d6f7: test   %eax,%eax
+    0.00 :   28d6f9: je     28d709 <<fp_frame::DataFrame>::new_with_axes+0x2b9>
+    0.00 :   28d6fb: mov    0x70(%rcx),%eax
+    0.00 :   28d6fe: test   %eax,%eax
+    0.00 :   28d700: je     28d719 <<fp_frame::DataFrame>::new_with_axes+0x2c9>
+    0.00 :   28d702: mov    0x40(%rcx),%eax
+    0.00 :   28d705: test   %eax,%eax
+    0.00 :   28d707: jne    28d724 <<fp_frame::DataFrame>::new_with_axes+0x2d4>
+    0.00 :   28d709: mov    -0x38(%rbp),%rax
+    0.00 :   28d70d: mov    (%rax),%rax
+    0.00 :   28d710: mov    0x20(%rax),%rdx
+    0.00 :   28d714: jmp    28d4c4 <<fp_frame::DataFrame>::new_with_axes+0x74>
+         : 295    }
+         : 296    if let Some(labels) = self.materialized.get() {
+         : 297    return labels.len();
+         : 298    }
+         : 299    if let Some(Some(values)) = self.int64_typed.get() {
+    0.00 :   28d719: mov    0x68(%rcx),%rax
+    0.00 :   28d71d: test   %rax,%rax
+    0.00 :   28d720: jne    28d710 <<fp_frame::DataFrame>::new_with_axes+0x2c0>
+    0.00 :   28d722: jmp    28d702 <<fp_frame::DataFrame>::new_with_axes+0x2b2>
+    0.00 :   28d724: mov    -0x38(%rbp),%rdi
+    0.00 :   28d728: mov    -0x40(%rbp),%rsi
+         : 306    // currently done by calling `self.get()`, which in turn calls
+         : 307    // `self.initialized()`, which in turn performs the acquire.
+         : 308    if let Some(value) = self.get() {
+         : 309    return Ok(value);
+         : 310    }
+         : 311    self.initialize(f)?;
+    0.00 :   28d72c: call   2f3f2f <<std::sync::once_lock::OnceLock<alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>>::get_or_init<<fp_index::IndexLabels>::as_slice::{closure#0}>::{closure#0}, !>>
+    0.00 :   28d731: jmp    28d709 <<fp_frame::DataFrame>::new_with_axes+0x2b9>
+    0.00 :   28d733: movabs $0x8000000000000000,%rax
+    0.00 :   28d73d: cmp    %rax,0x0(%r13)
+    0.00 :   28d741: je     28d882 <<fp_frame::DataFrame>::new_with_axes+0x432>
+         : 317    //   check ensures that it is not possible to mutably alias `self.buf` within the
+         : 318    //   returned lifetime.
+         : 319    unsafe {
+         : 320    // normally this would use `slice::from_raw_parts`, but it's
+         : 321    // instantiated often enough that avoiding the UB check is worth it
+         : 322    &*core::intrinsics::aggregate_raw_ptr::<*const [T], _, _>(self.as_ptr(), self.len)
+    0.00 :   28d747: mov    0x10(%r13),%rbx
+         : 324    #[stable(feature = "rust1", since = "1.0.0")]
+         : 325    #[rustc_const_stable(feature = "const_slice_first_last_not_mut", since = "1.56.0")]
+         : 326    #[inline]
+         : 327    #[must_use]
+         : 328    pub const fn first(&self) -> Option<&T> {
+         : 329    if let [first, ..] = self { Some(first) } else { None }
+    0.00 :   28d74b: test   %rbx,%rbx
+         : 331    pub const fn map_or<U, F>(self, default: U, f: F) -> U
+         : 332    where
+         : 333    F: [const] FnOnce(T) -> U + [const] Destruct,
+         : 334    U: [const] Destruct,
+         : 335    {
+         : 336    match self {
+    0.00 :   28d74e: je     28d79b <<fp_frame::DataFrame>::new_with_axes+0x34b>
+    0.00 :   28d750: mov    0x8(%r13),%rax
+         : 339    Some(t) => f(t),
+    0.00 :   28d754: mov    0x10(%rax),%r14
+    0.00 :   28d758: mov    -0x40(%rbp),%rdi
+         : 342    if let Some(range) = self.int64_unit_range {
+    0.00 :   28d75c: cmpl   $0x1,(%rdi)
+    0.00 :   28d75f: jne    28d7a7 <<fp_frame::DataFrame>::new_with_axes+0x357>
+    0.00 :   28d761: mov    0x10(%rdi),%rdx
+    0.00 :   28d765: jmp    28d879 <<fp_frame::DataFrame>::new_with_axes+0x429>
+    0.00 :   28d76a: mov    -0x40(%rbp),%rdi
+    0.00 :   28d76e: cmpl   $0x1,(%rdi)
+    0.00 :   28d771: jne    28d77c <<fp_frame::DataFrame>::new_with_axes+0x32c>
+    0.00 :   28d773: mov    0x10(%rdi),%r14
+    0.00 :   28d777: jmp    28d834 <<fp_frame::DataFrame>::new_with_axes+0x3e4>
+         : 352    if let Some(range) = self.int64_affine {
+    0.00 :   28d77c: cmpl   $0x1,0x18(%rdi)
+    0.00 :   28d780: jne    28d78b <<fp_frame::DataFrame>::new_with_axes+0x33b>
+    0.00 :   28d782: mov    0x30(%rdi),%r14
+    0.00 :   28d786: jmp    28d834 <<fp_frame::DataFrame>::new_with_axes+0x3e4>
+         : 357    if let Some(strided) = &self.int64_strided {
+    0.00 :   28d78b: cmpq   $0x0,0x48(%rdi)
+    0.00 :   28d790: je     28d7c6 <<fp_frame::DataFrame>::new_with_axes+0x376>
+         : 360    return strided.len;
+    0.00 :   28d792: mov    0x60(%rdi),%r14
+    0.00 :   28d796: jmp    28d834 <<fp_frame::DataFrame>::new_with_axes+0x3e4>
+    0.00 :   28d79b: xor    %r14d,%r14d
+    0.00 :   28d79e: mov    -0x40(%rbp),%rdi
+         : 365    if let Some(range) = self.int64_unit_range {
+    0.00 :   28d7a2: cmpl   $0x1,(%rdi)
+    0.00 :   28d7a5: je     28d761 <<fp_frame::DataFrame>::new_with_axes+0x311>
+         : 368    if let Some(range) = self.int64_affine {
+    0.00 :   28d7a7: cmpl   $0x1,0x18(%rdi)
+    0.00 :   28d7ab: jne    28d7b6 <<fp_frame::DataFrame>::new_with_axes+0x366>
+    0.00 :   28d7ad: mov    0x30(%rdi),%rdx
+    0.00 :   28d7b1: jmp    28d879 <<fp_frame::DataFrame>::new_with_axes+0x429>
+         : 373    if let Some(strided) = &self.int64_strided {
+    0.00 :   28d7b6: cmpq   $0x0,0x48(%rdi)
+    0.00 :   28d7bb: je     28d7d9 <<fp_frame::DataFrame>::new_with_axes+0x389>
+         : 376    return strided.len;
+    0.00 :   28d7bd: mov    0x60(%rdi),%rdx
+    0.00 :   28d7c1: jmp    28d879 <<fp_frame::DataFrame>::new_with_axes+0x429>
+         : 379    if let Some((_, offsets)) = &self.utf8_contiguous {
+    0.00 :   28d7c6: cmpq   $0x0,0x78(%rdi)
+    0.00 :   28d7cb: je     28d7ef <<fp_frame::DataFrame>::new_with_axes+0x39f>
+    0.00 :   28d7cd: mov    0x90(%rdi),%r14
+         : 383    return offsets.len() - 1;
+    0.00 :   28d7d4: dec    %r14
+    0.00 :   28d7d7: jmp    28d834 <<fp_frame::DataFrame>::new_with_axes+0x3e4>
+         : 386    if let Some((_, offsets)) = &self.utf8_contiguous {
+    0.00 :   28d7d9: cmpq   $0x0,0x78(%rdi)
+    0.00 :   28d7de: je     28d808 <<fp_frame::DataFrame>::new_with_axes+0x3b8>
+    0.00 :   28d7e0: mov    0x90(%rdi),%rdx
+         : 390    return offsets.len() - 1;
+    0.00 :   28d7e7: dec    %rdx
+    0.00 :   28d7ea: jmp    28d879 <<fp_frame::DataFrame>::new_with_axes+0x429>
+    0.00 :   28d7ef: mov    0x40(%rdi),%eax
+         : 394    if self.initialized() {
+    0.00 :   28d7f2: test   %eax,%eax
+    0.00 :   28d7f4: je     28d81e <<fp_frame::DataFrame>::new_with_axes+0x3ce>
+    0.00 :   28d7f6: mov    0x70(%rdi),%eax
+    0.00 :   28d7f9: test   %eax,%eax
+    0.00 :   28d7fb: je     28d827 <<fp_frame::DataFrame>::new_with_axes+0x3d7>
+         : 400    return values.len();
+         : 401    }
+         : 402    self.as_slice().len()
+    0.00 :   28d7fd: call   *0x32c385(%rip)        # 5b9b88 <_DYNAMIC+0xc50>
+    0.00 :   28d803: mov    %rdx,%r14
+    0.00 :   28d806: jmp    28d834 <<fp_frame::DataFrame>::new_with_axes+0x3e4>
+    0.00 :   28d808: mov    0x40(%rdi),%eax
+    0.00 :   28d80b: test   %eax,%eax
+    0.00 :   28d80d: je     28d863 <<fp_frame::DataFrame>::new_with_axes+0x413>
+    0.00 :   28d80f: mov    0x70(%rdi),%eax
+    0.00 :   28d812: test   %eax,%eax
+    0.00 :   28d814: je     28d86c <<fp_frame::DataFrame>::new_with_axes+0x41c>
+    0.00 :   28d816: call   *0x32c36c(%rip)        # 5b9b88 <_DYNAMIC+0xc50>
+    0.00 :   28d81c: jmp    28d879 <<fp_frame::DataFrame>::new_with_axes+0x429>
+    0.00 :   28d81e: mov    -0x38(%rbp),%rax
+    0.00 :   28d822: mov    (%rax),%rax
+         : 416    #[inline]
+         : 417    #[stable(feature = "rust1", since = "1.0.0")]
+         : 418    #[rustc_const_stable(feature = "const_vec_string_slice", since = "1.87.0")]
+         : 419    #[rustc_confusables("length", "size")]
+         : 420    pub const fn len(&self) -> usize {
+         : 421    let len = self.len;
+    0.00 :   28d825: jmp    28d830 <<fp_frame::DataFrame>::new_with_axes+0x3e0>
+         : 423    if let Some(Some(values)) = self.int64_typed.get() {
+    0.00 :   28d827: mov    0x68(%rdi),%rax
+    0.00 :   28d82b: test   %rax,%rax
+    0.00 :   28d82e: je     28d7fd <<fp_frame::DataFrame>::new_with_axes+0x3ad>
+    0.00 :   28d830: mov    0x20(%rax),%r14
+    0.00 :   28d834: mov    %r15,%rdi
+    0.00 :   28d837: call   2180e0 <<fp_columnar::ScalarValues>::len>
+    0.00 :   28d83c: movabs $0x8000000000000000,%rdx
+         : 431    {
+         : 432    #[inline]
+         : 433    #[track_caller]
+         : 434    fn from_residual(residual: Result<convert::Infallible, E>) -> Self {
+         : 435    match residual {
+         : 436    Err(e) => Err(From::from(e)),
+    0.00 :   28d846: lea    0x10(%rdx),%rcx
+    0.00 :   28d84a: mov    -0x90(%rbp),%rsi
+    0.00 :   28d851: mov    %rcx,0x8(%rsi)
+    0.00 :   28d855: mov    %r14,0x10(%rsi)
+    0.00 :   28d859: mov    $0x18,%ecx
+    0.00 :   28d85e: jmp    28e70b <<fp_frame::DataFrame>::new_with_axes+0x12bb>
+    0.00 :   28d863: mov    -0x38(%rbp),%rax
+    0.00 :   28d867: mov    (%rax),%rax
+    0.00 :   28d86a: jmp    28d875 <<fp_frame::DataFrame>::new_with_axes+0x425>
+    0.00 :   28d86c: mov    0x68(%rdi),%rax
+    0.00 :   28d870: test   %rax,%rax
+    0.00 :   28d873: je     28d816 <<fp_frame::DataFrame>::new_with_axes+0x3c6>
+    0.00 :   28d875: mov    0x20(%rax),%rdx
+         : 450    column_order: Vec<String>,
+         : 451    column_multiindex: Option<fp_index::MultiIndex>,
+         : 452    ) -> Result<Self, FrameError> {
+         : 453    Self::validate_column_lengths(&index, &columns)?;
+         : 454    if let Some(multiindex) = row_multiindex.as_ref()
+         : 455    && multiindex.len() != index.len()
+    0.00 :   28d879: cmp    %rdx,%r14
+    0.00 :   28d87c: jne    28dc82 <<fp_frame::DataFrame>::new_with_axes+0x832>
+    0.00 :   28d882: mov    -0x30(%rbp),%rcx
+         : 459    "row MultiIndex height {} does not match index length {}",
+         : 460    multiindex.len(),
+         : 461    index.len()
+         : 462    )));
+         : 463    }
+         : 464    let column_order = Self::normalize_column_order(&columns, column_order)?;
+    0.00 :   28d886: mov    (%rcx),%rax
+    0.00 :   28d889: mov    %rax,-0xf8(%rbp)
+    0.00 :   28d890: mov    0x8(%rcx),%rax
+    0.00 :   28d894: mov    %rax,-0x48(%rbp)
+    0.00 :   28d898: mov    0x10(%rcx),%r12
+         : 470    if column_order.is_empty() {
+    0.00 :   28d89c: test   %r12,%r12
+    0.00 :   28d89f: je     28dbcf <<fp_frame::DataFrame>::new_with_axes+0x77f>
+         : 473    |__rust_std_internal_init| {
+         : 474    #[thread_local]
+         : 475    $(#[$align_attr])*
+         : 476    static __RUST_STD_INTERNAL_VAL: $crate::thread::local_impl::LazyStorage<$t, !>
+         : 477    = $crate::thread::local_impl::LazyStorage::new();
+         : 478    __RUST_STD_INTERNAL_VAL.get_or_init(__rust_std_internal_init, __rust_std_internal_init_fn)
+    0.00 :   28d8a5: mov    $0xffffffffffffffd8,%rcx
+         : 480    ///
+         : 481    /// # Safety
+         : 482    /// The `self` reference must remain valid until the TLS destructor is run.
+         : 483    #[inline]
+         : 484    pub unsafe fn get_or_init(&self, i: Option<&mut Option<T>>, f: impl FnOnce() -> T) -> *const T {
+         : 485    if let State::Alive = self.state.get() {
+    0.00 :   28d8ac: cmpb   $0x1,%fs:0x10(%rcx)
+    0.00 :   28d8b1: jne    28ea77 <<fp_frame::DataFrame>::new_with_axes+0x1627>
+         : 488    #[rustc_const_stable(feature = "const_cell", since = "1.88.0")]
+         : 489    #[rustc_should_not_be_called_on_const_items]
+         : 490    pub const fn get(&self) -> T {
+         : 491    // SAFETY: This can cause data races if called from a separate thread,
+         : 492    // but `Cell` is `!Sync` so this won't happen.
+         : 493    unsafe { *self.value.get() }
+    0.00 :   28d8b7: mov    %fs:(%rcx),%rax
+    0.00 :   28d8bb: mov    %fs:0x8(%rcx),%r14
+    0.00 :   28d8c0: mov    %rax,%rbx
+         : 497    #[rustc_const_stable(feature = "const_wrapping_math", since = "1.32.0")]
+         : 498    #[must_use = "this returns the result of the operation, \
+         : 499    without modifying the original"]
+         : 500    #[inline(always)]
+         : 501    pub const fn wrapping_add(self, rhs: Self) -> Self {
+         : 502    intrinsics::wrapping_add(self, rhs)
+    0.00 :   28d8c3: inc    %rax
+         : 504    // `ptr` methods introduces two unnecessary UbChecks, so until we can
+         : 505    // remove those for pointers that come from references, this uses the
+         : 506    // intrinsics instead so this stays very cheap in MIR (and debug).
+         :
+         : 508    let result = crate::intrinsics::read_via_copy(dest);
+         : 509    crate::intrinsics::write_via_move(dest, src);
+    0.00 :   28d8c6: mov    %rax,%fs:(%rcx)
+    0.00 :   28d8ca: lea    -0x3b0(%rbp),%rdi
+    0.00 :   28d8d1: mov    $0x18,%esi
+    0.00 :   28d8d6: mov    %r12,%rdx
+    0.00 :   28d8d9: mov    $0x1,%ecx
+    0.00 :   28d8de: call   230a60 <<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>>
+    0.00 :   28d8e3: movdqu -0x3b0(%rbp),%xmm0
+    0.00 :   28d8eb: movdqu -0x3a0(%rbp),%xmm1
+    0.00 :   28d8f3: movdqa %xmm1,-0xe0(%rbp)
+    0.00 :   28d8fb: movdqa %xmm0,-0xf0(%rbp)
+         : 520    /// ```
+         : 521    #[inline]
+         : 522    #[must_use]
+         : 523    #[stable(feature = "hashmap_build_hasher", since = "1.7.0")]
+         : 524    pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> HashMap<K, V, S> {
+         : 525    HashMap { base: base::HashMap::with_capacity_and_hasher(capacity, hasher) }
+    0.00 :   28d903: mov    %rbx,-0xd0(%rbp)
+    0.00 :   28d90a: mov    %r14,-0xc8(%rbp)
+         : 528    size: usize = size_of::<T>(),
+         : 529    ) => runtime_add_nowrap(this, count, size)
+         : 530    );
+         :
+         : 532    // SAFETY: the caller must uphold the safety contract for `offset`.
+         : 533    unsafe { intrinsics::offset(self, count) }
+    0.00 :   28d911: lea    (%r12,%r12,2),%rax
+    0.00 :   28d915: mov    -0x48(%rbp),%r14
+    0.00 :   28d919: lea    (%r14,%rax,8),%rax
+    0.00 :   28d91d: mov    %rax,-0x188(%rbp)
+    0.00 :   28d924: xor    %ebx,%ebx
+    0.00 :   28d926: jmp    28daeb <<fp_frame::DataFrame>::new_with_axes+0x69b>
+    0.00 :   28d92b: nopl   0x0(%rax,%rax,1)
+    0.00 :   28d930: and    %r9,%r13
+         : 542    }
+         : 543    );
+         :
+         : 545    // SAFETY: the safety contract for `copy_nonoverlapping` must be
+         : 546    // upheld by the caller.
+         : 547    unsafe { crate::intrinsics::copy_nonoverlapping(src, dst, count) }
+    0.00 :   28d933: movdqu (%rdi,%r13,1),%xmm2
+         : 549    #[rustc_const_unstable(feature = "stdarch_const_x86", issue = "149298")]
+         : 550    pub const fn _mm_movemask_epi8(a: __m128i) -> i32 {
+         : 551    unsafe {
+         : 552    let z = i8x16::ZERO;
+         : 553    let m: i8x16 = simd_lt(a.as_i8x16(), z);
+         : 554    simd_bitmask::<_, u16>(m) as u32 as i32
+    0.00 :   28d939: movdqa %xmm2,%xmm0
+    0.00 :   28d93d: pcmpeqb %xmm1,%xmm0
+    0.00 :   28d941: pmovmskb %xmm0,%ebx
+    0.00 :   28d945: test   %ebx,%ebx
+    0.00 :   28d947: je     28da20 <<fp_frame::DataFrame>::new_with_axes+0x5d0>
+    0.00 :   28d94d: mov    %r15,-0x88(%rbp)
+    0.00 :   28d954: mov    %r8,-0x160(%rbp)
+    0.00 :   28d95b: mov    %r9,-0xc0(%rbp)
+    0.00 :   28d962: mov    %r13,-0xb8(%rbp)
+    0.00 :   28d969: movdqa %xmm1,-0x1b0(%rbp)
+    0.00 :   28d971: mov    %rcx,-0xb0(%rbp)
+    0.00 :   28d978: mov    %rax,-0x110(%rbp)
+    0.00 :   28d97f: movdqa %xmm2,-0x1a0(%rbp)
+         : 568    without modifying the original"]
+         : 569    #[inline]
+         : 570    pub const fn trailing_zeros(self) -> u32 {
+         : 571    // SAFETY: since `self` cannot be zero, it is safe to call `cttz_nonzero`.
+         : 572    unsafe {
+         : 573    intrinsics::cttz_nonzero(self.get() as $Uint)
+    0.00 :   28d987: tzcnt  %ebx,%r15d
+    0.00 :   28d98c: add    %r13,%r15
+    0.00 :   28d98f: and    %r9,%r15
+         : 577    self
+         : 578    } else {
+         : 579    // SAFETY: the caller must uphold the safety contract for `offset`.
+         : 580    // Because the pointee is *not* a ZST, that means that `count` is
+         : 581    // at most `isize::MAX`, and thus the negation cannot overflow.
+         : 582    unsafe { intrinsics::offset(self, intrinsics::unchecked_sub(0, count as isize)) }
+    0.00 :   28d992: neg    %r15
+    0.00 :   28d995: lea    (%r15,%r15,2),%rax
+         : 585    T: [const] PartialEq<U>,
+         : 586    {
+         : 587    #[inline]
+         : 588    fn eq(&self, other: &[U]) -> bool {
+         : 589    let len = self.len();
+         : 590    if len == other.len() {
+    0.00 :   28d999: cmp    -0x10(%rdi,%rax,8),%rdx
+    0.00 :   28d99e: jne    28d9cb <<fp_frame::DataFrame>::new_with_axes+0x57b>
+    0.00 :   28d9a0: lea    (%rdi,%rax,8),%rax
+    0.00 :   28d9a4: mov    -0x18(%rax),%rsi
+    0.00 :   28d9a8: mov    %rdi,%r13
+    0.00 :   28d9ab: mov    -0x88(%rbp),%rdi
+    0.00 :   28d9b2: mov    -0x30(%rbp),%rdx
+         : 598    // SAFETY: by our precondition, `lhs` and `rhs` are guaranteed to be valid
+         : 599    // for reading `len` values, which also means the size is guaranteed
+         : 600    // not to overflow because it exists in memory;
+         : 601    unsafe {
+         : 602    let size = crate::intrinsics::unchecked_mul(len, Self::SIZE);
+         : 603    compare_bytes(lhs as _, rhs as _, size) == 0
+    0.00 :   28d9b6: call   *0x32bb94(%rip)        # 5b9550 <bcmp@GLIBC_2.2.5>
+    0.00 :   28d9bc: mov    %r13,%rdi
+    0.00 :   28d9bf: mov    -0x30(%rbp),%rdx
+    0.00 :   28d9c3: test   %eax,%eax
+         : 608    /// This intrinsic does not have a stable counterpart.
+         : 609    #[unstable(feature = "core_intrinsics", issue = "none")]
+         : 610    #[rustc_nounwind]
+         : 611    #[inline(always)]
+         : 612    pub const fn likely(b: bool) -> bool {
+         : 613    if b {
+    0.00 :   28d9c5: je     28dac7 <<fp_frame::DataFrame>::new_with_axes+0x677>
+         : 615    unsafe { intrinsics::transmute_unchecked(self) }
+    0.00 :   28d9cb: lea    -0x1(%rbx),%eax
+    0.00 :   28d9ce: and    %bx,%ax
+    0.00 :   28d9d1: mov    %eax,%ebx
+    0.00 :   28d9d3: mov    -0x88(%rbp),%r15
+    0.00 :   28d9da: mov    -0x160(%rbp),%r8
+    0.00 :   28d9e1: mov    -0xc0(%rbp),%r9
+    0.00 :   28d9e8: mov    -0xb8(%rbp),%r13
+    0.00 :   28d9ef: movdqa -0x1b0(%rbp),%xmm1
+    0.00 :   28d9f7: mov    -0xb0(%rbp),%rcx
+    0.00 :   28d9fe: mov    -0x110(%rbp),%rax
+    0.00 :   28da05: movdqa -0x1a0(%rbp),%xmm2
+    0.00 :   28da0d: jne    28d987 <<fp_frame::DataFrame>::new_with_axes+0x537>
+    0.00 :   28da13: data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+         : 629    #[rustc_diagnostic_item = "matches_macro"]
+         : 630    #[allow_internal_unstable(non_exhaustive_omitted_patterns_lint, stmt_expr_attributes)]
+         : 631    macro_rules! matches {
+         : 632    ($expression:expr, $pattern:pat $(if $guard:expr)? $(,)?) => {
+         : 633    #[allow(non_exhaustive_omitted_patterns)]
+         : 634    match $expression {
+    0.00 :   28da20: cmp    $0x1,%rax
+    0.00 :   28da24: mov    -0x108(%rbp),%r10
+  100.00 :   28da2b: je     28da40 <<fp_frame::DataFrame>::new_with_axes+0x5f0>
+    0.00 :   28da2d: pmovmskb %xmm2,%eax
+    0.00 :   28da31: test   %eax,%eax
+    0.00 :   28da33: je     28da57 <<fp_frame::DataFrame>::new_with_axes+0x607>
+         : 641    intrinsics::cttz_nonzero(self.get() as $Uint)
+    0.00 :   28da35: tzcnt  %eax,%r10d
+    0.00 :   28da3a: add    %r13,%r10
+    0.00 :   28da3d: and    %r9,%r10
+    0.00 :   28da40: pcmpeqd %xmm0,%xmm0
+    0.00 :   28da44: pcmpeqb %xmm0,%xmm2
+    0.00 :   28da48: pmovmskb %xmm2,%eax
+    0.00 :   28da4c: test   %eax,%eax
+    0.00 :   28da4e: jne    28da70 <<fp_frame::DataFrame>::new_with_axes+0x620>
+    0.00 :   28da50: mov    $0x1,%eax
+    0.00 :   28da55: jmp    28da59 <<fp_frame::DataFrame>::new_with_axes+0x609>
+    0.00 :   28da57: xor    %eax,%eax
+    0.00 :   28da59: mov    %r10,-0x108(%rbp)
+    0.00 :   28da60: add    %rcx,%r13
+    0.00 :   28da63: add    $0x10,%r13
+    0.00 :   28da67: add    $0x10,%rcx
+    0.00 :   28da6b: jmp    28d930 <<fp_frame::DataFrame>::new_with_axes+0x4e0>
+    0.00 :   28da70: movzbl (%rdi,%r10,1),%eax
+         : 659    /// This intrinsic does not have a stable counterpart.
+         : 660    #[unstable(feature = "core_intrinsics", issue = "none")]
+         : 661    #[rustc_nounwind]
+         : 662    #[inline(always)]
+         : 663    pub const fn unlikely(b: bool) -> bool {
+         : 664    if b {
+    0.00 :   28da75: test   %al,%al
+    0.00 :   28da77: jns    28db82 <<fp_frame::DataFrame>::new_with_axes+0x732>
+    0.00 :   28da7d: and    $0x1,%al
+         : 668    #[rustc_const_stable(feature = "const_wrapping_math", since = "1.32.0")]
+         : 669    #[must_use = "this returns the result of the operation, \
+         : 670    without modifying the original"]
+         : 671    #[inline(always)]
+         : 672    pub const fn wrapping_sub(self, rhs: Self) -> Self {
+         : 673    intrinsics::wrapping_sub(self, rhs)
+    0.00 :   28da7f: lea    -0x10(%r10),%rcx
+    0.00 :   28da83: and    %r9,%rcx
+    0.00 :   28da86: mov    %r8b,(%rdi,%r10,1)
+    0.00 :   28da8a: mov    %r8b,0x10(%rdi,%rcx,1)
+    0.00 :   28da8f: movdqa -0xe0(%rbp),%xmm0
+    0.00 :   28da97: movzbl %al,%eax
+    0.00 :   28da9a: movd   %eax,%xmm1
+    0.00 :   28da9e: shufpd $0x2,-0x19dfd7(%rip),%xmm1        # efad0 <anon.3e22f7eaf389cb154618bb7a311e3cd4.43.llvm.14095262477429346001+0x752>
+    0.00 :   28daa7: psubq  %xmm1,%xmm0
+    0.00 :   28daab: movdqa %xmm0,-0xe0(%rbp)
+    0.00 :   28dab3: neg    %r10
+    0.00 :   28dab6: lea    (%r10,%r10,2),%rax
+         : 686    addr: *mut () = dst as *mut (),
+         : 687    align: usize = align_of::<T>(),
+         : 688    is_zst: bool = T::IS_ZST,
+         : 689    ) => ub_checks::maybe_is_aligned_and_not_null(addr, align, is_zst)
+         : 690    );
+         : 691    intrinsics::write_via_move(dst, src)
+    0.00 :   28daba: mov    %r15,-0x18(%rdi,%rax,8)
+    0.00 :   28dabf: mov    %rdx,-0x10(%rdi,%rax,8)
+    0.00 :   28dac4: mov    %r10,%r15
+    0.00 :   28dac7: lea    (%r15,%r15,2),%rax
+    0.00 :   28dacb: mov    -0x38(%rbp),%rcx
+    0.00 :   28dacf: mov    %rcx,-0x8(%rdi,%rax,8)
+    0.00 :   28dad4: mov    %r14,%rbx
+    0.00 :   28dad7: mov    -0xa0(%rbp),%r14
+         : 700    #[stable(feature = "nonnull", since = "1.25.0")]
+         : 701    impl<T: PointeeSized> PartialEq for NonNull<T> {
+         : 702    #[inline]
+         : 703    #[allow(ambiguous_wide_pointer_comparisons)]
+         : 704    fn eq(&self, other: &Self) -> bool {
+         : 705    self.as_ptr() == other.as_ptr()
+    0.00 :   28dade: cmp    -0x188(%rbp),%r14
+         : 707    self.end_or_len = without_provenance_mut(len.unchecked_sub(1));
+         : 708    } else {
+         : 709    // SAFETY: by type invariant, the `end_or_len` field is always
+         : 710    // non-null for a non-ZST pointee.  (This transmute ensures we
+         : 711    // get `!nonnull` metadata on the load of the field.)
+         : 712    if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+    0.00 :   28dae5: je     28db99 <<fp_frame::DataFrame>::new_with_axes+0x749>
+         : 714    self.non_null::<T>().as_ptr()
+         : 715    }
+         :
+         : 717    #[inline]
+         : 718    const fn non_null<T>(&self) -> NonNull<T> {
+         : 719    self.ptr.cast().as_non_null_ptr()
+    0.00 :   28daeb: mov    0x8(%r14),%r15
+         : 721    &*core::intrinsics::aggregate_raw_ptr::<*const [T], _, _>(self.as_ptr(), self.len)
+    0.00 :   28daef: mov    0x10(%r14),%rcx
+    0.00 :   28daf3: mov    -0xd0(%rbp),%rdi
+    0.00 :   28dafa: mov    -0xc8(%rbp),%rsi
+    0.00 :   28db01: mov    %r15,%rdx
+    0.00 :   28db04: mov    %rcx,-0x30(%rbp)
+    0.00 :   28db08: call   2753d0 <<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>>
+    0.00 :   28db0d: mov    %rax,%r13
+    0.00 :   28db10: cmpq   $0x0,-0xe0(%rbp)
+    0.00 :   28db18: je     28db62 <<fp_frame::DataFrame>::new_with_axes+0x712>
+    0.00 :   28db1a: add    $0x18,%r14
+    0.00 :   28db1e: mov    %r14,-0xa0(%rbp)
+    0.00 :   28db25: mov    %rbx,-0x38(%rbp)
+    0.00 :   28db29: lea    0x1(%rbx),%r14
+    0.00 :   28db2d: mov    -0xf0(%rbp),%rdi
+    0.00 :   28db34: mov    -0xe8(%rbp),%r9
+    0.00 :   28db3b: mov    %r13,%r8
+    0.00 :   28db3e: shr    $0x39,%r8
+    0.00 :   28db42: movd   %r8d,%xmm0
+    0.00 :   28db47: punpcklbw %xmm0,%xmm0
+    0.00 :   28db4b: pshuflw $0x0,%xmm0,%xmm0
+    0.00 :   28db50: pshufd $0x44,%xmm0,%xmm1
+    0.00 :   28db55: xor    %eax,%eax
+    0.00 :   28db57: xor    %ecx,%ecx
+    0.00 :   28db59: mov    -0x30(%rbp),%rdx
+    0.00 :   28db5d: jmp    28d930 <<fp_frame::DataFrame>::new_with_axes+0x4e0>
+    0.00 :   28db62: mov    $0x1,%esi
+    0.00 :   28db67: lea    -0xf0(%rbp),%rdi
+    0.00 :   28db6e: lea    -0xd0(%rbp),%rdx
+    0.00 :   28db75: mov    $0x1,%ecx
+    0.00 :   28db7a: call   *0x32c058(%rip)        # 5b9bd8 <_DYNAMIC+0xca0>
+    0.00 :   28db80: jmp    28db1a <<fp_frame::DataFrame>::new_with_axes+0x6ca>
+         : 753    *mem_addr
+    0.00 :   28db82: movdqa (%rdi),%xmm0
+         : 755    simd_bitmask::<_, u16>(m) as u32 as i32
+    0.00 :   28db86: pmovmskb %xmm0,%eax
+    0.00 :   28db8a: tzcnt  %eax,%r10d
+    0.00 :   28db8f: movzbl (%rdi,%r10,1),%eax
+    0.00 :   28db94: jmp    28da7d <<fp_frame::DataFrame>::new_with_axes+0x62d>
+    0.00 :   28db99: mov    -0x100(%rbp),%rcx
+         : 761    #[rustc_const_stable(feature = "const_wrapping_math", since = "1.32.0")]
+         : 762    #[must_use = "this returns the result of the operation, \
+         : 763    without modifying the original"]
+         : 764    #[inline(always)]
+         : 765    pub const fn overflowing_mul(self, rhs: Self) -> (Self, bool) {
+         : 766    let (a, b) = intrinsics::mul_with_overflow(self as $ActualT, rhs as $ActualT);
+    0.00 :   28dba0: lea    0x0(,%rcx,8),%rax
+    0.00 :   28dba8: lea    (%rax,%rax,2),%rsi
+    0.00 :   28dbac: movabs $0x555555555555556,%rax
+    0.00 :   28dbb6: dec    %rax
+    0.00 :   28dbb9: cmp    %rax,%rcx
+    0.00 :   28dbbc: jbe    28dca8 <<fp_frame::DataFrame>::new_with_axes+0x858>
+    0.00 :   28dbc2: xor    %edi,%edi
+         : 774    Err(err) => handle_error(err),
+    0.00 :   28dbc4: call   *0x32b5ae(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   28dbca: jmp    28eb62 <<fp_frame::DataFrame>::new_with_axes+0x1712>
+         : 777    if let Some(root) = &self.root {
+    0.00 :   28dbcf: xor    %eax,%eax
+    0.00 :   28dbd1: mov    -0x58(%rbp),%rdx
+    0.00 :   28dbd5: test   %rdx,%rdx
+    0.00 :   28dbd8: setne  %al
+         : 782    it: I,
+         : 783    }
+         :
+         : 785    impl<I> Cloned<I> {
+         : 786    pub(in crate::iter) const fn new(it: I) -> Cloned<I> {
+         : 787    Cloned { it }
+    0.00 :   28dbdb: mov    %rax,-0x3b0(%rbp)
+    0.00 :   28dbe2: movq   $0x0,-0x3a8(%rbp)
+    0.00 :   28dbed: mov    %rdx,-0x3a0(%rbp)
+    0.00 :   28dbf4: mov    -0xa8(%rbp),%rcx
+    0.00 :   28dbfb: mov    %rcx,-0x398(%rbp)
+    0.00 :   28dc02: mov    %rax,-0x390(%rbp)
+    0.00 :   28dc09: movq   $0x0,-0x388(%rbp)
+    0.00 :   28dc14: mov    %rdx,-0x380(%rbp)
+    0.00 :   28dc1b: mov    %rcx,-0x378(%rbp)
+    0.00 :   28dc22: mov    -0xa0(%rbp),%rax
+    0.00 :   28dc29: mov    %rax,-0x370(%rbp)
+    0.00 :   28dc30: lea    -0x200(%rbp),%rdi
+    0.00 :   28dc37: lea    -0x3b0(%rbp),%rsi
+         : 801    impl<T, I> SpecFromIter<T, I> for Vec<T>
+         : 802    where
+         : 803    I: Iterator<Item = T>,
+         : 804    {
+         : 805    default fn from_iter(iterator: I) -> Self {
+         : 806    SpecFromIterNested::from_iter(iterator)
+    0.00 :   28dc3e: call   2ef760 <<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::cloned::Cloned<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>>>>::from_iter>
+         : 808    return Ok(columns.keys().cloned().collect());
+    0.00 :   28dc43: movdqu -0x200(%rbp),%xmm0
+    0.00 :   28dc4b: movdqa %xmm0,-0x130(%rbp)
+    0.00 :   28dc53: mov    -0x1f0(%rbp),%rax
+    0.00 :   28dc5a: mov    %rax,-0x120(%rbp)
+    0.00 :   28dc61: movabs $0x8000000000000000,%rax
+    0.00 :   28dc6b: lea    0x14(%rax),%rbx
+         : 815    ///   initially construct `self`
+         : 816    /// - `elem_layout`'s size must be a multiple of its alignment
+         : 817    #[inline]
+         : 818    #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
+         : 819    const unsafe fn current_memory(&self, elem_layout: Layout) -> Option<(NonNull<u8>, Layout)> {
+         : 820    if elem_layout.size() == 0 || self.cap.as_inner() == 0 {
+    0.00 :   28dc6f: cmpq   $0x0,-0xf8(%rbp)
+    0.00 :   28dc77: jne    28e290 <<fp_frame::DataFrame>::new_with_axes+0xe40>
+    0.00 :   28dc7d: jmp    28e2af <<fp_frame::DataFrame>::new_with_axes+0xe5f>
+    0.00 :   28dc82: test   %rbx,%rbx
+         : 825    match self {
+    0.00 :   28dc85: je     28dccb <<fp_frame::DataFrame>::new_with_axes+0x87b>
+    0.00 :   28dc87: mov    0x8(%r13),%rax
+         : 828    Some(t) => f(t),
+    0.00 :   28dc8b: mov    0x10(%rax),%rax
+    0.00 :   28dc8f: mov    -0x40(%rbp),%rdi
+         : 831    multiindex.len(),
+    0.00 :   28dc93: mov    %rax,-0x230(%rbp)
+         : 833    if let Some(range) = self.int64_unit_range {
+    0.00 :   28dc9a: cmpl   $0x1,(%rdi)
+    0.00 :   28dc9d: jne    28dcdd <<fp_frame::DataFrame>::new_with_axes+0x88d>
+    0.00 :   28dc9f: mov    0x10(%rdi),%rdx
+    0.00 :   28dca3: jmp    28e686 <<fp_frame::DataFrame>::new_with_axes+0x1236>
+         : 838    if layout.size() == 0 {
+    0.00 :   28dca8: test   %rsi,%rsi
+    0.00 :   28dcab: je     28dcf0 <<fp_frame::DataFrame>::new_with_axes+0x8a0>
+    0.00 :   28dcad: mov    %rsi,%rbx
+    0.00 :   28dcb0: mov    %rsi,%rdi
+    0.00 :   28dcb3: call   *0x32b477(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+         : 844    let ptr = match result {
+    0.00 :   28dcb9: test   %rax,%rax
+    0.00 :   28dcbc: je     28eb35 <<fp_frame::DataFrame>::new_with_axes+0x16e5>
+    0.00 :   28dcc2: mov    -0x100(%rbp),%rcx
+    0.00 :   28dcc9: jmp    28dcf7 <<fp_frame::DataFrame>::new_with_axes+0x8a7>
+    0.00 :   28dccb: xor    %eax,%eax
+    0.00 :   28dccd: mov    -0x40(%rbp),%rdi
+    0.00 :   28dcd1: mov    %rax,-0x230(%rbp)
+    0.00 :   28dcd8: cmpl   $0x1,(%rdi)
+    0.00 :   28dcdb: je     28dc9f <<fp_frame::DataFrame>::new_with_axes+0x84f>
+         : 854    if let Some(range) = self.int64_affine {
+    0.00 :   28dcdd: cmpl   $0x1,0x18(%rdi)
+    0.00 :   28dce1: jne    28e373 <<fp_frame::DataFrame>::new_with_axes+0xf23>
+    0.00 :   28dce7: mov    0x30(%rdi),%rdx
+    0.00 :   28dceb: jmp    28e686 <<fp_frame::DataFrame>::new_with_axes+0x1236>
+    0.00 :   28dcf0: mov    $0x8,%eax
+    0.00 :   28dcf5: xor    %ecx,%ecx
+         : 861    Vec { buf: RawVec::with_capacity_in(capacity, alloc), len: 0 }
+    0.00 :   28dcf7: mov    %rcx,-0x70(%rbp)
+    0.00 :   28dcfb: mov    %rax,-0x68(%rbp)
+    0.00 :   28dcff: movq   $0x0,-0x60(%rbp)
+    0.00 :   28dd07: cmpq   $0x0,-0x58(%rbp)
+    0.00 :   28dd0c: je     28e161 <<fp_frame::DataFrame>::new_with_axes+0xd11>
+    0.00 :   28dd12: cmpq   $0x0,-0xd8(%rbp)
+    0.00 :   28dd1a: je     28e387 <<fp_frame::DataFrame>::new_with_axes+0xf37>
+    0.00 :   28dd20: mov    -0xd0(%rbp),%rax
+    0.00 :   28dd27: mov    %rax,-0x108(%rbp)
+    0.00 :   28dd2e: mov    -0xc8(%rbp),%rax
+    0.00 :   28dd35: mov    %rax,-0x238(%rbp)
+    0.00 :   28dd3c: mov    -0xf0(%rbp),%rcx
+    0.00 :   28dd43: mov    -0xe8(%rbp),%rax
+    0.00 :   28dd4a: mov    %rax,-0xb8(%rbp)
+    0.00 :   28dd51: xor    %r14d,%r14d
+    0.00 :   28dd54: mov    -0x48(%rbp),%rax
+    0.00 :   28dd58: xor    %ebx,%ebx
+    0.00 :   28dd5a: mov    %rcx,-0xc0(%rbp)
+    0.00 :   28dd61: mov    %r14,-0x1b0(%rbp)
+         : 881    for (i, name) in column_order.iter().enumerate() {
+    0.00 :   28dd68: mov    %rax,-0x118(%rbp)
+         : 883    self.get(key).is_some()
+    0.00 :   28dd6f: mov    0x8(%rax),%rcx
+    0.00 :   28dd73: mov    %rcx,-0x30(%rbp)
+    0.00 :   28dd77: mov    0x10(%rax),%rcx
+    0.00 :   28dd7b: mov    %rcx,-0x38(%rbp)
+         : 888    unsafe { transmute(intrinsics::offset(self.as_ptr(), count)) }
+    0.00 :   28dd7f: add    $0x18,%rax
+    0.00 :   28dd83: mov    %rax,-0x1a0(%rbp)
+    0.00 :   28dd8a: mov    %rbx,-0x110(%rbp)
+         : 892    #[inline]
+         : 893    #[rustc_inherit_overflow_checks]
+         : 894    fn next(&mut self) -> Option<(usize, <I as Iterator>::Item)> {
+         : 895    let a = self.iter.next()?;
+         : 896    let i = self.count;
+         : 897    self.count += 1;
+    0.00 :   28dd91: lea    0x1(%rbx),%rax
+    0.00 :   28dd95: mov    %rax,-0xb0(%rbp)
+    0.00 :   28dd9c: mov    -0xa8(%rbp),%rax
+    0.00 :   28dda3: mov    %rax,-0xa0(%rbp)
+    0.00 :   28ddaa: mov    -0x58(%rbp),%rcx
+         : 903    unsafe { leaf.keys.get_unchecked(..usize::from(leaf.len)).assume_init_ref() }
+    0.00 :   28ddae: lea    0x8(%rcx),%rax
+    0.00 :   28ddb2: mov    %rcx,-0x88(%rbp)
+    0.00 :   28ddb9: movzwl 0xb0a(%rcx),%ecx
+    0.00 :   28ddc0: mov    %rcx,-0x160(%rbp)
+         : 908    K: Borrow<Q>,
+         : 909    {
+         : 910    let node = self.reborrow();
+         : 911    let keys = node.keys();
+         : 912    debug_assert!(start_index <= keys.len());
+         : 913    for (offset, k) in unsafe { keys.get_unchecked(start_index..) }.iter().enumerate() {
+    0.00 :   28ddc7: lea    0x0(,%rcx,8),%ecx
+    0.00 :   28ddce: lea    (%rcx,%rcx,2),%rbx
+    0.00 :   28ddd2: mov    $0xffffffffffffffff,%r13
+    0.00 :   28ddd9: nopl   0x0(%rax)
+         : 918    self.as_ptr() == other.as_ptr()
+    0.00 :   28dde0: test   %rbx,%rbx
+    0.00 :   28dde3: je     28de34 <<fp_frame::DataFrame>::new_with_axes+0x9e4>
+         : 921    unsafe { transmute(intrinsics::offset(self.as_ptr(), count)) }
+    0.00 :   28dde5: lea    0x18(%rax),%r15
+         : 923    match key.cmp(k.borrow()) {
+    0.00 :   28dde9: mov    0x8(%rax),%rsi
+    0.00 :   28dded: mov    0x10(%rax),%rdx
+    0.00 :   28ddf1: mov    -0x38(%rbp),%rax
+         : 927    // Since the length of a slice is always less than or equal to
+         : 928    // isize::MAX, this never underflows.
+         : 929    let diff = left.len() as isize - right.len() as isize;
+         : 930    // This comparison gets optimized away (on x86_64 and ARM) because the
+         : 931    // subtraction updates flags.
+         : 932    let len = if left.len() < right.len() { left.len() } else { right.len() };
+    0.00 :   28ddf5: mov    %rax,%r14
+    0.00 :   28ddf8: sub    %rdx,%r14
+    0.00 :   28ddfb: cmovb  %rax,%rdx
+    0.00 :   28ddff: mov    -0x30(%rbp),%rdi
+         : 937    // SAFETY: `left` and `right` are references and are thus guaranteed to
+         : 938    // be valid. `UnsignedBytewiseOrd` is only implemented for types that
+         : 939    // are valid u8s and can be compared the same way. We use the minimum
+         : 940    // of both lengths which guarantees that both regions are valid for
+         : 941    // reads in that interval.
+         : 942    let mut order = unsafe { compare_bytes(left, right, len) as isize };
+    0.00 :   28de03: call   *0x32b567(%rip)        # 5b9370 <memcmp@GLIBC_2.2.5>
+    0.00 :   28de09: cltq
+         : 945    if order == 0 {
+    0.00 :   28de0b: test   %eax,%eax
+    0.00 :   28de0d: cmovne %rax,%r14
+         : 948    #[stable(feature = "rust1", since = "1.0.0")]
+         : 949    #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+         : 950    impl const Ord for $t {
+         : 951    #[inline]
+         : 952    fn cmp(&self, other: &Self) -> Ordering {
+         : 953    crate::intrinsics::three_way_compare(*self, *other)
+    0.00 :   28de11: test   %r14,%r14
+    0.00 :   28de14: sets   %al
+    0.00 :   28de17: setg   %cl
+    0.00 :   28de1a: sub    %al,%cl
+    0.00 :   28de1c: inc    %r13
+    0.00 :   28de1f: add    $0xffffffffffffffe8,%rbx
+    0.00 :   28de23: mov    %r15,%rax
+    0.00 :   28de26: cmp    $0x1,%cl
+    0.00 :   28de29: je     28dde0 <<fp_frame::DataFrame>::new_with_axes+0x990>
+    0.00 :   28de2b: movzbl %cl,%eax
+    0.00 :   28de2e: test   %eax,%eax
+    0.00 :   28de30: jne    28de3b <<fp_frame::DataFrame>::new_with_axes+0x9eb>
+    0.00 :   28de32: jmp    28de67 <<fp_frame::DataFrame>::new_with_axes+0xa17>
+    0.00 :   28de34: mov    -0x160(%rbp),%r13
+    0.00 :   28de3b: mov    -0xa0(%rbp),%rax
+         : 969    if self.height == 0 {
+    0.00 :   28de42: sub    $0x1,%rax
+    0.00 :   28de46: jb     28e16c <<fp_frame::DataFrame>::new_with_axes+0xd1c>
+    0.00 :   28de4c: mov    %rax,-0xa0(%rbp)
+    0.00 :   28de53: mov    -0x88(%rbp),%rcx
+         : 974    crate::intrinsics::read_via_copy(src)
+    0.00 :   28de5a: mov    0xb10(%rcx,%r13,8),%rcx
+         : 976    loop {
+    0.00 :   28de62: jmp    28ddae <<fp_frame::DataFrame>::new_with_axes+0x95e>
+    0.00 :   28de67: mov    -0x108(%rbp),%rdi
+    0.00 :   28de6e: mov    -0x238(%rbp),%rsi
+    0.00 :   28de75: mov    -0x30(%rbp),%rdx
+    0.00 :   28de79: mov    -0x38(%rbp),%r14
+    0.00 :   28de7d: mov    %r14,%rcx
+    0.00 :   28de80: call   275550 <<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>>
+    0.00 :   28de85: mov    %rax,%rcx
+    0.00 :   28de88: shr    $0x39,%rcx
+    0.00 :   28de8c: movd   %ecx,%xmm0
+    0.00 :   28de90: punpcklbw %xmm0,%xmm0
+    0.00 :   28de94: pshuflw $0x0,%xmm0,%xmm0
+    0.00 :   28de99: pshufd $0x44,%xmm0,%xmm1
+    0.00 :   28de9e: xor    %edx,%edx
+    0.00 :   28dea0: and    -0xb8(%rbp),%rax
+    0.00 :   28dea7: mov    -0xc0(%rbp),%rcx
+         : 993    unsafe { crate::intrinsics::copy_nonoverlapping(src, dst, count) }
+    0.00 :   28deae: movdqu (%rcx,%rax,1),%xmm2
+    0.00 :   28deb3: movdqa %xmm2,%xmm0
+    0.00 :   28deb7: pcmpeqb %xmm1,%xmm0
+    0.00 :   28debb: pmovmskb %xmm0,%r13d
+    0.00 :   28dec0: test   %r13d,%r13d
+    0.00 :   28dec3: je     28df43 <<fp_frame::DataFrame>::new_with_axes+0xaf3>
+    0.00 :   28dec5: movdqa %xmm1,-0xa0(%rbp)
+    0.00 :   28decd: mov    %rdx,-0x88(%rbp)
+    0.00 :   28ded4: movdqa %xmm2,-0x160(%rbp)
+    0.00 :   28dedc: tzcnt  %r13d,%ecx
+    0.00 :   28dee1: mov    %rax,%rbx
+    0.00 :   28dee4: add    %rax,%rcx
+    0.00 :   28dee7: and    -0xb8(%rbp),%rcx
+    0.00 :   28deee: neg    %rcx
+    0.00 :   28def1: lea    (%rcx,%rcx,2),%rax
+    0.00 :   28def5: mov    -0xc0(%rbp),%rcx
+         : 1010   if len == other.len() {
+    0.00 :   28defc: cmp    -0x10(%rcx,%rax,8),%r14
+    0.00 :   28df01: jne    28df1c <<fp_frame::DataFrame>::new_with_axes+0xacc>
+    0.00 :   28df03: lea    (%rcx,%rax,8),%r15
+    0.00 :   28df07: mov    -0x18(%r15),%rsi
+    0.00 :   28df0b: mov    -0x30(%rbp),%rdi
+         : 1016   compare_bytes(lhs as _, rhs as _, size) == 0
+    0.00 :   28df0f: mov    %r14,%rdx
+    0.00 :   28df12: call   *0x32b638(%rip)        # 5b9550 <bcmp@GLIBC_2.2.5>
+    0.00 :   28df18: test   %eax,%eax
+         : 1020   if b {
+    0.00 :   28df1a: je     28df67 <<fp_frame::DataFrame>::new_with_axes+0xb17>
+         : 1022   unsafe { intrinsics::transmute_unchecked(self) }
+    0.00 :   28df1c: lea    -0x1(%r13),%eax
+    0.00 :   28df20: and    %r13w,%ax
+    0.00 :   28df24: mov    %eax,%r13d
+    0.00 :   28df27: mov    %rbx,%rax
+    0.00 :   28df2a: movdqa -0xa0(%rbp),%xmm1
+    0.00 :   28df32: mov    -0x88(%rbp),%rdx
+    0.00 :   28df39: movdqa -0x160(%rbp),%xmm2
+    0.00 :   28df41: jne    28dedc <<fp_frame::DataFrame>::new_with_axes+0xa8c>
+    0.00 :   28df43: pcmpeqd %xmm0,%xmm0
+    0.00 :   28df47: pcmpeqb %xmm0,%xmm2
+    0.00 :   28df4b: pmovmskb %xmm2,%ecx
+    0.00 :   28df4f: test   %ecx,%ecx
+    0.00 :   28df51: jne    28e466 <<fp_frame::DataFrame>::new_with_axes+0x1016>
+    0.00 :   28df57: add    %rdx,%rax
+    0.00 :   28df5a: add    $0x10,%rax
+    0.00 :   28df5e: add    $0x10,%rdx
+    0.00 :   28df62: jmp    28dea0 <<fp_frame::DataFrame>::new_with_axes+0xa50>
+    0.00 :   28df67: mov    -0x110(%rbp),%rax
+         : 1041   if last_idx[name.as_str()] == i {
+    0.00 :   28df6e: cmp    %rax,-0x8(%r15)
+    0.00 :   28df72: jne    28dfb2 <<fp_frame::DataFrame>::new_with_axes+0xb62>
+    0.00 :   28df74: mov    -0x38(%rbp),%r15
+    0.00 :   28df78: test   %r15,%r15
+    0.00 :   28df7b: mov    -0x1b0(%rbp),%r14
+    0.00 :   28df82: mov    -0xb0(%rbp),%rbx
+    0.00 :   28df89: je     28dfd6 <<fp_frame::DataFrame>::new_with_axes+0xb86>
+    0.00 :   28df8b: mov    %r15,%rdi
+    0.00 :   28df8e: call   *0x32b19c(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+    0.00 :   28df94: test   %rax,%rax
+    0.00 :   28df97: je     28eb42 <<fp_frame::DataFrame>::new_with_axes+0x16f2>
+    0.00 :   28df9d: mov    %rax,%r13
+    0.00 :   28dfa0: mov    %rax,%rdi
+    0.00 :   28dfa3: mov    -0x30(%rbp),%rsi
+    0.00 :   28dfa7: mov    %r15,%rdx
+    0.00 :   28dfaa: call   *0x32b1a0(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+    0.00 :   28dfb0: jmp    28dfdc <<fp_frame::DataFrame>::new_with_axes+0xb8c>
+    0.00 :   28dfb2: mov    -0x1b0(%rbp),%r14
+    0.00 :   28dfb9: mov    -0x1a0(%rbp),%rax
+    0.00 :   28dfc0: mov    -0xb0(%rbp),%rbx
+         : 1062   self.as_ptr() == other.as_ptr()
+    0.00 :   28dfc7: cmp    -0x188(%rbp),%rax
+    0.00 :   28dfce: jne    28dd61 <<fp_frame::DataFrame>::new_with_axes+0x911>
+    0.00 :   28dfd4: jmp    28e01d <<fp_frame::DataFrame>::new_with_axes+0xbcd>
+    0.00 :   28dfd6: mov    $0x1,%r13d
+         : 1067   if len == self.buf.capacity() {
+    0.00 :   28dfdc: cmp    -0x70(%rbp),%r14
+    0.00 :   28dfe0: jne    28dfec <<fp_frame::DataFrame>::new_with_axes+0xb9c>
+         : 1070   self.buf.grow_one();
+    0.00 :   28dfe2: lea    -0x70(%rbp),%rdi
+    0.00 :   28dfe6: call   *0x32bf9c(%rip)        # 5b9f88 <_DYNAMIC+0x1050>
+         : 1073   self.ptr.cast().as_non_null_ptr()
+    0.00 :   28dfec: mov    -0x68(%rbp),%rax
+         : 1075   unsafe { intrinsics::offset(self, count) }
+    0.00 :   28dff0: lea    (%r14,%r14,2),%rcx
+         : 1077   intrinsics::write_via_move(dst, src)
+    0.00 :   28dff4: mov    %r15,(%rax,%rcx,8)
+    0.00 :   28dff8: mov    %r13,0x8(%rax,%rcx,8)
+    0.00 :   28dffd: mov    %r15,0x10(%rax,%rcx,8)
+         : 1081   self.len = len + 1;
+    0.00 :   28e002: inc    %r14
+    0.00 :   28e005: mov    %r14,-0x60(%rbp)
+    0.00 :   28e009: mov    -0x1a0(%rbp),%rax
+    0.00 :   28e010: cmp    -0x188(%rbp),%rax
+    0.00 :   28e017: jne    28dd61 <<fp_frame::DataFrame>::new_with_axes+0x911>
+    0.00 :   28e01d: mov    -0x68(%rbp),%rbx
+    0.00 :   28e021: mov    $0xffffffffffffffd8,%rsi
+    0.00 :   28e028: cmpb   $0x1,%fs:0x10(%rsi)
+    0.00 :   28e02d: jne    28eaa7 <<fp_frame::DataFrame>::new_with_axes+0x1657>
+    0.00 :   28e033: mov    %fs:(%rsi),%rax
+    0.00 :   28e037: mov    %fs:0x8(%rsi),%rdx
+         : 1093   intrinsics::wrapping_add(self, rhs)
+    0.00 :   28e03c: lea    0x1(%rax),%rcx
+    0.00 :   28e040: mov    %rcx,%fs:(%rsi)
+         : 1096   #[inline]
+         : 1097   #[must_use]
+         : 1098   #[stable(feature = "hashmap_build_hasher", since = "1.7.0")]
+         : 1099   #[rustc_const_stable(feature = "const_collections_with_hasher", since = "1.85.0")]
+         : 1100   pub const fn with_hasher(hasher: S) -> HashSet<T, S> {
+         : 1101   HashSet { base: base::HashSet::with_hasher(hasher) }
+    0.00 :   28e044: movups 0x2ff54d(%rip),%xmm0        # 58d598 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0xad8>
+    0.00 :   28e04b: movaps %xmm0,-0x3b0(%rbp)
+    0.00 :   28e052: movdqu 0x2ff54e(%rip),%xmm0        # 58d5a8 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0xae8>
+    0.00 :   28e05a: movdqa %xmm0,-0x3a0(%rbp)
+    0.00 :   28e062: mov    %rax,-0x390(%rbp)
+    0.00 :   28e069: mov    %rdx,-0x388(%rbp)
+    0.00 :   28e070: test   %r14,%r14
+         : 1109   if b {
+    0.00 :   28e073: jne    28eac3 <<fp_frame::DataFrame>::new_with_axes+0x1673>
+         : 1111   {
+         : 1112   #[inline]
+         : 1113   fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> HashSet<T, S> {
+         : 1114   let mut set = HashSet::with_hasher(Default::default());
+         : 1115   set.extend(iter);
+         : 1116   set
+    0.00 :   28e079: movdqa -0x3b0(%rbp),%xmm0
+    0.00 :   28e081: movdqa -0x3a0(%rbp),%xmm1
+    0.00 :   28e089: mov    -0x390(%rbp),%rax
+    0.00 :   28e090: mov    %rax,-0x210(%rbp)
+    0.00 :   28e097: mov    -0x388(%rbp),%rax
+    0.00 :   28e09e: mov    %rax,-0x208(%rbp)
+    0.00 :   28e0a5: movdqa %xmm1,-0x220(%rbp)
+    0.00 :   28e0ad: movdqa %xmm0,-0x230(%rbp)
+    0.00 :   28e0b5: movq   $0x1,-0x200(%rbp)
+    0.00 :   28e0c0: movq   $0x0,-0x1f8(%rbp)
+    0.00 :   28e0cb: mov    -0x58(%rbp),%rcx
+    0.00 :   28e0cf: mov    %rcx,-0x1f0(%rbp)
+    0.00 :   28e0d6: mov    -0xa8(%rbp),%rax
+    0.00 :   28e0dd: mov    %rax,-0x1e8(%rbp)
+    0.00 :   28e0e4: movq   $0x1,-0x1e0(%rbp)
+    0.00 :   28e0ef: movq   $0x0,-0x1d8(%rbp)
+    0.00 :   28e0fa: mov    %rcx,-0x1d0(%rbp)
+    0.00 :   28e101: mov    %rax,-0x1c8(%rbp)
+    0.00 :   28e108: mov    -0x100(%rbp),%rax
+    0.00 :   28e10f: mov    %rax,-0x1c0(%rbp)
+    0.00 :   28e116: lea    -0x230(%rbp),%rax
+    0.00 :   28e11d: mov    %rax,-0x1b8(%rbp)
+    0.00 :   28e124: lea    -0x3b0(%rbp),%rdi
+    0.00 :   28e12b: lea    -0x200(%rbp),%rsi
+         : 1141   // Unroll the first iteration, as the vector is going to be
+         : 1142   // expanded on this iteration in every case when the iterable is not
+         : 1143   // empty, but the loop in extend_desugared() is not going to see the
+         : 1144   // vector being full in the few subsequent loop iterations.
+         : 1145   // So we get better branch prediction.
+         : 1146   let mut vector = match iterator.next() {
+    0.00 :   28e132: call   2f2fd0 <<core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, <fp_frame::DataFrame>::normalize_column_order::{closure#0}>> as core::iter::traits::iterator::Iterator>::next>
+    0.00 :   28e137: mov    -0x3b0(%rbp),%rbx
+    0.00 :   28e13e: movabs $0x8000000000000000,%rax
+    0.00 :   28e148: cmp    %rax,%rbx
+    0.00 :   28e14b: jne    28e7ba <<fp_frame::DataFrame>::new_with_axes+0x136a>
+    0.00 :   28e151: mov    $0x8,%ebx
+    0.00 :   28e156: xor    %r14d,%r14d
+    0.00 :   28e159: xor    %r13d,%r13d
+         : 1155   };
+         : 1156   // must delegate to spec_extend() since extend() itself delegates
+         : 1157   // to spec_from for empty Vecs
+         : 1158   <Vec<T> as SpecExtend<T, I>>::spec_extend(&mut vector, iterator);
+         : 1159   vector
+         : 1160   }
+    0.00 :   28e15c: jmp    28e90f <<fp_frame::DataFrame>::new_with_axes+0x14bf>
+    0.00 :   28e161: mov    -0x48(%rbp),%rax
+         : 1163   for (i, name) in column_order.iter().enumerate() {
+    0.00 :   28e165: mov    %rax,-0x118(%rbp)
+    0.00 :   28e16c: lea    -0x118(%rbp),%rax
+         : 1166   return Err(FrameError::CompatibilityRejected(format!(
+    0.00 :   28e173: mov    %rax,-0x3b0(%rbp)
+    0.00 :   28e17a: lea    0x6022f(%rip),%rax        # 2ee3b0 <<&alloc::string::String as core::fmt::Display>::fmt>
+    0.00 :   28e181: mov    %rax,-0x3a8(%rbp)
+         : 1170   .write_fmt(args)
+         : 1171   .expect("a formatting trait implementation returned an error when the underlying stream did not");
+         : 1172   output
+         : 1173   }
+         :
+         : 1175   args.as_str().map_or_else(|| format_inner(args), crate::borrow::ToOwned::to_owned)
+    0.00 :   28e188: lea    -0x1a30ac(%rip),%rsi        # eb0e3 <anon.08054e427e7b94125baecb02118072cf.148.llvm.759937635364240399+0xe8>
+    0.00 :   28e18f: lea    -0x410(%rbp),%rdi
+    0.00 :   28e196: lea    -0x3b0(%rbp),%rdx
+    0.00 :   28e19d: call   *0x32b355(%rip)        # 5b94f8 <_DYNAMIC+0x5c0>
+    0.00 :   28e1a3: movdqu -0x410(%rbp),%xmm0
+    0.00 :   28e1ab: movdqa %xmm0,-0x130(%rbp)
+    0.00 :   28e1b3: mov    -0x400(%rbp),%rax
+    0.00 :   28e1ba: mov    %rax,-0x120(%rbp)
+         : 1184   pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+    0.00 :   28e1c1: mov    -0x68(%rbp),%r14
+    0.00 :   28e1c5: mov    -0x60(%rbp),%rbx
+    0.00 :   28e1c9: test   %rbx,%rbx
+    0.00 :   28e1cc: je     28e1f8 <<fp_frame::DataFrame>::new_with_axes+0xda8>
+         : 1189   if elem_layout.size() == 0 || self.cap.as_inner() == 0 {
+    0.00 :   28e1ce: lea    0x8(%r14),%r15
+    0.00 :   28e1d2: mov    0x32af67(%rip),%r13        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28e1d9: jmp    28e1e9 <<fp_frame::DataFrame>::new_with_axes+0xd99>
+    0.00 :   28e1db: nopl   0x0(%rax,%rax,1)
+    0.00 :   28e1e0: add    $0x18,%r15
+    0.00 :   28e1e4: dec    %rbx
+    0.00 :   28e1e7: je     28e1f8 <<fp_frame::DataFrame>::new_with_axes+0xda8>
+    0.00 :   28e1e9: cmpq   $0x0,-0x8(%r15)
+    0.00 :   28e1ee: je     28e1e0 <<fp_frame::DataFrame>::new_with_axes+0xd90>
+    0.00 :   28e1f0: mov    (%r15),%rdi
+    0.00 :   28e1f3: call   *%r13
+    0.00 :   28e1f6: jmp    28e1e0 <<fp_frame::DataFrame>::new_with_axes+0xd90>
+    0.00 :   28e1f8: cmpq   $0x0,-0x70(%rbp)
+    0.00 :   28e1fd: je     28e208 <<fp_frame::DataFrame>::new_with_axes+0xdb8>
+    0.00 :   28e1ff: mov    %r14,%rdi
+    0.00 :   28e202: call   *0x32af38(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+         : 1206   }
+    0.00 :   28e208: mov    -0xe8(%rbp),%rcx
+    0.00 :   28e20f: test   %rcx,%rcx
+    0.00 :   28e212: mov    -0x50(%rbp),%r13
+    0.00 :   28e216: je     28e241 <<fp_frame::DataFrame>::new_with_axes+0xdf1>
+         : 1211   let (a, b) = intrinsics::mul_with_overflow(self as $ActualT, rhs as $ActualT);
+    0.00 :   28e218: lea    (%rcx,%rcx,2),%rax
+         : 1213   if intrinsics::unlikely(intrinsics::add_with_overflow(self, rhs).1) {
+    0.00 :   28e21c: lea    0x27(,%rax,8),%rax
+    0.00 :   28e224: and    $0xfffffffffffffff0,%rax
+    0.00 :   28e228: add    %rax,%rcx
+         : 1217   }
+         :
+         : 1219   #[inline]
+         : 1220   #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+         : 1221   fn deallocate_impl_runtime(ptr: NonNull<u8>, layout: Layout) {
+         : 1222   if layout.size() != 0 {
+    0.00 :   28e22b: cmp    $0xffffffffffffffef,%rcx
+    0.00 :   28e22f: je     28e241 <<fp_frame::DataFrame>::new_with_axes+0xdf1>
+    0.00 :   28e231: mov    -0xf0(%rbp),%rdi
+         : 1226   unsafe { intrinsics::offset(self, intrinsics::unchecked_sub(0, count as isize)) }
+    0.00 :   28e238: sub    %rax,%rdi
+    0.00 :   28e23b: call   *0x32aeff(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28e241: mov    -0x48(%rbp),%rax
+    0.00 :   28e245: lea    0x8(%rax),%rbx
+    0.00 :   28e249: mov    0x32aef0(%rip),%r14        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28e250: jmp    28e269 <<fp_frame::DataFrame>::new_with_axes+0xe19>
+    0.00 :   28e252: data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+    0.00 :   28e260: add    $0x18,%rbx
+    0.00 :   28e264: dec    %r12
+    0.00 :   28e267: je     28e278 <<fp_frame::DataFrame>::new_with_axes+0xe28>
+    0.00 :   28e269: cmpq   $0x0,-0x8(%rbx)
+    0.00 :   28e26e: je     28e260 <<fp_frame::DataFrame>::new_with_axes+0xe10>
+    0.00 :   28e270: mov    (%rbx),%rdi
+    0.00 :   28e273: call   *%r14
+    0.00 :   28e276: jmp    28e260 <<fp_frame::DataFrame>::new_with_axes+0xe10>
+    0.00 :   28e278: movabs $0x8000000000000000,%rax
+    0.00 :   28e282: lea    0x11(%rax),%rbx
+    0.00 :   28e286: cmpq   $0x0,-0xf8(%rbp)
+    0.00 :   28e28e: je     28e2af <<fp_frame::DataFrame>::new_with_axes+0xe5f>
+    0.00 :   28e290: mov    -0x48(%rbp),%rdi
+    0.00 :   28e294: call   *0x32aea6(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28e29a: movabs $0x8000000000000000,%rcx
+         : 1249   match self {
+    0.00 :   28e2a4: lea    0x14(%rcx),%rax
+    0.00 :   28e2a8: cmp    %rax,%rbx
+    0.00 :   28e2ab: jne    28e315 <<fp_frame::DataFrame>::new_with_axes+0xec5>
+    0.00 :   28e2ad: jmp    28e2c2 <<fp_frame::DataFrame>::new_with_axes+0xe72>
+    0.00 :   28e2af: movabs $0x8000000000000000,%rcx
+    0.00 :   28e2b9: lea    0x14(%rcx),%rax
+    0.00 :   28e2bd: cmp    %rax,%rbx
+    0.00 :   28e2c0: jne    28e315 <<fp_frame::DataFrame>::new_with_axes+0xec5>
+         : 1258   Ok(v) => ControlFlow::Continue(v),
+    0.00 :   28e2c2: mov    -0x120(%rbp),%rax
+    0.00 :   28e2c9: movdqa -0x130(%rbp),%xmm0
+         : 1261   let column_order = Self::normalize_column_order(&columns, column_order)?;
+    0.00 :   28e2d1: movdqa %xmm0,-0x180(%rbp)
+    0.00 :   28e2d9: mov    %rax,-0x170(%rbp)
+    0.00 :   28e2e0: mov    -0x80(%rbp),%r15
+         : 1265   match *self {
+    0.00 :   28e2e4: cmp    %rcx,(%r15)
+    0.00 :   28e2e7: je     28e56c <<fp_frame::DataFrame>::new_with_axes+0x111c>
+    0.00 :   28e2ed: cmpq   $0x0,0x10(%r15)
+         : 1269   match self {
+    0.00 :   28e2f2: je     28e484 <<fp_frame::DataFrame>::new_with_axes+0x1034>
+    0.00 :   28e2f8: mov    0x8(%r15),%rax
+         : 1272   Some(t) => f(t),
+    0.00 :   28e2fc: mov    0x10(%rax),%rax
+         : 1274   let len = self.len;
+    0.00 :   28e300: mov    -0x170(%rbp),%rbx
+         : 1276   if let Some(multiindex) = column_multiindex.as_ref()
+         : 1277   && multiindex.len() != column_order.len()
+    0.00 :   28e307: cmp    %rbx,%rax
+    0.00 :   28e30a: jne    28e496 <<fp_frame::DataFrame>::new_with_axes+0x1046>
+    0.00 :   28e310: jmp    28e56c <<fp_frame::DataFrame>::new_with_axes+0x111c>
+         : 1281   Err(e) => ControlFlow::Break(Err(e)),
+    0.00 :   28e315: mov    -0x120(%rbp),%rax
+    0.00 :   28e31c: mov    %rax,-0x420(%rbp)
+    0.00 :   28e323: movdqa -0x130(%rbp),%xmm0
+    0.00 :   28e32b: movdqa %xmm0,-0x430(%rbp)
+    0.00 :   28e333: mov    -0x90(%rbp),%rcx
+         : 1287   let column_order = Self::normalize_column_order(&columns, column_order)?;
+    0.00 :   28e33a: mov    %rax,0x20(%rcx)
+    0.00 :   28e33e: movdqu %xmm0,0x10(%rcx)
+         : 1290   Err(e) => Err(From::from(e)),
+    0.00 :   28e343: mov    %rbx,0x8(%rcx)
+    0.00 :   28e347: movq   $0x2,(%rcx)
+    0.00 :   28e34e: movabs $0x8000000000000000,%rax
+    0.00 :   28e358: mov    -0x80(%rbp),%rdi
+    0.00 :   28e35c: cmp    %rax,(%rdi)
+    0.00 :   28e35f: mov    -0x40(%rbp),%rbx
+    0.00 :   28e363: je     28e77f <<fp_frame::DataFrame>::new_with_axes+0x132f>
+    0.00 :   28e369: call   235fe0 <core::ptr::drop_in_place::<fp_index::MultiIndex>>
+    0.00 :   28e36e: jmp    28e77f <<fp_frame::DataFrame>::new_with_axes+0x132f>
+         : 1300   if let Some(strided) = &self.int64_strided {
+    0.00 :   28e373: cmpq   $0x0,0x48(%rdi)
+    0.00 :   28e378: je     28e647 <<fp_frame::DataFrame>::new_with_axes+0x11f7>
+         : 1303   return strided.len;
+    0.00 :   28e37e: mov    0x60(%rdi),%rdx
+    0.00 :   28e382: jmp    28e686 <<fp_frame::DataFrame>::new_with_axes+0x1236>
+    0.00 :   28e387: mov    -0x48(%rbp),%rax
+         : 1307   for (i, name) in column_order.iter().enumerate() {
+    0.00 :   28e38b: mov    %rax,-0x118(%rbp)
+    0.00 :   28e392: mov    0x8(%rax),%rcx
+    0.00 :   28e396: mov    %rcx,-0x30(%rbp)
+    0.00 :   28e39a: mov    0x10(%rax),%rax
+    0.00 :   28e39e: mov    %rax,-0x38(%rbp)
+    0.00 :   28e3a2: mov    -0x58(%rbp),%rax
+    0.00 :   28e3a6: cs nopw 0x0(%rax,%rax,1)
+    0.00 :   28e3b0: mov    %rax,%rcx
+         : 1316   unsafe { leaf.keys.get_unchecked(..usize::from(leaf.len)).assume_init_ref() }
+    0.00 :   28e3b3: add    $0x8,%rax
+    0.00 :   28e3b7: mov    %rcx,-0x58(%rbp)
+    0.00 :   28e3bb: movzwl 0xb0a(%rcx),%ecx
+    0.00 :   28e3c2: mov    %rcx,-0xa0(%rbp)
+         : 1321   for (offset, k) in unsafe { keys.get_unchecked(start_index..) }.iter().enumerate() {
+    0.00 :   28e3c9: lea    0x0(,%rcx,8),%ecx
+    0.00 :   28e3d0: lea    (%rcx,%rcx,2),%r15
+    0.00 :   28e3d4: mov    $0xffffffffffffffff,%r13
+    0.00 :   28e3db: nopl   0x0(%rax,%rax,1)
+    0.00 :   28e3e0: test   %r15,%r15
+    0.00 :   28e3e3: je     28e440 <<fp_frame::DataFrame>::new_with_axes+0xff0>
+         : 1328   unsafe { transmute(intrinsics::offset(self.as_ptr(), count)) }
+    0.00 :   28e3e5: lea    0x18(%rax),%r14
+         : 1330   match key.cmp(k.borrow()) {
+    0.00 :   28e3e9: mov    0x8(%rax),%rsi
+    0.00 :   28e3ed: mov    0x10(%rax),%rdx
+    0.00 :   28e3f1: mov    -0x38(%rbp),%rax
+         : 1334   let len = if left.len() < right.len() { left.len() } else { right.len() };
+    0.00 :   28e3f5: mov    %rax,%rbx
+    0.00 :   28e3f8: sub    %rdx,%rbx
+    0.00 :   28e3fb: cmovb  %rax,%rdx
+    0.00 :   28e3ff: mov    -0x30(%rbp),%rdi
+         : 1339   let mut order = unsafe { compare_bytes(left, right, len) as isize };
+    0.00 :   28e403: call   *0x32af67(%rip)        # 5b9370 <memcmp@GLIBC_2.2.5>
+    0.00 :   28e409: cltq
+         : 1342   if order == 0 {
+    0.00 :   28e40b: test   %eax,%eax
+    0.00 :   28e40d: cmovne %rax,%rbx
+    0.00 :   28e411: test   %rbx,%rbx
+    0.00 :   28e414: sets   %al
+    0.00 :   28e417: setg   %cl
+    0.00 :   28e41a: sub    %al,%cl
+    0.00 :   28e41c: inc    %r13
+    0.00 :   28e41f: add    $0xffffffffffffffe8,%r15
+    0.00 :   28e423: mov    %r14,%rax
+    0.00 :   28e426: cmp    $0x1,%cl
+    0.00 :   28e429: je     28e3e0 <<fp_frame::DataFrame>::new_with_axes+0xf90>
+    0.00 :   28e42b: movzbl %cl,%eax
+    0.00 :   28e42e: cmp    $0xff,%eax
+    0.00 :   28e433: je     28e447 <<fp_frame::DataFrame>::new_with_axes+0xff7>
+    0.00 :   28e435: jmp    28e466 <<fp_frame::DataFrame>::new_with_axes+0x1016>
+    0.00 :   28e437: nopw   0x0(%rax,%rax,1)
+    0.00 :   28e440: mov    -0xa0(%rbp),%r13
+         : 1360   if self.height == 0 {
+    0.00 :   28e447: subq   $0x1,-0xa8(%rbp)
+    0.00 :   28e44f: mov    -0x58(%rbp),%rax
+    0.00 :   28e453: jb     28e16c <<fp_frame::DataFrame>::new_with_axes+0xd1c>
+         : 1364   crate::intrinsics::read_via_copy(src)
+    0.00 :   28e459: mov    0xb10(%rax,%r13,8),%rax
+         : 1366   loop {
+    0.00 :   28e461: jmp    28e3b0 <<fp_frame::DataFrame>::new_with_axes+0xf60>
+         : 1368   None => expect_failed(msg),
+    0.00 :   28e466: lea    -0x16a283(%rip),%rdi        # 1241ea <core::unicode::unicode_data::white_space::WHITESPACE_MAP+0x323b>
+    0.00 :   28e46d: lea    0x30116c(%rip),%rdx        # 58f5e0 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0x2b20>
+    0.00 :   28e474: mov    $0x16,%esi
+    0.00 :   28e479: call   *0x32b189(%rip)        # 5b9608 <_DYNAMIC+0x6d0>
+    0.00 :   28e47f: jmp    28eb62 <<fp_frame::DataFrame>::new_with_axes+0x1712>
+    0.00 :   28e484: mov    -0x170(%rbp),%rbx
+         : 1375   && multiindex.len() != column_order.len()
+    0.00 :   28e48b: test   %rbx,%rbx
+    0.00 :   28e48e: je     28e56c <<fp_frame::DataFrame>::new_with_axes+0x111c>
+    0.00 :   28e494: xor    %eax,%eax
+         : 1379   {
+         : 1380   return Err(FrameError::CompatibilityRejected(format!(
+         : 1381   "column MultiIndex width {} does not match column count {}",
+         : 1382   multiindex.len(),
+    0.00 :   28e496: mov    %rax,-0x230(%rbp)
+    0.00 :   28e49d: mov    %rbx,-0x200(%rbp)
+    0.00 :   28e4a4: lea    -0x230(%rbp),%rax
+         : 1386   return Err(FrameError::CompatibilityRejected(format!(
+    0.00 :   28e4ab: mov    %rax,-0x3b0(%rbp)
+    0.00 :   28e4b2: mov    0x32af0f(%rip),%rax        # 5b93c8 <_DYNAMIC+0x490>
+    0.00 :   28e4b9: mov    %rax,-0x3a8(%rbp)
+    0.00 :   28e4c0: lea    -0x200(%rbp),%rcx
+    0.00 :   28e4c7: mov    %rcx,-0x3a0(%rbp)
+    0.00 :   28e4ce: mov    %rax,-0x398(%rbp)
+    0.00 :   28e4d5: lea    -0x1a0442(%rip),%rsi        # ee09a <anon.e7991269595fdbdef008a1004159f160.35.llvm.15209508612401942908+0x23c>
+    0.00 :   28e4dc: lea    -0x3f8(%rbp),%rdi
+    0.00 :   28e4e3: lea    -0x3b0(%rbp),%rdx
+    0.00 :   28e4ea: call   *0x32b008(%rip)        # 5b94f8 <_DYNAMIC+0x5c0>
+    0.00 :   28e4f0: mov    -0x3e8(%rbp),%rax
+    0.00 :   28e4f7: mov    -0x90(%rbp),%rcx
+    0.00 :   28e4fe: mov    %rax,0x20(%rcx)
+    0.00 :   28e502: movdqu -0x3f8(%rbp),%xmm0
+    0.00 :   28e50a: movdqu %xmm0,0x10(%rcx)
+    0.00 :   28e50f: movabs $0x8000000000000000,%rax
+    0.00 :   28e519: add    $0x11,%rax
+    0.00 :   28e51d: mov    %rax,0x8(%rcx)
+    0.00 :   28e521: movq   $0x2,(%rcx)
+         : 1406   pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+    0.00 :   28e528: mov    -0x178(%rbp),%r14
+    0.00 :   28e52f: test   %rbx,%rbx
+    0.00 :   28e532: je     28e62b <<fp_frame::DataFrame>::new_with_axes+0x11db>
+    0.00 :   28e538: lea    0x8(%r14),%r15
+    0.00 :   28e53c: mov    0x32abfd(%rip),%r12        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28e543: jmp    28e55d <<fp_frame::DataFrame>::new_with_axes+0x110d>
+    0.00 :   28e545: data16 cs nopw 0x0(%rax,%rax,1)
+    0.00 :   28e550: add    $0x18,%r15
+    0.00 :   28e554: dec    %rbx
+    0.00 :   28e557: je     28e62b <<fp_frame::DataFrame>::new_with_axes+0x11db>
+    0.00 :   28e55d: cmpq   $0x0,-0x8(%r15)
+    0.00 :   28e562: je     28e550 <<fp_frame::DataFrame>::new_with_axes+0x1100>
+    0.00 :   28e564: mov    (%r15),%rdi
+    0.00 :   28e567: call   *%r12
+    0.00 :   28e56a: jmp    28e550 <<fp_frame::DataFrame>::new_with_axes+0x1100>
+    0.00 :   28e56c: lea    -0x3b0(%rbp),%r14
+    0.00 :   28e573: mov    0x32abd6(%rip),%rbx        # 5b9150 <memcpy@GLIBC_2.14>
+         : 1424   column_order.len()
+         : 1425   )));
+         : 1426   }
+         : 1427   Ok(Self {
+         : 1428   index,
+    0.00 :   28e57a: mov    $0xe8,%edx
+    0.00 :   28e57f: mov    %r14,%rdi
+    0.00 :   28e582: mov    -0x40(%rbp),%rsi
+    0.00 :   28e586: call   *%rbx
+         : 1433   row_multiindex,
+    0.00 :   28e588: movups 0x0(%r13),%xmm0
+    0.00 :   28e58d: movups 0x10(%r13),%xmm1
+    0.00 :   28e592: movups 0x20(%r13),%xmm2
+    0.00 :   28e597: movups %xmm2,-0x290(%rbp)
+    0.00 :   28e59e: movups %xmm1,-0x2a0(%rbp)
+    0.00 :   28e5a5: movups %xmm0,-0x2b0(%rbp)
+         : 1440   columns,
+         : 1441   column_order,
+    0.00 :   28e5ac: mov    -0x170(%rbp),%rax
+    0.00 :   28e5b3: mov    %rax,-0x2b8(%rbp)
+    0.00 :   28e5ba: movaps -0x180(%rbp),%xmm0
+    0.00 :   28e5c1: movups %xmm0,-0x2c8(%rbp)
+         : 1446   column_multiindex,
+    0.00 :   28e5c8: movups (%r15),%xmm0
+    0.00 :   28e5cc: movdqu 0x10(%r15),%xmm1
+    0.00 :   28e5d2: movdqu 0x20(%r15),%xmm2
+    0.00 :   28e5d8: movdqu %xmm1,-0x270(%rbp)
+    0.00 :   28e5e0: movups %xmm0,-0x280(%rbp)
+    0.00 :   28e5e7: movdqu %xmm2,-0x260(%rbp)
+    0.00 :   28e5ef: mov    -0x78(%rbp),%rax
+         : 1454   Ok(Self {
+    0.00 :   28e5f3: movdqu (%rax),%xmm0
+    0.00 :   28e5f7: movdqu %xmm0,-0x250(%rbp)
+    0.00 :   28e5ff: mov    0x10(%rax),%rax
+    0.00 :   28e603: mov    %rax,-0x240(%rbp)
+    0.00 :   28e60a: mov    $0x178,%edx
+    0.00 :   28e60f: mov    -0x90(%rbp),%r15
+    0.00 :   28e616: mov    %r15,%rdi
+    0.00 :   28e619: mov    %r14,%rsi
+    0.00 :   28e61c: call   *%rbx
+    0.00 :   28e61e: movb   $0x1,0x178(%r15)
+         : 1465   allows_duplicate_labels: true,
+         : 1466   })
+         : 1467   }
+    0.00 :   28e626: jmp    28e7a8 <<fp_frame::DataFrame>::new_with_axes+0x1358>
+    0.00 :   28e62b: cmpq   $0x0,-0x180(%rbp)
+    0.00 :   28e633: je     28e34e <<fp_frame::DataFrame>::new_with_axes+0xefe>
+    0.00 :   28e639: mov    %r14,%rdi
+    0.00 :   28e63c: call   *0x32aafe(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28e642: jmp    28e34e <<fp_frame::DataFrame>::new_with_axes+0xefe>
+         : 1474   if let Some((_, offsets)) = &self.utf8_contiguous {
+    0.00 :   28e647: cmpq   $0x0,0x78(%rdi)
+    0.00 :   28e64c: je     28e65a <<fp_frame::DataFrame>::new_with_axes+0x120a>
+         : 1477   unsafe { &*self.as_ptr().cast_const() }
+    0.00 :   28e64e: mov    0x90(%rdi),%rdx
+         : 1479   return offsets.len() - 1;
+    0.00 :   28e655: dec    %rdx
+    0.00 :   28e658: jmp    28e686 <<fp_frame::DataFrame>::new_with_axes+0x1236>
+    0.00 :   28e65a: mov    0x40(%rdi),%eax
+    0.00 :   28e65d: test   %eax,%eax
+    0.00 :   28e65f: je     28e670 <<fp_frame::DataFrame>::new_with_axes+0x1220>
+    0.00 :   28e661: mov    0x70(%rdi),%eax
+    0.00 :   28e664: test   %eax,%eax
+    0.00 :   28e666: je     28e679 <<fp_frame::DataFrame>::new_with_axes+0x1229>
+         : 1488   self.as_slice().len()
+    0.00 :   28e668: call   *0x32b51a(%rip)        # 5b9b88 <_DYNAMIC+0xc50>
+    0.00 :   28e66e: jmp    28e686 <<fp_frame::DataFrame>::new_with_axes+0x1236>
+    0.00 :   28e670: mov    -0x38(%rbp),%rax
+    0.00 :   28e674: mov    (%rax),%rax
+    0.00 :   28e677: jmp    28e682 <<fp_frame::DataFrame>::new_with_axes+0x1232>
+         : 1494   if let Some(Some(values)) = self.int64_typed.get() {
+    0.00 :   28e679: mov    0x68(%rdi),%rax
+    0.00 :   28e67d: test   %rax,%rax
+    0.00 :   28e680: je     28e668 <<fp_frame::DataFrame>::new_with_axes+0x1218>
+    0.00 :   28e682: mov    0x20(%rax),%rdx
+         : 1499   index.len()
+    0.00 :   28e686: mov    %rdx,-0x200(%rbp)
+    0.00 :   28e68d: lea    -0x230(%rbp),%rax
+         : 1502   return Err(FrameError::CompatibilityRejected(format!(
+    0.00 :   28e694: mov    %rax,-0x3b0(%rbp)
+    0.00 :   28e69b: mov    0x32ad26(%rip),%rax        # 5b93c8 <_DYNAMIC+0x490>
+    0.00 :   28e6a2: mov    %rax,-0x3a8(%rbp)
+    0.00 :   28e6a9: lea    -0x200(%rbp),%rcx
+    0.00 :   28e6b0: mov    %rcx,-0x3a0(%rbp)
+    0.00 :   28e6b7: mov    %rax,-0x398(%rbp)
+    0.00 :   28e6be: lea    -0x1a204f(%rip),%rsi        # ec676 <anon.ef2dbc71928002fa557393c3c574936c.0.llvm.11682899113876593817+0x160>
+    0.00 :   28e6c5: lea    -0x3e0(%rbp),%rdi
+    0.00 :   28e6cc: lea    -0x3b0(%rbp),%rdx
+    0.00 :   28e6d3: call   *0x32ae1f(%rip)        # 5b94f8 <_DYNAMIC+0x5c0>
+    0.00 :   28e6d9: mov    -0x3d0(%rbp),%rax
+    0.00 :   28e6e0: mov    -0x90(%rbp),%rsi
+    0.00 :   28e6e7: mov    %rax,0x20(%rsi)
+    0.00 :   28e6eb: movdqu -0x3e0(%rbp),%xmm0
+    0.00 :   28e6f3: movdqu %xmm0,0x10(%rsi)
+    0.00 :   28e6f8: movabs $0x8000000000000000,%rdx
+    0.00 :   28e702: lea    0x11(%rdx),%rax
+    0.00 :   28e706: mov    $0x8,%ecx
+    0.00 :   28e70b: mov    %rax,(%rsi,%rcx,1)
+    0.00 :   28e70f: movq   $0x2,(%rsi)
+    0.00 :   28e716: mov    -0x80(%rbp),%rdi
+    0.00 :   28e71a: cmp    %rdx,(%rdi)
+    0.00 :   28e71d: je     28e724 <<fp_frame::DataFrame>::new_with_axes+0x12d4>
+    0.00 :   28e71f: call   235fe0 <core::ptr::drop_in_place::<fp_index::MultiIndex>>
+    0.00 :   28e724: mov    -0x30(%rbp),%rax
+    0.00 :   28e728: mov    0x8(%rax),%r14
+    0.00 :   28e72c: mov    0x10(%rax),%rbx
+    0.00 :   28e730: test   %rbx,%rbx
+    0.00 :   28e733: je     28e768 <<fp_frame::DataFrame>::new_with_axes+0x1318>
+    0.00 :   28e735: lea    0x8(%r14),%r15
+    0.00 :   28e739: mov    0x32aa00(%rip),%r12        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28e740: jmp    28e759 <<fp_frame::DataFrame>::new_with_axes+0x1309>
+    0.00 :   28e742: data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+    0.00 :   28e750: add    $0x18,%r15
+    0.00 :   28e754: dec    %rbx
+    0.00 :   28e757: je     28e768 <<fp_frame::DataFrame>::new_with_axes+0x1318>
+    0.00 :   28e759: cmpq   $0x0,-0x8(%r15)
+    0.00 :   28e75e: je     28e750 <<fp_frame::DataFrame>::new_with_axes+0x1300>
+    0.00 :   28e760: mov    (%r15),%rdi
+    0.00 :   28e763: call   *%r12
+    0.00 :   28e766: jmp    28e750 <<fp_frame::DataFrame>::new_with_axes+0x1300>
+    0.00 :   28e768: mov    -0x30(%rbp),%rax
+    0.00 :   28e76c: cmpq   $0x0,(%rax)
+    0.00 :   28e770: mov    -0x40(%rbp),%rbx
+    0.00 :   28e774: je     28e77f <<fp_frame::DataFrame>::new_with_axes+0x132f>
+    0.00 :   28e776: mov    %r14,%rdi
+    0.00 :   28e779: call   *0x32a9c1(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28e77f: mov    -0x78(%rbp),%rdi
+         : 1551   }
+    0.00 :   28e783: call   235450 <core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>>
+    0.00 :   28e788: movabs $0x8000000000000000,%rax
+    0.00 :   28e792: cmp    %rax,0x0(%r13)
+    0.00 :   28e796: je     28e7a0 <<fp_frame::DataFrame>::new_with_axes+0x1350>
+    0.00 :   28e798: mov    %r13,%rdi
+    0.00 :   28e79b: call   235fe0 <core::ptr::drop_in_place::<fp_index::MultiIndex>>
+    0.00 :   28e7a0: mov    %rbx,%rdi
+    0.00 :   28e7a3: call   236320 <core::ptr::drop_in_place::<fp_index::Index>>
+    0.00 :   28e7a8: add    $0x408,%rsp
+    0.00 :   28e7af: pop    %rbx
+    0.00 :   28e7b0: pop    %r12
+    0.00 :   28e7b2: pop    %r13
+    0.00 :   28e7b4: pop    %r14
+    0.00 :   28e7b6: pop    %r15
+    0.00 :   28e7b8: pop    %rbp
+    0.00 :   28e7b9: ret
+         : 1568   Some(element) => {
+    0.00 :   28e7ba: mov    -0x3a8(%rbp),%r14
+    0.00 :   28e7c1: mov    -0x3a0(%rbp),%r13
+    0.00 :   28e7c8: mov    $0x60,%edi
+    0.00 :   28e7cd: call   *0x32a95d(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+         : 1573   let ptr = match result {
+    0.00 :   28e7d3: test   %rax,%rax
+    0.00 :   28e7d6: je     28eb52 <<fp_frame::DataFrame>::new_with_axes+0x1702>
+         : 1576   intrinsics::write_via_move(dst, src)
+    0.00 :   28e7dc: mov    %rbx,(%rax)
+    0.00 :   28e7df: mov    %r14,0x8(%rax)
+    0.00 :   28e7e3: mov    %r13,0x10(%rax)
+         : 1580   vector
+    0.00 :   28e7e7: movq   $0x4,-0x148(%rbp)
+    0.00 :   28e7f2: mov    %rax,-0x30(%rbp)
+    0.00 :   28e7f6: mov    %rax,-0x140(%rbp)
+    0.00 :   28e7fd: movq   $0x1,-0x138(%rbp)
+         : 1585   <Vec<T> as SpecExtend<T, I>>::spec_extend(&mut vector, iterator);
+    0.00 :   28e808: movups -0x1c0(%rbp),%xmm0
+    0.00 :   28e80f: movaps %xmm0,-0x370(%rbp)
+    0.00 :   28e816: movdqu -0x200(%rbp),%xmm0
+    0.00 :   28e81e: movdqu -0x1f0(%rbp),%xmm1
+    0.00 :   28e826: movdqu -0x1e0(%rbp),%xmm2
+    0.00 :   28e82e: movups -0x1d0(%rbp),%xmm3
+    0.00 :   28e835: movaps %xmm3,-0x380(%rbp)
+    0.00 :   28e83c: movdqa %xmm2,-0x390(%rbp)
+    0.00 :   28e844: movdqa %xmm1,-0x3a0(%rbp)
+    0.00 :   28e84c: movdqa %xmm0,-0x3b0(%rbp)
+    0.00 :   28e854: mov    $0x1,%r15d
+    0.00 :   28e85a: mov    $0x28,%ebx
+    0.00 :   28e85f: jmp    28e896 <<fp_frame::DataFrame>::new_with_axes+0x1446>
+         : 1599   self.ptr.cast().as_non_null_ptr()
+    0.00 :   28e861: mov    -0x140(%rbp),%rax
+    0.00 :   28e868: mov    %rax,-0x30(%rbp)
+    0.00 :   28e86c: mov    %r15,%rsi
+    0.00 :   28e86f: mov    -0x30(%rbp),%rax
+    0.00 :   28e873: mov    %r14,-0x10(%rax,%rbx,1)
+    0.00 :   28e878: mov    -0x38(%rbp),%rcx
+    0.00 :   28e87c: mov    %rcx,-0x8(%rax,%rbx,1)
+    0.00 :   28e881: mov    %r13,(%rax,%rbx,1)
+         : 1608   unsafe {
+         : 1609   ptr::write(self.as_mut_ptr().add(len), element);
+         : 1610   // Since next() executes user code which can panic we have to bump the length
+         : 1611   // after each step.
+         : 1612   // NB can't overflow since we would have had to alloc the address space
+         : 1613   self.set_len(len + 1);
+    0.00 :   28e885: inc    %rsi
+         : 1615   self.len = new_len;
+    0.00 :   28e888: mov    %rsi,-0x138(%rbp)
+         : 1617   while let Some(element) = iterator.next() {
+    0.00 :   28e88f: add    $0x18,%rbx
+    0.00 :   28e893: mov    %rsi,%r15
+    0.00 :   28e896: lea    -0x3c8(%rbp),%rdi
+    0.00 :   28e89d: lea    -0x3b0(%rbp),%rsi
+    0.00 :   28e8a4: call   2f2fd0 <<core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, <fp_frame::DataFrame>::normalize_column_order::{closure#0}>> as core::iter::traits::iterator::Iterator>::next>
+    0.00 :   28e8a9: mov    -0x3c8(%rbp),%r14
+    0.00 :   28e8b0: movabs $0x8000000000000000,%rax
+    0.00 :   28e8ba: cmp    %rax,%r14
+    0.00 :   28e8bd: je     28e8fe <<fp_frame::DataFrame>::new_with_axes+0x14ae>
+    0.00 :   28e8bf: mov    -0x3c0(%rbp),%rax
+    0.00 :   28e8c6: mov    %rax,-0x38(%rbp)
+    0.00 :   28e8ca: mov    -0x3b8(%rbp),%r13
+    0.00 :   28e8d1: mov    %r15,%rsi
+         : 1631   if len == self.capacity() {
+    0.00 :   28e8d4: cmp    -0x148(%rbp),%r15
+    0.00 :   28e8db: jne    28e86f <<fp_frame::DataFrame>::new_with_axes+0x141f>
+         : 1634   }
+         : 1635   }
+         :
+         : 1637   if self.needs_to_grow(len, additional, elem_layout) {
+         : 1638   unsafe {
+         : 1639   do_reserve_and_handle(self, len, additional, elem_layout);
+    0.00 :   28e8dd: mov    $0x1,%edx
+    0.00 :   28e8e2: mov    $0x8,%ecx
+    0.00 :   28e8e7: mov    $0x18,%r8d
+    0.00 :   28e8ed: lea    -0x148(%rbp),%rdi
+    0.00 :   28e8f4: call   273f20 <<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>>
+    0.00 :   28e8f9: jmp    28e861 <<fp_frame::DataFrame>::new_with_axes+0x1411>
+         : 1646   vector
+    0.00 :   28e8fe: mov    -0x148(%rbp),%r13
+    0.00 :   28e905: mov    -0x140(%rbp),%rbx
+    0.00 :   28e90c: mov    %r15,%r14
+         : 1650   drop(normalized_set);
+    0.00 :   28e90f: mov    -0x228(%rbp),%rcx
+    0.00 :   28e916: test   %rcx,%rcx
+    0.00 :   28e919: je     28e93f <<fp_frame::DataFrame>::new_with_axes+0x14ef>
+         : 1654   let (a, b) = intrinsics::mul_with_overflow(self as $ActualT, rhs as $ActualT);
+    0.00 :   28e91b: mov    %rcx,%rax
+    0.00 :   28e91e: shl    $0x4,%rax
+    0.00 :   28e922: add    %rax,%rcx
+    0.00 :   28e925: cmp    $0xffffffffffffffdf,%rcx
+    0.00 :   28e929: je     28e93f <<fp_frame::DataFrame>::new_with_axes+0x14ef>
+    0.00 :   28e92b: mov    -0x230(%rbp),%rdi
+    0.00 :   28e932: sub    %rax,%rdi
+    0.00 :   28e935: add    $0xfffffffffffffff0,%rdi
+    0.00 :   28e939: call   *0x32a801(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+         : 1664   unsafe { intrinsics::offset(self, count) }
+    0.00 :   28e93f: lea    0x0(,%r14,8),%rax
+    0.00 :   28e947: lea    (%rax,%rax,2),%rax
+    0.00 :   28e94b: mov    %rax,-0x30(%rbp)
+    0.00 :   28e94f: add    %rbx,%rax
+         : 1669   IntoIter { buf, phantom: PhantomData, cap, alloc, ptr: buf, end }
+    0.00 :   28e952: mov    %rbx,-0x3b0(%rbp)
+    0.00 :   28e959: mov    %r13,%r15
+    0.00 :   28e95c: mov    %r13,-0x3a0(%rbp)
+    0.00 :   28e963: mov    %rbx,-0x3a8(%rbp)
+    0.00 :   28e96a: mov    %rax,-0x398(%rbp)
+         : 1675   if elem_size == 0 { usize::MAX } else { self.cap.as_inner() }
+    0.00 :   28e971: mov    -0x70(%rbp),%rax
+         : 1677   self.buf.reserve(self.len, additional);
+    0.00 :   28e975: mov    -0x60(%rbp),%r13
+         : 1679   intrinsics::wrapping_sub(self, rhs)
+    0.00 :   28e979: sub    %r13,%rax
+         : 1681   unsafe { self.shrink(cap, elem_layout) }
+         : 1682   }
+         :
+         : 1684   #[inline]
+         : 1685   const fn needs_to_grow(&self, len: usize, additional: usize, elem_layout: Layout) -> bool {
+         : 1686   additional > self.capacity(elem_layout.size()).wrapping_sub(len)
+    0.00 :   28e97c: cmp    %rax,%r14
+         : 1688   if self.needs_to_grow(len, additional, elem_layout) {
+    0.00 :   28e97f: ja     28eb0a <<fp_frame::DataFrame>::new_with_axes+0x16ba>
+         : 1690   if count > 0 {
+    0.00 :   28e985: test   %r14,%r14
+    0.00 :   28e988: je     28e9aa <<fp_frame::DataFrame>::new_with_axes+0x155a>
+    0.00 :   28e98a: lea    0x0(,%r13,2),%rdi
+    0.00 :   28e992: add    %r13,%rdi
+    0.00 :   28e995: shl    $0x3,%rdi
+    0.00 :   28e999: add    -0x68(%rbp),%rdi
+         : 1697   unsafe { crate::intrinsics::copy_nonoverlapping(src, dst, count) }
+    0.00 :   28e99d: mov    %rbx,%rsi
+    0.00 :   28e9a0: mov    -0x30(%rbp),%rdx
+    0.00 :   28e9a4: call   *0x32a7a6(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+         : 1701   self.len += count;
+    0.00 :   28e9aa: add    %r14,%r13
+    0.00 :   28e9ad: mov    %r13,-0x60(%rbp)
+         : 1704   if elem_layout.size() == 0 || self.cap.as_inner() == 0 {
+    0.00 :   28e9b1: test   %r15,%r15
+    0.00 :   28e9b4: je     28e9bf <<fp_frame::DataFrame>::new_with_axes+0x156f>
+    0.00 :   28e9b6: mov    %rbx,%rdi
+    0.00 :   28e9b9: call   *0x32a781(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+         : 1709   Ok(normalized)
+    0.00 :   28e9bf: movdqu -0x70(%rbp),%xmm0
+    0.00 :   28e9c4: movdqa %xmm0,-0x130(%rbp)
+    0.00 :   28e9cc: mov    -0x60(%rbp),%rax
+    0.00 :   28e9d0: mov    %rax,-0x120(%rbp)
+         : 1714   }
+    0.00 :   28e9d7: mov    -0xe8(%rbp),%rcx
+    0.00 :   28e9de: test   %rcx,%rcx
+    0.00 :   28e9e1: mov    -0x50(%rbp),%r13
+    0.00 :   28e9e5: je     28ea10 <<fp_frame::DataFrame>::new_with_axes+0x15c0>
+         : 1719   let (a, b) = intrinsics::mul_with_overflow(self as $ActualT, rhs as $ActualT);
+    0.00 :   28e9e7: lea    (%rcx,%rcx,2),%rax
+         : 1721   if intrinsics::unlikely(intrinsics::add_with_overflow(self, rhs).1) {
+    0.00 :   28e9eb: lea    0x27(,%rax,8),%rax
+    0.00 :   28e9f3: and    $0xfffffffffffffff0,%rax
+    0.00 :   28e9f7: add    %rax,%rcx
+    0.00 :   28e9fa: cmp    $0xffffffffffffffef,%rcx
+    0.00 :   28e9fe: je     28ea10 <<fp_frame::DataFrame>::new_with_axes+0x15c0>
+    0.00 :   28ea00: mov    -0xf0(%rbp),%rdi
+         : 1728   unsafe { intrinsics::offset(self, intrinsics::unchecked_sub(0, count as isize)) }
+    0.00 :   28ea07: sub    %rax,%rdi
+    0.00 :   28ea0a: call   *0x32a730(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28ea10: mov    -0x48(%rbp),%rax
+         : 1732   pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+    0.00 :   28ea14: lea    0x8(%rax),%rbx
+    0.00 :   28ea18: mov    0x32a721(%rip),%r14        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28ea1f: jmp    28ea2a <<fp_frame::DataFrame>::new_with_axes+0x15da>
+    0.00 :   28ea21: add    $0x18,%rbx
+    0.00 :   28ea25: dec    %r12
+    0.00 :   28ea28: je     28ea39 <<fp_frame::DataFrame>::new_with_axes+0x15e9>
+    0.00 :   28ea2a: cmpq   $0x0,-0x8(%rbx)
+    0.00 :   28ea2f: je     28ea21 <<fp_frame::DataFrame>::new_with_axes+0x15d1>
+    0.00 :   28ea31: mov    (%rbx),%rdi
+    0.00 :   28ea34: call   *%r14
+    0.00 :   28ea37: jmp    28ea21 <<fp_frame::DataFrame>::new_with_axes+0x15d1>
+    0.00 :   28ea39: cmpq   $0x0,-0xf8(%rbp)
+    0.00 :   28ea41: je     28ea56 <<fp_frame::DataFrame>::new_with_axes+0x1606>
+    0.00 :   28ea43: movabs $0x8000000000000000,%rax
+    0.00 :   28ea4d: lea    0x14(%rax),%rbx
+    0.00 :   28ea51: jmp    28e290 <<fp_frame::DataFrame>::new_with_axes+0xe40>
+    0.00 :   28ea56: movabs $0x8000000000000000,%rcx
+    0.00 :   28ea60: jmp    28e2c2 <<fp_frame::DataFrame>::new_with_axes+0xe72>
+         : 1751   None => unwrap_failed(),
+    0.00 :   28ea65: lea    0x30005c(%rip),%rdi        # 58eac8 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0x2008>
+    0.00 :   28ea6c: call   *0x32a73e(%rip)        # 5b91b0 <_DYNAMIC+0x278>
+    0.00 :   28ea72: jmp    28eb62 <<fp_frame::DataFrame>::new_with_axes+0x1712>
+    0.00 :   28ea77: mov    %rcx,%rbx
+         : 1756   // Later in #36481 it was discovered that exposing a deterministic
+         : 1757   // iteration order allows a form of DOS attack. To counter that we
+         : 1758   // increment one of the seeds on every RandomState creation, giving
+         : 1759   // every corresponding HashMap a different iteration order.
+         : 1760   thread_local!(static KEYS: Cell<(u64, u64)> = {
+         : 1761   Cell::new(hashmap_random_keys())
+    0.00 :   28ea7a: call   *0x32af48(%rip)        # 5b99c8 <_DYNAMIC+0xa90>
+    0.00 :   28ea80: mov    %rdx,%r14
+    0.00 :   28ea83: mov    %rbx,%rcx
+    0.00 :   28ea86: mov    %rdx,%fs:0x8(%rbx)
+    0.00 :   28ea8b: movb   $0x1,%fs:0x10(%rbx)
+    0.00 :   28ea90: jmp    28d8c0 <<fp_frame::DataFrame>::new_with_axes+0x470>
+    0.00 :   28ea95: lea    0x3025e4(%rip),%rdi        # 591080 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0x45c0>
+    0.00 :   28ea9c: call   *0x32a70e(%rip)        # 5b91b0 <_DYNAMIC+0x278>
+    0.00 :   28eaa2: jmp    28eb62 <<fp_frame::DataFrame>::new_with_axes+0x1712>
+    0.00 :   28eaa7: call   *0x32af1b(%rip)        # 5b99c8 <_DYNAMIC+0xa90>
+    0.00 :   28eaad: mov    $0xffffffffffffffd8,%rsi
+    0.00 :   28eab4: mov    %rdx,%fs:0x8(%rsi)
+    0.00 :   28eab9: movb   $0x1,%fs:0x10(%rsi)
+    0.00 :   28eabe: jmp    28e03c <<fp_frame::DataFrame>::new_with_axes+0xbec>
+    0.00 :   28eac3: lea    -0x390(%rbp),%rdx
+    0.00 :   28eaca: lea    -0x3b0(%rbp),%rdi
+    0.00 :   28ead1: mov    %r14,%r15
+    0.00 :   28ead4: mov    %r14,%rsi
+    0.00 :   28ead7: mov    $0x1,%ecx
+    0.00 :   28eadc: call   *0x32b0fe(%rip)        # 5b9be0 <_DYNAMIC+0xca8>
+    0.00 :   28eae2: add    $0x10,%rbx
+    0.00 :   28eae6: lea    -0x3b0(%rbp),%r14
+         : 1784   let mut i = 0;
+         : 1785   let len = len!(self);
+         : 1786   loop {
+         : 1787   // SAFETY: the loop iterates `i in 0..len`, which always is in bounds of
+         : 1788   // the slice allocation
+         : 1789   acc = f(acc, unsafe { & $( $mut_ )? *self.ptr.add(i).as_ptr() });
+    0.00 :   28eaed: mov    -0x8(%rbx),%rsi
+    0.00 :   28eaf1: mov    (%rbx),%rdx
+    0.00 :   28eaf4: mov    %r14,%rdi
+    0.00 :   28eaf7: call   2c3620 <<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert>
+         : 1794   // SAFETY: `i` can't overflow since it'll only reach usize::MAX if the
+         : 1795   // slice had that length, in which case we'll break out of the loop
+         : 1796   // after the increment
+         : 1797   i = unsafe { i.unchecked_add(1) };
+         : 1798   if i == len {
+    0.00 :   28eafc: add    $0x18,%rbx
+    0.00 :   28eb00: dec    %r15
+    0.00 :   28eb03: jne    28eaed <<fp_frame::DataFrame>::new_with_axes+0x169d>
+    0.00 :   28eb05: jmp    28e079 <<fp_frame::DataFrame>::new_with_axes+0xc29>
+    0.00 :   28eb0a: lea    -0x70(%rbp),%rdi
+         : 1804   do_reserve_and_handle(self, len, additional, elem_layout);
+    0.00 :   28eb0e: mov    $0x8,%ecx
+    0.00 :   28eb13: mov    $0x18,%r8d
+    0.00 :   28eb19: mov    %r13,%rsi
+    0.00 :   28eb1c: mov    %r14,-0x38(%rbp)
+    0.00 :   28eb20: mov    %r14,%rdx
+    0.00 :   28eb23: call   273f20 <<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>>
+         : 1811   let len = self.len;
+    0.00 :   28eb28: mov    -0x60(%rbp),%r13
+    0.00 :   28eb2c: mov    -0x38(%rbp),%r14
+         : 1814   if count > 0 {
+    0.00 :   28eb30: jmp    28e98a <<fp_frame::DataFrame>::new_with_axes+0x153a>
+    0.00 :   28eb35: mov    $0x8,%edi
+    0.00 :   28eb3a: mov    %rbx,%rsi
+    0.00 :   28eb3d: jmp    28dbc4 <<fp_frame::DataFrame>::new_with_axes+0x774>
+    0.00 :   28eb42: mov    $0x1,%edi
+    0.00 :   28eb47: mov    %r15,%rsi
+    0.00 :   28eb4a: call   *0x32a628(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   28eb50: jmp    28eb62 <<fp_frame::DataFrame>::new_with_axes+0x1712>
+         : 1823   Err(err) => handle_error(err),
+    0.00 :   28eb52: mov    $0x8,%edi
+    0.00 :   28eb57: mov    $0x60,%esi
+    0.00 :   28eb5c: call   *0x32a616(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   28eb62: ud2
+    0.00 :   28eb64: mov    %rax,-0x30(%rbp)
+    0.00 :   28eb68: lea    -0x3b0(%rbp),%rdi
+         : 1830   fn spec_extend(&mut self, iterator: IntoIter<T, A2>) {
+         : 1831   unsafe {
+         : 1832   self.append_elements(iterator.as_slice() as _);
+         : 1833   }
+         : 1834   iterator.forget_remaining_elements_and_dealloc();
+         : 1835   }
+    0.00 :   28eb6f: call   233ea0 <core::ptr::drop_in_place::<alloc::vec::into_iter::IntoIter<alloc::string::String>>>
+         : 1837   fn spec_extend(&mut self, iterator: IntoIter<T, A2>) {
+    0.00 :   28eb74: jmp    28ecad <<fp_frame::DataFrame>::new_with_axes+0x185d>
+    0.00 :   28eb79: jmp    28eb7b <<fp_frame::DataFrame>::new_with_axes+0x172b>
+    0.00 :   28eb7b: mov    %rax,-0x30(%rbp)
+         : 1841   }
+    0.00 :   28eb7f: mov    -0x3a8(%rbp),%rcx
+    0.00 :   28eb86: test   %rcx,%rcx
+    0.00 :   28eb89: je     28ecad <<fp_frame::DataFrame>::new_with_axes+0x185d>
+         : 1845   let (a, b) = intrinsics::mul_with_overflow(self as $ActualT, rhs as $ActualT);
+    0.00 :   28eb8f: mov    %rcx,%rax
+    0.00 :   28eb92: shl    $0x4,%rax
+    0.00 :   28eb96: add    %rax,%rcx
+    0.00 :   28eb99: cmp    $0xffffffffffffffdf,%rcx
+    0.00 :   28eb9d: je     28ecad <<fp_frame::DataFrame>::new_with_axes+0x185d>
+    0.00 :   28eba3: mov    -0x3b0(%rbp),%rdi
+    0.00 :   28ebaa: jmp    28ec4f <<fp_frame::DataFrame>::new_with_axes+0x17ff>
+    0.00 :   28ebaf: jmp    28ec6e <<fp_frame::DataFrame>::new_with_axes+0x181e>
+    0.00 :   28ebb4: mov    %rax,-0x30(%rbp)
+         : 1855   if elem_layout.size() == 0 || self.cap.as_inner() == 0 {
+    0.00 :   28ebb8: test   %rbx,%rbx
+    0.00 :   28ebbb: je     28ec2c <<fp_frame::DataFrame>::new_with_axes+0x17dc>
+    0.00 :   28ebbd: mov    %r14,%rdi
+    0.00 :   28ebc0: call   *0x32a57a(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28ebc6: jmp    28ec2c <<fp_frame::DataFrame>::new_with_axes+0x17dc>
+    0.00 :   28ebc8: mov    %rax,-0x30(%rbp)
+    0.00 :   28ebcc: jmp    28ec2c <<fp_frame::DataFrame>::new_with_axes+0x17dc>
+    0.00 :   28ebce: jmp    28ed09 <<fp_frame::DataFrame>::new_with_axes+0x18b9>
+    0.00 :   28ebd3: mov    %rax,-0x30(%rbp)
+    0.00 :   28ebd7: test   %r14,%r14
+    0.00 :   28ebda: je     28ec20 <<fp_frame::DataFrame>::new_with_axes+0x17d0>
+    0.00 :   28ebdc: mov    -0x38(%rbp),%rdi
+    0.00 :   28ebe0: call   *0x32a55a(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28ebe6: jmp    28ec20 <<fp_frame::DataFrame>::new_with_axes+0x17d0>
+    0.00 :   28ebe8: mov    %rax,-0x30(%rbp)
+    0.00 :   28ebec: test   %r15,%r15
+    0.00 :   28ebef: je     28ecad <<fp_frame::DataFrame>::new_with_axes+0x185d>
+    0.00 :   28ebf5: mov    %r13,%rdi
+    0.00 :   28ebf8: call   *0x32a542(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28ebfe: jmp    28ecad <<fp_frame::DataFrame>::new_with_axes+0x185d>
+    0.00 :   28ec03: jmp    28eca9 <<fp_frame::DataFrame>::new_with_axes+0x1859>
+    0.00 :   28ec08: mov    %rax,%r15
+    0.00 :   28ec0b: lea    -0x180(%rbp),%rdi
+         : 1879   }
+    0.00 :   28ec12: call   232b50 <core::ptr::drop_in_place::<alloc::vec::Vec<alloc::string::String>>>
+    0.00 :   28ec17: jmp    28ed5e <<fp_frame::DataFrame>::new_with_axes+0x190e>
+    0.00 :   28ec1c: mov    %rax,-0x30(%rbp)
+    0.00 :   28ec20: lea    -0x148(%rbp),%rdi
+         : 1884   }
+    0.00 :   28ec27: call   232b50 <core::ptr::drop_in_place::<alloc::vec::Vec<alloc::string::String>>>
+         : 1886   }
+    0.00 :   28ec2c: mov    -0x228(%rbp),%rcx
+    0.00 :   28ec33: test   %rcx,%rcx
+    0.00 :   28ec36: je     28ecad <<fp_frame::DataFrame>::new_with_axes+0x185d>
+    0.00 :   28ec38: mov    %rcx,%rax
+    0.00 :   28ec3b: shl    $0x4,%rax
+    0.00 :   28ec3f: add    %rax,%rcx
+    0.00 :   28ec42: cmp    $0xffffffffffffffdf,%rcx
+    0.00 :   28ec46: je     28ecad <<fp_frame::DataFrame>::new_with_axes+0x185d>
+    0.00 :   28ec48: mov    -0x230(%rbp),%rdi
+    0.00 :   28ec4f: sub    %rax,%rdi
+    0.00 :   28ec52: add    $0xfffffffffffffff0,%rdi
+    0.00 :   28ec56: call   *0x32a4e4(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28ec5c: jmp    28ecad <<fp_frame::DataFrame>::new_with_axes+0x185d>
+    0.00 :   28ec5e: mov    %rax,%r15
+    0.00 :   28ec61: jmp    28ed45 <<fp_frame::DataFrame>::new_with_axes+0x18f5>
+    0.00 :   28ec66: mov    %rax,%r15
+    0.00 :   28ec69: jmp    28ed86 <<fp_frame::DataFrame>::new_with_axes+0x1936>
+    0.00 :   28ec6e: mov    %rax,%r15
+    0.00 :   28ec71: movabs $0x8000000000000000,%rax
+    0.00 :   28ec7b: mov    -0x80(%rbp),%rcx
+    0.00 :   28ec7f: cmp    %rax,(%rcx)
+    0.00 :   28ec82: je     28ec8d <<fp_frame::DataFrame>::new_with_axes+0x183d>
+    0.00 :   28ec84: mov    -0x80(%rbp),%rdi
+    0.00 :   28ec88: call   235fe0 <core::ptr::drop_in_place::<fp_index::MultiIndex>>
+    0.00 :   28ec8d: mov    -0x30(%rbp),%rdi
+         : 1912   }
+    0.00 :   28ec91: call   232b50 <core::ptr::drop_in_place::<alloc::vec::Vec<alloc::string::String>>>
+    0.00 :   28ec96: mov    -0x40(%rbp),%rbx
+    0.00 :   28ec9a: mov    -0x50(%rbp),%r13
+    0.00 :   28ec9e: mov    -0x78(%rbp),%r14
+    0.00 :   28eca2: jmp    28ed7e <<fp_frame::DataFrame>::new_with_axes+0x192e>
+         : 1918   #[inline]
+         : 1919   pub(super) fn replace<T, R>(v: &mut T, change: impl FnOnce(T) -> (T, R)) -> R {
+         : 1920   struct PanicGuard;
+         : 1921   impl Drop for PanicGuard {
+         : 1922   fn drop(&mut self) {
+         : 1923   intrinsics::abort()
+    0.00 :   28eca7: ud2
+    0.00 :   28eca9: mov    %rax,-0x30(%rbp)
+    0.00 :   28ecad: mov    -0x68(%rbp),%r14
+    0.00 :   28ecb1: mov    -0x60(%rbp),%rbx
+    0.00 :   28ecb5: test   %rbx,%rbx
+    0.00 :   28ecb8: jne    28ecd4 <<fp_frame::DataFrame>::new_with_axes+0x1884>
+    0.00 :   28ecba: cmpq   $0x0,-0x70(%rbp)
+    0.00 :   28ecbf: je     28ecca <<fp_frame::DataFrame>::new_with_axes+0x187a>
+    0.00 :   28ecc1: mov    %r14,%rdi
+    0.00 :   28ecc4: call   *0x32a476(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28ecca: mov    -0x50(%rbp),%r13
+    0.00 :   28ecce: mov    -0x30(%rbp),%r15
+    0.00 :   28ecd2: jmp    28ed10 <<fp_frame::DataFrame>::new_with_axes+0x18c0>
+    0.00 :   28ecd4: lea    0x8(%r14),%r13
+    0.00 :   28ecd8: mov    0x32a461(%rip),%r15        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28ecdf: jmp    28ecf9 <<fp_frame::DataFrame>::new_with_axes+0x18a9>
+    0.00 :   28ece1: data16 data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+    0.00 :   28ecf0: add    $0x18,%r13
+    0.00 :   28ecf4: dec    %rbx
+    0.00 :   28ecf7: je     28ecba <<fp_frame::DataFrame>::new_with_axes+0x186a>
+    0.00 :   28ecf9: cmpq   $0x0,-0x8(%r13)
+    0.00 :   28ecfe: je     28ecf0 <<fp_frame::DataFrame>::new_with_axes+0x18a0>
+    0.00 :   28ed00: mov    0x0(%r13),%rdi
+    0.00 :   28ed04: call   *%r15
+    0.00 :   28ed07: jmp    28ecf0 <<fp_frame::DataFrame>::new_with_axes+0x18a0>
+    0.00 :   28ed09: mov    %rax,%r15
+    0.00 :   28ed0c: mov    -0x50(%rbp),%r13
+         : 1951   }
+    0.00 :   28ed10: mov    -0xe8(%rbp),%rcx
+    0.00 :   28ed17: test   %rcx,%rcx
+    0.00 :   28ed1a: je     28ed45 <<fp_frame::DataFrame>::new_with_axes+0x18f5>
+    0.00 :   28ed1c: lea    (%rcx,%rcx,2),%rax
+         : 1956   if intrinsics::unlikely(intrinsics::add_with_overflow(self, rhs).1) {
+    0.00 :   28ed20: lea    0x27(,%rax,8),%rax
+    0.00 :   28ed28: and    $0xfffffffffffffff0,%rax
+    0.00 :   28ed2c: add    %rax,%rcx
+    0.00 :   28ed2f: cmp    $0xffffffffffffffef,%rcx
+    0.00 :   28ed33: je     28ed45 <<fp_frame::DataFrame>::new_with_axes+0x18f5>
+    0.00 :   28ed35: mov    -0xf0(%rbp),%rdi
+    0.00 :   28ed3c: sub    %rax,%rdi
+    0.00 :   28ed3f: call   *0x32a3fb(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+         : 1965   if column_order.is_empty() {
+    0.00 :   28ed45: test   %r12,%r12
+    0.00 :   28ed48: jne    28edae <<fp_frame::DataFrame>::new_with_axes+0x195e>
+    0.00 :   28ed4a: cmpq   $0x0,-0xf8(%rbp)
+    0.00 :   28ed52: je     28ed5e <<fp_frame::DataFrame>::new_with_axes+0x190e>
+    0.00 :   28ed54: mov    -0x48(%rbp),%rdi
+    0.00 :   28ed58: call   *0x32a3e2(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28ed5e: mov    -0x40(%rbp),%rbx
+    0.00 :   28ed62: mov    -0x78(%rbp),%r14
+    0.00 :   28ed66: movabs $0x8000000000000000,%rax
+    0.00 :   28ed70: mov    -0x80(%rbp),%rdi
+    0.00 :   28ed74: cmp    %rax,(%rdi)
+    0.00 :   28ed77: je     28ed7e <<fp_frame::DataFrame>::new_with_axes+0x192e>
+    0.00 :   28ed79: call   235fe0 <core::ptr::drop_in_place::<fp_index::MultiIndex>>
+         : 1979   }
+    0.00 :   28ed7e: mov    %r14,%rdi
+    0.00 :   28ed81: call   235450 <core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>>
+    0.00 :   28ed86: movabs $0x8000000000000000,%rax
+    0.00 :   28ed90: cmp    %rax,0x0(%r13)
+    0.00 :   28ed94: je     28ed9e <<fp_frame::DataFrame>::new_with_axes+0x194e>
+    0.00 :   28ed96: mov    %r13,%rdi
+    0.00 :   28ed99: call   235fe0 <core::ptr::drop_in_place::<fp_index::MultiIndex>>
+    0.00 :   28ed9e: mov    %rbx,%rdi
+    0.00 :   28eda1: call   236320 <core::ptr::drop_in_place::<fp_index::Index>>
+    0.00 :   28eda6: mov    %r15,%rdi
+    0.00 :   28eda9: call   48bb40 <_Unwind_Resume@plt>
+    0.00 :   28edae: mov    -0x48(%rbp),%rax
+    0.00 :   28edb2: lea    0x8(%rax),%rbx
+    0.00 :   28edb6: mov    0x32a383(%rip),%r14        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   28edbd: jmp    28edc9 <<fp_frame::DataFrame>::new_with_axes+0x1979>
+    0.00 :   28edbf: nop
+    0.00 :   28edc0: add    $0x18,%rbx
+    0.00 :   28edc4: dec    %r12
+    0.00 :   28edc7: je     28ed4a <<fp_frame::DataFrame>::new_with_axes+0x18fa>
+    0.00 :   28edc9: cmpq   $0x0,-0x8(%rbx)
+    0.00 :   28edce: je     28edc0 <<fp_frame::DataFrame>::new_with_axes+0x1970>
+    0.00 :   28edd0: mov    (%rbx),%rdi
+    0.00 :   28edd3: call   *%r14
+    0.00 :   28edd6: jmp    28edc0 <<fp_frame::DataFrame>::new_with_axes+0x1970>
+         : 2004   fn new_with_axes(
+    0.00 :   28edd8: call   *0x32a4f2(%rip)        # 5b92d0 <_DYNAMIC+0x398>

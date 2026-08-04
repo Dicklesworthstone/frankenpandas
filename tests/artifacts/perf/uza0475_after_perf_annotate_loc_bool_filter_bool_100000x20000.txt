@@ -1,0 +1,3021 @@
+ Percent |	Source code & Disassembly of perf_profile for cycles:P (5 samples, percent: local period)
+---------------------------------------------------------------------------------------------------------
+         :
+         :
+         :
+         : 3      Disassembly of section .text:
+         :
+         : 5      000000000029ec30 <<fp_frame::DataFrame>::loc_bool>:
+         :
+         : 7      /// Boolean mask row selection.
+         : 8      ///
+         : 9      /// Matches `df.loc[bool_array]` in pandas. The boolean mask must have the
+         : 10     /// same length as the DataFrame. Rows where the mask is `True` are kept.
+         : 11     pub fn loc_bool(&self, mask: &[bool]) -> Result<Self, FrameError> {
+    0.00 :   29ec30: push   %rbp
+    0.00 :   29ec31: mov    %rsp,%rbp
+    0.00 :   29ec34: push   %r15
+    0.00 :   29ec36: push   %r14
+    0.00 :   29ec38: push   %r13
+    0.00 :   29ec3a: push   %r12
+    0.00 :   29ec3c: push   %rbx
+    0.00 :   29ec3d: sub    $0x628,%rsp
+    0.00 :   29ec44: mov    %rcx,%rbx
+    0.00 :   29ec47: mov    %rdx,-0x38(%rbp)
+    0.00 :   29ec4b: mov    %rdi,%r15
+         : 23     })
+         : 24     .as_slice()
+         : 25     }
+         :
+         : 27     fn len(&self) -> usize {
+         : 28     if let Some(range) = self.int64_unit_range {
+    0.00 :   29ec4e: cmpl   $0x1,(%rsi)
+    0.00 :   29ec51: jne    29ec59 <<fp_frame::DataFrame>::loc_bool+0x29>
+    0.00 :   29ec53: mov    0x10(%rsi),%rdx
+    0.00 :   29ec57: jmp    29ecbd <<fp_frame::DataFrame>::loc_bool+0x8d>
+         : 33     return range.len;
+         : 34     }
+         : 35     if let Some(range) = self.int64_affine {
+    0.00 :   29ec59: cmpl   $0x1,0x18(%rsi)
+    0.00 :   29ec5d: jne    29ec65 <<fp_frame::DataFrame>::loc_bool+0x35>
+    0.00 :   29ec5f: mov    0x30(%rsi),%rdx
+    0.00 :   29ec63: jmp    29ecbd <<fp_frame::DataFrame>::loc_bool+0x8d>
+         : 40     return range.len;
+         : 41     }
+         : 42     if let Some(strided) = &self.int64_strided {
+    0.00 :   29ec65: cmpq   $0x0,0x48(%rsi)
+    0.00 :   29ec6a: je     29ec72 <<fp_frame::DataFrame>::loc_bool+0x42>
+         : 45     return strided.len;
+    0.00 :   29ec6c: mov    0x60(%rsi),%rdx
+    0.00 :   29ec70: jmp    29ecbd <<fp_frame::DataFrame>::loc_bool+0x8d>
+         : 48     }
+         : 49     if let Some((_, offsets)) = &self.utf8_contiguous {
+    0.00 :   29ec72: cmpq   $0x0,0x78(%rsi)
+    0.00 :   29ec77: je     29ec85 <<fp_frame::DataFrame>::loc_bool+0x55>
+         : 52     #[inline(always)]
+         : 53     pub const unsafe fn as_ref<'a>(&self) -> &'a T {
+         : 54     // SAFETY: the caller must guarantee that `self` meets all the
+         : 55     // requirements for a reference.
+         : 56     // `cast_const` avoids a mutable raw pointer deref.
+         : 57     unsafe { &*self.as_ptr().cast_const() }
+    0.00 :   29ec79: mov    0x90(%rsi),%rdx
+         : 59     return offsets.len() - 1;
+    0.00 :   29ec80: dec    %rdx
+    0.00 :   29ec83: jmp    29ecbd <<fp_frame::DataFrame>::loc_bool+0x8d>
+         : 62     unsafe fn atomic_load<T: Copy>(dst: *const T, order: Ordering) -> T {
+         : 63     // SAFETY: the caller must uphold the safety contract for `atomic_load`.
+         : 64     unsafe {
+         : 65     match order {
+         : 66     Relaxed => intrinsics::atomic_load::<T, { AO::Relaxed }>(dst),
+         : 67     Acquire => intrinsics::atomic_load::<T, { AO::Acquire }>(dst),
+    0.00 :   29ec85: mov    0x40(%rsi),%eax
+         : 69     /// This method never blocks.
+         : 70     #[inline]
+         : 71     #[stable(feature = "once_cell", since = "1.70.0")]
+         : 72     #[rustc_should_not_be_called_on_const_items]
+         : 73     pub fn get(&self) -> Option<&T> {
+         : 74     if self.initialized() {
+    0.00 :   29ec88: test   %eax,%eax
+    0.00 :   29ec8a: je     29ecaa <<fp_frame::DataFrame>::loc_bool+0x7a>
+    0.00 :   29ec8c: mov    0x70(%rsi),%eax
+    0.00 :   29ec8f: test   %eax,%eax
+    0.00 :   29ec91: je     29ecb0 <<fp_frame::DataFrame>::loc_bool+0x80>
+         : 80     return labels.len();
+         : 81     }
+         : 82     if let Some(Some(values)) = self.int64_typed.get() {
+         : 83     return values.len();
+         : 84     }
+         : 85     self.as_slice().len()
+    0.00 :   29ec93: mov    %rsi,%rdi
+    0.00 :   29ec96: mov    %rbx,%r14
+    0.00 :   29ec99: mov    %rsi,%rbx
+    0.00 :   29ec9c: call   *0x31aee6(%rip)        # 5b9b88 <_DYNAMIC+0xc50>
+    0.00 :   29eca2: mov    %rbx,%rsi
+    0.00 :   29eca5: mov    %r14,%rbx
+    0.00 :   29eca8: jmp    29ecbd <<fp_frame::DataFrame>::loc_bool+0x8d>
+    0.00 :   29ecaa: mov    0x38(%rsi),%rax
+         : 94     #[inline]
+         : 95     #[stable(feature = "rust1", since = "1.0.0")]
+         : 96     #[rustc_const_stable(feature = "const_vec_string_slice", since = "1.87.0")]
+         : 97     #[rustc_confusables("length", "size")]
+         : 98     pub const fn len(&self) -> usize {
+         : 99     let len = self.len;
+    0.00 :   29ecae: jmp    29ecb9 <<fp_frame::DataFrame>::loc_bool+0x89>
+         : 101    if let Some(Some(values)) = self.int64_typed.get() {
+    0.00 :   29ecb0: mov    0x68(%rsi),%rax
+    0.00 :   29ecb4: test   %rax,%rax
+    0.00 :   29ecb7: je     29ec93 <<fp_frame::DataFrame>::loc_bool+0x63>
+    0.00 :   29ecb9: mov    0x20(%rax),%rdx
+         : 106    if mask.len() != self.len() {
+    0.00 :   29ecbd: cmp    %rdx,%rbx
+    0.00 :   29ecc0: jne    29ed9b <<fp_frame::DataFrame>::loc_bool+0x16b>
+         : 109    #[must_use = "this returns the result of the operation, \
+         : 110    without modifying the original"]
+         : 111    #[inline]
+         : 112    #[track_caller]
+         : 113    pub const fn div_ceil(self, rhs: Self) -> Self {
+         : 114    let d = self / rhs;
+    0.00 :   29ecc6: mov    %rbx,%r12
+    0.00 :   29ecc9: shr    $1,%r12
+         : 117    let r = self % rhs;
+         : 118    if r > 0 {
+    0.00 :   29eccc: mov    %rbx,%rax
+    0.00 :   29eccf: sub    %r12,%rax
+         : 121    if even_len >= 2 && boolean_mask_matches_repeated_octet(mask, &EVEN_POSITIONS) {
+    0.00 :   29ecd2: cmp    $0x2,%rax
+    0.00 :   29ecd6: mov    %r15,-0x60(%rbp)
+    0.00 :   29ecda: mov    %rsi,-0x50(%rbp)
+    0.00 :   29ecde: mov    %rbx,-0x78(%rbp)
+    0.00 :   29ece2: jb     29ed36 <<fp_frame::DataFrame>::loc_bool+0x106>
+         :
+         : 128    impl<'a, T> ChunksExact<'a, T> {
+         : 129    #[inline]
+         : 130    pub(super) const fn new(slice: &'a [T], chunk_size: usize) -> Self {
+         : 131    let rem = slice.len() % chunk_size;
+         : 132    let fst_len = slice.len() - rem;
+    0.00 :   29ece4: movabs $0x8000000000000000,%rcx
+    0.00 :   29ecee: add    $0xfffffffffffffff8,%rcx
+    0.00 :   29ecf2: and    %rbx,%rcx
+         : 136    "slice::split_at_unchecked requires the index to be within the slice",
+         : 137    (mid: usize = mid, len: usize = len) => mid <= len,
+         : 138    );
+         :
+         : 140    // SAFETY: Caller has to check that `0 <= mid <= self.len()`
+         : 141    unsafe { (from_raw_parts(ptr, mid), from_raw_parts(ptr.add(mid), unchecked_sub(len, mid))) }
+    0.00 :   29ecf5: mov    %ebx,%edx
+    0.00 :   29ecf7: and    $0x7,%edx
+         : 144    let mut chunks = mask.chunks_exact(8);
+    0.00 :   29ecfa: mov    %rbx,%rsi
+    0.00 :   29ecfd: and    $0xfffffffffffffff8,%rsi
+    0.00 :   29ed01: neg    %rsi
+    0.00 :   29ed04: movabs $0x1000100010001,%rdi
+    0.00 :   29ed0e: mov    -0x38(%rbp),%r8
+    0.00 :   29ed12: data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+         : 151    #[stable(feature = "split_at_checked", since = "1.80.0")]
+         : 152    #[rustc_const_stable(feature = "split_at_checked", since = "1.80.0")]
+         : 153    #[inline]
+         : 154    #[must_use]
+         : 155    pub const fn split_at_checked(&self, mid: usize) -> Option<(&[T], &[T])> {
+         : 156    if mid <= self.len() {
+    0.00 :   29ed20: test   %rsi,%rsi
+    0.00 :   29ed23: je     29edce <<fp_frame::DataFrame>::loc_bool+0x19e>
+         : 159    if chunk != pattern.as_slice() {
+   33.52 :   29ed29: add    $0x8,%rsi
+         : 161    // SAFETY: by our precondition, `lhs` and `rhs` are guaranteed to be valid
+         : 162    // for reading `len` values, which also means the size is guaranteed
+         : 163    // not to overflow because it exists in memory;
+         : 164    unsafe {
+         : 165    let size = crate::intrinsics::unchecked_mul(len, Self::SIZE);
+         : 166    compare_bytes(lhs as _, rhs as _, size) == 0
+    0.00 :   29ed2d: cmp    %rdi,(%r8)
+         : 168    size: usize = size_of::<T>(),
+         : 169    ) => runtime_add_nowrap(this, count, size)
+         : 170    );
+         :
+         : 172    // SAFETY: the caller must uphold the safety contract for `offset`.
+         : 173    unsafe { intrinsics::offset(self, count) }
+   46.29 :   29ed30: lea    0x8(%r8),%r8
+   20.19 :   29ed34: je     29ed20 <<fp_frame::DataFrame>::loc_bool+0xf0>
+         : 176    if odd_len >= 2 && boolean_mask_matches_repeated_octet(mask, &ODD_POSITIONS) {
+    0.00 :   29ed36: cmp    $0x4,%rbx
+    0.00 :   29ed3a: jb     29edbf <<fp_frame::DataFrame>::loc_bool+0x18f>
+    0.00 :   29ed40: movabs $0x8000000000000000,%rax
+    0.00 :   29ed4a: add    $0xfffffffffffffff8,%rax
+    0.00 :   29ed4e: and    %rbx,%rax
+    0.00 :   29ed51: mov    -0x38(%rbp),%r9
+    0.00 :   29ed55: lea    (%r9,%rax,1),%rcx
+         : 184    unsafe { (from_raw_parts(ptr, mid), from_raw_parts(ptr.add(mid), unchecked_sub(len, mid))) }
+    0.00 :   29ed59: mov    %ebx,%edx
+    0.00 :   29ed5b: and    $0x7,%edx
+         : 187    let mut chunks = mask.chunks_exact(8);
+    0.00 :   29ed5e: mov    %rbx,%rdi
+    0.00 :   29ed61: and    $0xfffffffffffffff8,%rdi
+    0.00 :   29ed65: mov    %rdi,%rsi
+    0.00 :   29ed68: neg    %rsi
+    0.00 :   29ed6b: movabs $0x100010001000100,%r8
+    0.00 :   29ed75: data16 cs nopw 0x0(%rax,%rax,1)
+         : 194    if mid <= self.len() {
+    0.00 :   29ed80: test   %rsi,%rsi
+    0.00 :   29ed83: je     29ee09 <<fp_frame::DataFrame>::loc_bool+0x1d9>
+         : 197    if chunk != pattern.as_slice() {
+    0.00 :   29ed89: add    $0x8,%rsi
+    0.00 :   29ed8d: cmp    %r8,(%r9)
+    0.00 :   29ed90: lea    0x8(%r9),%r9
+    0.00 :   29ed94: je     29ed80 <<fp_frame::DataFrame>::loc_bool+0x150>
+    0.00 :   29ed96: jmp    29ee21 <<fp_frame::DataFrame>::loc_bool+0x1f1>
+         : 203    return Err(FrameError::CompatibilityRejected(format!(
+         : 204    "boolean index has wrong length: {} instead of {}",
+         : 205    mask.len(),
+    0.00 :   29ed9b: mov    %rbx,-0x538(%rbp)
+         : 207    if let Some(range) = self.int64_unit_range {
+    0.00 :   29eda2: cmpl   $0x1,(%rsi)
+    0.00 :   29eda5: jne    29edb0 <<fp_frame::DataFrame>::loc_bool+0x180>
+    0.00 :   29eda7: mov    0x10(%rsi),%rdx
+    0.00 :   29edab: jmp    29f5a0 <<fp_frame::DataFrame>::loc_bool+0x970>
+         : 212    if let Some(range) = self.int64_affine {
+    0.00 :   29edb0: cmpl   $0x1,0x18(%rsi)
+    0.00 :   29edb4: jne    29edf5 <<fp_frame::DataFrame>::loc_bool+0x1c5>
+    0.00 :   29edb6: mov    0x30(%rsi),%rdx
+    0.00 :   29edba: jmp    29f5a0 <<fp_frame::DataFrame>::loc_bool+0x970>
+    0.00 :   29edbf: xor    %r12d,%r12d
+    0.00 :   29edc2: mov    -0x38(%rbp),%rcx
+    0.00 :   29edc6: mov    %rbx,%rdx
+    0.00 :   29edc9: jmp    29f2a9 <<fp_frame::DataFrame>::loc_bool+0x679>
+         : 221    Zip { a, b, index: 0, len }
+         : 222    }
+         :
+         : 224    #[inline]
+         : 225    fn next(&mut self) -> Option<(A::Item, B::Item)> {
+         : 226    if self.index < self.len {
+    0.00 :   29edce: test   %rdx,%rdx
+    0.00 :   29edd1: je     29edea <<fp_frame::DataFrame>::loc_bool+0x1ba>
+    0.00 :   29edd3: mov    -0x38(%rbp),%rsi
+         : 230    ($($t:ty)*) => ($(
+         : 231    #[stable(feature = "rust1", since = "1.0.0")]
+         : 232    #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+         : 233    impl const PartialEq for $t {
+         : 234    #[inline]
+         : 235    fn eq(&self, other: &Self) -> bool { *self == *other }
+    0.00 :   29edd7: cmpb   $0x0,(%rsi,%rcx,1)
+         : 237    F: [const] FnMut(B, Self::Item) -> R + [const] Destruct,
+         : 238    R: [const] Try<Output = B>,
+         : 239    {
+         : 240    let mut accum = init;
+         : 241    while let Some(x) = self.next() {
+         : 242    accum = f(accum, x)?;
+    0.00 :   29eddb: je     29ed36 <<fp_frame::DataFrame>::loc_bool+0x106>
+    0.00 :   29ede1: cmp    $0x1,%edx
+    0.00 :   29ede4: jne    29f3fd <<fp_frame::DataFrame>::loc_bool+0x7cd>
+    0.00 :   29edea: xor    %r14d,%r14d
+    0.00 :   29eded: mov    %rax,%r12
+    0.00 :   29edf0: jmp    29f380 <<fp_frame::DataFrame>::loc_bool+0x750>
+         : 249    if let Some(strided) = &self.int64_strided {
+    0.00 :   29edf5: cmpq   $0x0,0x48(%rsi)
+    0.00 :   29edfa: je     29f2d5 <<fp_frame::DataFrame>::loc_bool+0x6a5>
+         : 252    return strided.len;
+    0.00 :   29ee00: mov    0x60(%rsi),%rdx
+    0.00 :   29ee04: jmp    29f5a0 <<fp_frame::DataFrame>::loc_bool+0x970>
+    0.00 :   29ee09: mov    $0x1,%r14d
+    0.00 :   29ee0f: test   %rdx,%rdx
+    0.00 :   29ee12: je     29f380 <<fp_frame::DataFrame>::loc_bool+0x750>
+    0.00 :   29ee18: cmpb   $0x0,(%rcx)
+    0.00 :   29ee1b: je     29f368 <<fp_frame::DataFrame>::loc_bool+0x738>
+    0.00 :   29ee21: test   %rax,%rax
+    0.00 :   29ee24: je     29f2a6 <<fp_frame::DataFrame>::loc_bool+0x676>
+         : 262    if chunk[0] {
+    0.00 :   29ee2a: neg    %rdi
+    0.00 :   29ee2d: mov    $0x7,%r8d
+    0.00 :   29ee33: xor    %esi,%esi
+    0.00 :   29ee35: xor    %r9d,%r9d
+    0.00 :   29ee38: xor    %r14d,%r14d
+    0.00 :   29ee3b: xor    %r12d,%r12d
+    0.00 :   29ee3e: jmp    29ee5f <<fp_frame::DataFrame>::loc_bool+0x22f>
+    0.00 :   29ee40: mov    %r8,%r14
+         : 271    self.len += 1;
+    0.00 :   29ee43: inc    %r12
+    0.00 :   29ee46: mov    %r8,%r9
+    0.00 :   29ee49: lea    (%rdi,%r8,1),%r10
+    0.00 :   29ee4d: add    $0x8,%r10
+    0.00 :   29ee51: add    $0x8,%r8
+    0.00 :   29ee55: cmp    $0x7,%r10
+    0.00 :   29ee59: je     29f2b3 <<fp_frame::DataFrame>::loc_bool+0x683>
+    0.00 :   29ee5f: mov    -0x38(%rbp),%r10
+         : 280    if chunk[0] {
+    0.00 :   29ee63: cmpb   $0x1,-0x7(%r10,%r8,1)
+    0.00 :   29ee69: jne    29eea0 <<fp_frame::DataFrame>::loc_bool+0x270>
+    0.00 :   29ee6b: lea    -0x7(%r8),%r10
+         : 284    match self.len {
+    0.00 :   29ee6f: cmp    $0x1,%r12
+    0.00 :   29ee73: je     29ef29 <<fp_frame::DataFrame>::loc_bool+0x2f9>
+    0.00 :   29ee79: test   %r12,%r12
+    0.00 :   29ee7c: jne    29ef7d <<fp_frame::DataFrame>::loc_bool+0x34d>
+    0.00 :   29ee82: mov    $0x1,%r12d
+    0.00 :   29ee88: mov    %r10,%r14
+    0.00 :   29ee8b: mov    -0x38(%rbp),%r9
+         : 292    if chunk[1] {
+    0.00 :   29ee8f: cmpb   $0x1,-0x6(%r9,%r8,1)
+    0.00 :   29ee95: je     29ef50 <<fp_frame::DataFrame>::loc_bool+0x320>
+    0.00 :   29ee9b: jmp    29eeb3 <<fp_frame::DataFrame>::loc_bool+0x283>
+    0.00 :   29ee9d: nopl   (%rax)
+    0.00 :   29eea0: mov    %r9,%r10
+    0.00 :   29eea3: mov    -0x38(%rbp),%r9
+    0.00 :   29eea7: cmpb   $0x1,-0x6(%r9,%r8,1)
+    0.00 :   29eead: je     29ef50 <<fp_frame::DataFrame>::loc_bool+0x320>
+    0.00 :   29eeb3: mov    %r10,%r9
+    0.00 :   29eeb6: mov    -0x38(%rbp),%r10
+         : 303    if chunk[2] {
+    0.00 :   29eeba: cmpb   $0x1,-0x5(%r10,%r8,1)
+    0.00 :   29eec0: je     29efd0 <<fp_frame::DataFrame>::loc_bool+0x3a0>
+    0.00 :   29eec6: mov    %r9,%r10
+    0.00 :   29eec9: mov    -0x38(%rbp),%r9
+         : 308    if chunk[3] {
+    0.00 :   29eecd: cmpb   $0x1,-0x4(%r9,%r8,1)
+    0.00 :   29eed3: je     29f050 <<fp_frame::DataFrame>::loc_bool+0x420>
+    0.00 :   29eed9: mov    %r10,%r9
+    0.00 :   29eedc: mov    -0x38(%rbp),%r10
+         : 313    if chunk[4] {
+    0.00 :   29eee0: cmpb   $0x1,-0x3(%r10,%r8,1)
+    0.00 :   29eee6: je     29f0d0 <<fp_frame::DataFrame>::loc_bool+0x4a0>
+    0.00 :   29eeec: mov    %r9,%r11
+    0.00 :   29eeef: mov    -0x38(%rbp),%r9
+         : 318    if chunk[5] {
+    0.00 :   29eef3: cmpb   $0x1,-0x2(%r9,%r8,1)
+    0.00 :   29eef9: je     29f150 <<fp_frame::DataFrame>::loc_bool+0x520>
+    0.00 :   29eeff: mov    %r11,%r10
+    0.00 :   29ef02: mov    -0x38(%rbp),%r9
+         : 323    if chunk[6] {
+    0.00 :   29ef06: cmpb   $0x1,-0x1(%r9,%r8,1)
+    0.00 :   29ef0c: je     29f1d0 <<fp_frame::DataFrame>::loc_bool+0x5a0>
+    0.00 :   29ef12: mov    %r10,%r9
+    0.00 :   29ef15: mov    -0x38(%rbp),%r10
+         : 328    if chunk[7] {
+    0.00 :   29ef19: cmpb   $0x0,(%r10,%r8,1)
+    0.00 :   29ef1e: je     29ee49 <<fp_frame::DataFrame>::loc_bool+0x219>
+    0.00 :   29ef24: jmp    29f24f <<fp_frame::DataFrame>::loc_bool+0x61f>
+         : 332    if self.step == 0 {
+    0.00 :   29ef29: mov    %r8,%rsi
+    0.00 :   29ef2c: sub    %r14,%rsi
+    0.00 :   29ef2f: mov    $0x2,%r12d
+    0.00 :   29ef35: sub    $0x7,%rsi
+         : 337    if !affine.is_affine {
+    0.00 :   29ef39: je     29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29ef3f: nop
+    0.00 :   29ef40: mov    -0x38(%rbp),%r9
+         : 341    if chunk[1] {
+    0.00 :   29ef44: cmpb   $0x1,-0x6(%r9,%r8,1)
+    0.00 :   29ef4a: jne    29eeb3 <<fp_frame::DataFrame>::loc_bool+0x283>
+         : 344    match self.len {
+    0.00 :   29ef50: lea    -0x6(%r8),%r9
+    0.00 :   29ef54: cmp    $0x1,%r12
+    0.00 :   29ef58: je     29efa4 <<fp_frame::DataFrame>::loc_bool+0x374>
+    0.00 :   29ef5a: test   %r12,%r12
+    0.00 :   29ef5d: jne    29effd <<fp_frame::DataFrame>::loc_bool+0x3cd>
+    0.00 :   29ef63: mov    $0x1,%r12d
+    0.00 :   29ef69: mov    %r9,%r14
+    0.00 :   29ef6c: mov    -0x38(%rbp),%r10
+         : 353    if chunk[2] {
+    0.00 :   29ef70: cmpb   $0x1,-0x5(%r10,%r8,1)
+    0.00 :   29ef76: je     29efd0 <<fp_frame::DataFrame>::loc_bool+0x3a0>
+    0.00 :   29ef78: jmp    29eec6 <<fp_frame::DataFrame>::loc_bool+0x296>
+         : 357    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29ef7d: mov    %r8,%r11
+    0.00 :   29ef80: sub    %r9,%r11
+    0.00 :   29ef83: add    $0xfffffffffffffff9,%r11
+    0.00 :   29ef87: cmp    %rsi,%r11
+         : 362    if !affine.is_affine {
+    0.00 :   29ef8a: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29ef90: inc    %r12
+    0.00 :   29ef93: mov    -0x38(%rbp),%r9
+         : 366    if chunk[1] {
+    0.00 :   29ef97: cmpb   $0x1,-0x6(%r9,%r8,1)
+    0.00 :   29ef9d: je     29ef50 <<fp_frame::DataFrame>::loc_bool+0x320>
+    0.00 :   29ef9f: jmp    29eeb3 <<fp_frame::DataFrame>::loc_bool+0x283>
+         : 370    if self.step == 0 {
+    0.00 :   29efa4: mov    %r8,%rsi
+    0.00 :   29efa7: sub    %r14,%rsi
+    0.00 :   29efaa: mov    $0x2,%r12d
+    0.00 :   29efb0: sub    $0x6,%rsi
+         : 375    if !affine.is_affine {
+    0.00 :   29efb4: je     29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29efba: nopw   0x0(%rax,%rax,1)
+    0.00 :   29efc0: mov    -0x38(%rbp),%r10
+         : 379    if chunk[2] {
+    0.00 :   29efc4: cmpb   $0x1,-0x5(%r10,%r8,1)
+    0.00 :   29efca: jne    29eec6 <<fp_frame::DataFrame>::loc_bool+0x296>
+         : 382    match self.len {
+    0.00 :   29efd0: lea    -0x5(%r8),%r10
+    0.00 :   29efd4: cmp    $0x1,%r12
+    0.00 :   29efd8: je     29f024 <<fp_frame::DataFrame>::loc_bool+0x3f4>
+    0.00 :   29efda: test   %r12,%r12
+    0.00 :   29efdd: jne    29f07d <<fp_frame::DataFrame>::loc_bool+0x44d>
+    0.00 :   29efe3: mov    $0x1,%r12d
+    0.00 :   29efe9: mov    %r10,%r14
+    0.00 :   29efec: mov    -0x38(%rbp),%r9
+         : 391    if chunk[3] {
+    0.00 :   29eff0: cmpb   $0x1,-0x4(%r9,%r8,1)
+    0.00 :   29eff6: je     29f050 <<fp_frame::DataFrame>::loc_bool+0x420>
+    0.00 :   29eff8: jmp    29eed9 <<fp_frame::DataFrame>::loc_bool+0x2a9>
+         : 395    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29effd: mov    %r8,%r11
+    0.00 :   29f000: sub    %r10,%r11
+    0.00 :   29f003: add    $0xfffffffffffffffa,%r11
+    0.00 :   29f007: cmp    %rsi,%r11
+         : 400    if !affine.is_affine {
+    0.00 :   29f00a: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f010: inc    %r12
+    0.00 :   29f013: mov    -0x38(%rbp),%r10
+         : 404    if chunk[2] {
+    0.00 :   29f017: cmpb   $0x1,-0x5(%r10,%r8,1)
+    0.00 :   29f01d: je     29efd0 <<fp_frame::DataFrame>::loc_bool+0x3a0>
+    0.00 :   29f01f: jmp    29eec6 <<fp_frame::DataFrame>::loc_bool+0x296>
+         : 408    if self.step == 0 {
+    0.00 :   29f024: mov    %r8,%rsi
+    0.00 :   29f027: sub    %r14,%rsi
+    0.00 :   29f02a: mov    $0x2,%r12d
+    0.00 :   29f030: sub    $0x5,%rsi
+         : 413    if !affine.is_affine {
+    0.00 :   29f034: je     29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f03a: nopw   0x0(%rax,%rax,1)
+    0.00 :   29f040: mov    -0x38(%rbp),%r9
+         : 417    if chunk[3] {
+    0.00 :   29f044: cmpb   $0x1,-0x4(%r9,%r8,1)
+    0.00 :   29f04a: jne    29eed9 <<fp_frame::DataFrame>::loc_bool+0x2a9>
+         : 420    match self.len {
+    0.00 :   29f050: lea    -0x4(%r8),%r9
+    0.00 :   29f054: cmp    $0x1,%r12
+    0.00 :   29f058: je     29f0a4 <<fp_frame::DataFrame>::loc_bool+0x474>
+    0.00 :   29f05a: test   %r12,%r12
+    0.00 :   29f05d: jne    29f0fd <<fp_frame::DataFrame>::loc_bool+0x4cd>
+    0.00 :   29f063: mov    $0x1,%r12d
+    0.00 :   29f069: mov    %r9,%r14
+    0.00 :   29f06c: mov    -0x38(%rbp),%r10
+         : 429    if chunk[4] {
+    0.00 :   29f070: cmpb   $0x1,-0x3(%r10,%r8,1)
+    0.00 :   29f076: je     29f0d0 <<fp_frame::DataFrame>::loc_bool+0x4a0>
+    0.00 :   29f078: jmp    29eeec <<fp_frame::DataFrame>::loc_bool+0x2bc>
+         : 433    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29f07d: mov    %r8,%r11
+    0.00 :   29f080: sub    %r9,%r11
+    0.00 :   29f083: add    $0xfffffffffffffffb,%r11
+    0.00 :   29f087: cmp    %rsi,%r11
+         : 438    if !affine.is_affine {
+    0.00 :   29f08a: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f090: inc    %r12
+    0.00 :   29f093: mov    -0x38(%rbp),%r9
+         : 442    if chunk[3] {
+    0.00 :   29f097: cmpb   $0x1,-0x4(%r9,%r8,1)
+    0.00 :   29f09d: je     29f050 <<fp_frame::DataFrame>::loc_bool+0x420>
+    0.00 :   29f09f: jmp    29eed9 <<fp_frame::DataFrame>::loc_bool+0x2a9>
+         : 446    if self.step == 0 {
+    0.00 :   29f0a4: mov    %r8,%rsi
+    0.00 :   29f0a7: sub    %r14,%rsi
+    0.00 :   29f0aa: mov    $0x2,%r12d
+    0.00 :   29f0b0: sub    $0x4,%rsi
+         : 451    if !affine.is_affine {
+    0.00 :   29f0b4: je     29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f0ba: nopw   0x0(%rax,%rax,1)
+    0.00 :   29f0c0: mov    -0x38(%rbp),%r10
+         : 455    if chunk[4] {
+    0.00 :   29f0c4: cmpb   $0x1,-0x3(%r10,%r8,1)
+    0.00 :   29f0ca: jne    29eeec <<fp_frame::DataFrame>::loc_bool+0x2bc>
+         : 458    match self.len {
+    0.00 :   29f0d0: lea    -0x3(%r8),%r11
+    0.00 :   29f0d4: cmp    $0x1,%r12
+    0.00 :   29f0d8: je     29f124 <<fp_frame::DataFrame>::loc_bool+0x4f4>
+    0.00 :   29f0da: test   %r12,%r12
+    0.00 :   29f0dd: jne    29f17d <<fp_frame::DataFrame>::loc_bool+0x54d>
+    0.00 :   29f0e3: mov    $0x1,%r12d
+    0.00 :   29f0e9: mov    %r11,%r14
+    0.00 :   29f0ec: mov    -0x38(%rbp),%r9
+         : 467    if chunk[5] {
+    0.00 :   29f0f0: cmpb   $0x1,-0x2(%r9,%r8,1)
+    0.00 :   29f0f6: je     29f150 <<fp_frame::DataFrame>::loc_bool+0x520>
+    0.00 :   29f0f8: jmp    29eeff <<fp_frame::DataFrame>::loc_bool+0x2cf>
+         : 471    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29f0fd: mov    %r8,%r11
+    0.00 :   29f100: sub    %r10,%r11
+    0.00 :   29f103: add    $0xfffffffffffffffc,%r11
+    0.00 :   29f107: cmp    %rsi,%r11
+         : 476    if !affine.is_affine {
+    0.00 :   29f10a: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f110: inc    %r12
+    0.00 :   29f113: mov    -0x38(%rbp),%r10
+         : 480    if chunk[4] {
+    0.00 :   29f117: cmpb   $0x1,-0x3(%r10,%r8,1)
+    0.00 :   29f11d: je     29f0d0 <<fp_frame::DataFrame>::loc_bool+0x4a0>
+    0.00 :   29f11f: jmp    29eeec <<fp_frame::DataFrame>::loc_bool+0x2bc>
+         : 484    if self.step == 0 {
+    0.00 :   29f124: mov    %r8,%rsi
+    0.00 :   29f127: sub    %r14,%rsi
+    0.00 :   29f12a: mov    $0x2,%r12d
+    0.00 :   29f130: sub    $0x3,%rsi
+         : 489    if !affine.is_affine {
+    0.00 :   29f134: je     29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f13a: nopw   0x0(%rax,%rax,1)
+    0.00 :   29f140: mov    -0x38(%rbp),%r9
+         : 493    if chunk[5] {
+    0.00 :   29f144: cmpb   $0x1,-0x2(%r9,%r8,1)
+    0.00 :   29f14a: jne    29eeff <<fp_frame::DataFrame>::loc_bool+0x2cf>
+         : 496    match self.len {
+    0.00 :   29f150: lea    -0x2(%r8),%r10
+    0.00 :   29f154: cmp    $0x1,%r12
+    0.00 :   29f158: je     29f1a4 <<fp_frame::DataFrame>::loc_bool+0x574>
+    0.00 :   29f15a: test   %r12,%r12
+    0.00 :   29f15d: jne    29f1fd <<fp_frame::DataFrame>::loc_bool+0x5cd>
+    0.00 :   29f163: mov    $0x1,%r12d
+    0.00 :   29f169: mov    %r10,%r14
+    0.00 :   29f16c: mov    -0x38(%rbp),%r9
+         : 505    if chunk[6] {
+    0.00 :   29f170: cmpb   $0x1,-0x1(%r9,%r8,1)
+    0.00 :   29f176: je     29f1d0 <<fp_frame::DataFrame>::loc_bool+0x5a0>
+    0.00 :   29f178: jmp    29ef12 <<fp_frame::DataFrame>::loc_bool+0x2e2>
+         : 509    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29f17d: mov    %r8,%r10
+    0.00 :   29f180: sub    %r9,%r10
+    0.00 :   29f183: add    $0xfffffffffffffffd,%r10
+    0.00 :   29f187: cmp    %rsi,%r10
+         : 514    if !affine.is_affine {
+    0.00 :   29f18a: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f190: inc    %r12
+    0.00 :   29f193: mov    -0x38(%rbp),%r9
+         : 518    if chunk[5] {
+    0.00 :   29f197: cmpb   $0x1,-0x2(%r9,%r8,1)
+    0.00 :   29f19d: je     29f150 <<fp_frame::DataFrame>::loc_bool+0x520>
+    0.00 :   29f19f: jmp    29eeff <<fp_frame::DataFrame>::loc_bool+0x2cf>
+         : 522    if self.step == 0 {
+    0.00 :   29f1a4: mov    %r8,%rsi
+    0.00 :   29f1a7: sub    %r14,%rsi
+    0.00 :   29f1aa: mov    $0x2,%r12d
+    0.00 :   29f1b0: sub    $0x2,%rsi
+         : 527    if !affine.is_affine {
+    0.00 :   29f1b4: je     29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f1ba: nopw   0x0(%rax,%rax,1)
+    0.00 :   29f1c0: mov    -0x38(%rbp),%r9
+         : 531    if chunk[6] {
+    0.00 :   29f1c4: cmpb   $0x1,-0x1(%r9,%r8,1)
+    0.00 :   29f1ca: jne    29ef12 <<fp_frame::DataFrame>::loc_bool+0x2e2>
+         : 534    match self.len {
+    0.00 :   29f1d0: lea    -0x1(%r8),%r9
+    0.00 :   29f1d4: cmp    $0x1,%r12
+    0.00 :   29f1d8: je     29f224 <<fp_frame::DataFrame>::loc_bool+0x5f4>
+    0.00 :   29f1da: test   %r12,%r12
+    0.00 :   29f1dd: jne    29f272 <<fp_frame::DataFrame>::loc_bool+0x642>
+    0.00 :   29f1e3: mov    $0x1,%r12d
+    0.00 :   29f1e9: mov    %r9,%r14
+    0.00 :   29f1ec: mov    -0x38(%rbp),%r10
+         : 543    if chunk[7] {
+    0.00 :   29f1f0: cmpb   $0x0,(%r10,%r8,1)
+    0.00 :   29f1f5: je     29ee49 <<fp_frame::DataFrame>::loc_bool+0x219>
+    0.00 :   29f1fb: jmp    29f24f <<fp_frame::DataFrame>::loc_bool+0x61f>
+         : 547    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29f1fd: mov    %r8,%r9
+    0.00 :   29f200: sub    %r11,%r9
+    0.00 :   29f203: add    $0xfffffffffffffffe,%r9
+    0.00 :   29f207: cmp    %rsi,%r9
+         : 552    if !affine.is_affine {
+    0.00 :   29f20a: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f210: inc    %r12
+    0.00 :   29f213: mov    -0x38(%rbp),%r9
+         : 556    if chunk[6] {
+    0.00 :   29f217: cmpb   $0x1,-0x1(%r9,%r8,1)
+    0.00 :   29f21d: je     29f1d0 <<fp_frame::DataFrame>::loc_bool+0x5a0>
+    0.00 :   29f21f: jmp    29ef12 <<fp_frame::DataFrame>::loc_bool+0x2e2>
+         : 560    if self.step == 0 {
+    0.00 :   29f224: mov    %r8,%rsi
+    0.00 :   29f227: sub    %r14,%rsi
+    0.00 :   29f22a: mov    $0x2,%r12d
+    0.00 :   29f230: dec    %rsi
+         : 565    if !affine.is_affine {
+    0.00 :   29f233: je     29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f239: nopl   0x0(%rax)
+    0.00 :   29f240: mov    -0x38(%rbp),%r10
+         : 569    if chunk[7] {
+    0.00 :   29f244: cmpb   $0x0,(%r10,%r8,1)
+    0.00 :   29f249: je     29ee49 <<fp_frame::DataFrame>::loc_bool+0x219>
+         : 572    match self.len {
+    0.00 :   29f24f: cmp    $0x1,%r12
+    0.00 :   29f253: je     29f295 <<fp_frame::DataFrame>::loc_bool+0x665>
+    0.00 :   29f255: test   %r12,%r12
+    0.00 :   29f258: je     29ee40 <<fp_frame::DataFrame>::loc_bool+0x210>
+         : 577    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29f25e: mov    %r8,%r10
+    0.00 :   29f261: sub    %r9,%r10
+    0.00 :   29f264: cmp    %rsi,%r10
+    0.00 :   29f267: je     29ee43 <<fp_frame::DataFrame>::loc_bool+0x213>
+    0.00 :   29f26d: jmp    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f272: not    %r10
+    0.00 :   29f275: add    %r8,%r10
+    0.00 :   29f278: cmp    %rsi,%r10
+         : 586    if !affine.is_affine {
+    0.00 :   29f27b: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f281: inc    %r12
+    0.00 :   29f284: mov    -0x38(%rbp),%r10
+         : 590    if chunk[7] {
+    0.00 :   29f288: cmpb   $0x0,(%r10,%r8,1)
+    0.00 :   29f28d: je     29ee49 <<fp_frame::DataFrame>::loc_bool+0x219>
+    0.00 :   29f293: jmp    29f24f <<fp_frame::DataFrame>::loc_bool+0x61f>
+         : 594    if self.step == 0 {
+    0.00 :   29f295: mov    %r8,%rsi
+    0.00 :   29f298: sub    %r14,%rsi
+    0.00 :   29f29b: jne    29ee43 <<fp_frame::DataFrame>::loc_bool+0x213>
+    0.00 :   29f2a1: jmp    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f2a6: xor    %r12d,%r12d
+    0.00 :   29f2a9: xor    %r14d,%r14d
+    0.00 :   29f2ac: xor    %r9d,%r9d
+    0.00 :   29f2af: xor    %esi,%esi
+    0.00 :   29f2b1: xor    %eax,%eax
+         : 604    #[stable(feature = "nonnull", since = "1.25.0")]
+         : 605    impl<T: PointeeSized> PartialEq for NonNull<T> {
+         : 606    #[inline]
+         : 607    #[allow(ambiguous_wide_pointer_comparisons)]
+         : 608    fn eq(&self, other: &Self) -> bool {
+         : 609    self.as_ptr() == other.as_ptr()
+    0.00 :   29f2b3: test   %rdx,%rdx
+         : 611    self.end_or_len = without_provenance_mut(len.unchecked_sub(1));
+         : 612    } else {
+         : 613    // SAFETY: by type invariant, the `end_or_len` field is always
+         : 614    // non-null for a non-ZST pointee.  (This transmute ensures we
+         : 615    // get `!nonnull` metadata on the load of the field.)
+         : 616    if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+    0.00 :   29f2b6: je     29f30f <<fp_frame::DataFrame>::loc_bool+0x6df>
+         : 618    if keep {
+    0.00 :   29f2b8: cmpb   $0x0,(%rcx)
+    0.00 :   29f2bb: je     29f309 <<fp_frame::DataFrame>::loc_bool+0x6d9>
+         : 621    match self.len {
+    0.00 :   29f2bd: test   %r12,%r12
+    0.00 :   29f2c0: je     29f2ef <<fp_frame::DataFrame>::loc_bool+0x6bf>
+    0.00 :   29f2c2: cmp    $0x1,%r12
+    0.00 :   29f2c6: jne    29f2f4 <<fp_frame::DataFrame>::loc_bool+0x6c4>
+         : 626    if self.step == 0 {
+    0.00 :   29f2c8: mov    %rax,%rsi
+    0.00 :   29f2cb: sub    %r14,%rsi
+    0.00 :   29f2ce: jne    29f303 <<fp_frame::DataFrame>::loc_bool+0x6d3>
+    0.00 :   29f2d0: jmp    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+         : 631    if let Some((_, offsets)) = &self.utf8_contiguous {
+    0.00 :   29f2d5: cmpq   $0x0,0x78(%rsi)
+    0.00 :   29f2da: je     29f484 <<fp_frame::DataFrame>::loc_bool+0x854>
+         : 634    unsafe { &*self.as_ptr().cast_const() }
+    0.00 :   29f2e0: mov    0x90(%rsi),%rdx
+         : 636    return offsets.len() - 1;
+    0.00 :   29f2e7: dec    %rdx
+    0.00 :   29f2ea: jmp    29f5a0 <<fp_frame::DataFrame>::loc_bool+0x970>
+    0.00 :   29f2ef: mov    %rax,%r14
+         : 640    match self.len {
+    0.00 :   29f2f2: jmp    29f303 <<fp_frame::DataFrame>::loc_bool+0x6d3>
+         : 642    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29f2f4: mov    %rax,%rdi
+    0.00 :   29f2f7: sub    %r9,%rdi
+    0.00 :   29f2fa: cmp    %rsi,%rdi
+    0.00 :   29f2fd: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+         : 647    self.len += 1;
+    0.00 :   29f303: inc    %r12
+    0.00 :   29f306: mov    %rax,%r9
+         : 650    self.as_ptr() == other.as_ptr()
+    0.00 :   29f309: cmp    $0x1,%rdx
+    0.00 :   29f30d: jne    29f328 <<fp_frame::DataFrame>::loc_bool+0x6f8>
+         : 653    match self.len {
+    0.00 :   29f30f: test   %r12,%r12
+    0.00 :   29f312: je     29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f318: mov    %r12,-0x40(%rbp)
+    0.00 :   29f31c: cmp    $0x1,%r12
+    0.00 :   29f320: je     29f392 <<fp_frame::DataFrame>::loc_bool+0x762>
+    0.00 :   29f322: mov    %rsi,-0x40(%rbp)
+    0.00 :   29f326: jmp    29f392 <<fp_frame::DataFrame>::loc_bool+0x762>
+         : 661    if keep {
+    0.00 :   29f328: cmpb   $0x1,0x1(%rcx)
+    0.00 :   29f32c: jne    29f359 <<fp_frame::DataFrame>::loc_bool+0x729>
+    0.00 :   29f32e: mov    %rax,%rdi
+    0.00 :   29f331: or     $0x1,%rdi
+         : 666    match self.len {
+    0.00 :   29f335: test   %r12,%r12
+    0.00 :   29f338: je     29f4a4 <<fp_frame::DataFrame>::loc_bool+0x874>
+    0.00 :   29f33e: cmp    $0x1,%r12
+    0.00 :   29f342: jne    29f4a9 <<fp_frame::DataFrame>::loc_bool+0x879>
+         : 671    if self.step == 0 {
+    0.00 :   29f348: mov    %rdi,%rsi
+    0.00 :   29f34b: sub    %r14,%rsi
+    0.00 :   29f34e: jne    29f4b8 <<fp_frame::DataFrame>::loc_bool+0x888>
+    0.00 :   29f354: jmp    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f359: mov    %r9,%rdi
+    0.00 :   29f35c: cmp    $0x2,%rdx
+    0.00 :   29f360: jne    29f4c5 <<fp_frame::DataFrame>::loc_bool+0x895>
+    0.00 :   29f366: jmp    29f30f <<fp_frame::DataFrame>::loc_bool+0x6df>
+    0.00 :   29f368: cmp    $0x1,%edx
+    0.00 :   29f36b: je     29f380 <<fp_frame::DataFrame>::loc_bool+0x750>
+    0.00 :   29f36d: cmpb   $0x0,0x1(%rcx)
+    0.00 :   29f371: je     29ee21 <<fp_frame::DataFrame>::loc_bool+0x1f1>
+    0.00 :   29f377: cmp    $0x2,%edx
+    0.00 :   29f37a: jne    29f61e <<fp_frame::DataFrame>::loc_bool+0x9ee>
+    0.00 :   29f380: mov    $0x2,%eax
+    0.00 :   29f385: mov    %rax,-0x40(%rbp)
+         : 688    if n == 0 || self.row_multiindex.is_some() {
+    0.00 :   29f389: test   %r12,%r12
+    0.00 :   29f38c: je     29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+         : 691    #[must_use = "if you intended to assert that this has a value, consider `.unwrap()` instead"]
+         : 692    #[inline]
+         : 693    #[stable(feature = "rust1", since = "1.0.0")]
+         : 694    #[rustc_const_stable(feature = "const_option_basics", since = "1.48.0")]
+         : 695    pub const fn is_some(&self) -> bool {
+         : 696    matches!(*self, Some(_))
+    0.00 :   29f392: movabs $0x8000000000000000,%rax
+    0.00 :   29f39c: mov    -0x50(%rbp),%rcx
+    0.00 :   29f3a0: cmp    %rax,0x100(%rcx)
+    0.00 :   29f3a7: jne    29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+         : 701    intrinsics::saturating_sub(self, rhs)
+    0.00 :   29f3ad: lea    -0x1(%r12),%rcx
+    0.00 :   29f3b2: mov    -0x40(%rbp),%rax
+         : 704    let (a, b) = intrinsics::mul_with_overflow(self as $ActualT, rhs as $ActualT);
+    0.00 :   29f3b6: mul    %rcx
+         : 706    /// This intrinsic does not have a stable counterpart.
+         : 707    #[unstable(feature = "core_intrinsics", issue = "none")]
+         : 708    #[rustc_nounwind]
+         : 709    #[inline(always)]
+         : 710    pub const fn unlikely(b: bool) -> bool {
+         : 711    if b {
+    0.00 :   29f3b9: jo     29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+         : 713    if intrinsics::unlikely(intrinsics::add_with_overflow(self, rhs).1) {
+    0.00 :   29f3bf: add    %r14,%rax
+    0.00 :   29f3c2: jb     29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+    0.00 :   29f3c8: mov    -0x50(%rbp),%rdi
+         : 717    if let Some(range) = self.int64_unit_range {
+    0.00 :   29f3cc: cmpl   $0x1,(%rdi)
+    0.00 :   29f3cf: jne    29f3da <<fp_frame::DataFrame>::loc_bool+0x7aa>
+    0.00 :   29f3d1: mov    0x10(%rdi),%rdx
+    0.00 :   29f3d5: jmp    29f6e4 <<fp_frame::DataFrame>::loc_bool+0xab4>
+         : 722    if let Some(range) = self.int64_affine {
+    0.00 :   29f3da: cmpl   $0x1,0x18(%rdi)
+    0.00 :   29f3de: jne    29f3e9 <<fp_frame::DataFrame>::loc_bool+0x7b9>
+    0.00 :   29f3e0: mov    0x30(%rdi),%rdx
+    0.00 :   29f3e4: jmp    29f6e4 <<fp_frame::DataFrame>::loc_bool+0xab4>
+         : 727    if let Some(strided) = &self.int64_strided {
+    0.00 :   29f3e9: cmpq   $0x0,0x48(%rdi)
+    0.00 :   29f3ee: je     29f4ef <<fp_frame::DataFrame>::loc_bool+0x8bf>
+         : 730    return strided.len;
+    0.00 :   29f3f4: mov    0x60(%rdi),%rdx
+    0.00 :   29f3f8: jmp    29f6e4 <<fp_frame::DataFrame>::loc_bool+0xab4>
+    0.00 :   29f3fd: mov    -0x38(%rbp),%rsi
+    0.00 :   29f401: cmpb   $0x0,0x1(%rsi,%rcx,1)
+    0.00 :   29f406: jne    29ed36 <<fp_frame::DataFrame>::loc_bool+0x106>
+    0.00 :   29f40c: cmp    $0x2,%edx
+    0.00 :   29f40f: je     29edea <<fp_frame::DataFrame>::loc_bool+0x1ba>
+    0.00 :   29f415: mov    -0x38(%rbp),%rsi
+    0.00 :   29f419: cmpb   $0x0,0x2(%rsi,%rcx,1)
+    0.00 :   29f41e: je     29ed36 <<fp_frame::DataFrame>::loc_bool+0x106>
+    0.00 :   29f424: cmp    $0x3,%edx
+    0.00 :   29f427: je     29edea <<fp_frame::DataFrame>::loc_bool+0x1ba>
+    0.00 :   29f42d: mov    -0x38(%rbp),%rsi
+    0.00 :   29f431: cmpb   $0x0,0x3(%rsi,%rcx,1)
+    0.00 :   29f436: jne    29ed36 <<fp_frame::DataFrame>::loc_bool+0x106>
+    0.00 :   29f43c: cmp    $0x4,%edx
+    0.00 :   29f43f: je     29edea <<fp_frame::DataFrame>::loc_bool+0x1ba>
+    0.00 :   29f445: mov    -0x38(%rbp),%rsi
+    0.00 :   29f449: cmpb   $0x0,0x4(%rsi,%rcx,1)
+    0.00 :   29f44e: je     29ed36 <<fp_frame::DataFrame>::loc_bool+0x106>
+    0.00 :   29f454: cmp    $0x5,%edx
+    0.00 :   29f457: je     29edea <<fp_frame::DataFrame>::loc_bool+0x1ba>
+    0.00 :   29f45d: mov    -0x38(%rbp),%rsi
+    0.00 :   29f461: cmpb   $0x0,0x5(%rsi,%rcx,1)
+    0.00 :   29f466: jne    29ed36 <<fp_frame::DataFrame>::loc_bool+0x106>
+    0.00 :   29f46c: cmp    $0x6,%edx
+    0.00 :   29f46f: jne    2a10d6 <<fp_frame::DataFrame>::loc_bool+0x24a6>
+    0.00 :   29f475: xor    %r14d,%r14d
+    0.00 :   29f478: mov    %rax,%r12
+    0.00 :   29f47b: mov    -0x60(%rbp),%r15
+    0.00 :   29f47f: jmp    29f380 <<fp_frame::DataFrame>::loc_bool+0x750>
+    0.00 :   29f484: mov    0x40(%rsi),%eax
+    0.00 :   29f487: test   %eax,%eax
+    0.00 :   29f489: je     29f505 <<fp_frame::DataFrame>::loc_bool+0x8d5>
+    0.00 :   29f48b: mov    0x70(%rsi),%eax
+    0.00 :   29f48e: test   %eax,%eax
+    0.00 :   29f490: je     29f58f <<fp_frame::DataFrame>::loc_bool+0x95f>
+         : 768    self.as_slice().len()
+    0.00 :   29f496: mov    %rsi,%rdi
+    0.00 :   29f499: call   *0x31a6e9(%rip)        # 5b9b88 <_DYNAMIC+0xc50>
+    0.00 :   29f49f: jmp    29f5a0 <<fp_frame::DataFrame>::loc_bool+0x970>
+    0.00 :   29f4a4: mov    %rdi,%r14
+         : 773    match self.len {
+    0.00 :   29f4a7: jmp    29f4b8 <<fp_frame::DataFrame>::loc_bool+0x888>
+         : 775    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29f4a9: mov    %rdi,%r8
+    0.00 :   29f4ac: sub    %r9,%r8
+    0.00 :   29f4af: cmp    %rsi,%r8
+    0.00 :   29f4b2: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+         : 780    self.len += 1;
+    0.00 :   29f4b8: inc    %r12
+    0.00 :   29f4bb: cmp    $0x2,%rdx
+    0.00 :   29f4bf: je     29f30f <<fp_frame::DataFrame>::loc_bool+0x6df>
+         : 784    if keep {
+    0.00 :   29f4c5: cmpb   $0x1,0x2(%rcx)
+    0.00 :   29f4c9: jne    29f4ea <<fp_frame::DataFrame>::loc_bool+0x8ba>
+    0.00 :   29f4cb: mov    %rax,%r8
+    0.00 :   29f4ce: or     $0x2,%r8
+         : 789    match self.len {
+    0.00 :   29f4d2: test   %r12,%r12
+    0.00 :   29f4d5: je     29f50e <<fp_frame::DataFrame>::loc_bool+0x8de>
+    0.00 :   29f4d7: cmp    $0x1,%r12
+    0.00 :   29f4db: jne    29f513 <<fp_frame::DataFrame>::loc_bool+0x8e3>
+         : 794    if self.step == 0 {
+    0.00 :   29f4dd: mov    %r8,%rsi
+    0.00 :   29f4e0: sub    %r14,%rsi
+    0.00 :   29f4e3: jne    29f522 <<fp_frame::DataFrame>::loc_bool+0x8f2>
+    0.00 :   29f4e5: jmp    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f4ea: mov    %rdi,%r8
+         : 800    if keep {
+    0.00 :   29f4ed: jmp    29f525 <<fp_frame::DataFrame>::loc_bool+0x8f5>
+         : 802    if let Some((_, offsets)) = &self.utf8_contiguous {
+    0.00 :   29f4ef: cmpq   $0x0,0x78(%rdi)
+    0.00 :   29f4f4: je     29f568 <<fp_frame::DataFrame>::loc_bool+0x938>
+         : 805    unsafe { &*self.as_ptr().cast_const() }
+    0.00 :   29f4f6: mov    0x90(%rdi),%rdx
+         : 807    return offsets.len() - 1;
+    0.00 :   29f4fd: dec    %rdx
+    0.00 :   29f500: jmp    29f6e4 <<fp_frame::DataFrame>::loc_bool+0xab4>
+    0.00 :   29f505: mov    0x38(%rsi),%rax
+    0.00 :   29f509: jmp    29f59c <<fp_frame::DataFrame>::loc_bool+0x96c>
+    0.00 :   29f50e: mov    %r8,%r14
+         : 813    match self.len {
+    0.00 :   29f511: jmp    29f522 <<fp_frame::DataFrame>::loc_bool+0x8f2>
+         : 815    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29f513: mov    %r8,%r9
+    0.00 :   29f516: sub    %rdi,%r9
+    0.00 :   29f519: cmp    %rsi,%r9
+    0.00 :   29f51c: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+         : 820    self.len += 1;
+    0.00 :   29f522: inc    %r12
+         : 822    self.as_ptr() == other.as_ptr()
+    0.00 :   29f525: cmp    $0x3,%rdx
+    0.00 :   29f529: je     29f30f <<fp_frame::DataFrame>::loc_bool+0x6df>
+         : 825    if keep {
+    0.00 :   29f52f: cmpb   $0x1,0x3(%rcx)
+    0.00 :   29f533: jne    29f560 <<fp_frame::DataFrame>::loc_bool+0x930>
+    0.00 :   29f535: mov    %rax,%rdi
+    0.00 :   29f538: or     $0x3,%rdi
+         : 830    match self.len {
+    0.00 :   29f53c: test   %r12,%r12
+    0.00 :   29f53f: je     29f673 <<fp_frame::DataFrame>::loc_bool+0xa43>
+    0.00 :   29f545: cmp    $0x1,%r12
+    0.00 :   29f549: jne    29f678 <<fp_frame::DataFrame>::loc_bool+0xa48>
+         : 835    if self.step == 0 {
+    0.00 :   29f54f: mov    %rdi,%rsi
+    0.00 :   29f552: sub    %r14,%rsi
+    0.00 :   29f555: jne    29f687 <<fp_frame::DataFrame>::loc_bool+0xa57>
+    0.00 :   29f55b: jmp    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f560: mov    %r8,%rdi
+         : 841    if keep {
+    0.00 :   29f563: jmp    29f68a <<fp_frame::DataFrame>::loc_bool+0xa5a>
+    0.00 :   29f568: mov    0x40(%rdi),%ecx
+    0.00 :   29f56b: test   %ecx,%ecx
+    0.00 :   29f56d: je     29f6cd <<fp_frame::DataFrame>::loc_bool+0xa9d>
+    0.00 :   29f573: mov    0x70(%rdi),%ecx
+    0.00 :   29f576: test   %ecx,%ecx
+    0.00 :   29f578: je     29f6d3 <<fp_frame::DataFrame>::loc_bool+0xaa3>
+    0.00 :   29f57e: mov    %rax,%rbx
+         : 850    self.as_slice().len()
+    0.00 :   29f581: call   *0x31a601(%rip)        # 5b9b88 <_DYNAMIC+0xc50>
+    0.00 :   29f587: mov    %rbx,%rax
+    0.00 :   29f58a: jmp    29f6e4 <<fp_frame::DataFrame>::loc_bool+0xab4>
+         : 854    if let Some(Some(values)) = self.int64_typed.get() {
+    0.00 :   29f58f: mov    0x68(%rsi),%rax
+    0.00 :   29f593: test   %rax,%rax
+    0.00 :   29f596: je     29f496 <<fp_frame::DataFrame>::loc_bool+0x866>
+    0.00 :   29f59c: mov    0x20(%rax),%rdx
+         : 859    self.len()
+    0.00 :   29f5a0: mov    %rdx,-0x450(%rbp)
+    0.00 :   29f5a7: lea    -0x538(%rbp),%rax
+         : 862    return Err(FrameError::CompatibilityRejected(format!(
+    0.00 :   29f5ae: mov    %rax,-0x2d0(%rbp)
+    0.00 :   29f5b5: mov    0x319e0c(%rip),%rax        # 5b93c8 <_DYNAMIC+0x490>
+    0.00 :   29f5bc: mov    %rax,-0x2c8(%rbp)
+    0.00 :   29f5c3: lea    -0x450(%rbp),%rcx
+    0.00 :   29f5ca: mov    %rcx,-0x2c0(%rbp)
+    0.00 :   29f5d1: mov    %rax,-0x2b8(%rbp)
+    0.00 :   29f5d8: lea    0x10(%r15),%rdi
+         : 870    .write_fmt(args)
+         : 871    .expect("a formatting trait implementation returned an error when the underlying stream did not");
+         : 872    output
+         : 873    }
+         :
+         : 875    args.as_str().map_or_else(|| format_inner(args), crate::borrow::ToOwned::to_owned)
+    0.00 :   29f5dc: lea    -0x1b2307(%rip),%rsi        # ed2dc <anon.b0b210abaab616bb83f5765e0997a5ad.97.llvm.15963824012875845702+0x13e>
+    0.00 :   29f5e3: lea    -0x2d0(%rbp),%rdx
+    0.00 :   29f5ea: call   *0x319f08(%rip)        # 5b94f8 <_DYNAMIC+0x5c0>
+    0.00 :   29f5f0: movabs $0x8000000000000000,%rax
+    0.00 :   29f5fa: add    $0x11,%rax
+    0.00 :   29f5fe: mov    %rax,0x8(%r15)
+    0.00 :   29f602: movq   $0x2,(%r15)
+         : 883    let (positions, affine_certificate) = boolean_mask_positions(mask);
+         : 884    self.take_rows_by_positions_with_affine_certificate_unchecked(
+         : 885    &positions,
+         : 886    affine_certificate,
+         : 887    )
+         : 888    }
+    0.00 :   29f609: mov    %r15,%rax
+    0.00 :   29f60c: add    $0x628,%rsp
+    0.00 :   29f613: pop    %rbx
+    0.00 :   29f614: pop    %r12
+    0.00 :   29f616: pop    %r13
+    0.00 :   29f618: pop    %r14
+    0.00 :   29f61a: pop    %r15
+    0.00 :   29f61c: pop    %rbp
+    0.00 :   29f61d: ret
+    0.00 :   29f61e: cmpb   $0x0,0x2(%rcx)
+    0.00 :   29f622: jne    29ee21 <<fp_frame::DataFrame>::loc_bool+0x1f1>
+    0.00 :   29f628: cmp    $0x3,%edx
+    0.00 :   29f62b: je     29f380 <<fp_frame::DataFrame>::loc_bool+0x750>
+    0.00 :   29f631: cmpb   $0x0,0x3(%rcx)
+    0.00 :   29f635: je     29ee21 <<fp_frame::DataFrame>::loc_bool+0x1f1>
+    0.00 :   29f63b: cmp    $0x4,%edx
+    0.00 :   29f63e: je     29f380 <<fp_frame::DataFrame>::loc_bool+0x750>
+    0.00 :   29f644: cmpb   $0x0,0x4(%rcx)
+    0.00 :   29f648: jne    29ee21 <<fp_frame::DataFrame>::loc_bool+0x1f1>
+    0.00 :   29f64e: cmp    $0x5,%edx
+    0.00 :   29f651: je     29f380 <<fp_frame::DataFrame>::loc_bool+0x750>
+    0.00 :   29f657: cmpb   $0x0,0x5(%rcx)
+    0.00 :   29f65b: je     29ee21 <<fp_frame::DataFrame>::loc_bool+0x1f1>
+    0.00 :   29f661: cmp    $0x6,%edx
+    0.00 :   29f664: jne    2a10f3 <<fp_frame::DataFrame>::loc_bool+0x24c3>
+    0.00 :   29f66a: mov    -0x60(%rbp),%r15
+    0.00 :   29f66e: jmp    29f380 <<fp_frame::DataFrame>::loc_bool+0x750>
+    0.00 :   29f673: mov    %rdi,%r14
+         : 917    match self.len {
+    0.00 :   29f676: jmp    29f687 <<fp_frame::DataFrame>::loc_bool+0xa57>
+         : 919    if self.is_affine && position - self.previous != self.step {
+    0.00 :   29f678: mov    %rdi,%r9
+    0.00 :   29f67b: sub    %r8,%r9
+    0.00 :   29f67e: cmp    %rsi,%r9
+    0.00 :   29f681: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+         : 924    self.len += 1;
+    0.00 :   29f687: inc    %r12
+    0.00 :   29f68a: cmp    $0x4,%rdx
+    0.00 :   29f68e: je     29f30f <<fp_frame::DataFrame>::loc_bool+0x6df>
+         : 928    if keep {
+    0.00 :   29f694: cmpb   $0x1,0x4(%rcx)
+    0.00 :   29f698: jne    29f6c5 <<fp_frame::DataFrame>::loc_bool+0xa95>
+    0.00 :   29f69a: mov    %rax,%r8
+    0.00 :   29f69d: or     $0x4,%r8
+         : 933    match self.len {
+    0.00 :   29f6a1: test   %r12,%r12
+    0.00 :   29f6a4: je     2a0ff0 <<fp_frame::DataFrame>::loc_bool+0x23c0>
+    0.00 :   29f6aa: cmp    $0x1,%r12
+    0.00 :   29f6ae: jne    2a0ff5 <<fp_frame::DataFrame>::loc_bool+0x23c5>
+         : 938    if self.step == 0 {
+    0.00 :   29f6b4: mov    %r8,%rsi
+    0.00 :   29f6b7: sub    %r14,%rsi
+    0.00 :   29f6ba: jne    2a1004 <<fp_frame::DataFrame>::loc_bool+0x23d4>
+    0.00 :   29f6c0: jmp    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   29f6c5: mov    %rdi,%r8
+         : 944    if keep {
+    0.00 :   29f6c8: jmp    2a1007 <<fp_frame::DataFrame>::loc_bool+0x23d7>
+         : 946    unsafe { &*self.as_ptr().cast_const() }
+    0.00 :   29f6cd: mov    0x38(%rdi),%rcx
+    0.00 :   29f6d1: jmp    29f6e0 <<fp_frame::DataFrame>::loc_bool+0xab0>
+    0.00 :   29f6d3: mov    0x68(%rdi),%rcx
+    0.00 :   29f6d7: test   %rcx,%rcx
+    0.00 :   29f6da: je     29f57e <<fp_frame::DataFrame>::loc_bool+0x94e>
+    0.00 :   29f6e0: mov    0x20(%rcx),%rdx
+         : 953    if last >= self.len() {
+    0.00 :   29f6e4: cmp    %rdx,%rax
+    0.00 :   29f6e7: jae    29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+    0.00 :   29f6ed: mov    -0x50(%rbp),%rbx
+         : 957    #[rustc_const_unstable(feature = "const_option_ops", issue = "143956")]
+         : 958    pub const fn map<U, F>(self, f: F) -> Option<U>
+         : 959    where
+         : 960    F: [const] FnOnce(T) -> U + [const] Destruct,
+         : 961    {
+         : 962    match self {
+    0.00 :   29f6f1: cmpq   $0x1,(%rbx)
+    0.00 :   29f6f5: mov    %r12,-0xa8(%rbp)
+    0.00 :   29f6fc: mov    %r14,-0x88(%rbp)
+    0.00 :   29f703: jne    29f746 <<fp_frame::DataFrame>::loc_bool+0xb16>
+    0.00 :   29f705: test   %r14,%r14
+         : 968    if last >= range_len {
+    0.00 :   29f708: js     29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+    0.00 :   29f70e: cmp    0x10(%rbx),%rax
+    0.00 :   29f712: jae    29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+    0.00 :   29f718: mov    0x8(%rbx),%rsi
+         : 973    #[rustc_const_stable(feature = "const_int_methods", since = "1.32.0")]
+         : 974    #[must_use = "this returns the result of the operation, \
+         : 975    without modifying the original"]
+         : 976    #[inline(always)]
+         : 977    pub const fn overflowing_add(self, rhs: Self) -> (Self, bool) {
+         : 978    let (a, b) = intrinsics::add_with_overflow(self as $ActualT, rhs as $ActualT);
+    0.00 :   29f71c: add    %r14,%rsi
+    0.00 :   29f71f: jo     29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+    0.00 :   29f725: cmpq   $0x0,-0x40(%rbp)
+    0.00 :   29f72a: js     29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+    0.00 :   29f730: lea    -0x2d0(%rbp),%rdi
+    0.00 :   29f737: mov    -0x40(%rbp),%rdx
+         : 985    Index::new_known_unique_int64_affine_range(label_start, step, n)?
+    0.00 :   29f73b: mov    %r12,%rcx
+    0.00 :   29f73e: call   *0x31a8d4(%rip)        # 5ba018 <_DYNAMIC+0x10e0>
+         : 988    Some(output)
+         : 989    }
+         :
+         : 991    #[inline]
+         : 992    fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {
+         : 993    match self {
+    0.00 :   29f744: jmp    29f7bb <<fp_frame::DataFrame>::loc_bool+0xb8b>
+    0.00 :   29f746: mov    0x70(%rbx),%eax
+    0.00 :   29f749: test   %eax,%eax
+    0.00 :   29f74b: je     29f791 <<fp_frame::DataFrame>::loc_bool+0xb61>
+         : 998    let (a, b) = intrinsics::mul_with_overflow(self as $ActualT, rhs as $ActualT);
+    0.00 :   29f74d: mov    %r12,%rax
+    0.00 :   29f750: shr    $0x3e,%rax
+    0.00 :   29f754: jne    2a1114 <<fp_frame::DataFrame>::loc_bool+0x24e4>
+    0.00 :   29f75a: lea    0x0(,%r12,4),%rbx
+    0.00 :   29f762: mov    -0x50(%rbp),%r14
+         : 1004   self.index.len()
+    0.00 :   29f766: mov    %r14,%rdi
+    0.00 :   29f769: call   *0x31a7d1(%rip)        # 5b9f40 <_DYNAMIC+0x1008>
+         : 1007   None if n.saturating_mul(4) >= self.len() => self.index.int64_label_values(),
+    0.00 :   29f76f: cmp    %rax,%rbx
+    0.00 :   29f772: mov    %r14,%rbx
+    0.00 :   29f775: mov    -0x88(%rbp),%r14
+    0.00 :   29f77c: jb     29f7e6 <<fp_frame::DataFrame>::loc_bool+0xbb6>
+    0.00 :   29f77e: mov    %rbx,%rdi
+    0.00 :   29f781: call   *0x31a899(%rip)        # 5ba020 <_DYNAMIC+0x10e8>
+    0.00 :   29f787: mov    %rax,%rsi
+         : 1015   if let Some(values) = typed_view {
+    0.00 :   29f78a: test   %rax,%rax
+    0.00 :   29f78d: jne    29f7a4 <<fp_frame::DataFrame>::loc_bool+0xb74>
+    0.00 :   29f78f: jmp    29f7e6 <<fp_frame::DataFrame>::loc_bool+0xbb6>
+         : 1019   match self {
+    0.00 :   29f791: mov    0x68(%rbx),%rsi
+    0.00 :   29f795: test   %rsi,%rsi
+    0.00 :   29f798: je     29f7e6 <<fp_frame::DataFrame>::loc_bool+0xbb6>
+         : 1023   #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+         : 1024   unsafe fn atomic_add<T: Copy, U: Copy>(dst: *mut T, val: U, order: Ordering) -> T {
+         : 1025   // SAFETY: the caller must uphold the safety contract for `atomic_add`.
+         : 1026   unsafe {
+         : 1027   match order {
+         : 1028   Relaxed => intrinsics::atomic_xadd::<T, U, { AO::Relaxed }>(dst, val),
+    0.00 :   29f79a: lock incq (%rsi)
+         : 1030   //
+         : 1031   // This is a global invariant, and also applies when using a compare-exchange loop to increment
+         : 1032   // counters in other methods.
+         : 1033   // Otherwise, the counter could be brought to an almost-overflow using a compare-exchange loop,
+         : 1034   // and then overflow using a few `fetch_add`s.
+         : 1035   if old_size > MAX_REFCOUNT {
+    0.00 :   29f79e: jle    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   29f7a4: lea    -0x2d0(%rbp),%rdi
+         : 1038   Index::from_i64_strided_values(values, certificate.start, certificate.step, n)?
+    0.00 :   29f7ab: mov    %r14,%rdx
+    0.00 :   29f7ae: mov    -0x40(%rbp),%rcx
+    0.00 :   29f7b2: mov    %r12,%r8
+    0.00 :   29f7b5: call   *0x31a86d(%rip)        # 5ba028 <_DYNAMIC+0x10f0>
+         : 1043   match self {
+    0.00 :   29f7bb: cmpl   $0x2,-0x2d0(%rbp)
+    0.00 :   29f7c2: je     29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+    0.00 :   29f7c8: lea    -0x620(%rbp),%rdi
+    0.00 :   29f7cf: lea    -0x2d0(%rbp),%rsi
+         : 1048   Some(v) => ControlFlow::Continue(v),
+    0.00 :   29f7d6: mov    $0xe8,%edx
+    0.00 :   29f7db: call   *0x31996f(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+         : 1051   if let Some(values) = typed_view {
+    0.00 :   29f7e1: jmp    29fa24 <<fp_frame::DataFrame>::loc_bool+0xdf4>
+         : 1053   let index_labels = self.index.labels();
+    0.00 :   29f7e6: mov    %rbx,%rdi
+    0.00 :   29f7e9: call   *0x31a841(%rip)        # 5ba030 <_DYNAMIC+0x10f8>
+    0.00 :   29f7ef: mov    %rdx,-0x70(%rbp)
+    0.00 :   29f7f3: lea    0x0(,%r12,8),%rcx
+    0.00 :   29f7fb: lea    (%rcx,%rcx,2),%rbx
+    0.00 :   29f7ff: movabs $0x555555555555556,%rcx
+    0.00 :   29f809: dec    %rcx
+    0.00 :   29f80c: cmp    %rcx,%r12
+    0.00 :   29f80f: jbe    29f820 <<fp_frame::DataFrame>::loc_bool+0xbf0>
+    0.00 :   29f811: xor    %r14d,%r14d
+         : 1064   // Make it more obvious that a subsequent Vec::reserve(capacity) will not allocate.
+         : 1065   hint::assert_unchecked(!this.needs_to_grow(0, capacity, elem_layout));
+         : 1066   }
+         : 1067   this
+         : 1068   }
+         : 1069   Err(err) => handle_error(err),
+    0.00 :   29f814: mov    %r14,%rdi
+    0.00 :   29f817: mov    %rbx,%rsi
+    0.00 :   29f81a: call   *0x319958(%rip)        # 5b9178 <_DYNAMIC+0x240>
+         : 1073   Ok(layout) => layout,
+         : 1074   Err(_) => return Err(CapacityOverflow.into()),
+         : 1075   };
+         :
+         : 1077   // Don't allocate here because `Drop` will not deallocate when `capacity` is 0.
+         : 1078   if layout.size() == 0 {
+    0.00 :   29f820: test   %rbx,%rbx
+    0.00 :   29f823: je     29f84f <<fp_frame::DataFrame>::loc_bool+0xc1f>
+    0.00 :   29f825: mov    %rax,%r15
+    0.00 :   29f828: mov    $0x8,%r14d
+         : 1083   unsafe {
+         : 1084   // Make sure we don't accidentally allow omitting the allocator shim in
+         : 1085   // stable code until it is actually stabilized.
+         : 1086   __rust_no_alloc_shim_is_unstable_v2();
+         :
+         : 1088   __rust_alloc(layout.size(), layout.alignment())
+    0.00 :   29f82e: mov    $0x8,%esi
+    0.00 :   29f833: mov    %rbx,%rdi
+    0.00 :   29f836: call   1b60e0 <__rustc::__rust_alloc>
+         : 1092   let result = match init {
+         : 1093   AllocInit::Uninitialized => alloc.allocate(layout),
+         : 1094   #[cfg(not(no_global_oom_handling))]
+         : 1095   AllocInit::Zeroed => alloc.allocate_zeroed(layout),
+         : 1096   };
+         : 1097   let ptr = match result {
+    0.00 :   29f83b: test   %rax,%rax
+    0.00 :   29f83e: je     29f814 <<fp_frame::DataFrame>::loc_bool+0xbe4>
+    0.00 :   29f840: mov    %rax,%rcx
+    0.00 :   29f843: mov    %r15,%rax
+    0.00 :   29f846: mov    -0x88(%rbp),%r14
+    0.00 :   29f84d: jmp    29f857 <<fp_frame::DataFrame>::loc_bool+0xc27>
+    0.00 :   29f84f: mov    $0x8,%ecx
+    0.00 :   29f854: xor    %r12d,%r12d
+         : 1106   Vec { buf: RawVec::with_capacity_in(capacity, alloc), len: 0 }
+    0.00 :   29f857: mov    %r12,-0x538(%rbp)
+    0.00 :   29f85e: mov    %rcx,-0x530(%rbp)
+    0.00 :   29f865: movq   $0x0,-0x528(%rbp)
+         : 1110   for _ in 0..n {
+    0.00 :   29f870: lea    (%r14,%r14,2),%rcx
+    0.00 :   29f874: lea    (%rax,%rcx,8),%r12
+    0.00 :   29f878: add    $0x10,%r12
+    0.00 :   29f87c: mov    -0x40(%rbp),%rax
+    0.00 :   29f880: lea    0x0(,%rax,8),%rax
+    0.00 :   29f888: lea    (%rax,%rax,2),%rax
+    0.00 :   29f88c: mov    %rax,-0x48(%rbp)
+    0.00 :   29f890: mov    %r14,%rbx
+    0.00 :   29f893: mov    $0x10,%r14d
+    0.00 :   29f899: xor    %r15d,%r15d
+    0.00 :   29f89c: jmp    29f8d9 <<fp_frame::DataFrame>::loc_bool+0xca9>
+    0.00 :   29f89e: xchg   %ax,%ax
+         : 1123   self.non_null::<T>().as_ptr()
+         : 1124   }
+         :
+         : 1126   #[inline]
+         : 1127   const fn non_null<T>(&self) -> NonNull<T> {
+         : 1128   self.ptr.cast().as_non_null_ptr()
+    0.00 :   29f8a0: mov    -0x530(%rbp),%rax
+         : 1130   addr: *mut () = dst as *mut (),
+         : 1131   align: usize = align_of::<T>(),
+         : 1132   is_zst: bool = T::IS_ZST,
+         : 1133   ) => ub_checks::maybe_is_aligned_and_not_null(addr, align, is_zst)
+         : 1134   );
+         : 1135   intrinsics::write_via_move(dst, src)
+    0.00 :   29f8a7: mov    %r13,-0x10(%rax,%r14,1)
+    0.00 :   29f8ac: mov    -0x58(%rbp),%rcx
+    0.00 :   29f8b0: mov    %rcx,-0x8(%rax,%r14,1)
+    0.00 :   29f8b5: mov    -0x30(%rbp),%rcx
+    0.00 :   29f8b9: mov    %rcx,(%rax,%r14,1)
+         : 1141   self.len = len + 1;
+    0.00 :   29f8bd: inc    %r15
+    0.00 :   29f8c0: mov    %r15,-0x528(%rbp)
+         : 1144   if intrinsics::unlikely(intrinsics::add_with_overflow(self, rhs).1) {
+    0.00 :   29f8c7: add    $0x18,%r14
+    0.00 :   29f8cb: add    -0x48(%rbp),%r12
+    0.00 :   29f8cf: add    -0x40(%rbp),%rbx
+    0.00 :   29f8d3: jb     2a109b <<fp_frame::DataFrame>::loc_bool+0x246b>
+         :
+         : 1150   #[rustfmt::skip]
+         : 1151   macro_rules! partial_ord_methods_primitive_impl {
+         : 1152   () => {
+         : 1153   #[inline(always)]
+         : 1154   fn lt(&self, other: &Self) -> bool { *self <  *other }
+    0.00 :   29f8d9: cmp    %r15,-0xa8(%rbp)
+         : 1156   }
+         :
+         : 1158   impl<T: TrustedStep> RangeIteratorImpl for ops::Range<T> {
+         : 1159   #[inline]
+         : 1160   fn spec_next(&mut self) -> Option<T> {
+         : 1161   if self.start < self.end {
+    0.00 :   29f8e0: je     29f9a5 <<fp_frame::DataFrame>::loc_bool+0xd75>
+         : 1163   labels.push(index_labels[pos].clone());
+    0.00 :   29f8e6: cmp    -0x70(%rbp),%rbx
+    0.00 :   29f8ea: jae    2a11a1 <<fp_frame::DataFrame>::loc_bool+0x2571>
+         : 1166   #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+    0.00 :   29f8f0: mov    -0x10(%r12),%r13
+    0.00 :   29f8f5: mov    %r13,%rax
+    0.00 :   29f8f8: movabs $0x8000000000000000,%rcx
+    0.00 :   29f902: xor    %rcx,%rax
+    0.00 :   29f905: test   %r13,%r13
+    0.00 :   29f908: mov    $0x1,%ecx
+    0.00 :   29f90d: cmovns %rcx,%rax
+    0.00 :   29f911: lea    -0x17c968(%rip),%rcx        # 122fb0 <core::unicode::unicode_data::white_space::WHITESPACE_MAP+0x2001>
+    0.00 :   29f918: movslq (%rcx,%rax,4),%rax
+    0.00 :   29f91c: add    %rcx,%rax
+    0.00 :   29f91f: jmp    *%rax
+    0.00 :   29f921: mov    -0x8(%r12),%rax
+    0.00 :   29f926: mov    %rax,-0x58(%rbp)
+    0.00 :   29f92a: mov    (%r12),%rax
+    0.00 :   29f92e: mov    %rax,-0x30(%rbp)
+         : 1182   if len == self.buf.capacity() {
+    0.00 :   29f932: cmp    -0x538(%rbp),%r15
+    0.00 :   29f939: jne    29f8a0 <<fp_frame::DataFrame>::loc_bool+0xc70>
+         : 1185   self.buf.grow_one();
+    0.00 :   29f93f: lea    -0x538(%rbp),%rdi
+    0.00 :   29f946: call   *0x31a5dc(%rip)        # 5b9f28 <_DYNAMIC+0xff0>
+    0.00 :   29f94c: jmp    29f8a0 <<fp_frame::DataFrame>::loc_bool+0xc70>
+    0.00 :   29f951: mov    (%r12),%r13
+    0.00 :   29f955: test   %r13,%r13
+    0.00 :   29f958: je     29f98f <<fp_frame::DataFrame>::loc_bool+0xd5f>
+    0.00 :   29f95a: mov    -0x8(%r12),%rax
+    0.00 :   29f95f: mov    %rax,-0x30(%rbp)
+    0.00 :   29f963: mov    %r13,%rdi
+    0.00 :   29f966: call   *0x3197c4(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+    0.00 :   29f96c: test   %rax,%rax
+    0.00 :   29f96f: je     2a1202 <<fp_frame::DataFrame>::loc_bool+0x25d2>
+    0.00 :   29f975: mov    %rax,-0x58(%rbp)
+    0.00 :   29f979: mov    %rax,%rdi
+    0.00 :   29f97c: mov    -0x30(%rbp),%rsi
+    0.00 :   29f980: mov    %r13,%rdx
+    0.00 :   29f983: call   *0x3197c7(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+    0.00 :   29f989: mov    %r13,-0x30(%rbp)
+    0.00 :   29f98d: jmp    29f932 <<fp_frame::DataFrame>::loc_bool+0xd02>
+    0.00 :   29f98f: mov    $0x1,%eax
+    0.00 :   29f994: mov    %rax,-0x58(%rbp)
+    0.00 :   29f998: movq   $0x0,-0x30(%rbp)
+    0.00 :   29f9a0: xor    %r13d,%r13d
+    0.00 :   29f9a3: jmp    29f932 <<fp_frame::DataFrame>::loc_bool+0xd02>
+         : 1210   Index::new(labels)
+    0.00 :   29f9a5: mov    -0x528(%rbp),%rax
+    0.00 :   29f9ac: mov    %rax,-0x2c0(%rbp)
+    0.00 :   29f9b3: movups -0x538(%rbp),%xmm0
+    0.00 :   29f9ba: movaps %xmm0,-0x2d0(%rbp)
+    0.00 :   29f9c1: lea    -0x620(%rbp),%rdi
+    0.00 :   29f9c8: lea    -0x2d0(%rbp),%rsi
+         :
+         : 1218   impl Index {
+         : 1219   #[must_use]
+         : 1220   pub fn new(labels: Vec<IndexLabel>) -> Self {
+         : 1221   Self {
+         : 1222   labels: IndexLabels::new(labels),
+    0.00 :   29f9cf: call   *0x31a1a3(%rip)        # 5b9b78 <_DYNAMIC+0xc40>
+    0.00 :   29f9d5: mov    0x31a1a4(%rip),%rax        # 5b9b80 <_DYNAMIC+0xc48>
+    0.00 :   29f9dc: mov    $0x1,%ecx
+    0.00 :   29f9e1: lock xadd %rcx,(%rax)
+         : 1227   Self {
+    0.00 :   29f9e6: movabs $0x8000000000000000,%rax
+    0.00 :   29f9f0: mov    %rax,-0x588(%rbp)
+    0.00 :   29f9f7: mov    %rcx,-0x570(%rbp)
+    0.00 :   29f9fe: movl   $0x3,-0x568(%rbp)
+    0.00 :   29fa08: movl   $0x3,-0x560(%rbp)
+    0.00 :   29fa12: movl   $0x3,-0x540(%rbp)
+    0.00 :   29fa1c: mov    -0x60(%rbp),%r15
+    0.00 :   29fa20: mov    -0x50(%rbp),%rbx
+         : 1236   #[stable(feature = "rust1", since = "1.0.0")]
+         : 1237   #[rustc_const_stable(feature = "const_btree_new", since = "1.66.0")]
+         : 1238   #[inline]
+         : 1239   #[must_use]
+         : 1240   pub const fn new() -> BTreeMap<K, V> {
+         : 1241   BTreeMap { root: None, length: 0, alloc: ManuallyDrop::new(Global), _marker: PhantomData }
+    0.00 :   29fa24: movq   $0x0,-0xe8(%rbp)
+    0.00 :   29fa2f: movq   $0x0,-0xd8(%rbp)
+         : 1244   &*core::intrinsics::aggregate_raw_ptr::<*const [T], _, _>(self.as_ptr(), self.len)
+    0.00 :   29fa3a: mov    0xf8(%rbx),%rax
+         : 1246   self.as_ptr() == other.as_ptr()
+    0.00 :   29fa41: test   %rax,%rax
+    0.00 :   29fa44: je     29fc51 <<fp_frame::DataFrame>::loc_bool+0x1021>
+    0.00 :   29fa4a: mov    0xf0(%rbx),%rcx
+    0.00 :   29fa51: lea    (%rax,%rax,2),%rax
+    0.00 :   29fa55: lea    (%rcx,%rax,8),%rax
+    0.00 :   29fa59: mov    %rax,-0x98(%rbp)
+    0.00 :   29fa60: jmp    29fa7d <<fp_frame::DataFrame>::loc_bool+0xe4d>
+    0.00 :   29fa62: mov    -0xb0(%rbp),%rax
+    0.00 :   29fa69: mov    %rax,%rcx
+    0.00 :   29fa6c: cmp    -0x98(%rbp),%rax
+    0.00 :   29fa73: mov    -0x50(%rbp),%rbx
+    0.00 :   29fa77: je     29fc51 <<fp_frame::DataFrame>::loc_bool+0x1021>
+    0.00 :   29fa7d: mov    %rcx,-0x68(%rbp)
+         : 1260   .get(name)
+    0.00 :   29fa81: mov    0x160(%rbx),%rdx
+         : 1262   match *self {
+    0.00 :   29fa88: test   %rdx,%rdx
+    0.00 :   29fa8b: je     2a1186 <<fp_frame::DataFrame>::loc_bool+0x2556>
+    0.00 :   29fa91: mov    -0x68(%rbp),%rcx
+    0.00 :   29fa95: lea    0x18(%rcx),%rax
+    0.00 :   29fa99: mov    %rax,-0xb0(%rbp)
+    0.00 :   29faa0: mov    0x8(%rcx),%rax
+    0.00 :   29faa4: mov    %rax,-0x58(%rbp)
+    0.00 :   29faa8: mov    0x10(%rcx),%rax
+    0.00 :   29faac: mov    %rax,-0x30(%rbp)
+    0.00 :   29fab0: mov    0x168(%rbx),%rax
+    0.00 :   29fab7: mov    %rax,-0x70(%rbp)
+         : 1274   }
+         :
+         : 1276   /// Borrows a view into the keys stored in the node.
+         : 1277   pub(super) fn keys(&self) -> &[K] {
+         : 1278   let leaf = self.into_leaf();
+         : 1279   unsafe { leaf.keys.get_unchecked(..usize::from(leaf.len)).assume_init_ref() }
+    0.00 :   29fabb: lea    0x8(%rdx),%rax
+    0.00 :   29fabf: movzwl 0xb0a(%rdx),%ecx
+    0.00 :   29fac6: mov    %rdx,-0x48(%rbp)
+         : 1283   K: Borrow<Q>,
+         : 1284   {
+         : 1285   let node = self.reborrow();
+         : 1286   let keys = node.keys();
+         : 1287   debug_assert!(start_index <= keys.len());
+         : 1288   for (offset, k) in unsafe { keys.get_unchecked(start_index..) }.iter().enumerate() {
+    0.00 :   29faca: lea    0x28(%rdx),%r14
+    0.00 :   29face: mov    %rcx,-0xa0(%rbp)
+    0.00 :   29fad5: lea    0x0(,%rcx,8),%ecx
+    0.00 :   29fadc: lea    (%rcx,%rcx,2),%r15
+    0.00 :   29fae0: mov    $0xffffffffffffffff,%r12
+    0.00 :   29fae7: nopw   0x0(%rax,%rax,1)
+    0.00 :   29faf0: test   %r15,%r15
+    0.00 :   29faf3: je     29fb50 <<fp_frame::DataFrame>::loc_bool+0xf20>
+         : 1297   unsafe { transmute(intrinsics::offset(self.as_ptr(), count)) }
+    0.00 :   29faf5: lea    0x18(%rax),%rbx
+         : 1299   match key.cmp(k.borrow()) {
+    0.00 :   29faf9: mov    0x8(%rax),%rsi
+    0.00 :   29fafd: mov    0x10(%rax),%rdx
+    0.00 :   29fb01: mov    -0x30(%rbp),%rax
+         : 1303   // Since the length of a slice is always less than or equal to
+         : 1304   // isize::MAX, this never underflows.
+         : 1305   let diff = left.len() as isize - right.len() as isize;
+         : 1306   // This comparison gets optimized away (on x86_64 and ARM) because the
+         : 1307   // subtraction updates flags.
+         : 1308   let len = if left.len() < right.len() { left.len() } else { right.len() };
+    0.00 :   29fb05: mov    %rax,%r13
+    0.00 :   29fb08: sub    %rdx,%r13
+    0.00 :   29fb0b: cmovb  %rax,%rdx
+    0.00 :   29fb0f: mov    -0x58(%rbp),%rdi
+         : 1313   // SAFETY: `left` and `right` are references and are thus guaranteed to
+         : 1314   // be valid. `UnsignedBytewiseOrd` is only implemented for types that
+         : 1315   // are valid u8s and can be compared the same way. We use the minimum
+         : 1316   // of both lengths which guarantees that both regions are valid for
+         : 1317   // reads in that interval.
+         : 1318   let mut order = unsafe { compare_bytes(left, right, len) as isize };
+    0.00 :   29fb13: call   *0x319857(%rip)        # 5b9370 <memcmp@GLIBC_2.2.5>
+    0.00 :   29fb19: cltq
+         : 1321   if order == 0 {
+    0.00 :   29fb1b: test   %eax,%eax
+    0.00 :   29fb1d: cmovne %rax,%r13
+         : 1324   #[stable(feature = "rust1", since = "1.0.0")]
+         : 1325   #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+         : 1326   impl const Ord for $t {
+         : 1327   #[inline]
+         : 1328   fn cmp(&self, other: &Self) -> Ordering {
+         : 1329   crate::intrinsics::three_way_compare(*self, *other)
+    0.00 :   29fb21: test   %r13,%r13
+    0.00 :   29fb24: sets   %al
+    0.00 :   29fb27: setg   %cl
+    0.00 :   29fb2a: sub    %al,%cl
+    0.00 :   29fb2c: add    $0xe8,%r14
+    0.00 :   29fb33: inc    %r12
+    0.00 :   29fb36: add    $0xffffffffffffffe8,%r15
+    0.00 :   29fb3a: mov    %rbx,%rax
+    0.00 :   29fb3d: cmp    $0x1,%cl
+    0.00 :   29fb40: je     29faf0 <<fp_frame::DataFrame>::loc_bool+0xec0>
+    0.00 :   29fb42: movzbl %cl,%eax
+    0.00 :   29fb45: test   %eax,%eax
+    0.00 :   29fb47: jne    29fb57 <<fp_frame::DataFrame>::loc_bool+0xf27>
+    0.00 :   29fb49: jmp    29fb7a <<fp_frame::DataFrame>::loc_bool+0xf4a>
+    0.00 :   29fb4b: nopl   0x0(%rax,%rax,1)
+    0.00 :   29fb50: mov    -0xa0(%rbp),%r12
+    0.00 :   29fb57: mov    -0x70(%rbp),%rax
+         : 1347   self,
+         : 1348   ) -> ForceResult<
+         : 1349   NodeRef<BorrowType, K, V, marker::Leaf>,
+         : 1350   NodeRef<BorrowType, K, V, marker::Internal>,
+         : 1351   > {
+         : 1352   if self.height == 0 {
+    0.00 :   29fb5b: sub    $0x1,%rax
+    0.00 :   29fb5f: mov    -0x48(%rbp),%rdx
+    0.00 :   29fb63: jb     2a1186 <<fp_frame::DataFrame>::loc_bool+0x2556>
+    0.00 :   29fb69: mov    %rax,-0x70(%rbp)
+         : 1357   crate::intrinsics::read_via_copy(src)
+    0.00 :   29fb6d: mov    0xb10(%rdx,%r12,8),%rdx
+         : 1359   loop {
+    0.00 :   29fb75: jmp    29fabb <<fp_frame::DataFrame>::loc_bool+0xe8b>
+    0.00 :   29fb7a: lea    -0x2d0(%rbp),%r12
+         : 1362   &self,
+         : 1363   start: usize,
+         : 1364   step: usize,
+         : 1365   len: usize,
+         : 1366   ) -> Option<Self> {
+         : 1367   self.take_affine_all_valid_float64_positions(len, start, step)
+    0.00 :   29fb81: mov    %r12,%rdi
+    0.00 :   29fb84: mov    %r14,%rsi
+    0.00 :   29fb87: mov    -0xa8(%rbp),%rdx
+    0.00 :   29fb8e: mov    -0x88(%rbp),%rcx
+    0.00 :   29fb95: mov    -0x40(%rbp),%r8
+    0.00 :   29fb99: call   225080 <<fp_columnar::Column>::take_affine_all_valid_float64_positions>
+    0.00 :   29fb9e: mov    -0x60(%rbp),%r15
+         : 1375   match self {
+    0.00 :   29fba2: cmpl   $0x9,-0x2d0(%rbp)
+    0.00 :   29fba9: je     29fda3 <<fp_frame::DataFrame>::loc_bool+0x1173>
+         : 1378   Some(v) => ControlFlow::Continue(v),
+    0.00 :   29fbaf: mov    $0xe8,%edx
+    0.00 :   29fbb4: lea    -0x538(%rbp),%rdi
+    0.00 :   29fbbb: mov    %r12,%rsi
+    0.00 :   29fbbe: call   *0x31958c(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+    0.00 :   29fbc4: mov    -0x68(%rbp),%rax
+    0.00 :   29fbc8: mov    0x10(%rax),%rbx
+    0.00 :   29fbcc: test   %rbx,%rbx
+    0.00 :   29fbcf: je     29fbff <<fp_frame::DataFrame>::loc_bool+0xfcf>
+    0.00 :   29fbd1: mov    0x8(%rax),%r15
+    0.00 :   29fbd5: mov    %rbx,%rdi
+    0.00 :   29fbd8: call   *0x319552(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+    0.00 :   29fbde: test   %rax,%rax
+    0.00 :   29fbe1: je     2a11d5 <<fp_frame::DataFrame>::loc_bool+0x25a5>
+    0.00 :   29fbe7: mov    %rax,%r14
+    0.00 :   29fbea: mov    %rax,%rdi
+    0.00 :   29fbed: mov    %r15,%rsi
+    0.00 :   29fbf0: mov    %rbx,%rdx
+    0.00 :   29fbf3: call   *0x319557(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+    0.00 :   29fbf9: mov    -0x60(%rbp),%r15
+    0.00 :   29fbfd: jmp    29fc05 <<fp_frame::DataFrame>::loc_bool+0xfd5>
+    0.00 :   29fbff: mov    $0x1,%r14d
+    0.00 :   29fc05: mov    %rbx,-0x120(%rbp)
+    0.00 :   29fc0c: mov    %r14,-0x118(%rbp)
+    0.00 :   29fc13: mov    %rbx,-0x110(%rbp)
+         : 1403   columns.insert(name.clone(), gathered);
+    0.00 :   29fc1a: mov    %r12,%rdi
+    0.00 :   29fc1d: lea    -0xe8(%rbp),%rsi
+    0.00 :   29fc24: lea    -0x120(%rbp),%rdx
+    0.00 :   29fc2b: lea    -0x538(%rbp),%rcx
+    0.00 :   29fc32: call   2e2f30 <<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert>
+         : 1409   pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+    0.00 :   29fc37: cmpl   $0x9,-0x2d0(%rbp)
+    0.00 :   29fc3e: je     29fa62 <<fp_frame::DataFrame>::loc_bool+0xe32>
+    0.00 :   29fc44: mov    %r12,%rdi
+    0.00 :   29fc47: call   2364d0 <core::ptr::drop_in_place::<fp_columnar::Column>>
+    0.00 :   29fc4c: jmp    29fa62 <<fp_frame::DataFrame>::loc_bool+0xe32>
+         : 1415   match *self {
+    0.00 :   29fc51: movabs $0x8000000000000000,%rax
+    0.00 :   29fc5b: cmp    %rax,0x98(%rbx)
+    0.00 :   29fc62: jne    29fc68 <<fp_frame::DataFrame>::loc_bool+0x1038>
+    0.00 :   29fc64: xor    %edx,%edx
+    0.00 :   29fc66: jmp    29fc76 <<fp_frame::DataFrame>::loc_bool+0x1046>
+    0.00 :   29fc68: mov    0xa0(%rbx),%rdx
+    0.00 :   29fc6f: mov    0xa8(%rbx),%rcx
+    0.00 :   29fc76: lea    -0x538(%rbp),%rdi
+    0.00 :   29fc7d: lea    -0x620(%rbp),%rsi
+         : 1425   }
+         :
+         : 1427   /// Return a new index with the name cleared.
+         : 1428   #[must_use]
+         : 1429   pub fn rename_index(&self, name: Option<&str>) -> Self {
+         : 1430   self.set_names(name)
+    0.00 :   29fc84: call   *0x31a296(%rip)        # 5b9f20 <_DYNAMIC+0xfe8>
+    0.00 :   29fc8a: movabs $0x8000000000000000,%rbx
+         : 1433   None,
+    0.00 :   29fc94: mov    %rbx,-0x650(%rbp)
+         : 1435   columns,
+    0.00 :   29fc9b: mov    -0xd8(%rbp),%rax
+    0.00 :   29fca2: mov    %rax,-0xc0(%rbp)
+    0.00 :   29fca9: movups -0xe8(%rbp),%xmm0
+    0.00 :   29fcb0: movaps %xmm0,-0xd0(%rbp)
+    0.00 :   29fcb7: mov    -0x50(%rbp),%r14
+         : 1441   self.column_order.clone(),
+    0.00 :   29fcbb: mov    0xf0(%r14),%rsi
+    0.00 :   29fcc2: mov    0xf8(%r14),%rdx
+    0.00 :   29fcc9: lea    -0x140(%rbp),%rdi
+    0.00 :   29fcd0: call   2f33a0 <<alloc::vec::Vec<alloc::string::String> as core::clone::Clone>::clone>
+         : 1446   match self {
+    0.00 :   29fcd5: cmp    %rbx,0x130(%r14)
+    0.00 :   29fcdc: jne    29fce7 <<fp_frame::DataFrame>::loc_bool+0x10b7>
+         : 1449   None => None,
+    0.00 :   29fcde: mov    %rbx,-0x120(%rbp)
+    0.00 :   29fce5: jmp    29fd24 <<fp_frame::DataFrame>::loc_bool+0x10f4>
+    0.00 :   29fce7: lea    0x130(%r14),%rsi
+    0.00 :   29fcee: lea    -0x2d0(%rbp),%rdi
+         : 1454   Some(x) => Some(x.clone()),
+    0.00 :   29fcf5: call   2ee520 <<fp_index::MultiIndex as core::clone::Clone>::clone>
+    0.00 :   29fcfa: movups -0x2d0(%rbp),%xmm0
+    0.00 :   29fd01: movups -0x2c0(%rbp),%xmm1
+    0.00 :   29fd08: movups -0x2b0(%rbp),%xmm2
+    0.00 :   29fd0f: movaps %xmm2,-0x100(%rbp)
+    0.00 :   29fd16: movaps %xmm1,-0x110(%rbp)
+    0.00 :   29fd1d: movaps %xmm0,-0x120(%rbp)
+    0.00 :   29fd24: lea    -0x2d0(%rbp),%rdi
+    0.00 :   29fd2b: lea    -0x538(%rbp),%rsi
+    0.00 :   29fd32: lea    -0x650(%rbp),%rdx
+    0.00 :   29fd39: lea    -0xd0(%rbp),%rcx
+    0.00 :   29fd40: lea    -0x140(%rbp),%r8
+    0.00 :   29fd47: lea    -0x120(%rbp),%r9
+         : 1468   Some(Self::new_with_axes(
+    0.00 :   29fd4e: call   28d450 <<fp_frame::DataFrame>::new_with_axes>
+    0.00 :   29fd53: mov    -0x2d0(%rbp),%rbx
+    0.00 :   29fd5a: lea    -0x2c8(%rbp),%rsi
+    0.00 :   29fd61: lea    -0x450(%rbp),%rdi
+    0.00 :   29fd68: mov    $0x178,%edx
+    0.00 :   29fd6d: call   *0x3193dd(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+    0.00 :   29fd73: lea    -0x620(%rbp),%rdi
+         : 1476   }
+    0.00 :   29fd7a: call   236320 <core::ptr::drop_in_place::<fp_index::Index>>
+         : 1478   && let Some(result) = self.take_rows_by_affine_certificate_unchecked(certificate)
+    0.00 :   29fd7f: cmp    $0x3,%rbx
+    0.00 :   29fd83: je     29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+    0.00 :   29fd85: mov    %rbx,(%r15)
+    0.00 :   29fd88: lea    0x8(%r15),%rdi
+    0.00 :   29fd8c: lea    -0x450(%rbp),%rsi
+    0.00 :   29fd93: mov    $0x178,%edx
+    0.00 :   29fd98: call   *0x3193b2(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+    0.00 :   29fd9e: jmp    29f609 <<fp_frame::DataFrame>::loc_bool+0x9d9>
+    0.00 :   29fda3: lea    -0xe8(%rbp),%rdi
+         : 1488   }
+    0.00 :   29fdaa: call   235450 <core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>>
+    0.00 :   29fdaf: lea    -0x620(%rbp),%rdi
+    0.00 :   29fdb6: call   236320 <core::ptr::drop_in_place::<fp_index::Index>>
+    0.00 :   29fdbb: mov    -0x78(%rbp),%rbx
+    0.00 :   29fdbf: movabs $0x1ffffffffffffff8,%r15
+         : 1494   let (a, b) = intrinsics::mul_with_overflow(self as $ActualT, rhs as $ActualT);
+    0.00 :   29fdc9: lea    0x0(,%rbx,8),%rsi
+    0.00 :   29fdd1: lea    0x7(%r15),%rax
+    0.00 :   29fdd5: cmp    %rax,%rbx
+    0.00 :   29fdd8: seta   %al
+    0.00 :   29fddb: movabs $0x8000000000000000,%rcx
+    0.00 :   29fde5: add    $0xfffffffffffffff8,%rcx
+    0.00 :   29fde9: cmp    %rcx,%rsi
+    0.00 :   29fdec: seta   %cl
+    0.00 :   29fdef: or     %al,%cl
+    0.00 :   29fdf1: je     29fdfb <<fp_frame::DataFrame>::loc_bool+0x11cb>
+    0.00 :   29fdf3: xor    %edi,%edi
+         : 1506   Err(err) => handle_error(err),
+    0.00 :   29fdf5: call   *0x31937d(%rip)        # 5b9178 <_DYNAMIC+0x240>
+         : 1508   if layout.size() == 0 {
+    0.00 :   29fdfb: test   %rsi,%rsi
+    0.00 :   29fdfe: je     29fe20 <<fp_frame::DataFrame>::loc_bool+0x11f0>
+    0.00 :   29fe00: mov    %rbx,%r14
+    0.00 :   29fe03: mov    %rsi,%rbx
+    0.00 :   29fe06: mov    %rsi,%rdi
+    0.00 :   29fe09: call   *0x319321(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+         : 1515   let ptr = match result {
+    0.00 :   29fe0f: test   %rax,%rax
+    0.00 :   29fe12: je     2a11c7 <<fp_frame::DataFrame>::loc_bool+0x2597>
+    0.00 :   29fe18: mov    %r14,%rbx
+    0.00 :   29fe1b: mov    %r14,%rcx
+    0.00 :   29fe1e: jmp    29fe27 <<fp_frame::DataFrame>::loc_bool+0x11f7>
+    0.00 :   29fe20: mov    $0x8,%eax
+    0.00 :   29fe25: xor    %ecx,%ecx
+         : 1523   Vec { buf: RawVec::with_capacity_in(capacity, alloc), len: 0 }
+    0.00 :   29fe27: mov    %rcx,-0x2d0(%rbp)
+    0.00 :   29fe2e: mov    %rax,-0x2c8(%rbp)
+    0.00 :   29fe35: movq   $0x0,-0x2c0(%rbp)
+    0.00 :   29fe40: movq   $0x0,-0x58(%rbp)
+    0.00 :   29fe48: and    %rbx,%r15
+    0.00 :   29fe4b: je     2a05c2 <<fp_frame::DataFrame>::loc_bool+0x1992>
+    0.00 :   29fe51: mov    %r15,-0xa0(%rbp)
+         : 1531   if chunk[0] {
+    0.00 :   29fe58: neg    %r15
+    0.00 :   29fe5b: mov    %r15,-0x70(%rbp)
+    0.00 :   29fe5f: mov    $0x1,%al
+    0.00 :   29fe61: mov    %eax,-0x30(%rbp)
+    0.00 :   29fe64: mov    $0x7,%r15d
+    0.00 :   29fe6a: xor    %r13d,%r13d
+    0.00 :   29fe6d: movq   $0x0,-0x48(%rbp)
+    0.00 :   29fe75: xor    %ecx,%ecx
+    0.00 :   29fe77: movq   $0x0,-0x40(%rbp)
+    0.00 :   29fe7f: xor    %r14d,%r14d
+    0.00 :   29fe82: jmp    29fed4 <<fp_frame::DataFrame>::loc_bool+0x12a4>
+    0.00 :   29fe84: data16 data16 cs nopw 0x0(%rax,%rax,1)
+         : 1544   self.buf.grow_one();
+    0.00 :   29fe90: lea    -0x2d0(%rbp),%rdi
+    0.00 :   29fe97: call   *0x319e33(%rip)        # 5b9cd0 <_DYNAMIC+0xd98>
+    0.00 :   29fe9d: inc    %r14
+         : 1548   self.ptr.cast().as_non_null_ptr()
+    0.00 :   29fea0: mov    -0x2c8(%rbp),%rax
+    0.00 :   29fea7: mov    %rbx,%r13
+         : 1551   intrinsics::write_via_move(dst, src)
+    0.00 :   29feaa: mov    %r15,(%rax,%rbx,8)
+         : 1553   self.len = len + 1;
+    0.00 :   29feae: inc    %r13
+    0.00 :   29feb1: mov    %r13,-0x2c0(%rbp)
+    0.00 :   29feb8: mov    %r15,%rcx
+    0.00 :   29febb: mov    -0x70(%rbp),%rax
+    0.00 :   29febf: add    %r15,%rax
+    0.00 :   29fec2: add    $0x8,%rax
+    0.00 :   29fec6: add    $0x8,%r15
+    0.00 :   29feca: cmp    $0x7,%rax
+    0.00 :   29fece: je     2a05a1 <<fp_frame::DataFrame>::loc_bool+0x1971>
+    0.00 :   29fed4: mov    -0x38(%rbp),%rax
+    0.00 :   29fed8: cmpb   $0x1,-0x7(%rax,%r15,1)
+    0.00 :   29fede: jne    29ff10 <<fp_frame::DataFrame>::loc_bool+0x12e0>
+    0.00 :   29fee0: lea    -0x7(%r15),%r12
+         : 1567   match self.len {
+    0.00 :   29fee4: cmp    $0x1,%r14
+    0.00 :   29fee8: je     29ff4b <<fp_frame::DataFrame>::loc_bool+0x131b>
+    0.00 :   29feea: test   %r14,%r14
+    0.00 :   29feed: jne    29ff6a <<fp_frame::DataFrame>::loc_bool+0x133a>
+    0.00 :   29feef: mov    %r12,-0x40(%rbp)
+    0.00 :   29fef3: mov    %r13,%rbx
+         : 1574   if len == self.buf.capacity() {
+    0.00 :   29fef6: cmp    -0x2d0(%rbp),%r13
+    0.00 :   29fefd: je     2a0000 <<fp_frame::DataFrame>::loc_bool+0x13d0>
+    0.00 :   29ff03: jmp    2a000d <<fp_frame::DataFrame>::loc_bool+0x13dd>
+    0.00 :   29ff08: nopl   0x0(%rax,%rax,1)
+    0.00 :   29ff10: mov    %rcx,%r12
+    0.00 :   29ff13: mov    -0x38(%rbp),%rax
+         : 1581   if chunk[1] {
+    0.00 :   29ff17: cmpb   $0x1,-0x6(%rax,%r15,1)
+    0.00 :   29ff1d: jne    2a0038 <<fp_frame::DataFrame>::loc_bool+0x1408>
+         : 1584   match self.len {
+    0.00 :   29ff23: lea    -0x6(%r15),%rcx
+    0.00 :   29ff27: cmp    $0x1,%r14
+    0.00 :   29ff2b: je     29ff92 <<fp_frame::DataFrame>::loc_bool+0x1362>
+    0.00 :   29ff2d: test   %r14,%r14
+    0.00 :   29ff30: jne    29ffb1 <<fp_frame::DataFrame>::loc_bool+0x1381>
+    0.00 :   29ff32: mov    %rcx,-0x40(%rbp)
+    0.00 :   29ff36: mov    %r13,%rbx
+    0.00 :   29ff39: cmp    -0x2d0(%rbp),%r13
+    0.00 :   29ff40: je     2a00e0 <<fp_frame::DataFrame>::loc_bool+0x14b0>
+    0.00 :   29ff46: jmp    2a00ed <<fp_frame::DataFrame>::loc_bool+0x14bd>
+         : 1595   if self.step == 0 {
+    0.00 :   29ff4b: mov    %r15,%rax
+    0.00 :   29ff4e: sub    -0x40(%rbp),%rax
+    0.00 :   29ff52: sub    $0x7,%rax
+    0.00 :   29ff56: mov    %rax,-0x48(%rbp)
+    0.00 :   29ff5a: mov    -0x30(%rbp),%eax
+    0.00 :   29ff5d: movzbl %al,%eax
+    0.00 :   29ff60: mov    $0x0,%ecx
+    0.00 :   29ff65: cmove  %ecx,%eax
+    0.00 :   29ff68: jmp    29ff81 <<fp_frame::DataFrame>::loc_bool+0x1351>
+         : 1605   if self.is_affine && position - self.previous != self.step {
+    0.00 :   29ff6a: testb  $0x1,-0x30(%rbp)
+    0.00 :   29ff6e: je     29ffe4 <<fp_frame::DataFrame>::loc_bool+0x13b4>
+    0.00 :   29ff70: mov    %r15,%rax
+    0.00 :   29ff73: sub    %rcx,%rax
+    0.00 :   29ff76: add    $0xfffffffffffffff9,%rax
+    0.00 :   29ff7a: cmp    -0x48(%rbp),%rax
+    0.00 :   29ff7e: sete   %al
+    0.00 :   29ff81: mov    %eax,-0x30(%rbp)
+    0.00 :   29ff84: mov    %r13,%rbx
+    0.00 :   29ff87: cmp    -0x2d0(%rbp),%r13
+    0.00 :   29ff8e: je     2a0000 <<fp_frame::DataFrame>::loc_bool+0x13d0>
+    0.00 :   29ff90: jmp    2a000d <<fp_frame::DataFrame>::loc_bool+0x13dd>
+         : 1618   if self.step == 0 {
+    0.00 :   29ff92: mov    %r15,%rax
+    0.00 :   29ff95: sub    -0x40(%rbp),%rax
+    0.00 :   29ff99: sub    $0x6,%rax
+    0.00 :   29ff9d: mov    %rax,-0x48(%rbp)
+    0.00 :   29ffa1: mov    -0x30(%rbp),%eax
+    0.00 :   29ffa4: movzbl %al,%eax
+    0.00 :   29ffa7: mov    $0x0,%ecx
+    0.00 :   29ffac: cmove  %ecx,%eax
+    0.00 :   29ffaf: jmp    29ffcc <<fp_frame::DataFrame>::loc_bool+0x139c>
+         : 1628   if self.is_affine && position - self.previous != self.step {
+    0.00 :   29ffb1: testb  $0x1,-0x30(%rbp)
+    0.00 :   29ffb5: je     2a00c5 <<fp_frame::DataFrame>::loc_bool+0x1495>
+    0.00 :   29ffbb: mov    %r15,%rax
+    0.00 :   29ffbe: sub    %r12,%rax
+    0.00 :   29ffc1: add    $0xfffffffffffffffa,%rax
+    0.00 :   29ffc5: cmp    -0x48(%rbp),%rax
+    0.00 :   29ffc9: sete   %al
+    0.00 :   29ffcc: mov    %eax,-0x30(%rbp)
+    0.00 :   29ffcf: mov    %r13,%rbx
+    0.00 :   29ffd2: cmp    -0x2d0(%rbp),%r13
+    0.00 :   29ffd9: je     2a00e0 <<fp_frame::DataFrame>::loc_bool+0x14b0>
+    0.00 :   29ffdf: jmp    2a00ed <<fp_frame::DataFrame>::loc_bool+0x14bd>
+    0.00 :   29ffe4: movl   $0x0,-0x30(%rbp)
+    0.00 :   29ffeb: mov    %r13,%rbx
+    0.00 :   29ffee: cmp    -0x2d0(%rbp),%r13
+    0.00 :   29fff5: jne    2a000d <<fp_frame::DataFrame>::loc_bool+0x13dd>
+    0.00 :   29fff7: nopw   0x0(%rax,%rax,1)
+         : 1646   self.buf.grow_one();
+    0.00 :   2a0000: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a0007: call   *0x319cc3(%rip)        # 5b9cd0 <_DYNAMIC+0xd98>
+    0.00 :   2a000d: inc    %r14
+    0.00 :   2a0010: mov    -0x2c8(%rbp),%rax
+    0.00 :   2a0017: mov    %rbx,%r13
+    0.00 :   2a001a: mov    %r12,(%rax,%rbx,8)
+         : 1653   self.len = len + 1;
+    0.00 :   2a001e: inc    %r13
+    0.00 :   2a0021: mov    %r13,-0x2c0(%rbp)
+    0.00 :   2a0028: mov    -0x38(%rbp),%rax
+         : 1657   if chunk[1] {
+    0.00 :   2a002c: cmpb   $0x1,-0x6(%rax,%r15,1)
+    0.00 :   2a0032: je     29ff23 <<fp_frame::DataFrame>::loc_bool+0x12f3>
+    0.00 :   2a0038: mov    %r12,%rcx
+    0.00 :   2a003b: mov    -0x38(%rbp),%rax
+         : 1662   if chunk[2] {
+    0.00 :   2a003f: cmpb   $0x1,-0x5(%rax,%r15,1)
+    0.00 :   2a0045: jne    2a011c <<fp_frame::DataFrame>::loc_bool+0x14ec>
+         : 1665   match self.len {
+    0.00 :   2a004b: lea    -0x5(%r15),%r12
+    0.00 :   2a004f: cmp    $0x1,%r14
+    0.00 :   2a0053: je     2a0073 <<fp_frame::DataFrame>::loc_bool+0x1443>
+    0.00 :   2a0055: test   %r14,%r14
+    0.00 :   2a0058: jne    2a0092 <<fp_frame::DataFrame>::loc_bool+0x1462>
+    0.00 :   2a005a: mov    %r12,-0x40(%rbp)
+    0.00 :   2a005e: mov    %r13,%rbx
+         : 1673   if len == self.buf.capacity() {
+    0.00 :   2a0061: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0068: je     2a01d0 <<fp_frame::DataFrame>::loc_bool+0x15a0>
+    0.00 :   2a006e: jmp    2a01dd <<fp_frame::DataFrame>::loc_bool+0x15ad>
+         : 1677   if self.step == 0 {
+    0.00 :   2a0073: mov    %r15,%rax
+    0.00 :   2a0076: sub    -0x40(%rbp),%rax
+    0.00 :   2a007a: sub    $0x5,%rax
+    0.00 :   2a007e: mov    %rax,-0x48(%rbp)
+    0.00 :   2a0082: mov    -0x30(%rbp),%eax
+    0.00 :   2a0085: movzbl %al,%eax
+    0.00 :   2a0088: mov    $0x0,%ecx
+    0.00 :   2a008d: cmove  %ecx,%eax
+    0.00 :   2a0090: jmp    2a00ad <<fp_frame::DataFrame>::loc_bool+0x147d>
+         : 1687   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a0092: testb  $0x1,-0x30(%rbp)
+    0.00 :   2a0096: je     2a01af <<fp_frame::DataFrame>::loc_bool+0x157f>
+    0.00 :   2a009c: mov    %r15,%rax
+    0.00 :   2a009f: sub    %rcx,%rax
+    0.00 :   2a00a2: add    $0xfffffffffffffffb,%rax
+    0.00 :   2a00a6: cmp    -0x48(%rbp),%rax
+    0.00 :   2a00aa: sete   %al
+    0.00 :   2a00ad: mov    %eax,-0x30(%rbp)
+    0.00 :   2a00b0: mov    %r13,%rbx
+    0.00 :   2a00b3: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a00ba: je     2a01d0 <<fp_frame::DataFrame>::loc_bool+0x15a0>
+    0.00 :   2a00c0: jmp    2a01dd <<fp_frame::DataFrame>::loc_bool+0x15ad>
+    0.00 :   2a00c5: movl   $0x0,-0x30(%rbp)
+    0.00 :   2a00cc: mov    %r13,%rbx
+    0.00 :   2a00cf: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a00d6: jne    2a00ed <<fp_frame::DataFrame>::loc_bool+0x14bd>
+    0.00 :   2a00d8: nopl   0x0(%rax,%rax,1)
+         : 1705   self.buf.grow_one();
+    0.00 :   2a00e0: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a00e7: call   *0x319be3(%rip)        # 5b9cd0 <_DYNAMIC+0xd98>
+    0.00 :   2a00ed: inc    %r14
+    0.00 :   2a00f0: mov    -0x2c8(%rbp),%rax
+    0.00 :   2a00f7: mov    %rbx,%r13
+    0.00 :   2a00fa: lea    -0x6(%r15),%rcx
+    0.00 :   2a00fe: mov    %rcx,(%rax,%rbx,8)
+         : 1713   self.len = len + 1;
+    0.00 :   2a0102: inc    %r13
+    0.00 :   2a0105: mov    %r13,-0x2c0(%rbp)
+    0.00 :   2a010c: mov    -0x38(%rbp),%rax
+         : 1717   if chunk[2] {
+    0.00 :   2a0110: cmpb   $0x1,-0x5(%rax,%r15,1)
+    0.00 :   2a0116: je     2a004b <<fp_frame::DataFrame>::loc_bool+0x141b>
+    0.00 :   2a011c: mov    %rcx,%r12
+    0.00 :   2a011f: mov    -0x38(%rbp),%rax
+         : 1722   if chunk[3] {
+    0.00 :   2a0123: cmpb   $0x1,-0x4(%rax,%r15,1)
+    0.00 :   2a0129: jne    2a0208 <<fp_frame::DataFrame>::loc_bool+0x15d8>
+         : 1725   match self.len {
+    0.00 :   2a012f: lea    -0x4(%r15),%rdx
+    0.00 :   2a0133: cmp    $0x1,%r14
+    0.00 :   2a0137: je     2a015a <<fp_frame::DataFrame>::loc_bool+0x152a>
+    0.00 :   2a0139: test   %r14,%r14
+    0.00 :   2a013c: jne    2a0179 <<fp_frame::DataFrame>::loc_bool+0x1549>
+    0.00 :   2a013e: mov    %rdx,%r12
+    0.00 :   2a0141: mov    %rdx,-0x40(%rbp)
+    0.00 :   2a0145: mov    %r13,%rbx
+         : 1734   if len == self.buf.capacity() {
+    0.00 :   2a0148: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a014f: je     2a02c0 <<fp_frame::DataFrame>::loc_bool+0x1690>
+    0.00 :   2a0155: jmp    2a02cd <<fp_frame::DataFrame>::loc_bool+0x169d>
+         : 1738   if self.step == 0 {
+    0.00 :   2a015a: mov    %r15,%rax
+    0.00 :   2a015d: sub    -0x40(%rbp),%rax
+    0.00 :   2a0161: sub    $0x4,%rax
+    0.00 :   2a0165: mov    %rax,-0x48(%rbp)
+    0.00 :   2a0169: mov    -0x30(%rbp),%eax
+    0.00 :   2a016c: movzbl %al,%eax
+    0.00 :   2a016f: mov    $0x0,%ecx
+    0.00 :   2a0174: cmove  %ecx,%eax
+    0.00 :   2a0177: jmp    2a0194 <<fp_frame::DataFrame>::loc_bool+0x1564>
+         : 1748   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a0179: testb  $0x1,-0x30(%rbp)
+    0.00 :   2a017d: je     2a029f <<fp_frame::DataFrame>::loc_bool+0x166f>
+    0.00 :   2a0183: mov    %r15,%rax
+    0.00 :   2a0186: sub    %r12,%rax
+    0.00 :   2a0189: add    $0xfffffffffffffffc,%rax
+    0.00 :   2a018d: cmp    -0x48(%rbp),%rax
+    0.00 :   2a0191: sete   %al
+    0.00 :   2a0194: mov    %eax,-0x30(%rbp)
+    0.00 :   2a0197: mov    %rdx,%r12
+    0.00 :   2a019a: mov    %r13,%rbx
+    0.00 :   2a019d: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a01a4: jne    2a02cd <<fp_frame::DataFrame>::loc_bool+0x169d>
+    0.00 :   2a01aa: jmp    2a02c0 <<fp_frame::DataFrame>::loc_bool+0x1690>
+    0.00 :   2a01af: movl   $0x0,-0x30(%rbp)
+    0.00 :   2a01b6: mov    %r13,%rbx
+    0.00 :   2a01b9: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a01c0: jne    2a01dd <<fp_frame::DataFrame>::loc_bool+0x15ad>
+    0.00 :   2a01c2: data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+         : 1767   self.buf.grow_one();
+    0.00 :   2a01d0: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a01d7: call   *0x319af3(%rip)        # 5b9cd0 <_DYNAMIC+0xd98>
+    0.00 :   2a01dd: inc    %r14
+    0.00 :   2a01e0: mov    -0x2c8(%rbp),%rax
+    0.00 :   2a01e7: mov    %rbx,%r13
+    0.00 :   2a01ea: mov    %r12,(%rax,%rbx,8)
+         : 1774   self.len = len + 1;
+    0.00 :   2a01ee: inc    %r13
+    0.00 :   2a01f1: mov    %r13,-0x2c0(%rbp)
+    0.00 :   2a01f8: mov    -0x38(%rbp),%rax
+         : 1778   if chunk[3] {
+    0.00 :   2a01fc: cmpb   $0x1,-0x4(%rax,%r15,1)
+    0.00 :   2a0202: je     2a012f <<fp_frame::DataFrame>::loc_bool+0x14ff>
+    0.00 :   2a0208: mov    -0x38(%rbp),%rax
+         : 1782   if chunk[4] {
+    0.00 :   2a020c: cmpb   $0x1,-0x3(%rax,%r15,1)
+    0.00 :   2a0212: jne    2a02f8 <<fp_frame::DataFrame>::loc_bool+0x16c8>
+         : 1785   match self.len {
+    0.00 :   2a0218: lea    -0x3(%r15),%rbx
+    0.00 :   2a021c: cmp    $0x1,%r14
+    0.00 :   2a0220: je     2a023d <<fp_frame::DataFrame>::loc_bool+0x160d>
+    0.00 :   2a0222: test   %r14,%r14
+    0.00 :   2a0225: jne    2a026f <<fp_frame::DataFrame>::loc_bool+0x163f>
+    0.00 :   2a0227: mov    %rbx,-0x40(%rbp)
+         : 1792   if len == self.buf.capacity() {
+    0.00 :   2a022b: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0232: je     2a03b0 <<fp_frame::DataFrame>::loc_bool+0x1780>
+    0.00 :   2a0238: jmp    2a03bd <<fp_frame::DataFrame>::loc_bool+0x178d>
+         : 1796   if self.step == 0 {
+    0.00 :   2a023d: mov    %r15,%rax
+    0.00 :   2a0240: sub    -0x40(%rbp),%rax
+    0.00 :   2a0244: sub    $0x3,%rax
+    0.00 :   2a0248: mov    %rax,-0x48(%rbp)
+    0.00 :   2a024c: mov    -0x30(%rbp),%eax
+    0.00 :   2a024f: movzbl %al,%eax
+    0.00 :   2a0252: mov    $0x0,%ecx
+    0.00 :   2a0257: cmove  %ecx,%eax
+    0.00 :   2a025a: mov    %eax,-0x30(%rbp)
+    0.00 :   2a025d: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0264: je     2a03b0 <<fp_frame::DataFrame>::loc_bool+0x1780>
+    0.00 :   2a026a: jmp    2a03bd <<fp_frame::DataFrame>::loc_bool+0x178d>
+         : 1809   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a026f: testb  $0x1,-0x30(%rbp)
+    0.00 :   2a0273: je     2a0392 <<fp_frame::DataFrame>::loc_bool+0x1762>
+    0.00 :   2a0279: mov    %r15,%rax
+    0.00 :   2a027c: sub    %r12,%rax
+    0.00 :   2a027f: add    $0xfffffffffffffffd,%rax
+    0.00 :   2a0283: cmp    -0x48(%rbp),%rax
+    0.00 :   2a0287: sete   %al
+    0.00 :   2a028a: mov    %eax,-0x30(%rbp)
+    0.00 :   2a028d: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0294: je     2a03b0 <<fp_frame::DataFrame>::loc_bool+0x1780>
+    0.00 :   2a029a: jmp    2a03bd <<fp_frame::DataFrame>::loc_bool+0x178d>
+    0.00 :   2a029f: movl   $0x0,-0x30(%rbp)
+    0.00 :   2a02a6: mov    %rdx,%r12
+    0.00 :   2a02a9: mov    %r13,%rbx
+    0.00 :   2a02ac: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a02b3: jne    2a02cd <<fp_frame::DataFrame>::loc_bool+0x169d>
+    0.00 :   2a02b5: data16 cs nopw 0x0(%rax,%rax,1)
+         : 1827   self.buf.grow_one();
+    0.00 :   2a02c0: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a02c7: call   *0x319a03(%rip)        # 5b9cd0 <_DYNAMIC+0xd98>
+    0.00 :   2a02cd: inc    %r14
+    0.00 :   2a02d0: mov    -0x2c8(%rbp),%rax
+    0.00 :   2a02d7: mov    %rbx,%r13
+    0.00 :   2a02da: mov    %r12,(%rax,%rbx,8)
+         : 1834   self.len = len + 1;
+    0.00 :   2a02de: inc    %r13
+    0.00 :   2a02e1: mov    %r13,-0x2c0(%rbp)
+    0.00 :   2a02e8: mov    -0x38(%rbp),%rax
+         : 1838   if chunk[4] {
+    0.00 :   2a02ec: cmpb   $0x1,-0x3(%rax,%r15,1)
+    0.00 :   2a02f2: je     2a0218 <<fp_frame::DataFrame>::loc_bool+0x15e8>
+    0.00 :   2a02f8: mov    %r12,%rbx
+    0.00 :   2a02fb: mov    -0x38(%rbp),%rax
+         : 1843   if chunk[5] {
+    0.00 :   2a02ff: cmpb   $0x1,-0x2(%rax,%r15,1)
+    0.00 :   2a0305: jne    2a03eb <<fp_frame::DataFrame>::loc_bool+0x17bb>
+         : 1846   match self.len {
+    0.00 :   2a030b: lea    -0x2(%r15),%r12
+    0.00 :   2a030f: cmp    $0x1,%r14
+    0.00 :   2a0313: je     2a0330 <<fp_frame::DataFrame>::loc_bool+0x1700>
+    0.00 :   2a0315: test   %r14,%r14
+    0.00 :   2a0318: jne    2a0362 <<fp_frame::DataFrame>::loc_bool+0x1732>
+    0.00 :   2a031a: mov    %r12,-0x40(%rbp)
+         : 1853   if len == self.buf.capacity() {
+    0.00 :   2a031e: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0325: je     2a0480 <<fp_frame::DataFrame>::loc_bool+0x1850>
+    0.00 :   2a032b: jmp    2a048d <<fp_frame::DataFrame>::loc_bool+0x185d>
+         : 1857   if self.step == 0 {
+    0.00 :   2a0330: mov    %r15,%rax
+    0.00 :   2a0333: sub    -0x40(%rbp),%rax
+    0.00 :   2a0337: sub    $0x2,%rax
+    0.00 :   2a033b: mov    %rax,-0x48(%rbp)
+    0.00 :   2a033f: mov    -0x30(%rbp),%eax
+    0.00 :   2a0342: movzbl %al,%eax
+    0.00 :   2a0345: mov    $0x0,%ecx
+    0.00 :   2a034a: cmove  %ecx,%eax
+    0.00 :   2a034d: mov    %eax,-0x30(%rbp)
+    0.00 :   2a0350: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0357: je     2a0480 <<fp_frame::DataFrame>::loc_bool+0x1850>
+    0.00 :   2a035d: jmp    2a048d <<fp_frame::DataFrame>::loc_bool+0x185d>
+         : 1870   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a0362: testb  $0x1,-0x30(%rbp)
+    0.00 :   2a0366: je     2a046b <<fp_frame::DataFrame>::loc_bool+0x183b>
+    0.00 :   2a036c: mov    %r15,%rax
+    0.00 :   2a036f: sub    %rbx,%rax
+    0.00 :   2a0372: add    $0xfffffffffffffffe,%rax
+    0.00 :   2a0376: cmp    -0x48(%rbp),%rax
+    0.00 :   2a037a: sete   %al
+    0.00 :   2a037d: mov    %eax,-0x30(%rbp)
+    0.00 :   2a0380: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0387: je     2a0480 <<fp_frame::DataFrame>::loc_bool+0x1850>
+    0.00 :   2a038d: jmp    2a048d <<fp_frame::DataFrame>::loc_bool+0x185d>
+    0.00 :   2a0392: movl   $0x0,-0x30(%rbp)
+    0.00 :   2a0399: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a03a0: jne    2a03bd <<fp_frame::DataFrame>::loc_bool+0x178d>
+    0.00 :   2a03a2: data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+         : 1886   self.buf.grow_one();
+    0.00 :   2a03b0: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a03b7: call   *0x319913(%rip)        # 5b9cd0 <_DYNAMIC+0xd98>
+    0.00 :   2a03bd: inc    %r14
+    0.00 :   2a03c0: mov    -0x2c8(%rbp),%rax
+    0.00 :   2a03c7: mov    %r13,%rcx
+    0.00 :   2a03ca: mov    %rbx,(%rax,%r13,8)
+         : 1893   self.len = len + 1;
+    0.00 :   2a03ce: inc    %rcx
+    0.00 :   2a03d1: mov    %rcx,%r13
+    0.00 :   2a03d4: mov    %rcx,-0x2c0(%rbp)
+    0.00 :   2a03db: mov    -0x38(%rbp),%rax
+         : 1898   if chunk[5] {
+    0.00 :   2a03df: cmpb   $0x1,-0x2(%rax,%r15,1)
+    0.00 :   2a03e5: je     2a030b <<fp_frame::DataFrame>::loc_bool+0x16db>
+    0.00 :   2a03eb: mov    %rbx,%r12
+    0.00 :   2a03ee: mov    -0x38(%rbp),%rax
+         : 1903   if chunk[6] {
+    0.00 :   2a03f2: cmpb   $0x1,-0x1(%rax,%r15,1)
+    0.00 :   2a03f8: jne    2a04b5 <<fp_frame::DataFrame>::loc_bool+0x1885>
+         : 1906   match self.len {
+    0.00 :   2a03fe: lea    -0x1(%r15),%rax
+    0.00 :   2a0402: cmp    $0x1,%r14
+    0.00 :   2a0406: je     2a0426 <<fp_frame::DataFrame>::loc_bool+0x17f6>
+    0.00 :   2a0408: test   %r14,%r14
+    0.00 :   2a040b: jne    2a0444 <<fp_frame::DataFrame>::loc_bool+0x1814>
+    0.00 :   2a040d: mov    %rax,-0x40(%rbp)
+    0.00 :   2a0411: mov    %r13,%rbx
+         : 1914   if len == self.buf.capacity() {
+    0.00 :   2a0414: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a041b: je     2a04e0 <<fp_frame::DataFrame>::loc_bool+0x18b0>
+    0.00 :   2a0421: jmp    2a04ed <<fp_frame::DataFrame>::loc_bool+0x18bd>
+         : 1918   if self.step == 0 {
+    0.00 :   2a0426: mov    %r15,%rax
+    0.00 :   2a0429: sub    -0x40(%rbp),%rax
+    0.00 :   2a042d: dec    %rax
+    0.00 :   2a0430: mov    %rax,-0x48(%rbp)
+    0.00 :   2a0434: mov    -0x30(%rbp),%eax
+    0.00 :   2a0437: movzbl %al,%eax
+    0.00 :   2a043a: mov    $0x0,%ecx
+    0.00 :   2a043f: cmove  %ecx,%eax
+    0.00 :   2a0442: jmp    2a0457 <<fp_frame::DataFrame>::loc_bool+0x1827>
+         : 1928   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a0444: testb  $0x1,-0x30(%rbp)
+    0.00 :   2a0448: je     2a04c9 <<fp_frame::DataFrame>::loc_bool+0x1899>
+    0.00 :   2a044a: not    %r12
+    0.00 :   2a044d: add    %r15,%r12
+    0.00 :   2a0450: cmp    -0x48(%rbp),%r12
+    0.00 :   2a0454: sete   %al
+    0.00 :   2a0457: mov    %eax,-0x30(%rbp)
+    0.00 :   2a045a: mov    %r13,%rbx
+    0.00 :   2a045d: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0464: je     2a04e0 <<fp_frame::DataFrame>::loc_bool+0x18b0>
+    0.00 :   2a0466: jmp    2a04ed <<fp_frame::DataFrame>::loc_bool+0x18bd>
+    0.00 :   2a046b: movl   $0x0,-0x30(%rbp)
+    0.00 :   2a0472: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0479: jne    2a048d <<fp_frame::DataFrame>::loc_bool+0x185d>
+    0.00 :   2a047b: nopl   0x0(%rax,%rax,1)
+         : 1944   self.buf.grow_one();
+    0.00 :   2a0480: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a0487: call   *0x319843(%rip)        # 5b9cd0 <_DYNAMIC+0xd98>
+    0.00 :   2a048d: inc    %r14
+    0.00 :   2a0490: mov    -0x2c8(%rbp),%rax
+    0.00 :   2a0497: mov    %r12,(%rax,%r13,8)
+         : 1950   self.len = len + 1;
+    0.00 :   2a049b: inc    %r13
+    0.00 :   2a049e: mov    %r13,-0x2c0(%rbp)
+    0.00 :   2a04a5: mov    -0x38(%rbp),%rax
+         : 1954   if chunk[6] {
+    0.00 :   2a04a9: cmpb   $0x1,-0x1(%rax,%r15,1)
+    0.00 :   2a04af: je     2a03fe <<fp_frame::DataFrame>::loc_bool+0x17ce>
+    0.00 :   2a04b5: mov    %r12,%rcx
+    0.00 :   2a04b8: mov    -0x38(%rbp),%rax
+         : 1959   if chunk[7] {
+    0.00 :   2a04bc: cmpb   $0x0,(%rax,%r15,1)
+    0.00 :   2a04c1: je     29febb <<fp_frame::DataFrame>::loc_bool+0x128b>
+    0.00 :   2a04c7: jmp    2a051b <<fp_frame::DataFrame>::loc_bool+0x18eb>
+    0.00 :   2a04c9: movl   $0x0,-0x30(%rbp)
+    0.00 :   2a04d0: mov    %r13,%rbx
+         : 1965   if len == self.buf.capacity() {
+    0.00 :   2a04d3: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a04da: jne    2a04ed <<fp_frame::DataFrame>::loc_bool+0x18bd>
+    0.00 :   2a04dc: nopl   0x0(%rax)
+         : 1969   self.buf.grow_one();
+    0.00 :   2a04e0: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a04e7: call   *0x3197e3(%rip)        # 5b9cd0 <_DYNAMIC+0xd98>
+    0.00 :   2a04ed: inc    %r14
+    0.00 :   2a04f0: mov    -0x2c8(%rbp),%rax
+    0.00 :   2a04f7: mov    %rbx,%r13
+    0.00 :   2a04fa: lea    -0x1(%r15),%rcx
+    0.00 :   2a04fe: mov    %rcx,(%rax,%rbx,8)
+         : 1977   self.len = len + 1;
+    0.00 :   2a0502: inc    %r13
+    0.00 :   2a0505: mov    %r13,-0x2c0(%rbp)
+    0.00 :   2a050c: mov    -0x38(%rbp),%rax
+    0.00 :   2a0510: cmpb   $0x0,(%rax,%r15,1)
+    0.00 :   2a0515: je     29febb <<fp_frame::DataFrame>::loc_bool+0x128b>
+         : 1983   match self.len {
+    0.00 :   2a051b: cmp    $0x1,%r14
+    0.00 :   2a051f: je     2a053f <<fp_frame::DataFrame>::loc_bool+0x190f>
+    0.00 :   2a0521: test   %r14,%r14
+    0.00 :   2a0524: jne    2a055a <<fp_frame::DataFrame>::loc_bool+0x192a>
+    0.00 :   2a0526: mov    %r15,-0x40(%rbp)
+    0.00 :   2a052a: mov    %r13,%rbx
+         : 1990   if len == self.buf.capacity() {
+    0.00 :   2a052d: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0534: jne    29fe9d <<fp_frame::DataFrame>::loc_bool+0x126d>
+    0.00 :   2a053a: jmp    29fe90 <<fp_frame::DataFrame>::loc_bool+0x1260>
+         : 1994   if self.step == 0 {
+    0.00 :   2a053f: mov    %r15,%rax
+    0.00 :   2a0542: sub    -0x40(%rbp),%rax
+    0.00 :   2a0546: mov    %rax,-0x48(%rbp)
+    0.00 :   2a054a: mov    -0x30(%rbp),%eax
+    0.00 :   2a054d: movzbl %al,%eax
+    0.00 :   2a0550: mov    $0x0,%ecx
+    0.00 :   2a0555: cmove  %ecx,%eax
+    0.00 :   2a0558: jmp    2a056d <<fp_frame::DataFrame>::loc_bool+0x193d>
+         : 2003   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a055a: testb  $0x1,-0x30(%rbp)
+    0.00 :   2a055e: je     2a0585 <<fp_frame::DataFrame>::loc_bool+0x1955>
+    0.00 :   2a0560: mov    %r15,%rax
+    0.00 :   2a0563: sub    %rcx,%rax
+    0.00 :   2a0566: cmp    -0x48(%rbp),%rax
+    0.00 :   2a056a: sete   %al
+    0.00 :   2a056d: mov    %eax,-0x30(%rbp)
+    0.00 :   2a0570: mov    %r13,%rbx
+    0.00 :   2a0573: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a057a: jne    29fe9d <<fp_frame::DataFrame>::loc_bool+0x126d>
+    0.00 :   2a0580: jmp    29fe90 <<fp_frame::DataFrame>::loc_bool+0x1260>
+    0.00 :   2a0585: movl   $0x0,-0x30(%rbp)
+    0.00 :   2a058c: mov    %r13,%rbx
+    0.00 :   2a058f: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a0596: jne    29fe9d <<fp_frame::DataFrame>::loc_bool+0x126d>
+    0.00 :   2a059c: jmp    29fe90 <<fp_frame::DataFrame>::loc_bool+0x1260>
+         : 2020   size: usize = size_of::<T>(),
+         : 2021   ) => runtime_add_nowrap(this, count, size)
+         : 2022   );
+         :
+         : 2024   // SAFETY: the caller must uphold the safety contract for `offset`.
+         : 2025   unsafe { intrinsics::offset(self, count) }
+    0.00 :   2a05a1: add    $0xfffffffffffffff9,%r15
+    0.00 :   2a05a5: mov    %r15,-0x58(%rbp)
+    0.00 :   2a05a9: mov    -0xa0(%rbp),%r15
+    0.00 :   2a05b0: mov    -0x78(%rbp),%rax
+    0.00 :   2a05b4: and    $0x7,%eax
+    0.00 :   2a05b7: mov    %rax,-0x78(%rbp)
+    0.00 :   2a05bb: jne    2a05f0 <<fp_frame::DataFrame>::loc_bool+0x19c0>
+    0.00 :   2a05bd: jmp    2a06cd <<fp_frame::DataFrame>::loc_bool+0x1a9d>
+    0.00 :   2a05c2: mov    $0x1,%al
+    0.00 :   2a05c4: mov    %eax,-0x30(%rbp)
+    0.00 :   2a05c7: xor    %r13d,%r13d
+    0.00 :   2a05ca: xor    %r14d,%r14d
+    0.00 :   2a05cd: movq   $0x0,-0x40(%rbp)
+    0.00 :   2a05d5: xor    %ecx,%ecx
+    0.00 :   2a05d7: movq   $0x0,-0x48(%rbp)
+    0.00 :   2a05df: mov    -0x78(%rbp),%rax
+    0.00 :   2a05e3: and    $0x7,%eax
+    0.00 :   2a05e6: mov    %rax,-0x78(%rbp)
+    0.00 :   2a05ea: je     2a06cd <<fp_frame::DataFrame>::loc_bool+0x1a9d>
+    0.00 :   2a05f0: add    %r15,-0x38(%rbp)
+    0.00 :   2a05f4: xor    %ebx,%ebx
+    0.00 :   2a05f6: lea    -0x2d0(%rbp),%r12
+    0.00 :   2a05fd: xor    %r15d,%r15d
+    0.00 :   2a0600: jmp    2a0628 <<fp_frame::DataFrame>::loc_bool+0x19f8>
+    0.00 :   2a0602: data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+    0.00 :   2a0610: mov    -0x58(%rbp),%rax
+         : 2052   base += 1;
+    0.00 :   2a0614: inc    %rax
+    0.00 :   2a0617: mov    %rax,-0x58(%rbp)
+         : 2055   self.as_ptr() == other.as_ptr()
+    0.00 :   2a061b: inc    %r15
+    0.00 :   2a061e: cmp    %r15,-0x78(%rbp)
+    0.00 :   2a0622: je     2a06cd <<fp_frame::DataFrame>::loc_bool+0x1a9d>
+    0.00 :   2a0628: mov    -0x38(%rbp),%rax
+         : 2060   if keep {
+    0.00 :   2a062c: cmpb   $0x0,(%rax,%r15,1)
+    0.00 :   2a0631: je     2a0610 <<fp_frame::DataFrame>::loc_bool+0x19e0>
+         : 2063   match self.len {
+    0.00 :   2a0633: cmp    $0x1,%r14
+    0.00 :   2a0637: mov    -0x58(%rbp),%rax
+    0.00 :   2a063b: je     2a0651 <<fp_frame::DataFrame>::loc_bool+0x1a21>
+    0.00 :   2a063d: test   %r14,%r14
+    0.00 :   2a0640: jne    2a0670 <<fp_frame::DataFrame>::loc_bool+0x1a40>
+    0.00 :   2a0642: mov    %rax,-0x40(%rbp)
+    0.00 :   2a0646: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a064d: je     2a06a0 <<fp_frame::DataFrame>::loc_bool+0x1a70>
+    0.00 :   2a064f: jmp    2a06a9 <<fp_frame::DataFrame>::loc_bool+0x1a79>
+         : 2073   if self.step == 0 {
+    0.00 :   2a0651: sub    -0x40(%rbp),%rax
+    0.00 :   2a0655: mov    %rax,-0x48(%rbp)
+    0.00 :   2a0659: mov    -0x30(%rbp),%eax
+    0.00 :   2a065c: movzbl %al,%eax
+    0.00 :   2a065f: cmove  %ebx,%eax
+    0.00 :   2a0662: mov    %eax,-0x30(%rbp)
+    0.00 :   2a0665: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a066c: je     2a06a0 <<fp_frame::DataFrame>::loc_bool+0x1a70>
+    0.00 :   2a066e: jmp    2a06a9 <<fp_frame::DataFrame>::loc_bool+0x1a79>
+         : 2083   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a0670: testb  $0x1,-0x30(%rbp)
+    0.00 :   2a0674: je     2a068e <<fp_frame::DataFrame>::loc_bool+0x1a5e>
+    0.00 :   2a0676: sub    %rcx,%rax
+    0.00 :   2a0679: cmp    -0x48(%rbp),%rax
+    0.00 :   2a067d: sete   %al
+    0.00 :   2a0680: mov    %eax,-0x30(%rbp)
+    0.00 :   2a0683: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a068a: je     2a06a0 <<fp_frame::DataFrame>::loc_bool+0x1a70>
+    0.00 :   2a068c: jmp    2a06a9 <<fp_frame::DataFrame>::loc_bool+0x1a79>
+    0.00 :   2a068e: movl   $0x0,-0x30(%rbp)
+    0.00 :   2a0695: cmp    -0x2d0(%rbp),%r13
+    0.00 :   2a069c: jne    2a06a9 <<fp_frame::DataFrame>::loc_bool+0x1a79>
+    0.00 :   2a069e: xchg   %ax,%ax
+         : 2097   self.buf.grow_one();
+    0.00 :   2a06a0: mov    %r12,%rdi
+    0.00 :   2a06a3: call   *0x319627(%rip)        # 5b9cd0 <_DYNAMIC+0xd98>
+    0.00 :   2a06a9: inc    %r14
+    0.00 :   2a06ac: mov    -0x2c8(%rbp),%rax
+    0.00 :   2a06b3: mov    -0x58(%rbp),%rcx
+    0.00 :   2a06b7: mov    %rcx,(%rax,%r13,8)
+    0.00 :   2a06bb: mov    %rcx,%rax
+         : 2105   self.len = len + 1;
+    0.00 :   2a06be: inc    %r13
+    0.00 :   2a06c1: mov    %r13,-0x2c0(%rbp)
+    0.00 :   2a06c8: jmp    2a0614 <<fp_frame::DataFrame>::loc_bool+0x19e4>
+         : 2109   match self.len {
+    0.00 :   2a06cd: test   %r14,%r14
+    0.00 :   2a06d0: je     2a06e8 <<fp_frame::DataFrame>::loc_bool+0x1ab8>
+    0.00 :   2a06d2: cmp    $0x1,%r14
+    0.00 :   2a06d6: jne    2a06ef <<fp_frame::DataFrame>::loc_bool+0x1abf>
+    0.00 :   2a06d8: mov    $0x1,%al
+    0.00 :   2a06da: mov    %eax,-0x30(%rbp)
+    0.00 :   2a06dd: mov    $0x1,%eax
+    0.00 :   2a06e2: mov    %rax,-0x48(%rbp)
+    0.00 :   2a06e6: jmp    2a06ef <<fp_frame::DataFrame>::loc_bool+0x1abf>
+    0.00 :   2a06e8: movl   $0x0,-0x30(%rbp)
+    0.00 :   2a06ef: mov    -0x50(%rbp),%rdi
+         : 2121   (positions, certificate)
+    0.00 :   2a06f3: mov    -0x2d0(%rbp),%r14
+    0.00 :   2a06fa: mov    -0x2c8(%rbp),%rax
+    0.00 :   2a0701: mov    %rax,-0x68(%rbp)
+         : 2125   Acquire => intrinsics::atomic_load::<T, { AO::Acquire }>(dst),
+    0.00 :   2a0705: mov    0x70(%rdi),%eax
+    0.00 :   2a0708: test   %eax,%eax
+    0.00 :   2a070a: mov    %r13,-0x88(%rbp)
+    0.00 :   2a0711: mov    %r14,-0x90(%rbp)
+    0.00 :   2a0718: je     2a0725 <<fp_frame::DataFrame>::loc_bool+0x1af5>
+         : 2131   if let Some(range) = self.int64_unit_range {
+    0.00 :   2a071a: cmpl   $0x1,(%rdi)
+    0.00 :   2a071d: jne    2a0737 <<fp_frame::DataFrame>::loc_bool+0x1b07>
+    0.00 :   2a071f: mov    0x10(%rdi),%rdx
+    0.00 :   2a0723: jmp    2a0790 <<fp_frame::DataFrame>::loc_bool+0x1b60>
+         : 2136   match self {
+    0.00 :   2a0725: mov    0x68(%rdi),%rax
+    0.00 :   2a0729: test   %rax,%rax
+    0.00 :   2a072c: jne    2a07c0 <<fp_frame::DataFrame>::loc_bool+0x1b90>
+    0.00 :   2a0732: jmp    2a0881 <<fp_frame::DataFrame>::loc_bool+0x1c51>
+         : 2141   if let Some(range) = self.int64_affine {
+    0.00 :   2a0737: cmpl   $0x1,0x18(%rdi)
+    0.00 :   2a073b: jne    2a0743 <<fp_frame::DataFrame>::loc_bool+0x1b13>
+    0.00 :   2a073d: mov    0x30(%rdi),%rdx
+    0.00 :   2a0741: jmp    2a0790 <<fp_frame::DataFrame>::loc_bool+0x1b60>
+         : 2146   if let Some(strided) = &self.int64_strided {
+    0.00 :   2a0743: cmpq   $0x0,0x48(%rdi)
+    0.00 :   2a0748: je     2a0750 <<fp_frame::DataFrame>::loc_bool+0x1b20>
+         : 2149   return strided.len;
+    0.00 :   2a074a: mov    0x60(%rdi),%rdx
+    0.00 :   2a074e: jmp    2a0790 <<fp_frame::DataFrame>::loc_bool+0x1b60>
+         : 2152   if let Some((_, offsets)) = &self.utf8_contiguous {
+    0.00 :   2a0750: cmpq   $0x0,0x78(%rdi)
+    0.00 :   2a0755: je     2a0763 <<fp_frame::DataFrame>::loc_bool+0x1b33>
+         : 2155   unsafe { &*self.as_ptr().cast_const() }
+    0.00 :   2a0757: mov    0x90(%rdi),%rdx
+         : 2157   return offsets.len() - 1;
+    0.00 :   2a075e: dec    %rdx
+    0.00 :   2a0761: jmp    2a0790 <<fp_frame::DataFrame>::loc_bool+0x1b60>
+    0.00 :   2a0763: mov    0x40(%rdi),%eax
+    0.00 :   2a0766: test   %eax,%eax
+    0.00 :   2a0768: je     2a077d <<fp_frame::DataFrame>::loc_bool+0x1b4d>
+    0.00 :   2a076a: mov    0x70(%rdi),%eax
+    0.00 :   2a076d: test   %eax,%eax
+    0.00 :   2a076f: je     2a0783 <<fp_frame::DataFrame>::loc_bool+0x1b53>
+         : 2166   self.as_slice().len()
+    0.00 :   2a0771: call   *0x319411(%rip)        # 5b9b88 <_DYNAMIC+0xc50>
+    0.00 :   2a0777: mov    -0x50(%rbp),%rdi
+    0.00 :   2a077b: jmp    2a0790 <<fp_frame::DataFrame>::loc_bool+0x1b60>
+    0.00 :   2a077d: mov    0x38(%rdi),%rax
+         : 2171   let len = self.len;
+    0.00 :   2a0781: jmp    2a078c <<fp_frame::DataFrame>::loc_bool+0x1b5c>
+         : 2173   if let Some(Some(values)) = self.int64_typed.get() {
+    0.00 :   2a0783: mov    0x68(%rdi),%rax
+    0.00 :   2a0787: test   %rax,%rax
+    0.00 :   2a078a: je     2a0771 <<fp_frame::DataFrame>::loc_bool+0x1b41>
+    0.00 :   2a078c: mov    0x20(%rax),%rdx
+    0.00 :   2a0790: lea    0x0(,%r13,4),%rax
+         : 2179   None if n.saturating_mul(4) >= self.len() => self.index.int64_label_values(),
+    0.00 :   2a0798: cmp    %rdx,%rax
+    0.00 :   2a079b: jb     2a0881 <<fp_frame::DataFrame>::loc_bool+0x1c51>
+         : 2182   self.int64_typed
+    0.00 :   2a07a1: lea    0x68(%rdi),%rbx
+    0.00 :   2a07a5: mov    0x70(%rdi),%eax
+    0.00 :   2a07a8: test   %eax,%eax
+    0.00 :   2a07aa: jne    2a10c5 <<fp_frame::DataFrame>::loc_bool+0x2495>
+    0.00 :   2a07b0: mov    (%rbx),%rax
+    0.00 :   2a07b3: test   %rax,%rax
+    0.00 :   2a07b6: mov    -0x50(%rbp),%rdi
+    0.00 :   2a07ba: je     2a0881 <<fp_frame::DataFrame>::loc_bool+0x1c51>
+    0.00 :   2a07c0: lock incq (%rax)
+    0.00 :   2a07c4: jle    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   2a07ca: mov    %rax,-0xe8(%rbp)
+    0.00 :   2a07d1: mov    %rax,%r15
+         : 2195   let out_index = if let Some(values) = typed_view {
+    0.00 :   2a07d4: mov    %rax,-0x620(%rbp)
+         : 2197   if layout.size() == 0 {
+    0.00 :   2a07db: test   %r13,%r13
+    0.00 :   2a07de: je     2a0907 <<fp_frame::DataFrame>::loc_bool+0x1cd7>
+    0.00 :   2a07e4: lea    0x0(,%r13,8),%rbx
+    0.00 :   2a07ec: mov    %rbx,%rdi
+    0.00 :   2a07ef: call   *0x31893b(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+         : 2203   let ptr = match result {
+    0.00 :   2a07f5: test   %rax,%rax
+    0.00 :   2a07f8: je     2a11e5 <<fp_frame::DataFrame>::loc_bool+0x25b5>
+         : 2206   Vec { buf: RawVec::with_capacity_in(capacity, alloc), len: 0 }
+    0.00 :   2a07fe: mov    %r13,-0x450(%rbp)
+    0.00 :   2a0805: mov    %rax,-0x448(%rbp)
+    0.00 :   2a080c: movq   $0x0,-0x440(%rbp)
+    0.00 :   2a0817: xor    %r14d,%r14d
+    0.00 :   2a081a: mov    0x31978f(%rip),%r12        # 5b9fb0 <_DYNAMIC+0x1078>
+    0.00 :   2a0821: jmp    2a084f <<fp_frame::DataFrame>::loc_bool+0x1c1f>
+    0.00 :   2a0823: data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+         : 2214   self.ptr.cast().as_non_null_ptr()
+    0.00 :   2a0830: mov    -0x448(%rbp),%rax
+    0.00 :   2a0837: mov    %r13,(%rax,%r14,8)
+         : 2217   self.len = len + 1;
+    0.00 :   2a083b: inc    %r14
+    0.00 :   2a083e: mov    %r14,-0x440(%rbp)
+         : 2220   self.as_ptr() == other.as_ptr()
+    0.00 :   2a0845: add    $0xfffffffffffffff8,%rbx
+    0.00 :   2a0849: je     2a0928 <<fp_frame::DataFrame>::loc_bool+0x1cf8>
+    0.00 :   2a084f: mov    -0x68(%rbp),%rax
+         : 2224   for &pos in positions {
+    0.00 :   2a0853: mov    (%rax,%r14,8),%rdi
+         : 2226   &*core::intrinsics::aggregate_raw_ptr::<*const [T], _, _>(self.as_ptr(), self.len)
+    0.00 :   2a0857: mov    0x20(%r15),%rsi
+         : 2228   }
+         :
+         : 2230   #[inline]
+         : 2231   fn index(self, slice: &[T]) -> &T {
+         : 2232   // N.B., use intrinsic indexing
+         : 2233   &(*slice)[self]
+    0.00 :   2a085b: cmp    %rsi,%rdi
+    0.00 :   2a085e: jae    2a114b <<fp_frame::DataFrame>::loc_bool+0x251b>
+    0.00 :   2a0864: mov    0x18(%r15),%rax
+         : 2237   gathered.push(values[pos]);
+    0.00 :   2a0868: mov    (%rax,%rdi,8),%r13
+         : 2239   if len == self.buf.capacity() {
+    0.00 :   2a086c: cmp    -0x450(%rbp),%r14
+    0.00 :   2a0873: jne    2a0830 <<fp_frame::DataFrame>::loc_bool+0x1c00>
+         : 2242   self.buf.grow_one();
+    0.00 :   2a0875: lea    -0x450(%rbp),%rdi
+    0.00 :   2a087c: call   *%r12
+    0.00 :   2a087f: jmp    2a0830 <<fp_frame::DataFrame>::loc_bool+0x1c00>
+    0.00 :   2a0881: movq   $0x0,-0xe8(%rbp)
+         : 2247   self.materialized
+    0.00 :   2a088c: lea    0x38(%rdi),%rbx
+    0.00 :   2a0890: mov    0x40(%rdi),%eax
+    0.00 :   2a0893: test   %eax,%eax
+    0.00 :   2a0895: jne    2a10ac <<fp_frame::DataFrame>::loc_bool+0x247c>
+    0.00 :   2a089b: lea    0x0(,%r13,8),%r14
+    0.00 :   2a08a3: lea    (%r14,%r14,2),%rsi
+    0.00 :   2a08a7: movabs $0x555555555555556,%rax
+    0.00 :   2a08b1: dec    %rax
+    0.00 :   2a08b4: cmp    %rax,%r13
+    0.00 :   2a08b7: jbe    2a08ce <<fp_frame::DataFrame>::loc_bool+0x1c9e>
+    0.00 :   2a08b9: xor    %edi,%edi
+    0.00 :   2a08bb: mov    $0x1,%al
+    0.00 :   2a08bd: mov    %eax,-0x7c(%rbp)
+    0.00 :   2a08c0: xor    %r14d,%r14d
+         : 2262   Err(err) => handle_error(err),
+    0.00 :   2a08c3: call   *0x3188af(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   2a08c9: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   2a08ce: mov    (%rbx),%rax
+    0.00 :   2a08d1: mov    0x18(%rax),%rcx
+    0.00 :   2a08d5: mov    %rcx,-0x78(%rbp)
+    0.00 :   2a08d9: mov    0x20(%rax),%rax
+    0.00 :   2a08dd: mov    %rax,-0x58(%rbp)
+         : 2270   if layout.size() == 0 {
+    0.00 :   2a08e1: test   %rsi,%rsi
+    0.00 :   2a08e4: je     2a099a <<fp_frame::DataFrame>::loc_bool+0x1d6a>
+    0.00 :   2a08ea: mov    %rsi,%rbx
+    0.00 :   2a08ed: mov    %rsi,%rdi
+    0.00 :   2a08f0: call   *0x31883a(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+         : 2276   let ptr = match result {
+    0.00 :   2a08f6: test   %rax,%rax
+    0.00 :   2a08f9: je     2a11f5 <<fp_frame::DataFrame>::loc_bool+0x25c5>
+    0.00 :   2a08ff: mov    %r13,%rcx
+    0.00 :   2a0902: jmp    2a09a1 <<fp_frame::DataFrame>::loc_bool+0x1d71>
+         : 2281   Vec { buf: RawVec::with_capacity_in(capacity, alloc), len: 0 }
+    0.00 :   2a0907: movq   $0x0,-0x450(%rbp)
+    0.00 :   2a0912: movq   $0x8,-0x448(%rbp)
+    0.00 :   2a091d: movq   $0x0,-0x440(%rbp)
+         : 2285   Index::from_i64_values(gathered)
+    0.00 :   2a0928: mov    -0x440(%rbp),%rax
+    0.00 :   2a092f: mov    %rax,-0x2c0(%rbp)
+    0.00 :   2a0936: mov    -0x450(%rbp),%rax
+    0.00 :   2a093d: mov    %rax,-0x2d0(%rbp)
+    0.00 :   2a0944: mov    -0x448(%rbp),%rax
+    0.00 :   2a094b: mov    %rax,-0x2c8(%rbp)
+    0.00 :   2a0952: lea    -0x538(%rbp),%rdi
+    0.00 :   2a0959: lea    -0x2d0(%rbp),%rsi
+    0.00 :   2a0960: call   *0x319652(%rip)        # 5b9fb8 <_DYNAMIC+0x1080>
+    0.00 :   2a0966: mov    %r15,%r14
+         : 2296   // SAFETY: the caller must uphold the safety contract for `atomic_sub`.
+         : 2297   unsafe {
+         : 2298   match order {
+         : 2299   Relaxed => intrinsics::atomic_xsub::<T, U, { AO::Relaxed }>(dst, val),
+         : 2300   Acquire => intrinsics::atomic_xsub::<T, U, { AO::Acquire }>(dst, val),
+         : 2301   Release => intrinsics::atomic_xsub::<T, U, { AO::Release }>(dst, val),
+    0.00 :   2a0969: lock decq (%r15)
+    0.00 :   2a096d: mov    -0x60(%rbp),%r15
+    0.00 :   2a0971: mov    -0x50(%rbp),%rbx
+         : 2305   #[inline]
+         : 2306   fn drop(&mut self) {
+         : 2307   // Because `fetch_sub` is already atomic, we do not need to synchronize
+         : 2308   // with other threads unless we are going to delete the object. This
+         : 2309   // same logic applies to the below `fetch_sub` to the `weak` count.
+         : 2310   if self.inner().strong.fetch_sub(1, Release) != 1 {
+    0.00 :   2a0975: jne    2a0984 <<fp_frame::DataFrame>::loc_bool+0x1d54>
+    0.00 :   2a0977: lea    -0x620(%rbp),%rdi
+         : 2313   "Arcs backed by a static should never reach a strong count of 0. \
+         : 2314   Likely decrement_strong_count or from_raw were called too many times.",
+         : 2315   );
+         :
+         : 2317   unsafe {
+         : 2318   self.drop_slow();
+    0.00 :   2a097e: call   *0x3192c4(%rip)        # 5b9c48 <_DYNAMIC+0xd10>
+    0.00 :   2a0984: movl   $0x0,-0x7c(%rbp)
+    0.00 :   2a098b: movabs $0x8000000000000000,%rax
+    0.00 :   2a0995: jmp    2a0b66 <<fp_frame::DataFrame>::loc_bool+0x1f36>
+    0.00 :   2a099a: mov    $0x8,%eax
+    0.00 :   2a099f: xor    %ecx,%ecx
+    0.00 :   2a09a1: mov    %rcx,-0x450(%rbp)
+    0.00 :   2a09a8: mov    %rax,-0x448(%rbp)
+    0.00 :   2a09af: movq   $0x0,-0x440(%rbp)
+    0.00 :   2a09ba: test   %r13,%r13
+    0.00 :   2a09bd: mov    -0x50(%rbp),%rbx
+    0.00 :   2a09c1: je     2a0ad5 <<fp_frame::DataFrame>::loc_bool+0x1ea5>
+    0.00 :   2a09c7: mov    $0x2,%r15d
+    0.00 :   2a09cd: xor    %r12d,%r12d
+    0.00 :   2a09d0: jmp    2a0a15 <<fp_frame::DataFrame>::loc_bool+0x1de5>
+    0.00 :   2a09d2: data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+         : 2335   self.ptr.cast().as_non_null_ptr()
+    0.00 :   2a09e0: mov    -0x448(%rbp),%rax
+    0.00 :   2a09e7: mov    %r13,-0x10(%rax,%r15,8)
+    0.00 :   2a09ec: mov    -0x38(%rbp),%rcx
+    0.00 :   2a09f0: mov    %rcx,-0x8(%rax,%r15,8)
+    0.00 :   2a09f5: mov    %rbx,(%rax,%r15,8)
+         : 2341   self.len = len + 1;
+    0.00 :   2a09f9: inc    %r12
+    0.00 :   2a09fc: mov    %r12,-0x440(%rbp)
+    0.00 :   2a0a03: add    $0x3,%r15
+    0.00 :   2a0a07: add    $0xfffffffffffffff8,%r14
+    0.00 :   2a0a0b: mov    -0x50(%rbp),%rbx
+    0.00 :   2a0a0f: je     2a0ad5 <<fp_frame::DataFrame>::loc_bool+0x1ea5>
+    0.00 :   2a0a15: mov    -0x68(%rbp),%rax
+         : 2349   for &pos in positions {
+    0.00 :   2a0a19: mov    (%rax,%r12,8),%rdi
+         : 2351   labels.push(index_labels[pos].clone());
+    0.00 :   2a0a1d: cmp    -0x58(%rbp),%rdi
+    0.00 :   2a0a21: jae    2a1170 <<fp_frame::DataFrame>::loc_bool+0x2540>
+    0.00 :   2a0a27: lea    (%rdi,%rdi,2),%rcx
+    0.00 :   2a0a2b: mov    -0x78(%rbp),%rdx
+    0.00 :   2a0a2f: lea    (%rdx,%rcx,8),%rax
+         : 2357   #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+    0.00 :   2a0a33: mov    (%rdx,%rcx,8),%r13
+    0.00 :   2a0a37: mov    %r13,%rcx
+    0.00 :   2a0a3a: movabs $0x8000000000000000,%rdx
+    0.00 :   2a0a44: xor    %rdx,%rcx
+    0.00 :   2a0a47: test   %r13,%r13
+    0.00 :   2a0a4a: mov    $0x1,%edx
+    0.00 :   2a0a4f: cmovns %rdx,%rcx
+    0.00 :   2a0a53: lea    -0x17da96(%rip),%rdx        # 122fc4 <core::unicode::unicode_data::white_space::WHITESPACE_MAP+0x2015>
+    0.00 :   2a0a5a: movslq (%rdx,%rcx,4),%rcx
+    0.00 :   2a0a5e: add    %rdx,%rcx
+    0.00 :   2a0a61: jmp    *%rcx
+    0.00 :   2a0a63: mov    0x8(%rax),%rcx
+    0.00 :   2a0a67: mov    %rcx,-0x38(%rbp)
+    0.00 :   2a0a6b: mov    0x10(%rax),%rbx
+         : 2372   if len == self.buf.capacity() {
+    0.00 :   2a0a6f: cmp    -0x450(%rbp),%r12
+    0.00 :   2a0a76: jne    2a09e0 <<fp_frame::DataFrame>::loc_bool+0x1db0>
+         : 2375   self.buf.grow_one();
+    0.00 :   2a0a7c: lea    -0x450(%rbp),%rdi
+    0.00 :   2a0a83: call   *0x31949f(%rip)        # 5b9f28 <_DYNAMIC+0xff0>
+    0.00 :   2a0a89: jmp    2a09e0 <<fp_frame::DataFrame>::loc_bool+0x1db0>
+    0.00 :   2a0a8e: mov    0x10(%rax),%rbx
+    0.00 :   2a0a92: test   %rbx,%rbx
+    0.00 :   2a0a95: je     2a0ac5 <<fp_frame::DataFrame>::loc_bool+0x1e95>
+    0.00 :   2a0a97: mov    0x8(%rax),%r13
+    0.00 :   2a0a9b: mov    %rbx,%rdi
+    0.00 :   2a0a9e: call   *0x31868c(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+    0.00 :   2a0aa4: test   %rax,%rax
+    0.00 :   2a0aa7: je     2a11b7 <<fp_frame::DataFrame>::loc_bool+0x2587>
+    0.00 :   2a0aad: mov    %rax,-0x38(%rbp)
+    0.00 :   2a0ab1: mov    %rax,%rdi
+    0.00 :   2a0ab4: mov    %r13,%rsi
+    0.00 :   2a0ab7: mov    %rbx,%rdx
+    0.00 :   2a0aba: call   *0x318690(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+    0.00 :   2a0ac0: mov    %rbx,%r13
+    0.00 :   2a0ac3: jmp    2a0a6f <<fp_frame::DataFrame>::loc_bool+0x1e3f>
+    0.00 :   2a0ac5: mov    $0x1,%eax
+    0.00 :   2a0aca: mov    %rax,-0x38(%rbp)
+    0.00 :   2a0ace: xor    %ebx,%ebx
+    0.00 :   2a0ad0: xor    %r13d,%r13d
+    0.00 :   2a0ad3: jmp    2a0a6f <<fp_frame::DataFrame>::loc_bool+0x1e3f>
+         : 2399   Index::new(labels)
+    0.00 :   2a0ad5: mov    -0x440(%rbp),%rax
+    0.00 :   2a0adc: mov    %rax,-0x2c0(%rbp)
+    0.00 :   2a0ae3: mov    -0x450(%rbp),%rax
+    0.00 :   2a0aea: mov    %rax,-0x2d0(%rbp)
+    0.00 :   2a0af1: mov    -0x448(%rbp),%rax
+    0.00 :   2a0af8: mov    %rax,-0x2c8(%rbp)
+    0.00 :   2a0aff: lea    -0x538(%rbp),%rdi
+    0.00 :   2a0b06: lea    -0x2d0(%rbp),%rsi
+         : 2408   labels: IndexLabels::new(labels),
+    0.00 :   2a0b0d: call   *0x319065(%rip)        # 5b9b78 <_DYNAMIC+0xc40>
+         : 2410   Relaxed => intrinsics::atomic_xadd::<T, U, { AO::Relaxed }>(dst, val),
+    0.00 :   2a0b13: mov    0x319066(%rip),%rax        # 5b9b80 <_DYNAMIC+0xc48>
+    0.00 :   2a0b1a: mov    $0x1,%ecx
+    0.00 :   2a0b1f: lock xadd %rcx,(%rax)
+    0.00 :   2a0b24: movabs $0x8000000000000000,%rax
+         : 2415   Self {
+    0.00 :   2a0b2e: mov    %rax,-0x4a0(%rbp)
+    0.00 :   2a0b35: mov    %rcx,-0x488(%rbp)
+    0.00 :   2a0b3c: movl   $0x3,-0x480(%rbp)
+    0.00 :   2a0b46: movl   $0x3,-0x478(%rbp)
+    0.00 :   2a0b50: movl   $0x3,-0x458(%rbp)
+    0.00 :   2a0b5a: mov    $0x1,%cl
+    0.00 :   2a0b5c: mov    %ecx,-0x7c(%rbp)
+    0.00 :   2a0b5f: xor    %r14d,%r14d
+    0.00 :   2a0b62: mov    -0x60(%rbp),%r15
+    0.00 :   2a0b66: mov    -0x88(%rbp),%rcx
+    0.00 :   2a0b6d: mov    %rax,%rdx
+         : 2427   match *self {
+    0.00 :   2a0b70: cmp    %rax,0x100(%rbx)
+    0.00 :   2a0b77: mov    %r14,-0x98(%rbp)
+    0.00 :   2a0b7e: je     2a0c21 <<fp_frame::DataFrame>::loc_bool+0x1ff1>
+    0.00 :   2a0b84: lea    0x100(%rbx),%rsi
+    0.00 :   2a0b8b: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a0b92: mov    -0x68(%rbp),%rdx
+         : 2434   .map(|multiindex| Self::project_row_multiindex(multiindex, positions))
+    0.00 :   2a0b96: call   29b370 <<fp_frame::DataFrame>::project_row_multiindex>
+         : 2436   Some(x) => Some(f(x)),
+    0.00 :   2a0b9b: mov    -0x2d0(%rbp),%rax
+    0.00 :   2a0ba2: mov    -0x2c8(%rbp),%rdx
+    0.00 :   2a0ba9: movups -0x2c0(%rbp),%xmm0
+    0.00 :   2a0bb0: movaps %xmm0,-0x450(%rbp)
+    0.00 :   2a0bb7: movups -0x2b0(%rbp),%xmm0
+    0.00 :   2a0bbe: movaps %xmm0,-0x440(%rbp)
+    0.00 :   2a0bc5: mov    -0x2a0(%rbp),%rcx
+    0.00 :   2a0bcc: mov    %rcx,-0x430(%rbp)
+         : 2445   match self {
+    0.00 :   2a0bd3: cmp    $0x1,%rax
+    0.00 :   2a0bd7: jne    2a0c21 <<fp_frame::DataFrame>::loc_bool+0x1ff1>
+         :
+         : 2449   #[inline]
+         : 2450   fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {
+         : 2451   match self {
+         : 2452   Ok(v) => ControlFlow::Continue(v),
+         : 2453   Err(e) => ControlFlow::Break(Err(e)),
+    0.00 :   2a0bd9: mov    -0x430(%rbp),%rax
+    0.00 :   2a0be0: mov    %rax,-0x600(%rbp)
+    0.00 :   2a0be7: movaps -0x450(%rbp),%xmm0
+    0.00 :   2a0bee: movaps -0x440(%rbp),%xmm1
+    0.00 :   2a0bf5: movaps %xmm1,-0x610(%rbp)
+    0.00 :   2a0bfc: movaps %xmm0,-0x620(%rbp)
+         : 2460   .transpose()?;
+    0.00 :   2a0c03: mov    %rax,0x30(%r15)
+    0.00 :   2a0c07: movups %xmm1,0x20(%r15)
+    0.00 :   2a0c0c: movups %xmm0,0x10(%r15)
+         : 2464   {
+         : 2465   #[inline]
+         : 2466   #[track_caller]
+         : 2467   fn from_residual(residual: Result<convert::Infallible, E>) -> Self {
+         : 2468   match residual {
+         : 2469   Err(e) => Err(From::from(e)),
+    0.00 :   2a0c11: mov    %rdx,0x8(%r15)
+    0.00 :   2a0c15: movq   $0x2,(%r15)
+    0.00 :   2a0c1c: jmp    2a0fc7 <<fp_frame::DataFrame>::loc_bool+0x2397>
+    0.00 :   2a0c21: mov    %rdx,-0xf0(%rbp)
+         : 2474   Ok(v) => ControlFlow::Continue(v),
+    0.00 :   2a0c28: mov    -0x430(%rbp),%rax
+    0.00 :   2a0c2f: movaps -0x450(%rbp),%xmm0
+    0.00 :   2a0c36: movaps -0x440(%rbp),%xmm1
+         : 2478   let row_multiindex = self
+    0.00 :   2a0c3d: movups %xmm0,-0x118(%rbp)
+    0.00 :   2a0c44: movups %xmm1,-0x108(%rbp)
+    0.00 :   2a0c4b: mov    %rax,-0xf8(%rbp)
+    0.00 :   2a0c52: mov    %rdx,-0x120(%rbp)
+    0.00 :   2a0c59: movq   $0x0,-0xd0(%rbp)
+    0.00 :   2a0c64: movq   $0x0,-0xc0(%rbp)
+         : 2485   &*core::intrinsics::aggregate_raw_ptr::<*const [T], _, _>(self.as_ptr(), self.len)
+    0.00 :   2a0c6f: mov    0xf8(%rbx),%rax
+    0.00 :   2a0c76: test   %rax,%rax
+    0.00 :   2a0c79: je     2a0ecd <<fp_frame::DataFrame>::loc_bool+0x229d>
+    0.00 :   2a0c7f: mov    0xf0(%rbx),%rcx
+    0.00 :   2a0c86: lea    (%rax,%rax,2),%rax
+    0.00 :   2a0c8a: lea    (%rcx,%rax,8),%rax
+    0.00 :   2a0c8e: mov    %rax,-0x148(%rbp)
+    0.00 :   2a0c95: jmp    2a0cbf <<fp_frame::DataFrame>::loc_bool+0x208f>
+    0.00 :   2a0c97: nopw   0x0(%rax,%rax,1)
+    0.00 :   2a0ca0: mov    -0xb0(%rbp),%rax
+    0.00 :   2a0ca7: mov    %rax,%rcx
+    0.00 :   2a0caa: cmp    -0x148(%rbp),%rax
+    0.00 :   2a0cb1: mov    -0x60(%rbp),%r15
+    0.00 :   2a0cb5: mov    -0x50(%rbp),%rbx
+    0.00 :   2a0cb9: je     2a0ecd <<fp_frame::DataFrame>::loc_bool+0x229d>
+         : 2501   .get(name)
+    0.00 :   2a0cbf: mov    0x160(%rbx),%rdx
+         : 2503   match *self {
+    0.00 :   2a0cc6: test   %rdx,%rdx
+    0.00 :   2a0cc9: je     2a112d <<fp_frame::DataFrame>::loc_bool+0x24fd>
+    0.00 :   2a0ccf: lea    0x18(%rcx),%rax
+    0.00 :   2a0cd3: mov    %rax,-0xb0(%rbp)
+    0.00 :   2a0cda: mov    0x8(%rcx),%rax
+    0.00 :   2a0cde: mov    %rax,-0x38(%rbp)
+    0.00 :   2a0ce2: mov    %rcx,-0xa8(%rbp)
+    0.00 :   2a0ce9: mov    0x10(%rcx),%rax
+    0.00 :   2a0ced: mov    %rax,-0x58(%rbp)
+    0.00 :   2a0cf1: mov    0x168(%rbx),%rax
+    0.00 :   2a0cf8: mov    %rax,-0x78(%rbp)
+         : 2515   unsafe { leaf.keys.get_unchecked(..usize::from(leaf.len)).assume_init_ref() }
+    0.00 :   2a0cfc: lea    0x8(%rdx),%rax
+    0.00 :   2a0d00: movzwl 0xb0a(%rdx),%ecx
+    0.00 :   2a0d07: mov    %rdx,-0x70(%rbp)
+         : 2519   for (offset, k) in unsafe { keys.get_unchecked(start_index..) }.iter().enumerate() {
+    0.00 :   2a0d0b: lea    0x28(%rdx),%r15
+    0.00 :   2a0d0f: mov    %rcx,-0xa0(%rbp)
+    0.00 :   2a0d16: lea    0x0(,%rcx,8),%ecx
+    0.00 :   2a0d1d: lea    (%rcx,%rcx,2),%r13
+    0.00 :   2a0d21: mov    $0xffffffffffffffff,%r14
+    0.00 :   2a0d28: nopl   0x0(%rax,%rax,1)
+    0.00 :   2a0d30: test   %r13,%r13
+    0.00 :   2a0d33: je     2a0d90 <<fp_frame::DataFrame>::loc_bool+0x2160>
+         : 2528   unsafe { transmute(intrinsics::offset(self.as_ptr(), count)) }
+    0.00 :   2a0d35: lea    0x18(%rax),%rbx
+         : 2530   match key.cmp(k.borrow()) {
+    0.00 :   2a0d39: mov    0x8(%rax),%rsi
+    0.00 :   2a0d3d: mov    0x10(%rax),%rdx
+    0.00 :   2a0d41: mov    -0x58(%rbp),%rax
+         : 2534   let len = if left.len() < right.len() { left.len() } else { right.len() };
+    0.00 :   2a0d45: mov    %rax,%r12
+    0.00 :   2a0d48: sub    %rdx,%r12
+    0.00 :   2a0d4b: cmovb  %rax,%rdx
+    0.00 :   2a0d4f: mov    -0x38(%rbp),%rdi
+         : 2539   let mut order = unsafe { compare_bytes(left, right, len) as isize };
+    0.00 :   2a0d53: call   *0x318617(%rip)        # 5b9370 <memcmp@GLIBC_2.2.5>
+    0.00 :   2a0d59: cltq
+         : 2542   if order == 0 {
+    0.00 :   2a0d5b: test   %eax,%eax
+    0.00 :   2a0d5d: cmovne %rax,%r12
+    0.00 :   2a0d61: test   %r12,%r12
+    0.00 :   2a0d64: sets   %al
+    0.00 :   2a0d67: setg   %cl
+    0.00 :   2a0d6a: sub    %al,%cl
+    0.00 :   2a0d6c: add    $0xe8,%r15
+    0.00 :   2a0d73: inc    %r14
+    0.00 :   2a0d76: add    $0xffffffffffffffe8,%r13
+    0.00 :   2a0d7a: mov    %rbx,%rax
+    0.00 :   2a0d7d: cmp    $0x1,%cl
+    0.00 :   2a0d80: je     2a0d30 <<fp_frame::DataFrame>::loc_bool+0x2100>
+    0.00 :   2a0d82: movzbl %cl,%eax
+    0.00 :   2a0d85: test   %eax,%eax
+    0.00 :   2a0d87: jne    2a0d97 <<fp_frame::DataFrame>::loc_bool+0x2167>
+    0.00 :   2a0d89: jmp    2a0dc0 <<fp_frame::DataFrame>::loc_bool+0x2190>
+    0.00 :   2a0d8b: nopl   0x0(%rax,%rax,1)
+    0.00 :   2a0d90: mov    -0xa0(%rbp),%r14
+    0.00 :   2a0d97: mov    -0x78(%rbp),%rax
+         : 2562   if self.height == 0 {
+    0.00 :   2a0d9b: sub    $0x1,%rax
+    0.00 :   2a0d9f: mov    -0x70(%rbp),%rdx
+    0.00 :   2a0da3: jb     2a112d <<fp_frame::DataFrame>::loc_bool+0x24fd>
+    0.00 :   2a0da9: mov    %rax,-0x78(%rbp)
+         : 2567   crate::intrinsics::read_via_copy(src)
+    0.00 :   2a0dad: mov    0xb10(%rdx,%r14,8),%rdx
+         : 2569   loop {
+    0.00 :   2a0db5: jmp    2a0cfc <<fp_frame::DataFrame>::loc_bool+0x20cc>
+    0.00 :   2a0dba: nopw   0x0(%rax,%rax,1)
+         : 2572   let gathered = if let Some(certificate) = certificate {
+    0.00 :   2a0dc0: testb  $0x1,-0x30(%rbp)
+    0.00 :   2a0dc4: mov    -0x88(%rbp),%rbx
+    0.00 :   2a0dcb: mov    -0x98(%rbp),%r14
+    0.00 :   2a0dd2: mov    -0xa8(%rbp),%r12
+    0.00 :   2a0dd9: je     2a0dfe <<fp_frame::DataFrame>::loc_bool+0x21ce>
+         : 2578   self.take_affine_all_valid_float64_positions(positions.len(), start, step)
+    0.00 :   2a0ddb: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a0de2: mov    %r15,%rsi
+    0.00 :   2a0de5: mov    %rbx,%rdx
+    0.00 :   2a0de8: mov    -0x40(%rbp),%rcx
+    0.00 :   2a0dec: mov    -0x48(%rbp),%r8
+    0.00 :   2a0df0: call   225080 <<fp_columnar::Column>::take_affine_all_valid_float64_positions>
+    0.00 :   2a0df5: cmpl   $0x9,-0x2d0(%rbp)
+         : 2586   if let Some(column) =
+    0.00 :   2a0dfc: jne    2a0e50 <<fp_frame::DataFrame>::loc_bool+0x2220>
+    0.00 :   2a0dfe: lea    -0x450(%rbp),%rdi
+    0.00 :   2a0e05: mov    %r15,%rsi
+    0.00 :   2a0e08: mov    -0x68(%rbp),%rdx
+    0.00 :   2a0e0c: mov    %rbx,%rcx
+    0.00 :   2a0e0f: call   *0x318c73(%rip)        # 5b9a88 <_DYNAMIC+0xb50>
+    0.00 :   2a0e15: mov    0x10(%r12),%rbx
+    0.00 :   2a0e1a: test   %rbx,%rbx
+    0.00 :   2a0e1d: je     2a0e73 <<fp_frame::DataFrame>::loc_bool+0x2243>
+    0.00 :   2a0e1f: mov    0x8(%r12),%r12
+    0.00 :   2a0e24: mov    %rbx,%rdi
+    0.00 :   2a0e27: call   *0x318303(%rip)        # 5b9130 <malloc@GLIBC_2.2.5>
+    0.00 :   2a0e2d: test   %rax,%rax
+    0.00 :   2a0e30: je     2a115d <<fp_frame::DataFrame>::loc_bool+0x252d>
+    0.00 :   2a0e36: mov    %rax,%r15
+    0.00 :   2a0e39: mov    %rax,%rdi
+    0.00 :   2a0e3c: mov    %r12,%rsi
+    0.00 :   2a0e3f: mov    %rbx,%rdx
+    0.00 :   2a0e42: call   *0x318308(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+    0.00 :   2a0e48: jmp    2a0e79 <<fp_frame::DataFrame>::loc_bool+0x2249>
+    0.00 :   2a0e4a: nopw   0x0(%rax,%rax,1)
+    0.00 :   2a0e50: mov    $0xe8,%edx
+    0.00 :   2a0e55: lea    -0x450(%rbp),%rdi
+    0.00 :   2a0e5c: lea    -0x2d0(%rbp),%rsi
+    0.00 :   2a0e63: call   *0x3182e7(%rip)        # 5b9150 <memcpy@GLIBC_2.14>
+    0.00 :   2a0e69: mov    0x10(%r12),%rbx
+    0.00 :   2a0e6e: test   %rbx,%rbx
+    0.00 :   2a0e71: jne    2a0e1f <<fp_frame::DataFrame>::loc_bool+0x21ef>
+    0.00 :   2a0e73: mov    $0x1,%r15d
+    0.00 :   2a0e79: mov    %rbx,-0x620(%rbp)
+    0.00 :   2a0e80: mov    %r15,-0x618(%rbp)
+    0.00 :   2a0e87: mov    %rbx,-0x610(%rbp)
+         : 2619   columns.insert(name.clone(), gathered);
+    0.00 :   2a0e8e: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a0e95: lea    -0xd0(%rbp),%rsi
+    0.00 :   2a0e9c: lea    -0x620(%rbp),%rdx
+    0.00 :   2a0ea3: lea    -0x450(%rbp),%rcx
+    0.00 :   2a0eaa: call   2e2f30 <<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert>
+         : 2625   pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+    0.00 :   2a0eaf: cmpl   $0x9,-0x2d0(%rbp)
+    0.00 :   2a0eb6: je     2a0ca0 <<fp_frame::DataFrame>::loc_bool+0x2070>
+    0.00 :   2a0ebc: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a0ec3: call   2364d0 <core::ptr::drop_in_place::<fp_columnar::Column>>
+    0.00 :   2a0ec8: jmp    2a0ca0 <<fp_frame::DataFrame>::loc_bool+0x2070>
+    0.00 :   2a0ecd: movabs $0x8000000000000000,%rax
+    0.00 :   2a0ed7: cmp    %rax,0x98(%rbx)
+    0.00 :   2a0ede: jne    2a0ee4 <<fp_frame::DataFrame>::loc_bool+0x22b4>
+    0.00 :   2a0ee0: xor    %edx,%edx
+    0.00 :   2a0ee2: jmp    2a0ef2 <<fp_frame::DataFrame>::loc_bool+0x22c2>
+    0.00 :   2a0ee4: mov    0xa0(%rbx),%rdx
+    0.00 :   2a0eeb: mov    0xa8(%rbx),%rcx
+    0.00 :   2a0ef2: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a0ef9: lea    -0x538(%rbp),%rsi
+         : 2640   self.set_names(name)
+    0.00 :   2a0f00: call   *0x31901a(%rip)        # 5b9f20 <_DYNAMIC+0xfe8>
+         : 2642   columns,
+    0.00 :   2a0f06: mov    -0xc0(%rbp),%rax
+    0.00 :   2a0f0d: mov    %rax,-0x130(%rbp)
+    0.00 :   2a0f14: movups -0xd0(%rbp),%xmm0
+    0.00 :   2a0f1b: movaps %xmm0,-0x140(%rbp)
+    0.00 :   2a0f22: mov    -0x50(%rbp),%rbx
+         : 2648   self.column_order.clone(),
+    0.00 :   2a0f26: mov    0xf0(%rbx),%rsi
+    0.00 :   2a0f2d: mov    0xf8(%rbx),%rdx
+    0.00 :   2a0f34: lea    -0x650(%rbp),%rdi
+    0.00 :   2a0f3b: call   2f33a0 <<alloc::vec::Vec<alloc::string::String> as core::clone::Clone>::clone>
+    0.00 :   2a0f40: movabs $0x8000000000000000,%rax
+         : 2654   match self {
+    0.00 :   2a0f4a: cmp    %rax,0x130(%rbx)
+    0.00 :   2a0f51: jne    2a0f5c <<fp_frame::DataFrame>::loc_bool+0x232c>
+         : 2657   None => None,
+    0.00 :   2a0f53: mov    %rax,-0x620(%rbp)
+    0.00 :   2a0f5a: jmp    2a0f9c <<fp_frame::DataFrame>::loc_bool+0x236c>
+    0.00 :   2a0f5c: add    $0x130,%rbx
+    0.00 :   2a0f63: lea    -0x450(%rbp),%rdi
+         : 2662   Some(x) => Some(x.clone()),
+    0.00 :   2a0f6a: mov    %rbx,%rsi
+    0.00 :   2a0f6d: call   2ee520 <<fp_index::MultiIndex as core::clone::Clone>::clone>
+    0.00 :   2a0f72: movups -0x450(%rbp),%xmm0
+    0.00 :   2a0f79: movups -0x440(%rbp),%xmm1
+    0.00 :   2a0f80: movups -0x430(%rbp),%xmm2
+    0.00 :   2a0f87: movaps %xmm2,-0x600(%rbp)
+    0.00 :   2a0f8e: movaps %xmm1,-0x610(%rbp)
+    0.00 :   2a0f95: movaps %xmm0,-0x620(%rbp)
+    0.00 :   2a0f9c: lea    -0x2d0(%rbp),%rsi
+    0.00 :   2a0fa3: lea    -0x120(%rbp),%rdx
+    0.00 :   2a0faa: lea    -0x140(%rbp),%rcx
+    0.00 :   2a0fb1: lea    -0x650(%rbp),%r8
+    0.00 :   2a0fb8: lea    -0x620(%rbp),%r9
+         : 2676   Self::new_with_axes(
+    0.00 :   2a0fbf: mov    %r15,%rdi
+    0.00 :   2a0fc2: call   28d450 <<fp_frame::DataFrame>::new_with_axes>
+    0.00 :   2a0fc7: lea    -0x538(%rbp),%rdi
+         : 2680   }
+    0.00 :   2a0fce: call   236320 <core::ptr::drop_in_place::<fp_index::Index>>
+         : 2682   ///   initially construct `self`
+         : 2683   /// - `elem_layout`'s size must be a multiple of its alignment
+         : 2684   #[inline]
+         : 2685   #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
+         : 2686   const unsafe fn current_memory(&self, elem_layout: Layout) -> Option<(NonNull<u8>, Layout)> {
+         : 2687   if elem_layout.size() == 0 || self.cap.as_inner() == 0 {
+    0.00 :   2a0fd3: cmpq   $0x0,-0x90(%rbp)
+    0.00 :   2a0fdb: je     29f609 <<fp_frame::DataFrame>::loc_bool+0x9d9>
+    0.00 :   2a0fe1: mov    -0x68(%rbp),%rdi
+    0.00 :   2a0fe5: call   *0x318155(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+         : 2692   }
+         :
+         : 2694   #[inline]
+         : 2695   #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+         : 2696   fn deallocate_impl_runtime(ptr: NonNull<u8>, layout: Layout) {
+         : 2697   if layout.size() != 0 {
+    0.00 :   2a0feb: jmp    29f609 <<fp_frame::DataFrame>::loc_bool+0x9d9>
+    0.00 :   2a0ff0: mov    %r8,%r14
+         : 2700   match self.len {
+    0.00 :   2a0ff3: jmp    2a1004 <<fp_frame::DataFrame>::loc_bool+0x23d4>
+         : 2702   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a0ff5: mov    %r8,%r9
+    0.00 :   2a0ff8: sub    %rdi,%r9
+    0.00 :   2a0ffb: cmp    %rsi,%r9
+    0.00 :   2a0ffe: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+         : 2707   self.len += 1;
+    0.00 :   2a1004: inc    %r12
+         : 2709   self.as_ptr() == other.as_ptr()
+    0.00 :   2a1007: cmp    $0x5,%rdx
+    0.00 :   2a100b: je     29f30f <<fp_frame::DataFrame>::loc_bool+0x6df>
+         : 2712   if keep {
+    0.00 :   2a1011: cmpb   $0x1,0x5(%rcx)
+    0.00 :   2a1015: jne    2a1036 <<fp_frame::DataFrame>::loc_bool+0x2406>
+    0.00 :   2a1017: mov    %rax,%rdi
+    0.00 :   2a101a: or     $0x5,%rdi
+         : 2717   match self.len {
+    0.00 :   2a101e: test   %r12,%r12
+    0.00 :   2a1021: je     2a103b <<fp_frame::DataFrame>::loc_bool+0x240b>
+    0.00 :   2a1023: cmp    $0x1,%r12
+    0.00 :   2a1027: jne    2a1040 <<fp_frame::DataFrame>::loc_bool+0x2410>
+         : 2722   if self.step == 0 {
+    0.00 :   2a1029: mov    %rdi,%rsi
+    0.00 :   2a102c: sub    %r14,%rsi
+    0.00 :   2a102f: jne    2a104f <<fp_frame::DataFrame>::loc_bool+0x241f>
+    0.00 :   2a1031: jmp    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   2a1036: mov    %r8,%rdi
+         : 2728   if keep {
+    0.00 :   2a1039: jmp    2a1052 <<fp_frame::DataFrame>::loc_bool+0x2422>
+    0.00 :   2a103b: mov    %rdi,%r14
+         : 2731   match self.len {
+    0.00 :   2a103e: jmp    2a104f <<fp_frame::DataFrame>::loc_bool+0x241f>
+         : 2733   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a1040: mov    %rdi,%r9
+    0.00 :   2a1043: sub    %r8,%r9
+    0.00 :   2a1046: cmp    %rsi,%r9
+    0.00 :   2a1049: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+         : 2738   self.len += 1;
+    0.00 :   2a104f: inc    %r12
+    0.00 :   2a1052: cmp    $0x6,%rdx
+    0.00 :   2a1056: je     29f30f <<fp_frame::DataFrame>::loc_bool+0x6df>
+         : 2742   if keep {
+    0.00 :   2a105c: cmpb   $0x1,0x6(%rcx)
+    0.00 :   2a1060: jne    29f30f <<fp_frame::DataFrame>::loc_bool+0x6df>
+    0.00 :   2a1066: or     $0x6,%rax
+         : 2746   match self.len {
+    0.00 :   2a106a: test   %r12,%r12
+    0.00 :   2a106d: je     2a1082 <<fp_frame::DataFrame>::loc_bool+0x2452>
+    0.00 :   2a106f: cmp    $0x1,%r12
+    0.00 :   2a1073: jne    2a1087 <<fp_frame::DataFrame>::loc_bool+0x2457>
+         : 2751   if self.step == 0 {
+    0.00 :   2a1075: sub    %r14,%rax
+    0.00 :   2a1078: mov    %rax,%rsi
+    0.00 :   2a107b: jne    2a1093 <<fp_frame::DataFrame>::loc_bool+0x2463>
+    0.00 :   2a107d: jmp    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+    0.00 :   2a1082: mov    %rax,%r14
+         : 2757   self.len += 1;
+    0.00 :   2a1085: jmp    2a1093 <<fp_frame::DataFrame>::loc_bool+0x2463>
+         : 2759   if self.is_affine && position - self.previous != self.step {
+    0.00 :   2a1087: sub    %rdi,%rax
+    0.00 :   2a108a: cmp    %rsi,%rax
+    0.00 :   2a108d: jne    29fdbf <<fp_frame::DataFrame>::loc_bool+0x118f>
+         : 2763   self.len += 1;
+    0.00 :   2a1093: inc    %r12
+    0.00 :   2a1096: jmp    29f30f <<fp_frame::DataFrame>::loc_bool+0x6df>
+    0.00 :   2a109b: lea    -0x538(%rbp),%rdi
+         : 2767   }
+    0.00 :   2a10a2: call   232760 <core::ptr::drop_in_place::<alloc::vec::Vec<fp_index::IndexLabel>>>
+    0.00 :   2a10a7: jmp    29fdbb <<fp_frame::DataFrame>::loc_bool+0x118b>
+    0.00 :   2a10ac: mov    $0x1,%al
+    0.00 :   2a10ae: mov    %eax,-0x7c(%rbp)
+    0.00 :   2a10b1: xor    %r14d,%r14d
+         : 2773   // currently done by calling `self.get()`, which in turn calls
+         : 2774   // `self.initialized()`, which in turn performs the acquire.
+         : 2775   if let Some(value) = self.get() {
+         : 2776   return Ok(value);
+         : 2777   }
+         : 2778   self.initialize(f)?;
+    0.00 :   2a10b4: mov    %rbx,%rdi
+    0.00 :   2a10b7: mov    -0x50(%rbp),%rsi
+    0.00 :   2a10bb: call   2f3f2f <<std::sync::once_lock::OnceLock<alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>>::get_or_init<<fp_index::IndexLabels>::as_slice::{closure#0}>::{closure#0}, !>>
+    0.00 :   2a10c0: jmp    2a089b <<fp_frame::DataFrame>::loc_bool+0x1c6b>
+    0.00 :   2a10c5: mov    %rbx,%rdi
+    0.00 :   2a10c8: mov    -0x50(%rbp),%rsi
+    0.00 :   2a10cc: call   2f3fc5 <<std::sync::once_lock::OnceLock<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64>>>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64>>>>>::get_or_init<<fp_index::IndexLabels>::int64_view::{closure#0}>::{closure#0}, !>>
+    0.00 :   2a10d1: jmp    2a07b0 <<fp_frame::DataFrame>::loc_bool+0x1b80>
+    0.00 :   2a10d6: cmp    $0x7,%edx
+    0.00 :   2a10d9: sete   %dl
+    0.00 :   2a10dc: mov    -0x38(%rbp),%rsi
+    0.00 :   2a10e0: test   %dl,0x6(%rsi,%rcx,1)
+    0.00 :   2a10e4: mov    -0x60(%rbp),%r15
+    0.00 :   2a10e8: je     29ed36 <<fp_frame::DataFrame>::loc_bool+0x106>
+    0.00 :   2a10ee: jmp    29edea <<fp_frame::DataFrame>::loc_bool+0x1ba>
+         : 2794   fn eq(&self, other: &Self) -> bool { *self == *other }
+    0.00 :   2a10f3: cmpb   $0x0,0x6(%rcx)
+    0.00 :   2a10f7: sete   %sil
+    0.00 :   2a10fb: cmp    $0x7,%edx
+    0.00 :   2a10fe: sete   %r8b
+    0.00 :   2a1102: test   %r8b,%sil
+    0.00 :   2a1105: mov    -0x60(%rbp),%r15
+    0.00 :   2a1109: je     29ee21 <<fp_frame::DataFrame>::loc_bool+0x1f1>
+    0.00 :   2a110f: jmp    29f380 <<fp_frame::DataFrame>::loc_bool+0x750>
+    0.00 :   2a1114: mov    -0x50(%rbp),%rbx
+         : 2804   self.index.len()
+    0.00 :   2a1118: mov    %rbx,%rdi
+    0.00 :   2a111b: call   *0x318e1f(%rip)        # 5b9f40 <_DYNAMIC+0x1008>
+    0.00 :   2a1121: mov    -0x88(%rbp),%r14
+         : 2808   None if n.saturating_mul(4) >= self.len() => self.index.int64_label_values(),
+    0.00 :   2a1128: jmp    29f77e <<fp_frame::DataFrame>::loc_bool+0xb4e>
+         : 2810   None => expect_failed(msg),
+    0.00 :   2a112d: lea    -0x17cf34(%rip),%rdi        # 124200 <core::unicode::unicode_data::white_space::WHITESPACE_MAP+0x3251>
+    0.00 :   2a1134: lea    0x2ee54d(%rip),%rdx        # 58f688 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0x2bc8>
+    0.00 :   2a113b: mov    $0x26,%esi
+    0.00 :   2a1140: call   *0x3184c2(%rip)        # 5b9608 <_DYNAMIC+0x6d0>
+    0.00 :   2a1146: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   2a114b: lea    0x2ee506(%rip),%rdx        # 58f658 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0x2b98>
+    0.00 :   2a1152: call   *0x318030(%rip)        # 5b9188 <_DYNAMIC+0x250>
+    0.00 :   2a1158: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   2a115d: mov    $0x1,%edi
+    0.00 :   2a1162: mov    %rbx,%rsi
+    0.00 :   2a1165: call   *0x31800d(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   2a116b: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+         : 2823   labels.push(index_labels[pos].clone());
+    0.00 :   2a1170: lea    0x2ee4f9(%rip),%rdx        # 58f670 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0x2bb0>
+    0.00 :   2a1177: mov    -0x58(%rbp),%rsi
+    0.00 :   2a117b: call   *0x318007(%rip)        # 5b9188 <_DYNAMIC+0x250>
+    0.00 :   2a1181: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   2a1186: lea    -0x17cf8d(%rip),%rdi        # 124200 <core::unicode::unicode_data::white_space::WHITESPACE_MAP+0x3251>
+    0.00 :   2a118d: lea    0x2ee4ac(%rip),%rdx        # 58f640 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0x2b80>
+    0.00 :   2a1194: mov    $0x26,%esi
+    0.00 :   2a1199: call   *0x318469(%rip)        # 5b9608 <_DYNAMIC+0x6d0>
+    0.00 :   2a119f: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+         : 2833   labels.push(index_labels[pos].clone());
+    0.00 :   2a11a1: lea    0x2ee480(%rip),%rdx        # 58f628 <anon.ef2dbc71928002fa557393c3c574936c.253.llvm.11682899113876593817+0x2b68>
+    0.00 :   2a11a8: mov    %rbx,%rdi
+    0.00 :   2a11ab: mov    -0x70(%rbp),%rsi
+    0.00 :   2a11af: call   *0x317fd3(%rip)        # 5b9188 <_DYNAMIC+0x250>
+    0.00 :   2a11b5: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   2a11b7: mov    $0x1,%edi
+    0.00 :   2a11bc: mov    %rbx,%rsi
+    0.00 :   2a11bf: call   *0x317fb3(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   2a11c5: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   2a11c7: mov    $0x8,%edi
+    0.00 :   2a11cc: mov    %rbx,%rsi
+         : 2845   Err(err) => handle_error(err),
+    0.00 :   2a11cf: call   *0x317fa3(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   2a11d5: mov    $0x1,%edi
+    0.00 :   2a11da: mov    %rbx,%rsi
+    0.00 :   2a11dd: call   *0x317f95(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   2a11e3: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   2a11e5: mov    $0x8,%edi
+    0.00 :   2a11ea: mov    %rbx,%rsi
+    0.00 :   2a11ed: call   *0x317f85(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   2a11f3: jmp    2a1210 <<fp_frame::DataFrame>::loc_bool+0x25e0>
+    0.00 :   2a11f5: mov    $0x8,%edi
+    0.00 :   2a11fa: mov    %rbx,%rsi
+    0.00 :   2a11fd: jmp    2a08bb <<fp_frame::DataFrame>::loc_bool+0x1c8b>
+    0.00 :   2a1202: mov    $0x1,%edi
+    0.00 :   2a1207: mov    %r13,%rsi
+    0.00 :   2a120a: call   *0x317f68(%rip)        # 5b9178 <_DYNAMIC+0x240>
+    0.00 :   2a1210: ud2
+    0.00 :   2a1212: mov    %rax,%rbx
+    0.00 :   2a1215: jmp    2a1468 <<fp_frame::DataFrame>::loc_bool+0x2838>
+    0.00 :   2a121a: jmp    2a122d <<fp_frame::DataFrame>::loc_bool+0x25fd>
+    0.00 :   2a121c: mov    %rax,%rbx
+    0.00 :   2a121f: lea    -0x140(%rbp),%rdi
+         : 2867   ))
+    0.00 :   2a1226: call   232b50 <core::ptr::drop_in_place::<alloc::vec::Vec<alloc::string::String>>>
+    0.00 :   2a122b: jmp    2a1238 <<fp_frame::DataFrame>::loc_bool+0x2608>
+    0.00 :   2a122d: mov    %rax,%rbx
+    0.00 :   2a1230: jmp    2a1333 <<fp_frame::DataFrame>::loc_bool+0x2703>
+    0.00 :   2a1235: mov    %rax,%rbx
+    0.00 :   2a1238: lea    -0xd0(%rbp),%rdi
+    0.00 :   2a123f: call   235450 <core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>>
+    0.00 :   2a1244: lea    -0x538(%rbp),%rdi
+    0.00 :   2a124b: call   236320 <core::ptr::drop_in_place::<fp_index::Index>>
+    0.00 :   2a1250: jmp    2a1333 <<fp_frame::DataFrame>::loc_bool+0x2703>
+    0.00 :   2a1255: jmp    2a130b <<fp_frame::DataFrame>::loc_bool+0x26db>
+    0.00 :   2a125a: mov    %rax,%rbx
+    0.00 :   2a125d: lea    -0x650(%rbp),%rdi
+         : 2881   )
+    0.00 :   2a1264: call   232b50 <core::ptr::drop_in_place::<alloc::vec::Vec<alloc::string::String>>>
+    0.00 :   2a1269: jmp    2a12a5 <<fp_frame::DataFrame>::loc_bool+0x2675>
+    0.00 :   2a126b: jmp    2a127e <<fp_frame::DataFrame>::loc_bool+0x264e>
+    0.00 :   2a126d: mov    %rax,%rbx
+    0.00 :   2a1270: mov    -0x90(%rbp),%r14
+         : 2887   if self.inner().strong.fetch_sub(1, Release) != 1 {
+    0.00 :   2a1277: jmp    2a1468 <<fp_frame::DataFrame>::loc_bool+0x2838>
+    0.00 :   2a127c: jmp    2a129a <<fp_frame::DataFrame>::loc_bool+0x266a>
+    0.00 :   2a127e: mov    %rax,%rbx
+    0.00 :   2a1281: jmp    2a13ab <<fp_frame::DataFrame>::loc_bool+0x277b>
+    0.00 :   2a1286: mov    %rax,%rbx
+    0.00 :   2a1289: lea    -0x538(%rbp),%rdi
+         : 2894   }
+    0.00 :   2a1290: call   2364d0 <core::ptr::drop_in_place::<fp_columnar::Column>>
+    0.00 :   2a1295: jmp    2a1327 <<fp_frame::DataFrame>::loc_bool+0x26f7>
+    0.00 :   2a129a: mov    %rax,%rbx
+    0.00 :   2a129d: jmp    2a13fc <<fp_frame::DataFrame>::loc_bool+0x27cc>
+    0.00 :   2a12a2: mov    %rax,%rbx
+    0.00 :   2a12a5: lea    -0x140(%rbp),%rdi
+         : 2901   )
+    0.00 :   2a12ac: call   235450 <core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>>
+    0.00 :   2a12b1: movabs $0x8000000000000000,%rax
+    0.00 :   2a12bb: cmp    %rax,-0xf0(%rbp)
+    0.00 :   2a12c2: je     2a12d0 <<fp_frame::DataFrame>::loc_bool+0x26a0>
+    0.00 :   2a12c4: lea    -0x120(%rbp),%rdi
+    0.00 :   2a12cb: call   235fe0 <core::ptr::drop_in_place::<fp_index::MultiIndex>>
+    0.00 :   2a12d0: lea    -0x2d0(%rbp),%rdi
+    0.00 :   2a12d7: call   236320 <core::ptr::drop_in_place::<fp_index::Index>>
+    0.00 :   2a12dc: jmp    2a13fc <<fp_frame::DataFrame>::loc_bool+0x27cc>
+    0.00 :   2a12e1: mov    %rax,%rbx
+    0.00 :   2a12e4: test   %r13,%r13
+    0.00 :   2a12e7: jle    2a130e <<fp_frame::DataFrame>::loc_bool+0x26de>
+    0.00 :   2a12e9: mov    -0x58(%rbp),%rdi
+    0.00 :   2a12ed: call   *0x317e4d(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   2a12f3: lea    -0x538(%rbp),%rdi
+         : 2917   }
+    0.00 :   2a12fa: call   232760 <core::ptr::drop_in_place::<alloc::vec::Vec<fp_index::IndexLabel>>>
+    0.00 :   2a12ff: mov    %rbx,%rdi
+    0.00 :   2a1302: call   48bb40 <_Unwind_Resume@plt>
+    0.00 :   2a1307: jmp    2a1365 <<fp_frame::DataFrame>::loc_bool+0x2735>
+    0.00 :   2a1309: jmp    2a1324 <<fp_frame::DataFrame>::loc_bool+0x26f4>
+    0.00 :   2a130b: mov    %rax,%rbx
+    0.00 :   2a130e: lea    -0x538(%rbp),%rdi
+    0.00 :   2a1315: call   232760 <core::ptr::drop_in_place::<alloc::vec::Vec<fp_index::IndexLabel>>>
+    0.00 :   2a131a: mov    %rbx,%rdi
+    0.00 :   2a131d: call   48bb40 <_Unwind_Resume@plt>
+    0.00 :   2a1322: jmp    2a1324 <<fp_frame::DataFrame>::loc_bool+0x26f4>
+    0.00 :   2a1324: mov    %rax,%rbx
+    0.00 :   2a1327: lea    -0xe8(%rbp),%rdi
+         : 2931   }
+    0.00 :   2a132e: call   235450 <core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>>
+    0.00 :   2a1333: lea    -0x620(%rbp),%rdi
+    0.00 :   2a133a: call   236320 <core::ptr::drop_in_place::<fp_index::Index>>
+    0.00 :   2a133f: jmp    2a146d <<fp_frame::DataFrame>::loc_bool+0x283d>
+    0.00 :   2a1344: mov    %rax,%rbx
+    0.00 :   2a1347: test   %r13,%r13
+    0.00 :   2a134a: jle    2a1368 <<fp_frame::DataFrame>::loc_bool+0x2738>
+    0.00 :   2a134c: mov    -0x38(%rbp),%rdi
+    0.00 :   2a1350: call   *0x317dea(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   2a1356: jmp    2a1368 <<fp_frame::DataFrame>::loc_bool+0x2738>
+         : 2942   fn take_rows_by_affine_certificate_unchecked(
+    0.00 :   2a1358: call   *0x317f72(%rip)        # 5b92d0 <_DYNAMIC+0x398>
+    0.00 :   2a135e: jmp    2a1391 <<fp_frame::DataFrame>::loc_bool+0x2761>
+    0.00 :   2a1360: jmp    2a140a <<fp_frame::DataFrame>::loc_bool+0x27da>
+    0.00 :   2a1365: mov    %rax,%rbx
+    0.00 :   2a1368: lea    -0x450(%rbp),%rdi
+         : 2948   };
+    0.00 :   2a136f: call   232760 <core::ptr::drop_in_place::<alloc::vec::Vec<fp_index::IndexLabel>>>
+    0.00 :   2a1374: mov    -0x90(%rbp),%r14
+    0.00 :   2a137b: jmp    2a1468 <<fp_frame::DataFrame>::loc_bool+0x2838>
+    0.00 :   2a1380: mov    %rax,%rbx
+    0.00 :   2a1383: lea    -0x450(%rbp),%rdi
+         : 2954   }
+    0.00 :   2a138a: call   2364d0 <core::ptr::drop_in_place::<fp_columnar::Column>>
+    0.00 :   2a138f: jmp    2a13d1 <<fp_frame::DataFrame>::loc_bool+0x27a1>
+    0.00 :   2a1391: mov    %rax,%rbx
+         : 2958   if elem_layout.size() == 0 || self.cap.as_inner() == 0 {
+    0.00 :   2a1394: cmpq   $0x0,-0x450(%rbp)
+    0.00 :   2a139c: je     2a13ab <<fp_frame::DataFrame>::loc_bool+0x277b>
+         : 2961   } else {
+    0.00 :   2a139e: mov    -0x448(%rbp),%rdi
+    0.00 :   2a13a5: call   *0x317d95(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+         : 2964   Release => intrinsics::atomic_xsub::<T, U, { AO::Release }>(dst, val),
+    0.00 :   2a13ab: lock decq (%r15)
+    0.00 :   2a13af: jne    2a13be <<fp_frame::DataFrame>::loc_bool+0x278e>
+    0.00 :   2a13b1: lea    -0x620(%rbp),%rdi
+         : 2968   self.drop_slow();
+    0.00 :   2a13b8: call   *0x31888a(%rip)        # 5b9c48 <_DYNAMIC+0xd10>
+    0.00 :   2a13be: mov    -0x90(%rbp),%r14
+         : 2971   if self.inner().strong.fetch_sub(1, Release) != 1 {
+    0.00 :   2a13c5: jmp    2a1468 <<fp_frame::DataFrame>::loc_bool+0x2838>
+    0.00 :   2a13ca: jmp    2a13ce <<fp_frame::DataFrame>::loc_bool+0x279e>
+    0.00 :   2a13cc: jmp    2a13ce <<fp_frame::DataFrame>::loc_bool+0x279e>
+    0.00 :   2a13ce: mov    %rax,%rbx
+    0.00 :   2a13d1: lea    -0xd0(%rbp),%rdi
+         : 2977   }
+    0.00 :   2a13d8: call   235450 <core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>>
+    0.00 :   2a13dd: movabs $0x8000000000000000,%rax
+    0.00 :   2a13e7: cmp    %rax,-0xf0(%rbp)
+    0.00 :   2a13ee: je     2a13fc <<fp_frame::DataFrame>::loc_bool+0x27cc>
+    0.00 :   2a13f0: lea    -0x120(%rbp),%rdi
+    0.00 :   2a13f7: call   235fe0 <core::ptr::drop_in_place::<fp_index::MultiIndex>>
+    0.00 :   2a13fc: lea    -0x538(%rbp),%rdi
+    0.00 :   2a1403: call   236320 <core::ptr::drop_in_place::<fp_index::Index>>
+    0.00 :   2a1408: jmp    2a143c <<fp_frame::DataFrame>::loc_bool+0x280c>
+    0.00 :   2a140a: mov    %rax,%rbx
+    0.00 :   2a140d: cmpq   $0x0,-0x2d0(%rbp)
+    0.00 :   2a1415: je     2a146d <<fp_frame::DataFrame>::loc_bool+0x283d>
+         : 2990   }
+    0.00 :   2a1417: mov    -0x2c8(%rbp),%rdi
+    0.00 :   2a141e: call   *0x317d1c(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   2a1424: mov    %rbx,%rdi
+    0.00 :   2a1427: call   48bb40 <_Unwind_Resume@plt>
+         : 2995   fn take_rows_by_positions_with_affine_certificate_unchecked(
+    0.00 :   2a142c: call   *0x317e9e(%rip)        # 5b92d0 <_DYNAMIC+0x398>
+    0.00 :   2a1432: mov    %r14,-0x98(%rbp)
+    0.00 :   2a1439: mov    %rax,%rbx
+         : 2999   }
+    0.00 :   2a143c: cmpb   $0x0,-0x7c(%rbp)
+    0.00 :   2a1440: mov    -0x90(%rbp),%r14
+    0.00 :   2a1447: je     2a1468 <<fp_frame::DataFrame>::loc_bool+0x2838>
+    0.00 :   2a1449: mov    -0x98(%rbp),%rax
+    0.00 :   2a1450: test   %rax,%rax
+    0.00 :   2a1453: je     2a1468 <<fp_frame::DataFrame>::loc_bool+0x2838>
+    0.00 :   2a1455: lock decq (%rax)
+    0.00 :   2a1459: jne    2a1468 <<fp_frame::DataFrame>::loc_bool+0x2838>
+    0.00 :   2a145b: lea    -0xe8(%rbp),%rdi
+         : 3009   self.drop_slow();
+    0.00 :   2a1462: call   *0x3187e0(%rip)        # 5b9c48 <_DYNAMIC+0xd10>
+    0.00 :   2a1468: test   %r14,%r14
+    0.00 :   2a146b: jne    2a1475 <<fp_frame::DataFrame>::loc_bool+0x2845>
+    0.00 :   2a146d: mov    %rbx,%rdi
+    0.00 :   2a1470: call   48bb40 <_Unwind_Resume@plt>
+    0.00 :   2a1475: mov    -0x68(%rbp),%rdi
+    0.00 :   2a1479: call   *0x317cc1(%rip)        # 5b9140 <free@GLIBC_2.2.5>
+    0.00 :   2a147f: mov    %rbx,%rdi
+    0.00 :   2a1482: call   48bb40 <_Unwind_Resume@plt>

@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/lavender_0mtyz_bins/perf_profile_base_75d9f7a0 value_counts_nan50 1000000 10
+  Time (mean ± σ):     648.2 ms ±  22.4 ms    [User: 441.2 ms, System: 237.0 ms]
+  Range (min … max):   608.5 ms … 681.9 ms    10 runs
+ 

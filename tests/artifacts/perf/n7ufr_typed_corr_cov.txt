@@ -1,0 +1,44 @@
+br-frankenpandas-n7ufr — Typed Float64 fast path for Series.corr/cov + DataFrame.corrwith
+=========================================================================================
+
+Fifth in the eydcr Scalar-bound-elementwise-ops family (diff 30x, pct_change 38x,
+combine_first 5.6x, ffill/bfill 18-19x). Series.corr/cov accumulated the paired
+sums over `aligned_numeric_pairs`, which align(Inner)-reindexes both columns,
+materializes Vec<Scalar>, and runs per-element to_f64 — even for typed Float64.
+DataFrame.corrwith calls Series::corr per shared column.
+
+LEVER (one): typed_corr_sums helper accumulates (sum_x, sum_y, sum_xy, sum_x2,
+sum_y2, count) directly from the two f64 slices + validity masks, gated on an
+IDENTICAL UNIQUE index. align_inner for identical unique indexes yields positions
+0..n on both sides (each label maps to its own row), so the kept pairs are exactly
+(x[i], y[i]) for every i where both are valid, in ascending i order. Wired into
+cov_components (used by corr/corrwith) and cov_pair_sums (used by cov).
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter; machine loaded):
+  DataFrame.corrwith:  115  ->  3.5  = 32.9x
+
+SCORE: 32.9x >> 2.0 PASS.
+
+ISOMORPHISM (f64-sum order matters — proven identical):
+  - align_inner walks left.labels in order, keeping labels present in right; for
+    identical unique indexes that is positions 0..n on both sides, in ascending
+    order. So aligned_numeric_pairs yields (self[i], other[i]) for i=0..n with
+    missing pairs dropped — exactly the order/values typed_corr_sums folds.
+  - A pair is kept iff both sides are non-missing-non-NaN. A set validity bit
+    already implies a non-NaN present f64 (Float64 NaN is missing), matching
+    pairwise_numeric_value's `to_f64().ok().filter(!is_nan)`.
+  - The 5 sums are accumulated with the identical separate `+=` left-fold and the
+    identical f64 products (x*y, x*x, y*y); the downstream cov/var/corr arithmetic
+    in cov_components / cov_with_options is unchanged.
+  - Gated to identical+unique index and Float64 backings; differing/duplicate
+    indexes or any other dtype keep the exact Scalar path.
+  - Golden sha256 (gap_hunt golden: diff/pct_change/combine_first/ffill/bfill +
+    corrwith all-valid-over-nullable and nullable-over-nullable, n=5000 x4)
+    UNCHANGED before/after:
+      134e581ae3263c6184b35959a4e675b90867cbc063610588b0842b872381cadc
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

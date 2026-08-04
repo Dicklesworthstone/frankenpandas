@@ -1,0 +1,2 @@
+3:                            [--all] [--sizes SIZES] [--dtypes DTYPES]
+13:  --sizes SIZES         Comma-separated sizes (10k,100k,1M)

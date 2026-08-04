@@ -1,0 +1,89 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 711  of event 'cycles:P'
+# Event count (approx.): 2520014721
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                                                                                              IPC   [IPC Coverage]
+# ........  ..................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+     9.78%  [.] fp_join::build_single_key_inner_merge_output_with_selections                                                                                                                                                                                                                                                                                                                    -      -            
+            |          
+             --1.21%--malloc
+
+     6.42%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                                                                                    -      -            
+     5.66%  [.] malloc                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |          
+             --1.86%--__memmove_avx_unaligned_erms
+                       |          
+                        --1.24%--fp_join::build_single_key_inner_merge_output_with_selections
+                                  fp_join::merge_single_key_inner_unsorted
+                                  fp_join::merge_dataframes_on_with_options
+                                  perf_profile::main
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                                  std::rt::lang_start::<()>::{closure#0}
+                                  std::rt::lang_start_internal
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     5.38%  [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert                                                                                                                                                                                                                                                                                  -      -            
+     5.17%  [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                                                                                                                             -      -            
+     4.98%  [.] cfree@GLIBC_2.2.5                                                                                                                                                                                                                                                                                                                                                               -      -            
+     4.35%  [.] <fp_columnar::Column>::take_contiguous_range                                                                                                                                                                                                                                                                                                                                    -      -            
+     4.22%  [.] perf_profile::build_str_join_frame                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --2.13%--perf_profile::build_str_join_frame
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     4.17%  [.] _int_malloc                                                                                                                                                                                                                                                                                                                                                                     -      -            
+     3.50%  [.] fp_join::merge_single_key_inner_unsorted                                                                                                                                                                                                                                                                                                                                        -      -            
+            |          
+             --1.11%--cfree@GLIBC_2.2.5
+
+     2.80%  [.] fp_join::merge_dataframes_on_with_options                                                                                                                                                                                                                                                                                                                                       -      -            
+     2.38%  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -            
+            |          
+             --1.43%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+                       <std::sys::sync::once::futex::Once>::call
+                       <std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                       <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     2.33%  [.] <alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next                                                                                                                                                                                                                                                                              -      -            
+     2.24%  [.] fp_join::collect_join_key_columns                                                                                                                                                                                                                                                                                                                                               -      -            
+     2.24%  [.] <hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>                                                                                                                                                                                                                                    -      -            
+     2.14%  [.] <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert                                                                                                                                                                                                                                                                                                     -      -            
+     1.97%  [.] _int_free_chunk                                                                                                                                                                                                                                                                                                                                                                 -      -            
+     1.75%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                                                                                                                                                                                                                                                                                 -      -            
+     1.72%  [.] <std::sys::sync::once::futex::Once>::call                                                                                                                                                                                                                                                                                                                                       -      -            
+     1.69%  [.] <fp_columnar::Column>::float64_arc_view_source                                                                                                                                                                                                                                                                                                                                  -      -            
+     1.62%  [k] 0xffffffff8621b2b7                                                                                                                                                                                                                                                                                                                                                              -      -            
+     1.36%  [.] <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous                                                                                                                                                                                                                                                                                                                    -      -            
+     1.26%  [.] <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>                                                                                                                                                                                                                                                                                                 -      -            
+     1.24%  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                                                                                                                                                                                            -      -            
+     1.09%  [.] core::ptr::drop_in_place::<fp_join::MergedDataFrame>                                                                                                                                                                                                                                                                                                                            -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

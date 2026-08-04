@@ -1,0 +1,2 @@
+tests/artifacts/perf/lavender_uza04131_after_golden_csv_parse_dates_dt_year_1000.txt: OK
+tests/artifacts/perf/lavender_uza04131_after_golden_csv_parse_dates_dt_year_100000.txt: OK

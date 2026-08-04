@@ -1,0 +1,8 @@
+   Compiling thiserror v2.0.18
+   Compiling thiserror-impl v2.0.18
+GOLDEN_FNV1A64 8195cd77cacfd2c3 len=29802
+CROSSCHECK ok=3000 bad=0
+TIMING n=200000 window=250 sum=265.983ms last=Some(Float64(118912.53438141673))
+TIMING n=200000 window=250 mean=271.391ms last=Some(Float64(475.65013752566693))
+TIMING n=200000 window=250 var=319.231ms last=Some(Float64(10486.075315921025))
+TIMING n=200000 window=250 std=286.732ms last=Some(Float64(102.40153961694631))

@@ -1,0 +1,5 @@
+rolling_n=100000 expanding_n=8000 window=50
+rolling skew  OLD    10.125 ms -> NEW    13.481 ms = 0.75x
+rolling kurt  OLD     9.011 ms -> NEW     9.734 ms = 0.93x
+expanding skew OLD    68.041 ms -> NEW    68.730 ms = 0.99x
+expanding kurt OLD    67.856 ms -> NEW    69.257 ms = 0.98x

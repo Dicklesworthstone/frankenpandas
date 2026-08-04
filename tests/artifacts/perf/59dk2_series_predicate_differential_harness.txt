@@ -1,0 +1,39 @@
+br-frankenpandas-59dk2 — differential property harness for Series predicate fast paths
+=======================================================================================
+
+Motivation: the swarm added many typed/validity fast paths to Series predicates
+— is_monotonic_increasing/decreasing (z53ed), hasnans (2jibm), is_unique
+null_count (160km), plus int64 paths — each with per-method unit tests but NO
+cross-cutting differential test. A subtle dtype / NaN / NaT / null edge case in
+any fast path could silently diverge from the Scalar-path semantics.
+
+Harness (test fp-frame: series_predicate_fast_paths_match_scalar_reference_59dk2):
+deterministic seeded LCG (no external rand crate, no mocks, reproducible). For
+3000 iterations it generates a Series across Int64 / Float64 / Bool / Utf8 /
+Datetime64, with random length (0..12), random null injection, random Float64
+NaN, random Datetime64 NaT, a small value range (ties / duplicates / equal
+adjacents), and a 1/3 forced-sorted variant. For each Series it asserts the
+fast-pathed method equals an INDEPENDENT reference computed from the column's own
+materialized Scalar values (the pre-optimization semantics):
+
+  hasnans()                == values().any(is_missing)
+  is_monotonic_increasing()== len<=1 || (no missing && all adjacent semantic_le)
+  is_monotonic_decreasing()== len<=1 || (no missing && all adjacent semantic_ge)
+  is_unique()              == (nunique() == len - null_count) && null_count <= 1
+                              where null_count = values().filter(is_missing).count()
+                              (the pre-160km formula)
+
+References read the column's own values() so they reflect exactly what the
+methods see after any construction-time normalization — a true fast-path-vs-
+reference differential.
+
+Result: PASS (1 passed; 3000 iterations × 5 dtypes). No divergence — all fast
+paths are bit-identical to the Scalar reference. The harness now guards against
+future regressions in this predicate family.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-frame series_predicate_fast_paths_match_scalar_reference_59dk2 -> 1 passed
+  cargo test -p fp-frame (full)  -> all passed, 0 failed
+  ubs crates/fp-frame/src/lib.rs -> no finding references the new test lines
+                                    (~626 whole-file criticals = documented FP
+                                    inventory, UBS_TRIAGE.md).

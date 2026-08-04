@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-uza0448-before/release-perf/join-bench --str-ordered --join inner --rows 5000000 --right-rows 5000000 --iters 200 --warmup 20",
+      "mean": 1.6649228896850001,
+      "stddev": 0.08450438012587709,
+      "median": 1.6786965925600001,
+      "user": 0.72635137,
+      "system": 0.9363787899999999,
+      "min": 1.48774522006,
+      "max": 1.77398904306,
+      "times": [
+        1.72573768106,
+        1.77398904306,
+        1.68265129106,
+        1.65376761306,
+        1.6951934880600001,
+        1.67474189406,
+        1.6255568870600001,
+        1.48774522006
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,204 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+#
+# Total Lost Samples: 0
+#
+# Samples: 872  of event 'cycles:P'
+# Event count (approx.): 3114155281
+#
+# Overhead  Shared Object     Symbol                                                                                              IPC   [IPC Coverage]
+# ........  ................  ..................................................................................................  ....................
+#
+    70.29%  perf_profile      [.] <fp_columnar::Column>::take_positions                                                           -      -
+            |
+            |--22.58%--<fp_columnar::Column>::take_positions
+            |          |
+            |          |--6.56%--ptr<alloc::alloc::Global, f64> (inlined)
+            |          |          ptr<f64, alloc::alloc::Global> (inlined)
+            |          |          as_mut_ptr<f64, alloc::alloc::Global> (inlined)
+            |          |          push_mut<f64, alloc::alloc::Global> (inlined)
+            |          |          push<f64, alloc::alloc::Global> (inlined)
+            |          |          take_cached_all_valid_float64_positions (inlined)
+            |          |          take_positions (inlined)
+            |          |          0x100f
+            |          |
+            |          |--5.06%--take_positions (inlined)
+            |          |          0x100f
+            |          |
+            |          |--4.03%--push<f64, alloc::alloc::Global> (inlined)
+            |          |          take_cached_all_valid_float64_positions (inlined)
+            |          |          take_positions (inlined)
+            |          |          0x100f
+            |          |
+            |          |--3.80%--next<usize> (inlined)
+            |          |          take_cached_all_valid_float64_positions (inlined)
+            |          |          take_positions (inlined)
+            |          |          |
+            |          |           --3.67%--0x100f
+            |          |
+            |           --3.13%--push_mut<f64, alloc::alloc::Global> (inlined)
+            |                     push<f64, alloc::alloc::Global> (inlined)
+            |                     take_cached_all_valid_float64_positions (inlined)
+            |                     take_positions (inlined)
+            |                     0x100f
+            |
+            |--21.55%--take_cached_all_valid_float64_positions (inlined)
+            |          take_positions (inlined)
+            |          0x100f
+            |
+            |--15.65%--push_mut<f64, alloc::alloc::Global> (inlined)
+            |          push<f64, alloc::alloc::Global> (inlined)
+            |          take_cached_all_valid_float64_positions (inlined)
+            |          take_positions (inlined)
+            |          |
+            |           --15.52%--0x100f
+            |
+             --10.50%--non_null<alloc::alloc::Global, f64> (inlined)
+                       ptr<alloc::alloc::Global, f64> (inlined)
+                       ptr<f64, alloc::alloc::Global> (inlined)
+                       as_mut_ptr<f64, alloc::alloc::Global> (inlined)
+                       push_mut<f64, alloc::alloc::Global> (inlined)
+                       push<f64, alloc::alloc::Global> (inlined)
+                       take_cached_all_valid_float64_positions (inlined)
+                       take_positions (inlined)
+                       0x100f
+
+    17.48%  perf_profile      [.] <fp_frame::DataFrame>::loc_bool                                                                 -      -
+            |
+            |--9.39%--<fp_frame::DataFrame>::loc_bool
+            |          |
+            |          |--3.04%--len (inlined)
+            |          |          len (inlined)
+            |          |          |
+            |          |          |--1.71%--take_rows_by_positions (inlined)
+            |          |          |          loc_bool (inlined)
+            |          |          |
+            |          |           --1.33%--len (inlined)
+            |          |                     take_rows_by_positions (inlined)
+            |          |                     loc_bool (inlined)
+            |          |
+            |          |--1.29%--next<bool> (inlined)
+            |          |          try_fold<core::slice::iter::Iter<bool>, (), core::iter::adapters::enumerate::{impl#1}::try_fold::enumerate::{closure_env#0}<&bool, (), core::ops::control_flow::ControlFlow<usize, ()>, core::iter::traits::iterator::Iterator::find_map::check::{closure_env#0}<(usize, &bool), usize, &mut fp_frame::{impl#62}::loc_bool::{closure_env#0}>>, core::ops::control_flow::ControlFlow<usize, ()>> (inlined)
+            |          |          try_fold<core::slice::iter::Iter<bool>, (), core::iter::traits::iterator::Iterator::find_map::check::{closure_env#0}<(usize, &bool), usize, &mut fp_frame::{impl#62}::loc_bool::{closure_env#0}>, core::ops::control_flow::ControlFlow<usize, ()>> (inlined)
+            |          |          find_map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, usize, &mut fp_frame::{impl#62}::loc_bool::{closure_env#0}> (inlined)
+            |          |          next<usize, core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}> (inlined)
+            |          |          extend_desugared<usize, alloc::alloc::Global, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          spec_extend<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::alloc::Global> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          collect<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::vec::Vec<usize, alloc::alloc::Global>> (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |          |--0.95%--extend_desugared<usize, alloc::alloc::Global, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          spec_extend<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::alloc::Global> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          collect<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::vec::Vec<usize, alloc::alloc::Global>> (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |          |--0.91%--next<usize> (inlined)
+            |          |          take_rows_by_positions (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |          |--0.81%--load (inlined)
+            |          |          is_completed (inlined)
+            |          |          is_completed (inlined)
+            |          |          initialized<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+            |          |          get<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+            |          |          len (inlined)
+            |          |          len (inlined)
+            |          |          len (inlined)
+            |          |          take_rows_by_positions (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |          |--0.76%--spec_extend<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::alloc::Global> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          collect<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::vec::Vec<usize, alloc::alloc::Global>> (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |          |--0.67%--try_fold<core::slice::iter::Iter<bool>, (), core::iter::traits::iterator::Iterator::find_map::check::{closure_env#0}<(usize, &bool), usize, &mut fp_frame::{impl#62}::loc_bool::{closure_env#0}>, core::ops::control_flow::ControlFlow<usize, ()>> (inlined)
+            |          |          find_map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, usize, &mut fp_frame::{impl#62}::loc_bool::{closure_env#0}> (inlined)
+            |          |          next<usize, core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}> (inlined)
+            |          |          extend_desugared<usize, alloc::alloc::Global, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          spec_extend<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::alloc::Global> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          |          collect<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::vec::Vec<usize, alloc::alloc::Global>> (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |           --0.54%--loc_bool (inlined)
+            |
+            |--3.10%--extend_desugared<usize, alloc::alloc::Global, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          spec_extend<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::alloc::Global> (inlined)
+            |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          collect<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::vec::Vec<usize, alloc::alloc::Global>> (inlined)
+            |          loc_bool (inlined)
+            |
+            |--2.71%--try_fold<core::slice::iter::Iter<bool>, (), core::iter::adapters::enumerate::{impl#1}::try_fold::enumerate::{closure_env#0}<&bool, (), core::ops::control_flow::ControlFlow<usize, ()>, core::iter::traits::iterator::Iterator::find_map::check::{closure_env#0}<(usize, &bool), usize, &mut fp_frame::{impl#62}::loc_bool::{closure_env#0}>>, core::ops::control_flow::ControlFlow<usize, ()>> (inlined)
+            |          try_fold<core::slice::iter::Iter<bool>, (), core::iter::traits::iterator::Iterator::find_map::check::{closure_env#0}<(usize, &bool), usize, &mut fp_frame::{impl#62}::loc_bool::{closure_env#0}>, core::ops::control_flow::ControlFlow<usize, ()>> (inlined)
+            |          find_map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, usize, &mut fp_frame::{impl#62}::loc_bool::{closure_env#0}> (inlined)
+            |          next<usize, core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}> (inlined)
+            |          extend_desugared<usize, alloc::alloc::Global, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          spec_extend<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::alloc::Global> (inlined)
+            |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+            |          collect<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::vec::Vec<usize, alloc::alloc::Global>> (inlined)
+            |          loc_bool (inlined)
+            |
+            |--0.80%--len (inlined)
+            |          len (inlined)
+            |          len (inlined)
+            |          take_rows_by_positions (inlined)
+            |          loc_bool (inlined)
+            |
+            |--0.67%--take_rows_by_positions (inlined)
+            |          loc_bool (inlined)
+            |
+             --0.54%--from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+                       from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+                       from_iter<usize, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>> (inlined)
+                       collect<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<bool>>, fp_frame::{impl#62}::loc_bool::{closure_env#0}>, alloc::vec::Vec<usize, alloc::alloc::Global>> (inlined)
+                       loc_bool (inlined)
+
+     5.60%  perf_profile      [.] <fp_frame::DataFrame>::take_rows_by_positions_unchecked                                         -      -
+            |
+             --4.93%--<fp_frame::DataFrame>::take_rows_by_positions_unchecked
+                       |
+                       |--1.20%--0x100f
+                       |
+                       |--0.80%--push<i64, alloc::alloc::Global> (inlined)
+                       |          <fp_frame::DataFrame>::take_rows_by_positions_unchecked
+                       |          0x100f
+                       |
+                       |--0.79%--next<usize> (inlined)
+                       |          <fp_frame::DataFrame>::take_rows_by_positions_unchecked
+                       |          0x100f
+                       |
+                        --0.67%--<fp_frame::DataFrame>::take_rows_by_positions_unchecked
+                                  0x100f
+
+     0.95%  [unknown]         [k] 0xffffffff84c01192                                                                              -      -
+     0.53%  [unknown]         [k] 0xffffffff8621b2b7                                                                              -      -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

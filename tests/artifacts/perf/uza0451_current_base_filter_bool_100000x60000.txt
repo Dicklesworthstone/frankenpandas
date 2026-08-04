@@ -1,0 +1,3 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavenderstone-uza0451-base/release-perf/examples/perf_profile filter_bool 100000 60000
+  Time (mean ± σ):     175.3 ms ±   8.9 ms    [User: 162.4 ms, System: 12.4 ms]
+  Range (min … max):   159.3 ms … 186.7 ms    10 runs

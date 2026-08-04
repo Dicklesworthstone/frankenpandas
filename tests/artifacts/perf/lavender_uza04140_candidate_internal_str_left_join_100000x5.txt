@@ -1,0 +1,2 @@
+perf_profile: scenario=str_left_join n=100000 iters=5
+perf_profile: done 5 iters in 0.167s (33.424 ms/iter), sink=500000

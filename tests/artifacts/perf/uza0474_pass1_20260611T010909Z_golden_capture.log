@@ -1,0 +1,6 @@
+$ /data/projects/.scratch/cargo-target-orangepeak-uza0474-base/release-perf/examples/perf_profile golden filter_bool 1000 > tests/artifacts/perf/uza0474_pass1_20260611T010909Z_golden_filter_bool_1000.txt
+$ /data/projects/.scratch/cargo-target-orangepeak-uza0474-base/release-perf/examples/perf_profile golden filter_bool 100000 > tests/artifacts/perf/uza0474_pass1_20260611T010909Z_golden_filter_bool_100000.txt
+$ sha256sum tests/artifacts/perf/uza0474_pass1_20260611T010909Z_golden_filter_bool_1000.txt tests/artifacts/perf/uza0474_pass1_20260611T010909Z_golden_filter_bool_100000.txt > tests/artifacts/perf/uza0474_pass1_20260611T010909Z_golden_sha256.txt
+$ sha256sum -c tests/artifacts/perf/uza0474_pass1_20260611T010909Z_golden_sha256.txt
+tests/artifacts/perf/uza0474_pass1_20260611T010909Z_golden_filter_bool_1000.txt: OK
+tests/artifacts/perf/uza0474_pass1_20260611T010909Z_golden_filter_bool_100000.txt: OK

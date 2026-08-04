@@ -1,0 +1,739 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 170  of event 'cycles:P'
+# Event count (approx.): 362371093
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                                                                                              IPC   [IPC Coverage]
+# ........  ..................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    20.02%  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -            
+            |          
+            |--12.24%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          <std::sys::sync::once::futex::Once>::call
+            |          <std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+            |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+            |          fp_join::merge_single_key_inner_unsorted
+            |          fp_join::merge_dataframes
+            |          join_bench::merge_once
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --7.77%--__memcmp_avx2_movbe
+                       <std::sys::sync::once::futex::Once>::call
+                       <std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                       <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes
+                       join_bench::merge_once
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+    16.93%  [.] join_bench::build_ordered_utf8_frame                                                                                                                                                                                                                                                                                                                                            -      -            
+            |          
+            |--6.03%--join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--3.39%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--1.56%--0xffffffff853a557b
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--1.41%--0xffffffff84c00b90
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--1.15%--0xffffffff8536b5d4
+            |          0xffffffff853ddbdb
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--1.09%--0xffffffff84c015e5
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --1.00%--0xffffffff861f6570
+                       0xffffffff85392d40
+                       0xffffffff84feb92c
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       join_bench::build_ordered_utf8_frame
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     8.89%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                                                                                    -      -            
+            |          
+            |--6.36%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --2.31%--__memmove_avx_unaligned_erms
+                       join_bench::build_ordered_utf8_frame
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     4.48%  [k] 0xffffffff84c01192                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--2.10%--join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--1.22%--0xffffffff8541a976
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --1.16%--0xffffffff853a37d1
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+                       join_bench::build_ordered_utf8_frame
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     4.38%  [k] 0xffffffff8621b2b7                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--3.08%--0xffffffff84c01199
+            |          |          
+            |          |--1.98%--__memmove_avx_unaligned_erms
+            |          |          join_bench::build_ordered_utf8_frame
+            |          |          join_bench::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main@@GLIBC_2.34
+            |          |          _start
+            |          |          
+            |           --1.10%--join_bench::build_ordered_utf8_frame
+            |                     join_bench::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |                     std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |          
+             --1.30%--0xffffffff8545555b
+                       0xffffffff853a5723
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+                       join_bench::build_ordered_utf8_frame
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     3.46%  [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                                                                                                                             -      -            
+            |          
+            |--2.31%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          <std::sys::sync::once::futex::Once>::call
+            |          <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+            |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+            |          fp_join::merge_single_key_inner_unsorted
+            |          fp_join::merge_dataframes
+            |          join_bench::merge_once
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --1.15%--__memcmp_avx2_movbe
+                       <std::sys::sync::once::futex::Once>::call
+                       <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+                       <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes
+                       join_bench::merge_once
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     3.03%  [k] 0xffffffff85452e2d                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --2.24%--0xffffffff8539b7d0
+                       0xffffffff8539c06e
+                       0xffffffff8539c594
+                       0xffffffff8539cb30
+                       0xffffffff8539cd76
+                       0xffffffff8539cea1
+                       0xffffffff853c9742
+                       0xffffffff853cb02c
+                       0xffffffff853cc7f5
+                       0xffffffff853cc961
+                       0xffffffff853ceac8
+                       0xffffffff853aa42b
+                       0xffffffff84f24dad
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __munmap
+                       <fp_columnar::ScalarValues>::lazy_contiguous_utf8
+                       join_bench::build_ordered_utf8_frame
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     2.49%  [k] 0xffffffff853dad7e                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __default_morecore@GLIBC_2.2.5
+               systrim.constprop.0
+               _int_free_chunk
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     2.30%  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}                                                                                                       -      -            
+            |
+            ---<std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     2.17%  [k] 0xffffffff853dc6c9                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     2.10%  [k] 0xffffffff85452de9                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __default_morecore@GLIBC_2.2.5
+               systrim.constprop.0
+               _int_free_chunk
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.65%  [k] 0xffffffff853d7d8d                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853d8f99
+               0xffffffff853d9102
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.63%  [k] 0xffffffff853b8398                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.56%  [k] 0xffffffff85452ccf                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --1.55%--0xffffffff84c01199
+                       join_bench::build_ordered_utf8_frame
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.55%  [.] join_bench::add_numeric_checksum                                                                                                                                                                                                                                                                                                                                                -      -            
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.51%  [k] 0xffffffff853a37a5                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.45%  [k] 0xffffffff853a3847                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.42%  [k] 0xffffffff86228a3e                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.39%  [k] 0xffffffff853d257a                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853d43b0
+               0xffffffff853db06b
+               0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <fp_columnar::ScalarValues>::lazy_contiguous_utf8
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.35%  [k] 0xffffffff84d0410b                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --1.23%--__memmove_avx_unaligned_erms
+                       join_bench::build_ordered_utf8_frame
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.34%  [k] 0xffffffff853a3879                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.29%  [k] 0xffffffff853a33da                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.25%  [k] 0xffffffff85452de1                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.18%  [k] 0xffffffff85392d3b                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff85458faf
+               0xffffffff853a33ec
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.17%  [k] 0xffffffff853dda9c                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.16%  [k] 0xffffffff853a4efc                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853a3790
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.15%  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}                                                          -      -            
+            |
+            ---<std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.11%  [k] 0xffffffff85452c7f                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.03%  [k] 0xffffffff853d43ec                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <fp_columnar::Column>::from_f64_values
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.03%  [k] 0xffffffff85456d80                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

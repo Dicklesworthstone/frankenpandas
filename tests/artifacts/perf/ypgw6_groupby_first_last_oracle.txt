@@ -1,0 +1,23 @@
+br-frankenpandas-ypgw6 — oracle differential for fp-groupby dense Int64 first/last
+==================================================================================
+
+Companion to k3zcv (sum/count/min/max). groupby_first/last carry ROW-ORDER
+(positional) semantics distinct from the order-insensitive reductions, so they
+warrant their own independent-oracle check.
+
+Harness (test fp-groupby: dense_int64_groupby_first_last_matches_handcomputed_oracle_ypgw6):
+deterministic seeded LCG (no rand crate, no mocks). For 1200 iterations it builds
+all-valid Int64 key+value Series (identity-aligned index, key range -2..2 for
+multi-row groups) and asserts groupby_first/groupby_last equal a hand-computed
+reference that groups rows by key while PRESERVING ROW ORDER
+(std BTreeMap<i64, Vec<i64>>; ascending keys = pandas default):
+  groupby_first -> index labels == sorted keys, values == per-group group[0]
+  groupby_last  -> values == per-group group[last]
+
+Result: PASS (1 passed; 1200 iterations). The dense first/last paths preserve
+within-group row order exactly, matching the independent oracle.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-groupby dense_int64_groupby_first_last_matches_handcomputed_oracle_ypgw6 -> 1 passed
+  cargo test -p fp-groupby (full)  -> all passed, 0 failed
+  ubs crates/fp-groupby/src/lib.rs -> 0 critical

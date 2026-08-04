@@ -267,10 +267,21 @@ pub struct GalaxyBrainCard {
 impl GalaxyBrainCard {
     #[must_use]
     pub fn render_plain(&self) -> String {
-        format!(
-            "[{}]\n{}\n{}\n{}",
-            self.title, self.equation, self.substitution, self.intuition
-        )
+        let capacity = self.title.len()
+            + self.equation.len()
+            + self.substitution.len()
+            + self.intuition.len()
+            + 5;
+        let mut rendered = String::with_capacity(capacity);
+        rendered.push('[');
+        rendered.push_str(&self.title);
+        rendered.push_str("]\n");
+        rendered.push_str(&self.equation);
+        rendered.push('\n');
+        rendered.push_str(&self.substitution);
+        rendered.push('\n');
+        rendered.push_str(&self.intuition);
+        rendered
     }
 }
 
@@ -568,7 +579,7 @@ impl RaptorQEnvelope {
     ) -> Self {
         let symbol_hashes: Vec<String> = source_bytes
             .chunks(DEFAULT_RAPTORQ_SYMBOL_BYTES)
-            .map(|chunk| format!("sha256:{}", sha256_hex(chunk)))
+            .map(sha256_prefixed_hex)
             .collect();
         let k = u32::try_from(symbol_hashes.len()).unwrap_or(u32::MAX);
         let overhead_ratio = if k == 0 {
@@ -580,7 +591,7 @@ impl RaptorQEnvelope {
         Self {
             artifact_id: artifact_id.into(),
             artifact_type: artifact_type.into(),
-            source_hash: format!("sha256:{}", sha256_hex(source_bytes)),
+            source_hash: sha256_prefixed_hex(source_bytes),
             raptorq: RaptorQMetadata {
                 k,
                 repair_symbols,
@@ -609,7 +620,7 @@ impl RaptorQEnvelope {
 
 #[must_use]
 pub fn semantic_fingerprint_bytes(bytes: &[u8]) -> String {
-    format!("sha256:{}", sha256_hex(bytes))
+    sha256_prefixed_hex(bytes)
 }
 
 #[derive(Debug)]
@@ -637,23 +648,41 @@ impl SemanticFingerprintBuilder {
 
     #[must_use]
     pub fn finish(self) -> String {
-        format!("sha256:{}", sha256_digest_hex(self.hasher.finalize()))
+        let digest = self.hasher.finalize();
+        let mut output = String::with_capacity(7 + 64);
+        output.push_str("sha256:");
+        append_sha256_digest_hex(&mut output, digest);
+        output
     }
 }
 
+#[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     sha256_digest_hex(digest)
 }
 
+fn sha256_prefixed_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(7 + 64);
+    hex.push_str("sha256:");
+    append_sha256_digest_hex(&mut hex, digest);
+    hex
+}
+
+#[cfg(test)]
 fn sha256_digest_hex(digest: impl IntoIterator<Item = u8>) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut hex = String::with_capacity(64);
+    append_sha256_digest_hex(&mut hex, digest);
+    hex
+}
+
+fn append_sha256_digest_hex(hex: &mut String, digest: impl IntoIterator<Item = u8>) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in digest {
         hex.push(char::from(HEX[usize::from(byte >> 4)]));
         hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    hex
 }
 
 // === Conformal Calibration for Decision Engine (bd-2t5e.9, AG-09) ===
@@ -675,6 +704,19 @@ fn normalize_conformal_alpha(alpha: f64) -> f64 {
     } else {
         DEFAULT_CONFORMAL_ALPHA
     }
+}
+
+fn select_conformal_quantile(mut scores: Vec<f64>, alpha: f64) -> Option<f64> {
+    if scores.len() < 2 {
+        return None;
+    }
+    // Quantile at level (1 - alpha)(1 + 1/n) per split conformal prediction.
+    let n = scores.len() as f64;
+    let level = (1.0 - normalize_conformal_alpha(alpha)) * (1.0 + 1.0 / n);
+    let idx = (level * n).ceil() as usize;
+    let idx = idx.min(scores.len()).saturating_sub(1);
+    let (_, quantile, _) = scores.select_nth_unstable_by(idx, f64::total_cmp);
+    Some(*quantile)
 }
 
 /// Conformal prediction set: which actions are admissible at significance level alpha.
@@ -731,22 +773,13 @@ impl ConformalGuard {
     /// Returns None if the window has fewer than 2 scores.
     #[must_use]
     pub fn conformal_quantile(&self) -> Option<f64> {
-        let mut sorted: Vec<f64> = self
+        let finite = self
             .scores
             .iter()
             .copied()
             .filter(|score| score.is_finite())
             .collect();
-        if sorted.len() < 2 {
-            return None;
-        }
-        sorted.sort_by(f64::total_cmp);
-        // Quantile at level (1 - alpha)(1 + 1/n) per split conformal prediction
-        let n = sorted.len() as f64;
-        let level = (1.0 - normalize_conformal_alpha(self.alpha)) * (1.0 + 1.0 / n);
-        let idx = (level * n).ceil() as usize;
-        let idx = idx.min(sorted.len()).saturating_sub(1);
-        Some(sorted[idx])
+        select_conformal_quantile(finite, self.alpha)
     }
 
     /// Evaluate a decision record against the conformal guard.
@@ -755,7 +788,8 @@ impl ConformalGuard {
         self.normalize_runtime_config();
         let score = nonconformity_score(record);
 
-        let quantile = self.conformal_quantile();
+        debug_assert!(self.scores.iter().all(|score| score.is_finite()));
+        let quantile = select_conformal_quantile(self.scores.clone(), self.alpha);
 
         // Add score to calibration window (rolling)
         if self.scores.len() >= self.window_size {
@@ -877,12 +911,466 @@ mod tests {
     use serde::Serialize;
 
     use super::{
-        ConformalGuard, DecisionAction, EvidenceLedger, RaptorQEnvelope, RuntimeMode,
-        RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord, decision_to_card,
+        ConformalGuard, DecisionAction, EvidenceLedger, GalaxyBrainCard, RaptorQEnvelope,
+        RuntimeMode, RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord, decision_to_card,
     };
 
     const ASUPERSYNC_PACKET_ID: &str = "ASUPERSYNC-E";
     const REPLAY_PREFIX: &str = "cargo test -p fp-runtime --";
+
+    /// br-frankenpandas-01gdm: semantic_fingerprint_bytes underpins reproducibility
+    /// ledgers / RaptorQ provenance. Known-answer SHA-256 vectors prove it's the
+    /// real hash (not a stub), plus determinism, format, and builder equivalence.
+    #[test]
+    fn semantic_fingerprint_sha256_known_answers_01gdm() {
+        // Standard SHA-256 known-answer vectors.
+        assert_eq!(
+            super::semantic_fingerprint_bytes(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            super::semantic_fingerprint_bytes(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        // Format: "sha256:" + 64 lowercase hex chars; deterministic.
+        let f = super::semantic_fingerprint_bytes(b"frankenpandas");
+        assert!(f.starts_with("sha256:"), "prefix");
+        assert_eq!(f.len(), 7 + 64, "length");
+        assert!(
+            f[7..]
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+            "lowercase hex"
+        );
+        assert_eq!(
+            f,
+            super::semantic_fingerprint_bytes(b"frankenpandas"),
+            "deterministic"
+        );
+
+        // Distinctness on a small sample (no collisions).
+        let inputs: [&[u8]; 5] = [b"a", b"b", b"ab", b"ba", b""];
+        for (i, x) in inputs.iter().enumerate() {
+            for (j, y) in inputs.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        super::semantic_fingerprint_bytes(x),
+                        super::semantic_fingerprint_bytes(y),
+                        "distinct {i} vs {j}"
+                    );
+                }
+            }
+        }
+
+        // Builder (chunked update) == one-shot over the concatenation.
+        let mut b = super::SemanticFingerprintBuilder::new();
+        b.update(b"hello");
+        b.update(b" ");
+        b.update(b"world");
+        assert_eq!(
+            b.finish(),
+            super::semantic_fingerprint_bytes(b"hello world")
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn raptorq_prefixed_sha256_single_buffer_ab_qfz4j() {
+        fn former(bytes: &[u8]) -> String {
+            format!("sha256:{}", super::sha256_hex(bytes))
+        }
+
+        fn one_buffer(bytes: &[u8]) -> String {
+            super::sha256_prefixed_hex(bytes)
+        }
+
+        fn elapsed(source: &[u8], hash: impl Fn(&[u8]) -> String) -> u128 {
+            let start = Instant::now();
+            let mut digest = 0_usize;
+            for chunk in source.chunks(super::DEFAULT_RAPTORQ_SYMBOL_BYTES) {
+                digest = digest.wrapping_add(black_box(hash(black_box(chunk))).len());
+            }
+            black_box(digest);
+            start.elapsed().as_nanos()
+        }
+
+        fn median(values: &mut [u128]) -> u128 {
+            values.sort_unstable();
+            values[values.len() / 2]
+        }
+
+        for len in [0, 1, 31, 1_023, 1_024, 1_025, 4_097] {
+            let bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            assert_eq!(former(&bytes), one_buffer(&bytes));
+        }
+
+        let source: Vec<u8> = (0..4 * 1_024 * 1_024)
+            .map(|i| ((i * 131 + i / 17) % 251) as u8)
+            .collect();
+        for chunk in source.chunks(super::DEFAULT_RAPTORQ_SYMBOL_BYTES) {
+            assert_eq!(former(chunk), one_buffer(chunk));
+        }
+
+        for _ in 0..2 {
+            black_box(elapsed(&source, former));
+            black_box(elapsed(&source, one_buffer));
+        }
+
+        let mut former_samples = Vec::with_capacity(18);
+        let mut candidate_samples = Vec::with_capacity(18);
+        for block in 0..9 {
+            if block % 2 == 0 {
+                former_samples.push(elapsed(&source, former));
+                candidate_samples.push(elapsed(&source, one_buffer));
+                candidate_samples.push(elapsed(&source, one_buffer));
+                former_samples.push(elapsed(&source, former));
+            } else {
+                candidate_samples.push(elapsed(&source, one_buffer));
+                former_samples.push(elapsed(&source, former));
+                former_samples.push(elapsed(&source, former));
+                candidate_samples.push(elapsed(&source, one_buffer));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "RAPTORQ_HASH_AB bytes={} symbols={} former_p50_ns={} candidate_p50_ns={} ratio={:.6}",
+            source.len(),
+            source.len() / super::DEFAULT_RAPTORQ_SYMBOL_BYTES,
+            former_p50,
+            candidate_p50,
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("RAPTORQ_HASH_AB former_samples_ns={former_samples:?}");
+        eprintln!("RAPTORQ_HASH_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn semantic_fingerprint_one_buffer_ab_9yiey() {
+        const BATCH: usize = 2_048;
+        const BLOCKS: usize = 10;
+
+        fn former(bytes: &[u8]) -> String {
+            format!("sha256:{}", super::sha256_hex(bytes))
+        }
+
+        fn candidate(bytes: &[u8]) -> String {
+            super::semantic_fingerprint_bytes(bytes)
+        }
+
+        fn elapsed(bytes: &[u8], fingerprint: fn(&[u8]) -> String) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_u8;
+            for _ in 0..BATCH {
+                let output = black_box(fingerprint(black_box(bytes)));
+                digest ^= output.as_bytes()[70];
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        }
+
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        for len in [0, 1, 31, 64, 65, 1_024, 1_025] {
+            let bytes = (0..len)
+                .map(|i| ((i * 131 + i / 7) % 251) as u8)
+                .collect::<Vec<_>>();
+            assert_eq!(former(&bytes), candidate(&bytes));
+        }
+
+        let bytes = (0..64)
+            .map(|i| ((i * 131 + i / 7) % 251) as u8)
+            .collect::<Vec<_>>();
+        for _ in 0..2 {
+            black_box(elapsed(&bytes, former));
+            black_box(elapsed(&bytes, candidate));
+        }
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut candidate_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&bytes, former));
+                candidate_samples.push(elapsed(&bytes, candidate));
+                candidate_samples.push(elapsed(&bytes, candidate));
+                former_samples.push(elapsed(&bytes, former));
+            } else {
+                candidate_samples.push(elapsed(&bytes, candidate));
+                former_samples.push(elapsed(&bytes, former));
+                former_samples.push(elapsed(&bytes, former));
+                candidate_samples.push(elapsed(&bytes, candidate));
+            }
+        }
+
+        let former_p50 = percentile(&mut former_samples, 50);
+        let candidate_p50 = percentile(&mut candidate_samples, 50);
+        let former_p95 = percentile(&mut former_samples, 95);
+        let candidate_p95 = percentile(&mut candidate_samples, 95);
+        eprintln!(
+            "SEMANTIC_FINGERPRINT_AB bytes={} batch={BATCH} samples={} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95}",
+            bytes.len(),
+            BLOCKS * 2,
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("SEMANTIC_FINGERPRINT_AB former_samples_ns={former_samples:?}");
+        eprintln!("SEMANTIC_FINGERPRINT_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn semantic_fingerprint_builder_finish_one_buffer_ab_88cuv() {
+        const BATCH: usize = 2_048;
+        const BLOCKS: usize = 10;
+
+        fn former(hasher: super::Sha256) -> String {
+            format!(
+                "sha256:{}",
+                super::sha256_digest_hex(super::Digest::finalize(hasher))
+            )
+        }
+
+        fn candidate(hasher: super::Sha256) -> String {
+            super::SemanticFingerprintBuilder { hasher }.finish()
+        }
+
+        fn seeded_hasher(len: usize) -> super::Sha256 {
+            let mut hasher = <super::Sha256 as super::Digest>::new();
+            let bytes = (0..len)
+                .map(|i| ((i * 131 + i / 7) % 251) as u8)
+                .collect::<Vec<_>>();
+            super::Digest::update(&mut hasher, &bytes);
+            hasher
+        }
+
+        fn elapsed(template: &super::Sha256, finish: fn(super::Sha256) -> String) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_u8;
+            for _ in 0..BATCH {
+                let output = black_box(finish(black_box(template.clone())));
+                digest ^= output.as_bytes().last().copied().unwrap_or_default();
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        }
+
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        for len in [0, 1, 31, 64, 65, 1_024, 1_025] {
+            let template = seeded_hasher(len);
+            assert_eq!(former(template.clone()), candidate(template));
+        }
+
+        let template = seeded_hasher(64);
+        for _ in 0..2 {
+            black_box(elapsed(&template, former));
+            black_box(elapsed(&template, candidate));
+        }
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut candidate_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&template, former));
+                candidate_samples.push(elapsed(&template, candidate));
+                candidate_samples.push(elapsed(&template, candidate));
+                former_samples.push(elapsed(&template, former));
+            } else {
+                candidate_samples.push(elapsed(&template, candidate));
+                former_samples.push(elapsed(&template, former));
+                former_samples.push(elapsed(&template, former));
+                candidate_samples.push(elapsed(&template, candidate));
+            }
+        }
+
+        let former_p50 = percentile(&mut former_samples, 50);
+        let candidate_p50 = percentile(&mut candidate_samples, 50);
+        let former_p95 = percentile(&mut former_samples, 95);
+        let candidate_p95 = percentile(&mut candidate_samples, 95);
+        eprintln!(
+            "SEMANTIC_BUILDER_FINISH_AB bytes=64 batch={BATCH} samples={} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95}",
+            BLOCKS * 2,
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("SEMANTIC_BUILDER_FINISH_AB former_samples_ns={former_samples:?}");
+        eprintln!("SEMANTIC_BUILDER_FINISH_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
+    fn semantic_fingerprint_streaming_equals_oneshot_h2i8m() {
+        // Metamorphic (br-frankenpandas-h2i8m): chunked SemanticFingerprintBuilder
+        // updates == one-shot over the concatenation, for arbitrary bytes and chunk
+        // boundaries (generalizes the fixed 3-chunk case in 01gdm). Seeded LCG.
+        let mut st: u64 = 0x4f1e_0b1c_2d3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for iter in 0..400u32 {
+            let total = (next() % 40) as usize;
+            let bytes: Vec<u8> = (0..total).map(|_| (next() % 256) as u8).collect();
+            // Split into chunks at random boundaries (some possibly empty).
+            let mut builder = super::SemanticFingerprintBuilder::new();
+            let mut pos = 0usize;
+            while pos < bytes.len() {
+                let remaining = bytes.len() - pos;
+                let take = (next() as usize % (remaining + 1)).min(remaining);
+                builder.update(&bytes[pos..pos + take]);
+                pos += take;
+                if take == 0 {
+                    // Avoid infinite loop on a zero-take; force progress.
+                    builder.update(&bytes[pos..pos + 1.min(bytes.len() - pos)]);
+                    pos += 1;
+                }
+            }
+            assert_eq!(
+                builder.finish(),
+                super::semantic_fingerprint_bytes(&bytes),
+                "streaming==one-shot iter={iter} total={total}"
+            );
+        }
+    }
+
+    /// br-frankenpandas-b9vvk: RaptorQ provenance envelopes (AGENTS.md
+    /// RaptorQ-Everywhere mandate). Structural invariants of from_source_bytes.
+    #[test]
+    fn raptorq_envelope_from_source_bytes_invariants_b9vvk() {
+        let sym = super::DEFAULT_RAPTORQ_SYMBOL_BYTES;
+        let repair = 3u32;
+        for &len in &[0usize, 1, sym, sym + 1, 3 * sym - 72] {
+            let source: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let env = RaptorQEnvelope::from_source_bytes("pkt-1", "conformance", &source, repair);
+
+            let expected_k = len.div_ceil(sym) as u32; // chunk count (0 for empty)
+            assert_eq!(env.raptorq.k, expected_k, "k for len={len}");
+            assert_eq!(
+                env.raptorq.symbol_hashes.len() as u32,
+                expected_k,
+                "one symbol hash per source symbol, len={len}"
+            );
+            assert_eq!(
+                env.raptorq.repair_symbols, repair,
+                "repair_symbols len={len}"
+            );
+            assert_eq!(
+                env.source_hash,
+                super::semantic_fingerprint_bytes(&source),
+                "source_hash == fingerprint, len={len}"
+            );
+            let expected_overhead = if expected_k == 0 {
+                0.0
+            } else {
+                f64::from(repair) / f64::from(expected_k)
+            };
+            assert_eq!(
+                env.raptorq.overhead_ratio, expected_overhead,
+                "overhead len={len}"
+            );
+            assert_eq!(env.scrub.status, "ok", "scrub ok len={len}");
+            assert!(
+                env.decode_proofs.is_empty(),
+                "no decode proofs yet len={len}"
+            );
+            // Every symbol hash is a well-formed sha256 fingerprint.
+            assert!(
+                env.raptorq
+                    .symbol_hashes
+                    .iter()
+                    .all(|h| h.starts_with("sha256:") && h.len() == 7 + 64),
+                "symbol hash format len={len}"
+            );
+        }
+    }
+
+    /// br-frankenpandas-bhlwt: push_decode_proof_capped keeps a bounded history,
+    /// evicting oldest first (defensive bounded recovery).
+    #[test]
+    fn raptorq_decode_proof_cap_fifo_bhlwt() {
+        let mut env = RaptorQEnvelope::from_source_bytes("p", "t", b"x", 1);
+        let cap = super::MAX_DECODE_PROOFS;
+        let total = cap + 5;
+        for i in 0..total {
+            env.push_decode_proof_capped(super::DecodeProof {
+                ts_unix_ms: i as u64,
+                reason: "scrub".to_owned(),
+                recovered_blocks: i as u32,
+                proof_hash: "sha256:deadbeef".to_owned(),
+            });
+        }
+        // Never exceeds the cap.
+        assert_eq!(
+            env.decode_proofs.len(),
+            cap,
+            "history capped at MAX_DECODE_PROOFS"
+        );
+        // Oldest-first eviction: the retained window is the newest `cap` entries.
+        assert_eq!(
+            env.decode_proofs.first().unwrap().recovered_blocks,
+            (total - cap) as u32,
+            "oldest evicted; first retained is seq=overflow"
+        );
+        assert_eq!(
+            env.decode_proofs.last().unwrap().recovered_blocks,
+            (total - 1) as u32,
+            "newest retained"
+        );
+        // Retained sequence is contiguous and strictly increasing.
+        assert!(
+            env.decode_proofs
+                .windows(2)
+                .all(|w| w[1].recovered_blocks == w[0].recovered_blocks + 1),
+            "retained window is contiguous"
+        );
+    }
+
+    /// br-frankenpandas-mbjpj: RuntimePolicy security mandates — strict fail-closes
+    /// unknown features; hardened caps oversized joins (bounded recovery).
+    #[test]
+    fn runtime_policy_failclosed_and_join_cap_mbjpj() {
+        // Configuration.
+        let s = RuntimePolicy::strict();
+        assert_eq!(s.mode, RuntimeMode::Strict);
+        assert!(s.fail_closed_unknown_features);
+        assert_eq!(s.hardened_join_row_cap, None);
+        let h = RuntimePolicy::hardened(Some(10));
+        assert_eq!(h.mode, RuntimeMode::Hardened);
+        assert!(!h.fail_closed_unknown_features);
+        assert_eq!(h.hardened_join_row_cap, Some(10));
+        assert_eq!(
+            RuntimePolicy::default().mode,
+            RuntimeMode::Strict,
+            "default is strict"
+        );
+
+        // Fail-closed: strict mode rejects unknown features and records the decision.
+        let mut led = EvidenceLedger::new();
+        let action =
+            RuntimePolicy::strict().decide_unknown_feature("widget", "no handler", &mut led);
+        assert_eq!(
+            action,
+            DecisionAction::Reject,
+            "strict fail-closes unknown features"
+        );
+        assert_eq!(led.records().len(), 1, "decision recorded");
+
+        // Bounded recovery: hardened mode repairs (caps) an over-cap join.
+        let mut led2 = EvidenceLedger::new();
+        let over = RuntimePolicy::hardened(Some(10)).decide_join_admission(1_000, &mut led2);
+        assert_eq!(over, DecisionAction::Repair, "hardened caps over-cap joins");
+        assert_eq!(led2.records().len(), 1, "join decision recorded");
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
     struct StructuredTestLog {
@@ -1443,6 +1931,126 @@ mod tests {
         let rendered = card.render_plain();
         assert!(rendered.contains("argmin_a"));
         assert!(rendered.contains("P(compatible|e)"));
+
+        let edge_card = GalaxyBrainCard {
+            title: "brain {card} ]\nnext".into(),
+            equation: "lambda -> integral".into(),
+            substitution: "Unicode: cafe\u{301}, data, 🧠".into(),
+            intuition: "embedded\nnewlines\nremain".into(),
+        };
+        assert_eq!(
+            edge_card.render_plain(),
+            "[brain {card} ]\nnext]\nlambda -> integral\nUnicode: cafe\u{301}, data, 🧠\nembedded\nnewlines\nremain"
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground profile-first A/B"]
+    fn galaxy_brain_card_render_plain_profile_lzy5c() {
+        #[inline(never)]
+        fn former(card: &GalaxyBrainCard) -> String {
+            format!(
+                "[{}]\n{}\n{}\n{}",
+                card.title, card.equation, card.substitution, card.intuition
+            )
+        }
+
+        #[inline(never)]
+        fn candidate(card: &GalaxyBrainCard) -> String {
+            card.render_plain()
+        }
+
+        fn elapsed(cards: &[GalaxyBrainCard], renderer: fn(&GalaxyBrainCard) -> String) -> u128 {
+            let started = Instant::now();
+            let rendered = black_box(cards).iter().map(renderer).collect::<Vec<_>>();
+            black_box(&rendered);
+            let elapsed = started.elapsed().as_nanos();
+            black_box(rendered);
+            elapsed
+        }
+
+        fn percentile(samples: &[u128], percent: usize) -> u128 {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            let rank = (sorted.len() * percent).div_ceil(100).saturating_sub(1);
+            sorted[rank]
+        }
+
+        let edge_cards = [
+            GalaxyBrainCard {
+                title: String::new(),
+                equation: String::new(),
+                substitution: String::new(),
+                intuition: String::new(),
+            },
+            GalaxyBrainCard {
+                title: "csv::Reject".into(),
+                equation: "argmin_a sum_s L(a,s) P(s|evidence)".into(),
+                substitution: "P(compatible|e)=0.1250, E[allow]=9.5".into(),
+                intuition: "Lower expected loss wins.".into(),
+            },
+            GalaxyBrainCard {
+                title: "brain {card} ]\nnext".into(),
+                equation: "lambda -> integral".into(),
+                substitution: "Unicode: cafe\u{301}, data, 🧠".into(),
+                intuition: "embedded\nnewlines\nremain".into(),
+            },
+        ];
+        for card in &edge_cards {
+            assert_eq!(candidate(card), former(card));
+        }
+
+        const CARDS: usize = 4_096;
+        const SAMPLES: usize = 12;
+        let cards = (0..CARDS)
+            .map(|index| GalaxyBrainCard {
+                title: format!("packet-{index:04}::{:?}", index % 3),
+                equation: "argmin_a sum_s L(a,s) P(s|evidence)".into(),
+                substitution: format!(
+                    "P(compatible|e)=0.{:04}, E[allow]={:.4}, E[reject]={:.4}",
+                    index % 10_000,
+                    (index % 97) as f64 / 7.0,
+                    (index % 89) as f64 / 11.0
+                ),
+                intuition: if index % 7 == 0 {
+                    "Strict mode may force fail-closed. 🧠".into()
+                } else {
+                    "Lower expected loss wins; evidence remains auditable.".into()
+                },
+            })
+            .collect::<Vec<_>>();
+        for card in &cards {
+            assert_eq!(candidate(card), former(card));
+        }
+
+        for _ in 0..2 {
+            black_box(elapsed(&cards, former));
+            black_box(elapsed(&cards, candidate));
+        }
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_ns.push(elapsed(&cards, former));
+                candidate_ns.push(elapsed(&cards, candidate));
+            } else {
+                candidate_ns.push(elapsed(&cards, candidate));
+                former_ns.push(elapsed(&cards, former));
+            }
+        }
+
+        let former_p50 = percentile(&former_ns, 50);
+        let former_p95 = percentile(&former_ns, 95);
+        let former_p99 = percentile(&former_ns, 99);
+        let candidate_p50 = percentile(&candidate_ns, 50);
+        let candidate_p95 = percentile(&candidate_ns, 95);
+        let candidate_p99 = percentile(&candidate_ns, 99);
+        println!(
+            "GALAXY_CARD_RENDER cards={CARDS} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup_p50={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95} speedup_p95={:.6} former_p99_ns={former_p99} candidate_p99_ns={candidate_p99} speedup_p99={:.6} former_samples={former_ns:?} candidate_samples={candidate_ns:?}",
+            former_p50 as f64 / candidate_p50 as f64,
+            former_p95 as f64 / candidate_p95 as f64,
+            former_p99 as f64 / candidate_p99 as f64,
+        );
     }
 
     // === Conformal Calibration Tests (bd-2t5e.9) ===
@@ -1590,6 +2198,101 @@ mod tests {
     }
 
     #[test]
+    fn conformal_normalized_quantile_matches_robust_path_qckka() {
+        let mut state = 0xa076_1d64_78bd_642f_u64;
+        let random_scores = (0..1_000)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 11) as f64 / ((1_u64 << 53) as f64)
+            })
+            .collect::<Vec<_>>();
+        let cases = [
+            (Vec::new(), 0, f64::NAN),
+            (vec![f64::NAN, 1.0, f64::INFINITY], 8, 0.1),
+            (
+                vec![f64::NEG_INFINITY, -0.0, 0.0, 1.0, 1.0, f64::MAX],
+                4,
+                f64::INFINITY,
+            ),
+            (random_scores, 257, 0.99),
+        ];
+
+        for (scores, window_size, alpha) in cases {
+            let mut guard = ConformalGuard {
+                scores,
+                window_size,
+                alpha,
+                in_set_count: 9,
+                total_count: 4,
+            };
+            guard.normalize_runtime_config();
+            let former = guard.conformal_quantile().map(f64::to_bits);
+            let candidate = super::select_conformal_quantile(guard.scores.clone(), guard.alpha)
+                .map(f64::to_bits);
+            assert_eq!(candidate, former, "window_size={window_size} alpha={alpha}");
+        }
+    }
+
+    #[test]
+    fn conformal_evaluate_preserves_observables_qckka() {
+        let mut ledger = EvidenceLedger::new();
+        RuntimePolicy::hardened(Some(100_000)).decide_join_admission(1_000, &mut ledger);
+        let record = &ledger.records()[0];
+        let mut guard = ConformalGuard {
+            scores: vec![f64::NAN, 0.25, 1.5, f64::INFINITY, -0.0, 2.5],
+            window_size: 4,
+            alpha: f64::NAN,
+            in_set_count: 9,
+            total_count: 4,
+        };
+        let mut expected_guard = guard.clone();
+        expected_guard.normalize_runtime_config();
+        let expected_threshold = expected_guard
+            .conformal_quantile()
+            .expect("normalized fixture is calibrated");
+        let expected_score = super::nonconformity_score(record);
+        if expected_guard.scores.len() >= expected_guard.window_size {
+            expected_guard.scores.remove(0);
+        }
+        expected_guard.scores.push(expected_score);
+        let expected_in_set = expected_score <= expected_threshold;
+        let expected_actions = if expected_in_set {
+            vec![record.action]
+        } else {
+            vec![
+                DecisionAction::Allow,
+                DecisionAction::Reject,
+                DecisionAction::Repair,
+            ]
+        };
+        expected_guard.total_count += 1;
+        if expected_in_set {
+            expected_guard.in_set_count += 1;
+        }
+        let expected_set = super::ConformalPredictionSet {
+            quantile_threshold: expected_threshold,
+            current_score: expected_score,
+            bayesian_action_in_set: expected_in_set,
+            admissible_actions: expected_actions,
+            empirical_coverage: expected_guard.in_set_count as f64
+                / expected_guard.total_count as f64,
+        };
+
+        let actual_set = guard.evaluate(record);
+        assert_eq!(actual_set, expected_set);
+        assert_eq!(
+            serde_json::to_vec(&actual_set).expect("serialize actual prediction set"),
+            serde_json::to_vec(&expected_set).expect("serialize expected prediction set")
+        );
+        assert_eq!(
+            serde_json::to_vec(&guard).expect("serialize actual guard"),
+            serde_json::to_vec(&expected_guard).expect("serialize expected guard")
+        );
+    }
+
+    #[test]
     fn conformal_guard_quantile_is_deterministic() {
         let mut guard = ConformalGuard::new(100, 0.1);
         let mut ledger = EvidenceLedger::new();
@@ -1605,6 +2308,251 @@ mod tests {
         let q1 = guard.conformal_quantile();
         let q2 = guard.conformal_quantile();
         assert_eq!(q1, q2);
+    }
+
+    fn full_sort_conformal_quantile(guard: &ConformalGuard) -> Option<f64> {
+        let mut sorted = guard
+            .scores
+            .iter()
+            .copied()
+            .filter(|score| score.is_finite())
+            .collect::<Vec<_>>();
+        if sorted.len() < 2 {
+            return None;
+        }
+        sorted.sort_by(f64::total_cmp);
+        let n = sorted.len() as f64;
+        let level = (1.0 - super::normalize_conformal_alpha(guard.alpha)) * (1.0 + 1.0 / n);
+        let idx = (level * n).ceil() as usize;
+        let idx = idx.min(sorted.len()).saturating_sub(1);
+        Some(sorted[idx])
+    }
+
+    #[test]
+    #[ignore = "foreground normal-release attribution probe"]
+    fn conformal_normalized_window_profile_qckka() {
+        const WINDOW: usize = 1_000;
+        const BATCH: usize = 128;
+        const SAMPLES: usize = 15;
+
+        fn normalized_quantile(guard: &ConformalGuard) -> Option<f64> {
+            super::select_conformal_quantile(guard.scores.clone(), guard.alpha)
+        }
+
+        fn elapsed(guard: &ConformalGuard, normalized: bool) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_u64;
+            for _ in 0..BATCH {
+                let quantile = if normalized {
+                    normalized_quantile(black_box(guard))
+                } else {
+                    black_box(guard).conformal_quantile()
+                };
+                digest = digest.wrapping_add(quantile.map_or(0, f64::to_bits));
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        }
+
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        let mut state = 0xa076_1d64_78bd_642f_u64;
+        let scores = (0..WINDOW)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 11) as f64 / ((1_u64 << 53) as f64)
+            })
+            .collect::<Vec<_>>();
+        let guard = ConformalGuard {
+            scores,
+            window_size: WINDOW,
+            alpha: 0.1,
+            in_set_count: 0,
+            total_count: 0,
+        };
+        assert_eq!(
+            guard.conformal_quantile().map(f64::to_bits),
+            normalized_quantile(&guard).map(f64::to_bits)
+        );
+
+        for _ in 0..3 {
+            black_box(elapsed(&guard, false));
+            black_box(elapsed(&guard, true));
+        }
+        let mut filtered = Vec::with_capacity(SAMPLES * 2);
+        let mut normalized = Vec::with_capacity(SAMPLES * 2);
+        for sample in 0_usize..SAMPLES {
+            if sample.is_multiple_of(2) {
+                filtered.push(elapsed(&guard, false));
+                normalized.push(elapsed(&guard, true));
+                normalized.push(elapsed(&guard, true));
+                filtered.push(elapsed(&guard, false));
+            } else {
+                normalized.push(elapsed(&guard, true));
+                filtered.push(elapsed(&guard, false));
+                filtered.push(elapsed(&guard, false));
+                normalized.push(elapsed(&guard, true));
+            }
+        }
+        let filtered_p50 = percentile(&mut filtered, 50);
+        let normalized_p50 = percentile(&mut normalized, 50);
+        let filtered_p95 = percentile(&mut filtered, 95);
+        let normalized_p95 = percentile(&mut normalized, 95);
+        eprintln!(
+            "CONFORMAL_NORMALIZED_PROFILE window={WINDOW} batch={BATCH} filtered_p50_ns={filtered_p50} normalized_p50_ns={normalized_p50} ratio={:.6} filtered_p95_ns={filtered_p95} normalized_p95_ns={normalized_p95}",
+            filtered_p50 as f64 / normalized_p50 as f64
+        );
+        eprintln!("CONFORMAL_NORMALIZED_PROFILE filtered_distribution_ns={filtered:?}");
+        eprintln!("CONFORMAL_NORMALIZED_PROFILE normalized_distribution_ns={normalized:?}");
+    }
+
+    #[test]
+    fn conformal_quantile_selection_matches_full_sort_bh91q() {
+        let mut state = 0xd1b5_4a32_d192_ed03_u64;
+        let mut random_scores = Vec::with_capacity(1_005);
+        for _ in 0..1_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            random_scores.push((state >> 11) as f64 / ((1_u64 << 53) as f64));
+        }
+        random_scores.extend([f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0, 0.0]);
+        let cases = [
+            Vec::new(),
+            vec![1.0],
+            vec![f64::NAN, f64::INFINITY, 2.0],
+            vec![-0.0, 0.0, -1.0, 1.0, 1.0, f64::MAX, f64::MIN],
+            random_scores,
+        ];
+
+        for scores in cases {
+            for alpha in [0.01, 0.1, 0.5, 0.99, f64::NAN, f64::INFINITY] {
+                let guard = ConformalGuard {
+                    window_size: scores.len().max(1),
+                    scores: scores.clone(),
+                    alpha,
+                    in_set_count: 0,
+                    total_count: 0,
+                };
+                let former = full_sort_conformal_quantile(&guard).map(f64::to_bits);
+                let candidate = guard.conformal_quantile().map(f64::to_bits);
+                assert_eq!(candidate, former, "len={} alpha={alpha}", scores.len());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn conformal_quantile_selection_ab_bh91q() {
+        const WINDOW: usize = 1_000;
+        const BATCH: usize = 64;
+        const SAMPLES: usize = 31;
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let scores = (0..WINDOW)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 11) as f64 / ((1_u64 << 53) as f64)
+            })
+            .collect::<Vec<_>>();
+        let guard = ConformalGuard {
+            scores,
+            window_size: WINDOW,
+            alpha: 0.1,
+            in_set_count: 0,
+            total_count: 0,
+        };
+
+        let former = full_sort_conformal_quantile(&guard).map(f64::to_bits);
+        let candidate = guard.conformal_quantile().map(f64::to_bits);
+        assert_eq!(candidate, former);
+
+        let measure_former = || {
+            let started = Instant::now();
+            let mut digest = 0_u64;
+            for _ in 0..BATCH {
+                let quantile = full_sort_conformal_quantile(black_box(&guard));
+                digest = digest.wrapping_add(quantile.map_or(0, f64::to_bits));
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        };
+        let measure_candidate = || {
+            let started = Instant::now();
+            let mut digest = 0_u64;
+            for _ in 0..BATCH {
+                let quantile = black_box(&guard).conformal_quantile();
+                digest = digest.wrapping_add(quantile.map_or(0, f64::to_bits));
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        };
+
+        for _ in 0..3 {
+            black_box(measure_former());
+            black_box(measure_candidate());
+        }
+        let mut former_a = Vec::with_capacity(SAMPLES);
+        let mut former_b = Vec::with_capacity(SAMPLES);
+        let mut candidate_a = Vec::with_capacity(SAMPLES);
+        let mut candidate_b = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_a.push(measure_former());
+                candidate_a.push(measure_candidate());
+                candidate_b.push(measure_candidate());
+                former_b.push(measure_former());
+            } else {
+                former_b.push(measure_former());
+                candidate_b.push(measure_candidate());
+                candidate_a.push(measure_candidate());
+                former_a.push(measure_former());
+            }
+        }
+        former_a.sort_unstable();
+        former_b.sort_unstable();
+        candidate_a.sort_unstable();
+        candidate_b.sort_unstable();
+        let percentile = |samples: &[u128], pct: usize| {
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        };
+        let former_a_p50 = percentile(&former_a, 50);
+        let former_b_p50 = percentile(&former_b, 50);
+        let candidate_a_p50 = percentile(&candidate_a, 50);
+        let candidate_b_p50 = percentile(&candidate_b, 50);
+        let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+        let candidate_mean = (candidate_a_p50 + candidate_b_p50) as f64 / 2.0;
+        println!(
+            "fp-runtime conformal quantile A/B: window={WINDOW} batch={BATCH} samples={SAMPLES}"
+        );
+        println!("former full-sort p50 A/B: {former_a_p50} / {former_b_p50} ns");
+        println!("candidate selection p50 A/B: {candidate_a_p50} / {candidate_b_p50} ns");
+        println!(
+            "former full-sort p95/p99 A: {} / {} ns; B: {} / {} ns",
+            percentile(&former_a, 95),
+            percentile(&former_a, 99),
+            percentile(&former_b, 95),
+            percentile(&former_b, 99)
+        );
+        println!(
+            "candidate selection p95/p99 A: {} / {} ns; B: {} / {} ns",
+            percentile(&candidate_a, 95),
+            percentile(&candidate_a, 99),
+            percentile(&candidate_b, 95),
+            percentile(&candidate_b, 99)
+        );
+        println!(
+            "former/candidate ratio: {:.6}x",
+            former_mean / candidate_mean
+        );
     }
 
     // --- AG-09-T: Conformal Calibration Tests ---

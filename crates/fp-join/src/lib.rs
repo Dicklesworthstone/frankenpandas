@@ -66,11 +66,13 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     mem::size_of,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
-use fp_columnar::{Column, ColumnError};
+use fp_columnar::{
+    Column, ColumnError, Int64DenseCycleWitness, Utf8LowerHexSequence, ValidityMask,
+};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexLabel};
 use fp_types::{DType, NullKind, Scalar, TypeError};
@@ -344,6 +346,230 @@ fn reindex_outer_join_column(
         .collect::<Result<Vec<_>, ColumnError>>()?;
 
     Ok(Column::new(fp_types::DType::Float64, values)?)
+}
+
+fn coalesce_utf8_contiguous_key_column(
+    left_key_col: &Column,
+    right_key_col: &Column,
+    left_positions: &[Option<usize>],
+    right_positions: &[Option<usize>],
+) -> Option<Column> {
+    let (left_bytes, left_offsets) = left_key_col.as_utf8_contiguous()?;
+    let (right_bytes, right_offsets) = right_key_col.as_utf8_contiguous()?;
+    if left_positions.len() != right_positions.len() {
+        return None;
+    }
+
+    let mut byte_len = 0usize;
+    for (left_pos, right_pos) in left_positions.iter().zip(right_positions.iter()) {
+        let (bytes, offsets, pos) = match (left_pos, right_pos) {
+            (Some(pos), _) => (left_bytes, left_offsets, *pos),
+            (None, Some(pos)) => (right_bytes, right_offsets, *pos),
+            (None, None) => return None,
+        };
+        let end = pos.checked_add(1)?;
+        let start_offset = *offsets.get(pos)?;
+        let end_offset = *offsets.get(end)?;
+        if end_offset < start_offset || end_offset > bytes.len() {
+            return None;
+        }
+        byte_len = byte_len.checked_add(end_offset - start_offset)?;
+    }
+
+    let mut bytes = Vec::with_capacity(byte_len);
+    let mut offsets = Vec::with_capacity(left_positions.len() + 1);
+    offsets.push(0);
+    for (left_pos, right_pos) in left_positions.iter().zip(right_positions.iter()) {
+        let (source_bytes, source_offsets, pos) = match (left_pos, right_pos) {
+            (Some(pos), _) => (left_bytes, left_offsets, *pos),
+            (None, Some(pos)) => (right_bytes, right_offsets, *pos),
+            (None, None) => return None,
+        };
+        let start = *source_offsets.get(pos)?;
+        let end = *source_offsets.get(pos.checked_add(1)?)?;
+        bytes.extend_from_slice(source_bytes.get(start..end)?);
+        offsets.push(bytes.len());
+    }
+    Some(Column::from_utf8_contiguous(bytes, offsets))
+}
+
+/// Coalesce an all-valid temporal OUTER key directly over raw nanoseconds.
+///
+/// The optional position tapes already define output order and matched-row
+/// precedence. Any malformed tape, nullable input, mixed dtype, out-of-bounds
+/// position, or selected NaT declines to the existing Scalar fallback.
+fn coalesce_temporal_i64_key_column(
+    left_key_col: &Column,
+    right_key_col: &Column,
+    left_positions: &[Option<usize>],
+    right_positions: &[Option<usize>],
+) -> Option<Column> {
+    if left_positions.len() != right_positions.len()
+        || !left_key_col.validity().all()
+        || !right_key_col.validity().all()
+    {
+        return None;
+    }
+
+    let (left_keys, right_keys, nat, is_datetime) =
+        match (left_key_col.dtype(), right_key_col.dtype()) {
+            (DType::Datetime64, DType::Datetime64) => (
+                left_key_col.as_datetime64_slice()?,
+                right_key_col.as_datetime64_slice()?,
+                fp_types::Timestamp::NAT,
+                true,
+            ),
+            (DType::Timedelta64, DType::Timedelta64) => (
+                left_key_col.as_timedelta64_slice()?,
+                right_key_col.as_timedelta64_slice()?,
+                fp_types::Timedelta::NAT,
+                false,
+            ),
+            _ => return None,
+        };
+
+    let mut data = Vec::with_capacity(left_positions.len());
+    for (left_pos, right_pos) in left_positions.iter().zip(right_positions.iter()) {
+        let value = match (*left_pos, *right_pos) {
+            (Some(pos), _) => *left_keys.get(pos)?,
+            (None, Some(pos)) => *right_keys.get(pos)?,
+            (None, None) => return None,
+        };
+        if value == nat {
+            return None;
+        }
+        data.push(value);
+    }
+
+    let validity = ValidityMask::all_valid(data.len());
+    Some(if is_datetime {
+        Column::from_datetime64_values_with_validity(data, validity)
+    } else {
+        Column::from_timedelta64_values_with_validity(data, validity)
+    })
+}
+
+enum SharedOptionalUtf8GatherPlan {
+    NullableRange {
+        null_prefix: usize,
+        source_start: usize,
+        source_len: usize,
+        null_suffix: usize,
+    },
+    Positions {
+        positions: Arc<[usize]>,
+        validity: ValidityMask,
+    },
+}
+
+fn shared_optional_utf8_gather_plan(
+    positions: &[Option<usize>],
+    source_len: usize,
+) -> Option<SharedOptionalUtf8GatherPlan> {
+    let mut first_valid = None;
+    let mut last_valid_exclusive = 0usize;
+    let mut has_missing = false;
+    for (out_idx, slot) in positions.iter().enumerate() {
+        match slot {
+            Some(idx) if *idx < source_len => {
+                first_valid.get_or_insert(out_idx);
+                last_valid_exclusive = out_idx + 1;
+            }
+            _ => has_missing = true,
+        }
+    }
+    if !has_missing {
+        return None;
+    }
+    if let Some(first_valid) = first_valid {
+        let source_start = positions.get(first_valid).copied().flatten()?;
+        let valid_len = last_valid_exclusive - first_valid;
+        let valid_window = positions.get(first_valid..last_valid_exclusive)?;
+        let contiguous = valid_window
+            .iter()
+            .enumerate()
+            .all(|(offset, slot)| *slot == Some(source_start + offset));
+        if contiguous
+            && source_start
+                .checked_add(valid_len)
+                .is_some_and(|end| end <= source_len)
+        {
+            return Some(SharedOptionalUtf8GatherPlan::NullableRange {
+                null_prefix: first_valid,
+                source_start,
+                source_len: valid_len,
+                null_suffix: positions.len() - last_valid_exclusive,
+            });
+        }
+    } else {
+        return Some(SharedOptionalUtf8GatherPlan::NullableRange {
+            null_prefix: positions.len(),
+            source_start: 0,
+            source_len: 0,
+            null_suffix: 0,
+        });
+    }
+
+    let mut plan = Vec::with_capacity(positions.len());
+    let mut words = vec![0_u64; positions.len().div_ceil(64)];
+    for (out_idx, slot) in positions.iter().enumerate() {
+        match slot {
+            Some(idx) if *idx < source_len => {
+                plan.push(*idx);
+                words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+            }
+            _ => plan.push(usize::MAX),
+        }
+    }
+    Some(SharedOptionalUtf8GatherPlan::Positions {
+        positions: Arc::from(plan),
+        validity: ValidityMask::from_words(words, positions.len()),
+    })
+}
+
+fn reindex_with_shared_utf8_plan(
+    column: &Column,
+    positions: &[Option<usize>],
+    plan: Option<&SharedOptionalUtf8GatherPlan>,
+) -> Result<Column, JoinError> {
+    if let Some(column) = plan.and_then(|plan| reindex_eager_utf8_with_plan(column, plan)) {
+        return Ok(column);
+    }
+    Ok(column.reindex_by_positions(positions)?)
+}
+
+fn reindex_outer_with_shared_utf8_plan(
+    column: &Column,
+    positions: &[Option<usize>],
+    plan: Option<&SharedOptionalUtf8GatherPlan>,
+) -> Result<Column, JoinError> {
+    if let Some(column) = plan.and_then(|plan| reindex_eager_utf8_with_plan(column, plan)) {
+        return Ok(column);
+    }
+    reindex_outer_join_column(column, positions)
+}
+
+fn reindex_eager_utf8_with_plan(
+    column: &Column,
+    plan: &SharedOptionalUtf8GatherPlan,
+) -> Option<Column> {
+    match plan {
+        SharedOptionalUtf8GatherPlan::NullableRange {
+            null_prefix,
+            source_start,
+            source_len,
+            null_suffix,
+        } => column.reindex_eager_utf8_with_nullable_range(
+            *null_prefix,
+            *source_start,
+            *source_len,
+            *null_suffix,
+        ),
+        SharedOptionalUtf8GatherPlan::Positions {
+            positions,
+            validity,
+        } => column.reindex_eager_utf8_with_shared_plan(Arc::clone(positions), validity.clone()),
+    }
 }
 
 fn sort_outer_join_rows(
@@ -692,7 +918,32 @@ impl Ord for JoinKeyComponent {
             }
             (FloatBits(_), Present(IndexLabel::Utf8(_))) => Ordering::Less,
             (Present(IndexLabel::Utf8(_)), FloatBits(_)) => Ordering::Greater,
+            // Float64/Bool index labels (br-frankenpandas-i10en). Join key
+            // extraction maps float keys to FloatBits and bool keys to Int64, so
+            // a Present(Float64)/Present(Bool) join key is unreachable today;
+            // these arms only keep the manual `Ord` total (same-variant compares
+            // by value, cross-variant by a stable variant rank).
+            (Present(IndexLabel::Float64(a)), Present(IndexLabel::Float64(b))) => a.cmp(b),
+            (Present(IndexLabel::Bool(a)), Present(IndexLabel::Bool(b))) => a.cmp(b),
+            (a, b) => join_component_rank(a).cmp(&join_component_rank(b)),
         }
+    }
+}
+
+/// Stable per-variant rank used only as the cross-variant fallback for the
+/// (unreachable) Float64/Bool join-key cases above, keeping `Ord` total.
+fn join_component_rank(c: &JoinKeyComponent) -> u8 {
+    use JoinKeyComponent::{FloatBits, Missing, Present};
+    match c {
+        Present(IndexLabel::Int64(_)) => 0,
+        Present(IndexLabel::Float64(_)) => 1,
+        Present(IndexLabel::Bool(_)) => 2,
+        Present(IndexLabel::Utf8(_)) => 3,
+        Present(IndexLabel::Timedelta64(_)) => 4,
+        Present(IndexLabel::Datetime64(_)) => 5,
+        Present(IndexLabel::Null(_)) => 6,
+        FloatBits(_) => 7,
+        Missing => 8,
     }
 }
 
@@ -714,6 +965,12 @@ fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
         }
         fp_types::Scalar::Utf8(v) => JoinKeyComponent::Present(IndexLabel::Utf8(v.clone())),
         fp_types::Scalar::Bool(b) => JoinKeyComponent::Present(IndexLabel::Int64(i64::from(*b))),
+        fp_types::Scalar::Timedelta64(v) if *v != fp_types::Timedelta::NAT => {
+            JoinKeyComponent::Present(IndexLabel::Timedelta64(*v))
+        }
+        fp_types::Scalar::Datetime64(v) if *v != fp_types::Timestamp::NAT => {
+            JoinKeyComponent::Present(IndexLabel::Datetime64(*v))
+        }
         _ => JoinKeyComponent::Missing, // Null, NaN, NaT
     }
 }
@@ -838,15 +1095,68 @@ fn reorder_vec_by_index<T: Clone>(values: &mut Vec<T>, order: &[usize]) {
 }
 
 fn sort_merge_rows_by_join_keys(
-    out_row_keys: &[CompositeJoinKey],
+    left_keys: &[CompositeJoinKey],
+    right_keys: &[CompositeJoinKey],
     left_positions: &mut Vec<Option<usize>>,
     right_positions: &mut Vec<Option<usize>>,
 ) {
-    if out_row_keys.is_empty() {
+    let n = left_positions.len();
+    if n <= 1 {
         return;
     }
-    let mut order: Vec<usize> = (0..out_row_keys.len()).collect();
-    order.sort_by(|a, b| out_row_keys[*a].cmp(&out_row_keys[*b]));
+    // pandas sorts merge output by the join key. The naive O(n·log n) COMPARISON
+    // sort re-compares full keys (string compares for Utf8) on every step. Instead
+    // FACTORIZE the keys to dense ranks (sort only the DISTINCT keys once, d≪n)
+    // then STABLE counting-sort the rows by rank — O(n + d·log d). Crucially, each
+    // output row's key is read BY REFERENCE from the already-built left_keys /
+    // right_keys via its position (matched / unmatched-left rows take the left key,
+    // unmatched-right rows take the right key — exactly what the removed per-row
+    // `out_row_keys` clone stored), so the ~n String-owning CompositeJoinKey clones
+    // that dominated outer merge are gone. Bit-identical to the prior path: same
+    // per-row key, same `cmp`-ordered ranks (over a superset of distinct keys —
+    // unused ranks are just empty counting-sort buckets), same stable
+    // ascending-index emission within each rank.
+    let mut distinct: Vec<&CompositeJoinKey> = {
+        let mut set = FxHashSet::default();
+        left_keys
+            .iter()
+            .chain(right_keys.iter())
+            .filter(|k| set.insert(*k))
+            .collect()
+    };
+    distinct.sort_unstable();
+    let d = distinct.len();
+    let mut rank_of: FxHashMap<&CompositeJoinKey, u32> = FxHashMap::default();
+    rank_of.reserve(d);
+    for (r, k) in distinct.iter().enumerate() {
+        rank_of.insert(*k, r as u32);
+    }
+    let left_rank: Vec<u32> = left_keys.iter().map(|k| rank_of[k]).collect();
+    let right_rank: Vec<u32> = right_keys.iter().map(|k| rank_of[k]).collect();
+    let ranks: Vec<u32> = left_positions
+        .iter()
+        .zip(right_positions.iter())
+        .map(|(lp, rp)| match lp {
+            Some(p) => left_rank[*p],
+            None => right_rank[rp.expect("an unmatched merge row has a right position")],
+        })
+        .collect();
+    let mut counts = vec![0usize; d + 1];
+    for &r in &ranks {
+        counts[r as usize + 1] += 1;
+    }
+    for i in 0..d {
+        counts[i + 1] += counts[i];
+    }
+    // `order[new_slot] = old_idx`, matching the comparison sort's permutation —
+    // stable because rows are scattered in ascending original-index order.
+    let mut cursor = counts;
+    let mut order = vec![0usize; n];
+    for (i, &r) in ranks.iter().enumerate() {
+        let slot = cursor[r as usize];
+        order[slot] = i;
+        cursor[r as usize] = slot + 1;
+    }
     reorder_vec_by_index(left_positions, &order);
     reorder_vec_by_index(right_positions, &order);
 }
@@ -904,6 +1214,20 @@ fn collect_overlapping_column_names(
     overlaps
 }
 
+const SMALL_SCHEMA_LINEAR_COLUMN_LOOKUP_LIMIT: usize = 8;
+
+fn column_name_lookup_contains(
+    names: &[&String],
+    hashed_names: Option<&HashSet<&str>>,
+    target: &str,
+) -> bool {
+    if let Some(hashed_names) = hashed_names {
+        hashed_names.contains(target)
+    } else {
+        names.iter().any(|name| name.as_str() == target)
+    }
+}
+
 fn ensure_merge_suffixes_for_overlaps(
     overlap_names: &[String],
     suffixes: &ResolvedMergeSuffixes,
@@ -941,8 +1265,8 @@ fn insert_merged_output_column(
 
 fn ordered_identity_int64_keys_match(left_key: &Column, right_key: &Column) -> bool {
     if left_key.len() != right_key.len()
-        || left_key.dtype() != DType::Int64
-        || right_key.dtype() != DType::Int64
+        || !matches!(left_key.dtype(), DType::Int64)
+        || !matches!(right_key.dtype(), DType::Int64)
         || !left_key.validity().all()
         || !right_key.validity().all()
     {
@@ -1021,10 +1345,513 @@ fn all_valid_int64_key_values(column: &Column) -> Option<&[Scalar]> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PositiveAffineI64Witness {
+    start: i128,
+    step: i128,
+    len: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AffineInnerPositionPlan {
+    left_start: usize,
+    left_step: usize,
+    right_start: usize,
+    right_step: usize,
+    len: usize,
+}
+
+const AFFINE_I64_INNER_MAX_MORSELS: usize = 64;
+
+fn affine_inner_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(AFFINE_I64_INNER_MAX_MORSELS)
+}
+
+fn balanced_partition(total: usize, index: usize, parts: usize) -> (usize, usize) {
+    debug_assert!(parts > 0);
+    debug_assert!(index < parts);
+    let base = total / parts;
+    let remainder = total % parts;
+    let start = index * base + index.min(remainder);
+    let end = start + base + usize::from(index < remainder);
+    (start, end)
+}
+
+fn positive_affine_i64_shape(values: &[i64]) -> Option<PositiveAffineI64Witness> {
+    if values.len() < 2 {
+        return None;
+    }
+    let start = i128::from(values[0]);
+    let step = i128::from(values[1]) - start;
+    // Keeping the step within positive i64 makes every CRT intermediate below
+    // fit i128. Rarer two-point sequences spanning more than i64::MAX retain
+    // the existing ordered/hash route.
+    if step <= 0 || step > i128::from(i64::MAX) {
+        return None;
+    }
+    Some(PositiveAffineI64Witness {
+        start,
+        step,
+        len: values.len(),
+    })
+}
+
+/// Prove two positive affine i64 key sequences with independent row morsels.
+///
+/// Every adjacent edge is checked exactly once, including boundaries between
+/// morsels. A failed proof simply declines the affine route; no result is
+/// emitted from speculative work. Large ordered joins therefore replace two
+/// serial O(n) order scans with up to 64 shared-nothing scans while preserving
+/// the exact strict-unique certificate required by pandas inner-join semantics.
+fn certify_positive_affine_i64_pair(
+    left: &[i64],
+    right: &[i64],
+) -> Option<(PositiveAffineI64Witness, PositiveAffineI64Witness)> {
+    let left_shape = positive_affine_i64_shape(left)?;
+    let right_shape = positive_affine_i64_shape(right)?;
+    let left_edges = left.len() - 1;
+    let right_edges = right.len() - 1;
+    let max_edges = left_edges.max(right_edges);
+    let worker_count = affine_inner_worker_count().min(max_edges.max(1));
+
+    let matches_shape = |values: &[i64], shape: PositiveAffineI64Witness| {
+        values
+            .windows(2)
+            .all(|pair| i128::from(pair[1]) - i128::from(pair[0]) == shape.step)
+    };
+    if max_edges < DENSE_I64_INNER_PARALLEL_MIN_VALUES || worker_count < 2 {
+        return (matches_shape(left, left_shape) && matches_shape(right, right_shape))
+            .then_some((left_shape, right_shape));
+    }
+
+    let proved = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for worker in 0..worker_count {
+            handles.push(scope.spawn(move || {
+                let (left_start, left_end) = balanced_partition(left_edges, worker, worker_count);
+                let (right_start, right_end) =
+                    balanced_partition(right_edges, worker, worker_count);
+                let left_ok = (left_start..left_end).all(|idx| {
+                    i128::from(left[idx + 1]) - i128::from(left[idx]) == left_shape.step
+                });
+                let right_ok = (right_start..right_end).all(|idx| {
+                    i128::from(right[idx + 1]) - i128::from(right[idx]) == right_shape.step
+                });
+                left_ok && right_ok
+            }));
+        }
+        handles
+            .into_iter()
+            .all(|handle| handle.join().expect("affine join proof worker panicked"))
+    });
+    proved.then_some((left_shape, right_shape))
+}
+
+fn positive_i128_gcd(mut left: i128, mut right: i128) -> i128 {
+    debug_assert!(left > 0 && right > 0);
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
+fn coprime_mod_inverse(value: i128, modulus: i128) -> Option<i128> {
+    debug_assert!(value > 0 && modulus > 1);
+    let (mut old_remainder, mut remainder) = (value, modulus);
+    let (mut old_coefficient, mut coefficient) = (1i128, 0i128);
+    while remainder != 0 {
+        let quotient = old_remainder / remainder;
+        (old_remainder, remainder) = (
+            remainder,
+            old_remainder.checked_sub(quotient.checked_mul(remainder)?)?,
+        );
+        (old_coefficient, coefficient) = (
+            coefficient,
+            old_coefficient.checked_sub(quotient.checked_mul(coefficient)?)?,
+        );
+    }
+    (old_remainder == 1).then(|| old_coefficient.rem_euclid(modulus))
+}
+
+fn empty_affine_inner_position_plan() -> AffineInnerPositionPlan {
+    AffineInnerPositionPlan {
+        left_start: 0,
+        left_step: 1,
+        right_start: 0,
+        right_step: 1,
+        len: 0,
+    }
+}
+
+/// Intersect two certified positive affine sequences analytically.
+///
+/// The generalized CRT yields the first shared key and the common step. Those
+/// map back to affine row selections on each input, so the join needs neither
+/// the serial two-pointer merge nor its two O(matches) position vectors.
+fn affine_i64_inner_position_plan(
+    left: PositiveAffineI64Witness,
+    right: PositiveAffineI64Witness,
+) -> Option<AffineInnerPositionPlan> {
+    let left_last = left
+        .start
+        .checked_add(left.step.checked_mul(i128::try_from(left.len - 1).ok()?)?)?;
+    let right_last = right.start.checked_add(
+        right
+            .step
+            .checked_mul(i128::try_from(right.len - 1).ok()?)?,
+    )?;
+    let low = left.start.max(right.start);
+    let high = left_last.min(right_last);
+    if low > high {
+        return Some(empty_affine_inner_position_plan());
+    }
+
+    let gcd = positive_i128_gcd(left.step, right.step);
+    let difference = right.start.checked_sub(left.start)?;
+    if difference % gcd != 0 {
+        return Some(empty_affine_inner_position_plan());
+    }
+    let left_reduced = left.step / gcd;
+    let right_reduced = right.step / gcd;
+    let left_solution = if right_reduced == 1 {
+        0
+    } else {
+        let inverse = coprime_mod_inverse(left_reduced.rem_euclid(right_reduced), right_reduced)?;
+        difference
+            .checked_div(gcd)?
+            .checked_mul(inverse)?
+            .rem_euclid(right_reduced)
+    };
+    let common_step = left.step.checked_mul(right_reduced)?;
+    let mut first = left
+        .start
+        .checked_add(left.step.checked_mul(left_solution)?)?;
+    if first < low {
+        let delta = low.checked_sub(first)?;
+        let jumps = delta
+            .checked_add(common_step - 1)?
+            .checked_div(common_step)?;
+        first = first.checked_add(jumps.checked_mul(common_step)?)?;
+    }
+    if first > high {
+        return Some(empty_affine_inner_position_plan());
+    }
+
+    let len = usize::try_from((high - first) / common_step + 1).ok()?;
+    let left_start = usize::try_from((first - left.start) / left.step).ok()?;
+    let right_start = usize::try_from((first - right.start) / right.step).ok()?;
+    let left_step = usize::try_from(common_step / left.step).ok()?;
+    let right_step = usize::try_from(common_step / right.step).ok()?;
+    debug_assert!(
+        left_start
+            .checked_add(left_step.saturating_mul(len.saturating_sub(1)))
+            .is_some_and(|last| last < left.len)
+    );
+    debug_assert!(
+        right_start
+            .checked_add(right_step.saturating_mul(len.saturating_sub(1)))
+            .is_some_and(|last| last < right.len)
+    );
+    Some(AffineInnerPositionPlan {
+        left_start,
+        left_step,
+        right_start,
+        right_step,
+        len,
+    })
+}
+
+enum AffineInnerOutputLane<'a> {
+    Int64 {
+        source: &'a [i64],
+        start: usize,
+        step: usize,
+    },
+    Built(Column),
+}
+
+struct AffineInnerOutputSpec<'a> {
+    name: String,
+    lane: AffineInnerOutputLane<'a>,
+}
+
+fn affine_selection_positions(start: usize, step: usize, len: usize) -> Vec<usize> {
+    (0..len).map(|idx| start + idx * step).collect()
+}
+
+fn affine_inner_output_lane<'a>(
+    column: &'a Column,
+    start: usize,
+    step: usize,
+    len: usize,
+) -> Option<AffineInnerOutputLane<'a>> {
+    if let Some(source) = column.as_i64_slice() {
+        return Some(AffineInnerOutputLane::Int64 {
+            source,
+            start,
+            step,
+        });
+    }
+    column.as_f64_slice()?;
+    let built = if len == 0 {
+        Column::from_f64_values(Vec::new())
+    } else if let Some(view) =
+        column.take_affine_positions_without_materialized_positions(start, step, len)
+    {
+        view
+    } else {
+        let positions = affine_selection_positions(start, step, len);
+        column.take_positions(&positions)
+    };
+    Some(AffineInnerOutputLane::Built(built))
+}
+
+/// Zero-copy Int64 output for a unit-stride side of an affine match.
+///
+/// Shared inner-join keys are byte-identical on both sides. If either side's
+/// matched rows form one contiguous range, reuse that immutable Arc-backed
+/// range as a one-chunk output instead of filling an O(matches) key buffer.
+fn affine_unit_stride_i64_view(
+    column: &Column,
+    start: usize,
+    step: usize,
+    len: usize,
+) -> Option<Column> {
+    if len == 0 {
+        return Some(Column::from_i64_values_owned(Vec::new()));
+    }
+    if step != 1 {
+        return None;
+    }
+    let (data, base) = column.as_i64_arc_view_source()?;
+    let view_start = base.checked_add(start)?;
+    view_start
+        .checked_add(len)
+        .filter(|&end| end <= data.len())?;
+    Some(Column::from_i64_all_valid_chunks(
+        vec![(data, view_start, len)],
+        len,
+    ))
+}
+
+/// Fill all Int64 affine output lanes by row morsel into disjoint buffers.
+/// Float64 lanes are descriptor-only strided views and never enter this fill.
+fn build_affine_inner_i64_lanes(sources: &[(&[i64], usize, usize)], len: usize) -> Vec<Vec<i64>> {
+    let mut output: Vec<Vec<i64>> = sources.iter().map(|_| vec![0i64; len]).collect();
+    if sources.is_empty() || len == 0 {
+        return output;
+    }
+    let worker_count = affine_inner_worker_count().min(len);
+    if len < DENSE_I64_INNER_PARALLEL_MIN_VALUES || worker_count < 2 {
+        for (lane, &(source, start, step)) in output.iter_mut().zip(sources) {
+            for (row, value) in lane.iter_mut().enumerate() {
+                *value = source[start + row * step];
+            }
+        }
+        return output;
+    }
+
+    let mut bundles: Vec<Vec<&mut [i64]>> = (0..worker_count)
+        .map(|_| Vec::with_capacity(output.len()))
+        .collect();
+    for lane in &mut output {
+        let mut remainder = lane.as_mut_slice();
+        for (worker, bundle) in bundles.iter_mut().enumerate() {
+            let (row_start, row_end) = balanced_partition(len, worker, worker_count);
+            let (chunk, tail) = remainder.split_at_mut(row_end - row_start);
+            bundle.push(chunk);
+            remainder = tail;
+        }
+    }
+
+    std::thread::scope(|scope| {
+        for (worker, mut bundle) in bundles.into_iter().enumerate() {
+            let (row_start, _) = balanced_partition(len, worker, worker_count);
+            scope.spawn(move || {
+                for (lane, &(source, start, step)) in bundle.iter_mut().zip(sources) {
+                    for (local_row, value) in lane.iter_mut().enumerate() {
+                        *value = source[start + (row_start + local_row) * step];
+                    }
+                }
+            });
+        }
+    });
+    output
+}
+
+/// Shared-nothing affine Int64 inner merge.
+///
+/// This is deliberately narrow but structural: all-valid typed Int64 keys are
+/// certified as positive affine sequences; every carried lane must be an
+/// all-valid Int64 or Float64. The match relation is then a pair of affine row
+/// selections. Float64 payloads become zero-copy strided views, while all
+/// Int64 lanes are filled together across row morsels. Any unsupported shape
+/// falls through to the general ordered/dense/hash implementations.
+fn build_single_key_affine_i64_inner_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_key: &Column,
+    right_key: &Column,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<Option<MergedDataFrame>, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+    let (Some(left_keys), Some(right_keys)) = (left_key.as_i64_slice(), right_key.as_i64_slice())
+    else {
+        return Ok(None);
+    };
+    let Some((left_shape, right_shape)) = certify_positive_affine_i64_pair(left_keys, right_keys)
+    else {
+        return Ok(None);
+    };
+    let Some(plan) = affine_i64_inner_position_plan(left_shape, right_shape) else {
+        return Ok(None);
+    };
+
+    let left_col_names: HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: HashSet<&String> = right.columns().keys().collect();
+    let shared_key_names = if left_on[0] == right_on[0] {
+        [left_on[0]].into_iter().collect::<HashSet<&str>>()
+    } else {
+        HashSet::new()
+    };
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let mut specs = Vec::<AffineInnerOutputSpec<'_>>::new();
+    for name in left.column_names() {
+        let column = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let out_name = if name.as_str() == left_on[0] {
+            name.clone()
+        } else if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        let shared_key_view = (name.as_str() == left_on[0] && left_on[0] == right_on[0])
+            .then(|| {
+                affine_unit_stride_i64_view(left_key, plan.left_start, plan.left_step, plan.len)
+                    .or_else(|| {
+                        affine_unit_stride_i64_view(
+                            right_key,
+                            plan.right_start,
+                            plan.right_step,
+                            plan.len,
+                        )
+                    })
+                    .map(AffineInnerOutputLane::Built)
+            })
+            .flatten();
+        let Some(lane) = shared_key_view.or_else(|| {
+            affine_inner_output_lane(column, plan.left_start, plan.left_step, plan.len)
+        }) else {
+            return Ok(None);
+        };
+        specs.push(AffineInnerOutputSpec {
+            name: out_name,
+            lane,
+        });
+    }
+    for name in right.column_names() {
+        if name.as_str() == right_on[0] && shared_key_names.contains(name.as_str()) {
+            continue;
+        }
+        let column = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        let Some(lane) =
+            affine_inner_output_lane(column, plan.right_start, plan.right_step, plan.len)
+        else {
+            return Ok(None);
+        };
+        specs.push(AffineInnerOutputSpec {
+            name: out_name,
+            lane,
+        });
+    }
+
+    let i64_sources: Vec<(&[i64], usize, usize)> = specs
+        .iter()
+        .filter_map(|spec| match &spec.lane {
+            AffineInnerOutputLane::Int64 {
+                source,
+                start,
+                step,
+            } => Some((*source, *start, *step)),
+            AffineInnerOutputLane::Built(_) => None,
+        })
+        .collect();
+    let mut i64_lanes = build_affine_inner_i64_lanes(&i64_sources, plan.len).into_iter();
+    let index = Index::new_known_unique_int64_unit_range(0, plan.len);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let column = match spec.lane {
+            AffineInnerOutputLane::Int64 { .. } => Column::from_i64_values_owned(
+                i64_lanes
+                    .next()
+                    .expect("one filled lane for every affine Int64 output"),
+            ),
+            AffineInnerOutputLane::Built(column) => column,
+        };
+        debug_assert_eq!(column.len(), plan.len);
+        insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+    }
+    Ok(Some(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    }))
+}
+
 fn ordered_unique_int64_inner_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<(Vec<usize>, Vec<usize>)> {
+    // Typed fast path (see ordered_unique_int64_left_match_positions): walk the
+    // ordered intersection over raw &[i64] when both keys carry a contiguous
+    // Int64 backing, skipping the Vec<Scalar> materialization (32 B/elem, ~64 MB
+    // per merge at 1M rows). Bit-identical: same strictly-increasing gate and
+    // the same monotone merge emitting the same (left_idx, right_idx) pairs.
+    if let (Some(left_values), Some(right_values)) = (
+        strictly_increasing_i64_slice(left_key),
+        strictly_increasing_i64_slice(right_key),
+    ) {
+        let mut left_positions =
+            Vec::<usize>::with_capacity(left_values.len().min(right_values.len()));
+        let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+        let (mut left_idx, mut right_idx) = (0usize, 0usize);
+        while left_idx < left_values.len() && right_idx < right_values.len() {
+            match left_values[left_idx].cmp(&right_values[right_idx]) {
+                Ordering::Equal => {
+                    left_positions.push(left_idx);
+                    right_positions.push(right_idx);
+                    left_idx += 1;
+                    right_idx += 1;
+                }
+                Ordering::Less => left_idx += 1,
+                Ordering::Greater => right_idx += 1,
+            }
+        }
+        return Some((left_positions, right_positions));
+    }
+
     let left_values = strictly_increasing_int64_key_values(left_key)?;
     let right_values = strictly_increasing_int64_key_values(right_key)?;
 
@@ -1058,10 +1885,388 @@ fn ordered_unique_int64_inner_positions(
     Some((left_positions, right_positions))
 }
 
+fn strictly_increasing_utf8_key_spans(column: &Column) -> Option<(&[u8], &[usize])> {
+    column.as_strictly_increasing_utf8_contiguous()
+}
+
+fn utf8_span<'a>(bytes: &'a [u8], offsets: &[usize], pos: usize) -> &'a [u8] {
+    &bytes[offsets[pos]..offsets[pos + 1]]
+}
+
+fn utf8_offsets_are_sorted(bytes: &[u8], offsets: &[usize]) -> bool {
+    offsets
+        .windows(3)
+        .all(|window| bytes[window[0]..window[1]] <= bytes[window[1]..window[2]])
+}
+
+fn sorted_contiguous_utf8_inner_positions(
+    left_bytes: &[u8],
+    left_offsets: &[usize],
+    right_bytes: &[u8],
+    right_offsets: &[usize],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    if !utf8_offsets_are_sorted(left_bytes, left_offsets)
+        || !utf8_offsets_are_sorted(right_bytes, right_offsets)
+    {
+        return None;
+    }
+
+    let left_n = left_offsets.len() - 1;
+    let right_n = right_offsets.len() - 1;
+    let mut left_positions = Vec::<usize>::with_capacity(left_n.min(right_n));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    let mut left_pos = 0usize;
+    let mut right_pos = 0usize;
+
+    while left_pos < left_n && right_pos < right_n {
+        let left_span = utf8_span(left_bytes, left_offsets, left_pos);
+        let right_span = utf8_span(right_bytes, right_offsets, right_pos);
+        match left_span.cmp(right_span) {
+            Ordering::Less => left_pos += 1,
+            Ordering::Greater => right_pos += 1,
+            Ordering::Equal => {
+                let left_start = left_pos;
+                let right_start = right_pos;
+                while left_pos < left_n
+                    && utf8_span(left_bytes, left_offsets, left_pos) == left_span
+                {
+                    left_pos += 1;
+                }
+                while right_pos < right_n
+                    && utf8_span(right_bytes, right_offsets, right_pos) == right_span
+                {
+                    right_pos += 1;
+                }
+                for matched_left in left_start..left_pos {
+                    for matched_right in right_start..right_pos {
+                        left_positions.push(matched_left);
+                        right_positions.push(matched_right);
+                    }
+                }
+            }
+        }
+    }
+
+    Some((left_positions, right_positions))
+}
+
+fn utf8_span_lower_bound(bytes: &[u8], offsets: &[usize], needle: &[u8]) -> usize {
+    let mut lo = 0usize;
+    let mut hi = offsets.len() - 1;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if utf8_span(bytes, offsets, mid) < needle {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+fn ordered_unique_utf8_fixed_width(left_key: &Column, right_key: &Column) -> Option<usize> {
+    let (_, _, left_width) = left_key.as_fixed_width_strictly_increasing_utf8_contiguous()?;
+    let (_, _, right_width) = right_key.as_fixed_width_strictly_increasing_utf8_contiguous()?;
+    (left_width == right_width && left_width > 0).then_some(left_width)
+}
+
+fn ordered_utf8_lower_hex_overlap_len(
+    left_cert: Utf8LowerHexSequence,
+    right_cert: Utf8LowerHexSequence,
+    left_idx: usize,
+    left_n: usize,
+    right_idx: usize,
+    right_n: usize,
+) -> Option<usize> {
+    if !left_cert.same_shape(right_cert) {
+        return None;
+    }
+    let left_value = left_cert.value_at(left_idx)?;
+    let right_value = right_cert.value_at(right_idx)?;
+    if left_value != right_value {
+        return None;
+    }
+    Some(left_n.saturating_sub(left_idx).min(right_n - right_idx))
+}
+
+fn lower_hex_overlap_plan_from_certificates(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<InnerPositionPlan> {
+    let (left_prefix, left_cert, left_n) = left_key.as_lower_hex_sequence_utf8()?;
+    let (right_prefix, right_cert, right_n) = right_key.as_lower_hex_sequence_utf8()?;
+    if !left_cert.same_shape(right_cert) {
+        return None;
+    }
+    if left_prefix != right_prefix {
+        return None;
+    }
+
+    let left_n = u64::try_from(left_n).ok()?;
+    let right_n = u64::try_from(right_n).ok()?;
+    if left_n == 0 || right_n == 0 {
+        return Some(InnerPositionPlan::Gather {
+            left_positions: Vec::new(),
+            right_positions: Vec::new(),
+        });
+    }
+
+    let left_start_value = left_cert.start();
+    let right_start_value = right_cert.start();
+    let left_end_value = left_start_value.checked_add(left_n)?;
+    let right_end_value = right_start_value.checked_add(right_n)?;
+    let overlap_start = left_start_value.max(right_start_value);
+    let overlap_end = left_end_value.min(right_end_value);
+    if overlap_start >= overlap_end {
+        return Some(InnerPositionPlan::Gather {
+            left_positions: Vec::new(),
+            right_positions: Vec::new(),
+        });
+    }
+
+    let len = usize::try_from(overlap_end.checked_sub(overlap_start)?).ok()?;
+    let left_start = usize::try_from(overlap_start.checked_sub(left_start_value)?).ok()?;
+    let right_start = usize::try_from(overlap_start.checked_sub(right_start_value)?).ok()?;
+    let left_len = usize::try_from(left_n).ok()?;
+    let right_len = usize::try_from(right_n).ok()?;
+    let left_end = left_start.checked_add(len)?;
+    let right_end = right_start.checked_add(len)?;
+    if left_end > left_len || right_end > right_len {
+        return None;
+    }
+
+    Some(InnerPositionPlan::ContiguousRanges {
+        left_start,
+        right_start,
+        len,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InnerPositionPlan {
+    Gather {
+        left_positions: Vec<usize>,
+        right_positions: Vec<usize>,
+    },
+    ContiguousRanges {
+        left_start: usize,
+        right_start: usize,
+        len: usize,
+    },
+}
+
+impl InnerPositionPlan {
+    #[cfg(test)]
+    fn into_positions(self) -> (Vec<usize>, Vec<usize>) {
+        match self {
+            Self::Gather {
+                left_positions,
+                right_positions,
+            } => (left_positions, right_positions),
+            Self::ContiguousRanges {
+                left_start,
+                right_start,
+                len,
+            } => (
+                (left_start..left_start + len).collect(),
+                (right_start..right_start + len).collect(),
+            ),
+        }
+    }
+}
+
+/// Hash-free ordered merge for all-valid, strictly increasing contiguous-Utf8
+/// keys. This is the string-key analogue of
+/// [`ordered_unique_int64_inner_positions`]: each side is unique and already in
+/// key order, so a two-cursor byte-span merge emits the exact same 1:1
+/// `(left_pos, right_pos)` pairs as the hash path while skipping hash table
+/// build/probe entirely. Duplicate or unsorted inputs fall back to the
+/// left-major byte-span hash path, preserving pandas row order.
+fn ordered_unique_utf8_inner_position_plan(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<InnerPositionPlan> {
+    if let Some(plan) = lower_hex_overlap_plan_from_certificates(left_key, right_key) {
+        return Some(plan);
+    }
+
+    let (left_bytes, left_offsets) = strictly_increasing_utf8_key_spans(left_key)?;
+    let (right_bytes, right_offsets) = strictly_increasing_utf8_key_spans(right_key)?;
+    let left_n = left_offsets.len() - 1;
+    let right_n = right_offsets.len() - 1;
+    let fixed_width = ordered_unique_utf8_fixed_width(left_key, right_key);
+
+    if left_n == 0 || right_n == 0 {
+        return Some(InnerPositionPlan::Gather {
+            left_positions: Vec::new(),
+            right_positions: Vec::new(),
+        });
+    }
+
+    let mut left_positions = Vec::<usize>::with_capacity(left_n.min(right_n));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+
+    let first_left = utf8_span(left_bytes, left_offsets, 0);
+    let last_left = utf8_span(left_bytes, left_offsets, left_n - 1);
+    let first_right = utf8_span(right_bytes, right_offsets, 0);
+    let last_right = utf8_span(right_bytes, right_offsets, right_n - 1);
+    if last_left < first_right || last_right < first_left {
+        return Some(InnerPositionPlan::Gather {
+            left_positions,
+            right_positions,
+        });
+    }
+
+    let mut left_idx = utf8_span_lower_bound(left_bytes, left_offsets, first_right);
+    let mut right_idx = if left_idx < left_n {
+        utf8_span_lower_bound(
+            right_bytes,
+            right_offsets,
+            utf8_span(left_bytes, left_offsets, left_idx),
+        )
+    } else {
+        right_n
+    };
+    let mut fixed_width_bulk_attempted = false;
+
+    while left_idx < left_n && right_idx < right_n {
+        let left_span = utf8_span(left_bytes, left_offsets, left_idx);
+        let right_span = utf8_span(right_bytes, right_offsets, right_idx);
+
+        match left_span.cmp(right_span) {
+            Ordering::Equal => {
+                if let Some(width) = fixed_width
+                    && !fixed_width_bulk_attempted
+                {
+                    fixed_width_bulk_attempted = true;
+                    // This branch is reached only after the current left/right
+                    // key spans compare equal. Matching lower-hex shapes then
+                    // prove the remaining shifted windows without a full
+                    // byte-window memcmp.
+                    let lower_hex_sequences = match (
+                        left_key.as_lower_hex_sequence_utf8_contiguous(),
+                        right_key.as_lower_hex_sequence_utf8_contiguous(),
+                    ) {
+                        (Some((_, _, left_cert)), Some((_, _, right_cert))) => {
+                            Some((left_cert, right_cert))
+                        }
+                        _ => None,
+                    };
+                    if let Some((left_cert, right_cert)) = lower_hex_sequences
+                        && let Some(run_len) = ordered_utf8_lower_hex_overlap_len(
+                            left_cert, right_cert, left_idx, left_n, right_idx, right_n,
+                        )
+                        && run_len > 1
+                    {
+                        if left_positions.is_empty() {
+                            return Some(InnerPositionPlan::ContiguousRanges {
+                                left_start: left_idx,
+                                right_start: right_idx,
+                                len: run_len,
+                            });
+                        }
+                        left_positions.extend(left_idx..left_idx + run_len);
+                        right_positions.extend(right_idx..right_idx + run_len);
+                        left_idx += run_len;
+                        right_idx += run_len;
+                        continue;
+                    }
+                    let run_len = left_n.saturating_sub(left_idx).min(right_n - right_idx);
+                    if run_len > 1
+                        && let Some(byte_len) = run_len.checked_mul(width)
+                    {
+                        let left_start = left_offsets[left_idx];
+                        let right_start = right_offsets[right_idx];
+                        let left_end = left_start + byte_len;
+                        let right_end = right_start + byte_len;
+                        if left_end <= left_bytes.len()
+                            && right_end <= right_bytes.len()
+                            && left_bytes[left_start..left_end]
+                                == right_bytes[right_start..right_end]
+                        {
+                            if left_positions.is_empty() {
+                                return Some(InnerPositionPlan::ContiguousRanges {
+                                    left_start: left_idx,
+                                    right_start: right_idx,
+                                    len: run_len,
+                                });
+                            }
+                            left_positions.extend(left_idx..left_idx + run_len);
+                            right_positions.extend(right_idx..right_idx + run_len);
+                            left_idx += run_len;
+                            right_idx += run_len;
+                            continue;
+                        }
+                    }
+                }
+                left_positions.push(left_idx);
+                right_positions.push(right_idx);
+                left_idx += 1;
+                right_idx += 1;
+            }
+            Ordering::Less => left_idx += 1,
+            Ordering::Greater => right_idx += 1,
+        }
+    }
+
+    Some(InnerPositionPlan::Gather {
+        left_positions,
+        right_positions,
+    })
+}
+
+#[cfg(test)]
+fn ordered_unique_utf8_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    ordered_unique_utf8_inner_position_plan(left_key, right_key)
+        .map(InnerPositionPlan::into_positions)
+}
+
+/// Strictly-increasing check over a column's contiguous `&[i64]` backing,
+/// returning the raw slice. The typed analogue of
+/// `strictly_increasing_int64_key_values` that skips the `Vec<Scalar>`
+/// materialization (32 B/elem) — `as_i64_slice` is `Some` only for an
+/// all-valid contiguous Int64 column, the same gate as the Scalar version
+/// (dtype Int64 + `validity().all()` + every value `Scalar::Int64`).
+fn strictly_increasing_i64_slice(column: &Column) -> Option<&[i64]> {
+    let data = column.as_i64_slice()?;
+    if data.windows(2).any(|pair| pair[1] <= pair[0]) {
+        return None;
+    }
+    Some(data)
+}
+
 fn ordered_unique_int64_left_match_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<Vec<Option<usize>>> {
+    // Typed fast path: both keys carry a contiguous Int64 backing, so run the
+    // ordered two-pointer match over raw `&[i64]` (8 B/elem, cache-friendly)
+    // instead of materializing two `Vec<Scalar>` (32 B/elem — ~32 MB per side
+    // at 1M rows, the tax that left-join paid but the typed inner path did
+    // not). Bit-identical: same strictly-increasing gate and the same
+    // monotone walk producing the same `right_idx` per left row.
+    if let (Some(left_values), Some(right_values)) = (
+        strictly_increasing_i64_slice(left_key),
+        strictly_increasing_i64_slice(right_key),
+    ) {
+        let mut right_positions = Vec::<Option<usize>>::with_capacity(left_values.len());
+        let mut right_idx = 0usize;
+        for &left_value in left_values {
+            while right_idx < right_values.len() && right_values[right_idx] < left_value {
+                right_idx += 1;
+            }
+            let matched = match right_values.get(right_idx) {
+                Some(&right_value) if right_value == left_value => Some(right_idx),
+                _ => None,
+            };
+            right_positions.push(matched);
+        }
+        return Some(right_positions);
+    }
+
     let left_values = strictly_increasing_int64_key_values(left_key)?;
     let right_values = strictly_increasing_int64_key_values(right_key)?;
 
@@ -1093,6 +2298,30 @@ fn ordered_unique_int64_right_match_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<Vec<Option<usize>>> {
+    // Typed fast path (mirror of ordered_unique_int64_left_match_positions):
+    // walk over raw &[i64] when both keys carry a contiguous Int64 backing,
+    // skipping the Vec<Scalar> materialization (32 B/elem, ~64 MB per merge at
+    // 1M rows). Bit-identical: same strictly-increasing gate and the same
+    // monotone walk producing the same left_idx per right row.
+    if let (Some(left_values), Some(right_values)) = (
+        strictly_increasing_i64_slice(left_key),
+        strictly_increasing_i64_slice(right_key),
+    ) {
+        let mut left_positions = Vec::<Option<usize>>::with_capacity(right_values.len());
+        let mut left_idx = 0usize;
+        for &right_value in right_values {
+            while left_idx < left_values.len() && left_values[left_idx] < right_value {
+                left_idx += 1;
+            }
+            let matched = match left_values.get(left_idx) {
+                Some(&left_value) if left_value == right_value => Some(left_idx),
+                _ => None,
+            };
+            left_positions.push(matched);
+        }
+        return Some(left_positions);
+    }
+
     let left_values = strictly_increasing_int64_key_values(left_key)?;
     let right_values = strictly_increasing_int64_key_values(right_key)?;
 
@@ -1122,10 +2351,85 @@ fn ordered_unique_int64_right_match_positions(
 
 type OptionalJoinPositions = (Vec<Option<usize>>, Vec<Option<usize>>);
 
+/// Direct-address unique-key fast path for a bounded-span Int64 left/inner
+/// join. When the right keys are *unique* within their value span, the
+/// counting-sort CSR (count + prefix-sum + scatter + per-bucket emit, over
+/// several span-sized `usize` arrays) collapses to a single fill pass over one
+/// compact `u32` table (`pos+1`, `0` == empty) plus a single probe pass — ~14x
+/// faster at 1M (and faster than open-addressing hashing, no hash/probe).
+///
+/// Returns `None` (caller falls back to the CSR path) when: a key column is not
+/// a contiguous `&[i64]`, the right side is empty, the span exceeds the dense
+/// gate, the row count would overflow `u32`, or a *duplicate* right key is seen
+/// (then the CSR path's per-bucket emission is required). For unique right keys
+/// the emitted `(Some(left_pos), match)` pairs are byte-identical to the CSR
+/// path: one row per left key in left order, matching the single right position
+/// in its bucket (or `None` when absent / out of span).
+fn dense_int64_unique_right_left_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left_values = left_key.as_i64_slice()?;
+    let right_values = right_key.as_i64_slice()?;
+    if right_values.is_empty() || left_values.len() > u32::MAX as usize {
+        return None;
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    for &key in right_values {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+    }
+
+    let span = i128::from(max_key)
+        .checked_sub(i128::from(min_key))?
+        .checked_add(1)?;
+    let row_count = left_values.len().saturating_add(right_values.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    if span > max_dense_span as i128 {
+        return None;
+    }
+    let span = usize::try_from(span).ok()?;
+    let span_i128 = i128::try_from(span).ok()?;
+
+    // Fill the direct-address table; a non-empty slot means a duplicate right
+    // key, so bail to the CSR path (which handles many-to-many emission).
+    let mut table = vec![0u32; span];
+    for (pos, &key) in right_values.iter().enumerate() {
+        let bucket = usize::try_from(i128::from(key) - i128::from(min_key)).ok()?;
+        if table[bucket] != 0 {
+            return None;
+        }
+        table[bucket] = (pos as u32).checked_add(1)?;
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(left_values.len());
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(left_values.len());
+    for (left_pos, &key) in left_values.iter().enumerate() {
+        let offset = i128::from(key) - i128::from(min_key);
+        let matched = if (0..span_i128).contains(&offset) {
+            match table[offset as usize] {
+                0 => None,
+                slot => Some(slot as usize - 1),
+            }
+        } else {
+            None
+        };
+        left_positions.push(Some(left_pos));
+        right_positions.push(matched);
+    }
+
+    Some((left_positions, right_positions))
+}
+
 fn dense_int64_left_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<OptionalJoinPositions> {
+    if let Some(direct) = dense_int64_unique_right_left_positions(left_key, right_key) {
+        return Some(direct);
+    }
     let left_values = all_valid_int64_key_values(left_key)?;
     let right_values = all_valid_int64_key_values(right_key)?;
 
@@ -1226,10 +2530,75 @@ fn dense_int64_left_positions(
     Some((left_positions, right_positions))
 }
 
+/// Direct-address unique-key fast path for a bounded-span Int64 right join —
+/// the mirror of [`dense_int64_unique_right_left_positions`]. When the *left*
+/// (build-side) keys are unique within their span, a single fill + single probe
+/// over one compact `u32` table replaces the CSR. Keeps every right row; bails
+/// (caller falls back to the CSR path) on a duplicate left key, non-contiguous
+/// backing, empty left, oversized span, or `u32` row overflow.
+fn dense_int64_unique_left_right_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left_values = left_key.as_i64_slice()?;
+    let right_values = right_key.as_i64_slice()?;
+    if left_values.is_empty() || left_values.len() > u32::MAX as usize {
+        return None;
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    for &key in left_values {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+    }
+
+    let span = i128::from(max_key)
+        .checked_sub(i128::from(min_key))?
+        .checked_add(1)?;
+    let row_count = left_values.len().saturating_add(right_values.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    if span > max_dense_span as i128 {
+        return None;
+    }
+    let span = usize::try_from(span).ok()?;
+    let span_i128 = i128::try_from(span).ok()?;
+
+    let mut table = vec![0u32; span];
+    for (pos, &key) in left_values.iter().enumerate() {
+        let bucket = usize::try_from(i128::from(key) - i128::from(min_key)).ok()?;
+        if table[bucket] != 0 {
+            return None;
+        }
+        table[bucket] = (pos as u32).checked_add(1)?;
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(right_values.len());
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(right_values.len());
+    for (right_pos, &key) in right_values.iter().enumerate() {
+        let offset = i128::from(key) - i128::from(min_key);
+        let matched = if (0..span_i128).contains(&offset) {
+            match table[offset as usize] {
+                0 => None,
+                slot => Some(slot as usize - 1),
+            }
+        } else {
+            None
+        };
+        left_positions.push(matched);
+        right_positions.push(Some(right_pos));
+    }
+
+    Some((left_positions, right_positions))
+}
+
 fn dense_int64_right_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<OptionalJoinPositions> {
+    if let Some(direct) = dense_int64_unique_left_right_positions(left_key, right_key) {
+        return Some(direct);
+    }
     let left_values = all_valid_int64_key_values(left_key)?;
     let right_values = all_valid_int64_key_values(right_key)?;
 
@@ -1330,10 +2699,96 @@ fn dense_int64_right_positions(
     Some((left_positions, right_positions))
 }
 
+/// Direct-address unique-key fast path for a bounded-span Int64 full-outer join.
+/// When BOTH key sides are unique within the joint span, two compact `u32`
+/// tables (`pos+1`, `0` == empty) plus a single ascending scan over `0..span`
+/// replace the CSR's `Vec<Vec<usize>>` (one heap `Vec` per bucket — `span`
+/// allocations) and the `Vec<Scalar>` materialization. Bails (caller falls back
+/// to the bucket-list CSR) on a duplicate key on either side, non-contiguous
+/// backing, oversized span, or `u32` row overflow.
+///
+/// Bit-identical for unique keys: the CSR emits one row per bucket in ascending
+/// key (bucket) order — matched `(Some,Some)`, left-only `(Some,None)`,
+/// right-only `(None,Some)` — which is exactly the per-bucket scan here.
+fn dense_int64_unique_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left_values = left_key.as_i64_slice()?;
+    let right_values = right_key.as_i64_slice()?;
+    if left_values.len() > u32::MAX as usize || right_values.len() > u32::MAX as usize {
+        return None;
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    let mut any = false;
+    for &key in left_values.iter().chain(right_values.iter()) {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+        any = true;
+    }
+    if !any {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let span = i128::from(max_key)
+        .checked_sub(i128::from(min_key))?
+        .checked_add(1)?;
+    let row_count = left_values.len().saturating_add(right_values.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    if span > max_dense_span as i128 {
+        return None;
+    }
+    let span = usize::try_from(span).ok()?;
+
+    let mut left_table = vec![0u32; span];
+    let mut right_table = vec![0u32; span];
+    for (pos, &key) in left_values.iter().enumerate() {
+        let bucket = usize::try_from(i128::from(key) - i128::from(min_key)).ok()?;
+        if left_table[bucket] != 0 {
+            return None;
+        }
+        left_table[bucket] = (pos as u32).checked_add(1)?;
+    }
+    for (pos, &key) in right_values.iter().enumerate() {
+        let bucket = usize::try_from(i128::from(key) - i128::from(min_key)).ok()?;
+        if right_table[bucket] != 0 {
+            return None;
+        }
+        right_table[bucket] = (pos as u32).checked_add(1)?;
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::new();
+    let mut right_positions = Vec::<Option<usize>>::new();
+    for bucket in 0..span {
+        match (left_table[bucket], right_table[bucket]) {
+            (0, 0) => {}
+            (l, 0) => {
+                left_positions.push(Some(l as usize - 1));
+                right_positions.push(None);
+            }
+            (0, r) => {
+                left_positions.push(None);
+                right_positions.push(Some(r as usize - 1));
+            }
+            (l, r) => {
+                left_positions.push(Some(l as usize - 1));
+                right_positions.push(Some(r as usize - 1));
+            }
+        }
+    }
+
+    Some((left_positions, right_positions))
+}
+
 fn dense_int64_outer_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<OptionalJoinPositions> {
+    if let Some(direct) = dense_int64_unique_outer_positions(left_key, right_key) {
+        return Some(direct);
+    }
     let left_values = all_valid_int64_key_values(left_key)?;
     let right_values = all_valid_int64_key_values(right_key)?;
 
@@ -1425,6 +2880,53 @@ fn ordered_unique_int64_outer_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<OptionalJoinPositions> {
+    // Typed fast path (see ordered_unique_int64_left_match_positions): merge the
+    // ordered union over raw &[i64] when both keys carry a contiguous Int64
+    // backing, skipping the Vec<Scalar> materialization (32 B/elem, ~64 MB per
+    // merge at 1M rows). Bit-identical: same strictly-increasing gate and the
+    // same three-way merge emitting the same (Option,Option) position pairs and
+    // the same drain order.
+    if let (Some(left_values), Some(right_values)) = (
+        strictly_increasing_i64_slice(left_key),
+        strictly_increasing_i64_slice(right_key),
+    ) {
+        let cap = left_values.len().saturating_add(right_values.len());
+        let mut left_positions = Vec::<Option<usize>>::with_capacity(cap);
+        let mut right_positions = Vec::<Option<usize>>::with_capacity(cap);
+        let (mut left_idx, mut right_idx) = (0usize, 0usize);
+        while left_idx < left_values.len() && right_idx < right_values.len() {
+            match left_values[left_idx].cmp(&right_values[right_idx]) {
+                Ordering::Equal => {
+                    left_positions.push(Some(left_idx));
+                    right_positions.push(Some(right_idx));
+                    left_idx += 1;
+                    right_idx += 1;
+                }
+                Ordering::Less => {
+                    left_positions.push(Some(left_idx));
+                    right_positions.push(None);
+                    left_idx += 1;
+                }
+                Ordering::Greater => {
+                    left_positions.push(None);
+                    right_positions.push(Some(right_idx));
+                    right_idx += 1;
+                }
+            }
+        }
+        while left_idx < left_values.len() {
+            left_positions.push(Some(left_idx));
+            right_positions.push(None);
+            left_idx += 1;
+        }
+        while right_idx < right_values.len() {
+            left_positions.push(None);
+            right_positions.push(Some(right_idx));
+            right_idx += 1;
+        }
+        return Some((left_positions, right_positions));
+    }
+
     let left_values = strictly_increasing_int64_key_values(left_key)?;
     let right_values = strictly_increasing_int64_key_values(right_key)?;
 
@@ -1570,6 +3072,40 @@ fn take_positions_typed(column: &Column, positions: &[usize]) -> Column {
 }
 
 #[derive(Clone, Copy)]
+enum PositionSelection<'a> {
+    Positions(&'a [usize]),
+    ContiguousRange { start: usize, len: usize },
+}
+
+impl PositionSelection<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Positions(positions) => positions.len(),
+            Self::ContiguousRange { len, .. } => len,
+        }
+    }
+}
+
+fn take_position_selection_typed(column: &Column, selection: PositionSelection<'_>) -> Column {
+    match selection {
+        PositionSelection::Positions(positions) => take_positions_typed(column, positions),
+        PositionSelection::ContiguousRange { start, len } => {
+            column.take_contiguous_range(start, len)
+        }
+    }
+}
+
+fn take_lower_hex_sequence_range(column: &Column, start: usize, len: usize) -> Option<Column> {
+    let (prefix, certificate, source_len) = column.as_lower_hex_sequence_utf8()?;
+    let end = start.checked_add(len)?;
+    if end > source_len {
+        return None;
+    }
+    let start_value = certificate.value_at(start)?;
+    Column::from_lower_hex_sequence_utf8(prefix, start_value, len, certificate.hex_width())
+}
+
+#[derive(Clone, Copy)]
 enum FusedInt64Side {
     Left,
     Right,
@@ -1591,6 +3127,15 @@ const DENSE_I64_INNER_PARALLEL_MIN_VALUES: usize = 1 << 18;
 #[cfg(test)]
 const DENSE_I64_INNER_PARALLEL_MIN_VALUES: usize = 1;
 const DENSE_I64_INNER_PARALLEL_MAX_CHUNKS: usize = 16;
+
+fn join_parallel_thread_count() -> usize {
+    static THREAD_COUNT: OnceLock<usize> = OnceLock::new();
+    *THREAD_COUNT.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS)
+    })
+}
 
 struct DenseI64InnerOutputPlan<'a> {
     left_keys: &'a [i64],
@@ -1711,9 +3256,7 @@ fn build_dense_i64_inner_output_data(
     // Fill the full lanes first (right lanes always; left lanes on
     // low-fanout joins).
     let mut full_data: Vec<Vec<i64>> = Vec::new();
-    let thread_count = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+    let thread_count = join_parallel_thread_count();
     if !full_specs.is_empty()
         && plan.output_len >= DENSE_I64_INNER_PARALLEL_MIN_VALUES
         && thread_count > 1
@@ -1873,6 +3416,177 @@ fn build_dense_i64_inner_output_data(
         .collect()
 }
 
+/// Which typed lane an output column of the dense inner merge uses, recorded in
+/// column-encounter order so the i64 (lazy) and f64 (materialized) builds can be
+/// re-interleaved into the original column order (br-frankenpandas-jzrem).
+enum DenseInnerSpecKind {
+    I64,
+    F64,
+}
+
+/// One Float64 output lane of the dense inner merge (br-frankenpandas-jzrem).
+struct FusedF64OutputColumn<'a> {
+    name: String,
+    side: FusedInt64Side,
+    values: &'a [f64],
+}
+
+/// The matched-left-row list `(left_pos, bucket_start, run_len)` in probe order
+/// — identical to the walk inside [`build_dense_i64_inner_output_data`], so the
+/// Float64 lanes materialize in the exact same row order as the i64 lanes and
+/// the flat `take_positions` path.
+fn dense_inner_matched_runs(plan: &DenseI64InnerOutputPlan<'_>) -> Vec<(usize, usize, usize)> {
+    let mut matched = Vec::new();
+    for (left_pos, &v) in plan.left_keys.iter().enumerate() {
+        if v < plan.min || v > plan.max {
+            continue;
+        }
+        let bucket = (v - plan.min) as usize;
+        if bucket + 1 >= plan.offsets.len() {
+            continue;
+        }
+        let start = plan.offsets[bucket];
+        let run_len = plan.offsets[bucket + 1] - start;
+        if run_len == 0 {
+            continue;
+        }
+        matched.push((left_pos, start, run_len));
+    }
+    matched
+}
+
+/// Build one Float64 inner-merge output column as a LAZY representation
+/// (br-frankenpandas-jzrem) — O(matched + right_len), never the O(output_len)
+/// materialization:
+///   * a Left column becomes a repeat-values lane: one value per matched run
+///     (`values[left_pos]`) over the shared `run_lens` descriptor;
+///   * a Right column becomes a repeated-slices lane over the bucket-ordered
+///     value tape (`values` gathered by `positions`, one scattered pass) with
+///     the shared `segments` descriptor.
+///
+/// Both materialize, only when a consumer reads them, to exactly the values
+/// `take_position_selection_typed` would produce on the flat `(left_positions,
+/// right_positions)` vectors — same values, same row order (matched-run probe
+/// order == flat position order). Mirrors the i64 lazy lanes the all-Int64 path
+/// already emits, so a join whose output is only sized (not consumed) stays
+/// near-free instead of writing the whole fanned-out column.
+fn build_dense_inner_f64_column(
+    side: FusedInt64Side,
+    values: &[f64],
+    matched: &[(usize, usize, usize)],
+    positions: &[usize],
+    run_lens: &Arc<[usize]>,
+    segments: &Arc<[(usize, usize)]>,
+    output_len: usize,
+) -> Column {
+    match side {
+        FusedInt64Side::Left => {
+            let run_values: Vec<f64> = matched
+                .iter()
+                .map(|&(left_pos, _, _)| values[left_pos])
+                .collect();
+            Column::from_f64_repeat_values_run_lengths(run_values, Arc::clone(run_lens))
+        }
+        FusedInt64Side::Right => {
+            let tape: Vec<f64> = positions.iter().map(|&p| values[p]).collect();
+            Column::from_f64_repeated_slices_shared(tape, Arc::clone(segments), output_len)
+        }
+    }
+}
+
+/// Build every Float64 inner-merge output column, one worker per column when the
+/// pool is worth it (the fu8f5 column-parallel pattern). Returns `(name, column)`
+/// pairs in `specs` order. `run_lens`/`segments` are the shared lazy-lane
+/// descriptors derived from the matched-run list (one per matched run).
+fn build_dense_inner_f64_columns(
+    specs: Vec<FusedF64OutputColumn<'_>>,
+    matched: &[(usize, usize, usize)],
+    positions: &[usize],
+    output_len: usize,
+) -> Vec<(String, Column)> {
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let run_lens: Arc<[usize]> = matched.iter().map(|&(_, _, run_len)| run_len).collect();
+    let segments: Arc<[(usize, usize)]> = matched
+        .iter()
+        .map(|&(_, bucket_start, run_len)| (bucket_start, run_len))
+        .collect();
+
+    let worker_count = join_parallel_thread_count().min(specs.len());
+    if worker_count < 2 {
+        return specs
+            .into_iter()
+            .map(|s| {
+                (
+                    s.name,
+                    build_dense_inner_f64_column(
+                        s.side, s.values, matched, positions, &run_lens, &segments, output_len,
+                    ),
+                )
+            })
+            .collect();
+    }
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let specs_ref = &specs;
+    let run_lens_ref = &run_lens;
+    let segments_ref = &segments;
+    let built_by_worker = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let next = &next;
+            handles.push(scope.spawn(move || {
+                let mut local: Vec<(usize, Column)> = Vec::new();
+                loop {
+                    let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if idx >= specs_ref.len() {
+                        break;
+                    }
+                    let s = &specs_ref[idx];
+                    local.push((
+                        idx,
+                        build_dense_inner_f64_column(
+                            s.side,
+                            s.values,
+                            matched,
+                            positions,
+                            run_lens_ref,
+                            segments_ref,
+                            output_len,
+                        ),
+                    ));
+                }
+                local
+            }));
+        }
+        let mut all: Vec<(usize, Column)> = Vec::new();
+        for handle in handles {
+            all.extend(
+                handle
+                    .join()
+                    .expect("f64 inner-merge column worker panicked"),
+            );
+        }
+        all
+    });
+
+    let mut built: Vec<Option<Column>> = (0..specs.len()).map(|_| None).collect();
+    for (idx, column) in built_by_worker {
+        built[idx] = Some(column);
+    }
+    specs
+        .into_iter()
+        .zip(built)
+        .map(|(s, column)| {
+            (
+                s.name,
+                column.expect("every f64 column index is built once"),
+            )
+        })
+        .collect()
+}
+
 fn build_single_key_dense_i64_inner_merge_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -1904,15 +3618,22 @@ fn build_single_key_dense_i64_inner_merge_output(
     let overlapping_names =
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
 
-    let mut specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    // Collect output specs in column-encounter order, accepting BOTH typed
+    // all-valid Int64 and typed all-valid Float64 columns (br-frankenpandas-jzrem).
+    // Int64 columns keep the lazy repeat-run / repeated-slice representation;
+    // Float64 columns are materialized cache-efficiently below. Any other dtype,
+    // a nullable column, or a NaN-bearing Float64 (as_f64_slice gates on
+    // validity.all()) declines the whole fast path (Ok(None)) and falls back to
+    // the flat gather, exactly as before.
+    let mut i64_specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    let mut f64_specs = Vec::<FusedF64OutputColumn<'_>>::new();
+    let mut order_kinds = Vec::<DenseInnerSpecKind>::new();
+
     for name in left.column_names() {
         let col = left
             .columns()
             .get(name)
             .expect("left column listed in column_names must exist");
-        let Some(values) = col.as_i64_slice() else {
-            return Ok(None);
-        };
         let out_name = if left_key_name_set.contains(name.as_str()) {
             name.clone()
         } else if right_col_names.contains(name) {
@@ -1920,11 +3641,23 @@ fn build_single_key_dense_i64_inner_merge_output(
         } else {
             name.clone()
         };
-        specs.push(FusedInt64OutputColumn {
-            name: out_name,
-            side: FusedInt64Side::Left,
-            values,
-        });
+        if let Some(values) = col.as_i64_slice() {
+            i64_specs.push(FusedInt64OutputColumn {
+                name: out_name,
+                side: FusedInt64Side::Left,
+                values,
+            });
+            order_kinds.push(DenseInnerSpecKind::I64);
+        } else if let Some(values) = col.as_f64_slice() {
+            f64_specs.push(FusedF64OutputColumn {
+                name: out_name,
+                side: FusedInt64Side::Left,
+                values,
+            });
+            order_kinds.push(DenseInnerSpecKind::F64);
+        } else {
+            return Ok(None);
+        }
     }
 
     for name in right.column_names() {
@@ -1935,19 +3668,28 @@ fn build_single_key_dense_i64_inner_merge_output(
         if right_key_name_set.contains(name.as_str()) && shared_key_names.contains(name.as_str()) {
             continue;
         }
-        let Some(values) = col.as_i64_slice() else {
-            return Ok(None);
-        };
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, options.suffixes.right.as_deref())
         } else {
             name.clone()
         };
-        specs.push(FusedInt64OutputColumn {
-            name: out_name,
-            side: FusedInt64Side::Right,
-            values,
-        });
+        if let Some(values) = col.as_i64_slice() {
+            i64_specs.push(FusedInt64OutputColumn {
+                name: out_name,
+                side: FusedInt64Side::Right,
+                values,
+            });
+            order_kinds.push(DenseInnerSpecKind::I64);
+        } else if let Some(values) = col.as_f64_slice() {
+            f64_specs.push(FusedF64OutputColumn {
+                name: out_name,
+                side: FusedInt64Side::Right,
+                values,
+            });
+            order_kinds.push(DenseInnerSpecKind::F64);
+        } else {
+            return Ok(None);
+        }
     }
 
     ensure_merge_suffixes_for_overlaps(&overlapping_names, options.suffixes)?;
@@ -1957,14 +3699,30 @@ fn build_single_key_dense_i64_inner_merge_output(
             return Ok(None);
         }
         let mut columns = std::collections::BTreeMap::new();
-        let mut column_order = Vec::with_capacity(specs.len());
-        for spec in specs {
-            insert_merged_output_column(
-                &mut columns,
-                &mut column_order,
-                spec.name,
-                Column::from_i64_values(Vec::new()),
-            )?;
+        let mut column_order = Vec::with_capacity(order_kinds.len());
+        let mut i64_it = i64_specs.into_iter();
+        let mut f64_it = f64_specs.into_iter();
+        for kind in &order_kinds {
+            match kind {
+                DenseInnerSpecKind::I64 => {
+                    let spec = i64_it.next().expect("i64 spec for each I64 kind");
+                    insert_merged_output_column(
+                        &mut columns,
+                        &mut column_order,
+                        spec.name,
+                        Column::from_i64_values(Vec::new()),
+                    )?;
+                }
+                DenseInnerSpecKind::F64 => {
+                    let spec = f64_it.next().expect("f64 spec for each F64 kind");
+                    insert_merged_output_column(
+                        &mut columns,
+                        &mut column_order,
+                        spec.name,
+                        Column::from_f64_values(Vec::new()),
+                    )?;
+                }
+            }
         }
         return Ok(Some(MergedDataFrame {
             index: Index::new(Vec::new()),
@@ -2034,26 +3792,47 @@ fn build_single_key_dense_i64_inner_merge_output(
         positions: &positions,
         output_len,
     };
-    let output_data = build_dense_i64_inner_output_data(&specs, &output_plan);
+    let i64_lanes = build_dense_i64_inner_output_data(&i64_specs, &output_plan);
+    // Float64 lanes materialized cache-efficiently in the same probe row order
+    // (br-frankenpandas-jzrem); the matched-run walk is only needed when there
+    // are Float64 columns to build.
+    let matched = if f64_specs.is_empty() {
+        Vec::new()
+    } else {
+        dense_inner_matched_runs(&output_plan)
+    };
+    let f64_columns = build_dense_inner_f64_columns(f64_specs, &matched, &positions, output_len);
 
     // Lazy unit-range output index: identical labels (0..output_len as
     // IndexLabel::Int64, materialized on demand), pre-proven unique and
     // ascending — skips the eager Vec<IndexLabel> build for huge join outputs.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
     let mut columns = std::collections::BTreeMap::new();
-    let mut column_order = Vec::with_capacity(specs.len());
-    for (spec, lane) in specs.into_iter().zip(output_data) {
-        let column = match lane {
-            DenseI64LaneData::RepeatRunLengths { values, run_lens } => {
-                Column::from_i64_repeat_values_run_lengths(values, run_lens)
+    let mut column_order = Vec::with_capacity(order_kinds.len());
+    let mut i64_it = i64_specs.into_iter().zip(i64_lanes);
+    let mut f64_it = f64_columns.into_iter();
+    for kind in &order_kinds {
+        match kind {
+            DenseInnerSpecKind::I64 => {
+                let (spec, lane) = i64_it.next().expect("i64 lane for each I64 kind");
+                let column = match lane {
+                    DenseI64LaneData::RepeatRunLengths { values, run_lens } => {
+                        Column::from_i64_repeat_values_run_lengths(values, run_lens)
+                    }
+                    DenseI64LaneData::RepeatedSlices { data, segments } => {
+                        Column::from_i64_repeated_slices_shared(data, segments, output_len)
+                    }
+                    DenseI64LaneData::Full(data) => Column::from_i64_values(data),
+                };
+                debug_assert_eq!(column.len(), output_len);
+                insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
             }
-            DenseI64LaneData::RepeatedSlices { data, segments } => {
-                Column::from_i64_repeated_slices_shared(data, segments, output_len)
+            DenseInnerSpecKind::F64 => {
+                let (name, column) = f64_it.next().expect("f64 column for each F64 kind");
+                debug_assert_eq!(column.len(), output_len);
+                insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
             }
-            DenseI64LaneData::Full(data) => Column::from_i64_values(data),
-        };
-        debug_assert_eq!(column.len(), output_len);
-        insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+        }
     }
 
     Ok(Some(MergedDataFrame {
@@ -2063,25 +3842,177 @@ fn build_single_key_dense_i64_inner_merge_output(
     }))
 }
 
-/// Set validity bits `[start, end)` word-wise (full-word fills with edge
-/// masks instead of per-bit loops).
-fn set_validity_bit_range(words: &mut [u64], start: usize, end: usize) {
-    if start >= end {
+fn push_join_invalid_range(ranges: &mut Vec<(usize, usize)>, start: usize, len: usize) {
+    if len == 0 {
         return;
     }
-    let first_word = start / 64;
-    let last_word = (end - 1) / 64;
-    let first_mask = u64::MAX << (start % 64);
-    let last_mask = u64::MAX >> (63 - ((end - 1) % 64));
-    if first_word == last_word {
-        words[first_word] |= first_mask & last_mask;
+    if let Some((last_start, last_len)) = ranges.last_mut()
+        && last_start.checked_add(*last_len) == Some(start)
+    {
+        *last_len += len;
         return;
     }
-    words[first_word] |= first_mask;
-    for word in &mut words[first_word + 1..last_word] {
-        *word = u64::MAX;
+    ranges.push((start, len));
+}
+
+fn dense_cycle_key_at(witness: Int64DenseCycleWitness, row: usize) -> Option<i64> {
+    let offset = i64::try_from(row % witness.period).ok()?;
+    witness.start.checked_add(offset)
+}
+
+fn dense_cycle_left_join_shape(
+    left_witness: Int64DenseCycleWitness,
+    right_witness: Int64DenseCycleWitness,
+) -> Option<(usize, ValidityMask)> {
+    let mut output_len = 0usize;
+    let mut invalid_ranges = Vec::<(usize, usize)>::new();
+    for left_pos in 0..left_witness.len {
+        let key = dense_cycle_key_at(left_witness, left_pos)?;
+        if let Some((_, right_count)) = right_witness.offset_count_for_key(key) {
+            output_len = output_len.checked_add(right_count)?;
+        } else {
+            push_join_invalid_range(&mut invalid_ranges, output_len, 1);
+            output_len = output_len.checked_add(1)?;
+        }
     }
-    words[last_word] |= last_mask;
+    let right_validity = ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), output_len);
+    Some((output_len, right_validity))
+}
+
+/// Dense-cycle LEFT merge builder (br-frankenpandas-yq96z).
+///
+/// For certified `key[row] = start + (row % period)` Int64 keys, the previous
+/// high-fanout left path still built an O(left_rows) plan, right segment tape,
+/// and one repeat-run descriptor per left lane. This path keeps the same
+/// left-major pandas order but stores only the two key witnesses:
+///
+/// - output length/right validity are derived by scanning the left witness once;
+/// - left lanes read `source[left_pos]` and repeat by the matching right count;
+/// - right lanes replay positions `right_offset + k * right_period`;
+/// - unmatched left rows emit one right null at the same output slot.
+///
+/// The route accepts only all-valid Int64 columns. Any other dtype/null shape
+/// falls back to the existing materialized-plan builder.
+fn build_single_key_dense_cycle_i64_left_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_key: &Column,
+    right_key: &Column,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<Option<MergedDataFrame>, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+
+    let Some(left_witness) = left_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == left_key.len())
+    else {
+        return Ok(None);
+    };
+    let Some(right_witness) = right_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == right_key.len())
+    else {
+        return Ok(None);
+    };
+    let Some((output_len, right_validity)) =
+        dense_cycle_left_join_shape(left_witness, right_witness)
+    else {
+        return Ok(None);
+    };
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
+    let right_key_name_set: HashSet<&str> = right_on.iter().copied().collect();
+    let shared_key_names = if left_on[0] == right_on[0] {
+        [left_on[0]].into_iter().collect::<HashSet<&str>>()
+    } else {
+        HashSet::new()
+    };
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+
+    enum DenseCycleLeftLane {
+        Left,
+        Right,
+    }
+    let mut spec_names = Vec::<String>::new();
+    let mut spec_kinds = Vec::<DenseCycleLeftLane>::new();
+    let mut spec_sources = Vec::<Arc<[i64]>>::new();
+
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let Some(source) = col.as_i64_arc() else {
+            return Ok(None);
+        };
+        let out_name = if left_key_name_set.contains(name.as_str()) {
+            name.clone()
+        } else if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        spec_names.push(out_name);
+        spec_kinds.push(DenseCycleLeftLane::Left);
+        spec_sources.push(source);
+    }
+
+    for name in right.column_names() {
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        if right_key_name_set.contains(name.as_str()) && shared_key_names.contains(name.as_str()) {
+            continue;
+        }
+        let Some(source) = col.as_i64_arc() else {
+            return Ok(None);
+        };
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        spec_names.push(out_name);
+        spec_kinds.push(DenseCycleLeftLane::Right);
+        spec_sources.push(source);
+    }
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let index = Index::new_known_unique_int64_unit_range(0, output_len);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(spec_names.len());
+    for ((name, kind), source) in spec_names.into_iter().zip(spec_kinds).zip(spec_sources) {
+        let column = match kind {
+            DenseCycleLeftLane::Left => Column::from_i64_left_join_dense_cycle_left(
+                source,
+                left_witness,
+                right_witness,
+                output_len,
+            ),
+            DenseCycleLeftLane::Right => Column::from_i64_left_join_dense_cycle_right_nullable(
+                source,
+                left_witness,
+                right_witness,
+                right_validity.clone(),
+                output_len,
+            ),
+        };
+        debug_assert_eq!(column.len(), output_len);
+        insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
+    }
+
+    Ok(Some(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    }))
 }
 
 /// Fused dense-i64 LEFT merge builder (br-frankenpandas-7wxoc).
@@ -2140,6 +4071,7 @@ fn build_single_key_dense_i64_left_merge_output(
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
 
     let mut specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    let mut sources = Vec::<Arc<[i64]>>::new();
     for name in left.column_names() {
         let col = left
             .columns()
@@ -2148,6 +4080,7 @@ fn build_single_key_dense_i64_left_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         let out_name = if left_key_name_set.contains(name.as_str()) {
             name.clone()
         } else if right_col_names.contains(name) {
@@ -2160,6 +4093,7 @@ fn build_single_key_dense_i64_left_merge_output(
             side: FusedInt64Side::Left,
             values,
         });
+        sources.push(source);
     }
     for name in right.column_names() {
         let col = right
@@ -2172,6 +4106,7 @@ fn build_single_key_dense_i64_left_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -2182,8 +4117,59 @@ fn build_single_key_dense_i64_left_merge_output(
             side: FusedInt64Side::Right,
             values,
         });
+        sources.push(source);
     }
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let row_count = left_keys.len().saturating_add(right_keys.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    let left_witness = left_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == left_keys.len());
+    let right_witness = right_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == right_keys.len());
+    if let (Some(left_witness), Some(right_witness), Some((right_min, right_max))) = (
+        left_witness,
+        right_witness,
+        right_witness.and_then(dense_cycle_domain),
+    ) {
+        let right_span = i128::from(right_max) - i128::from(right_min) + 1;
+        if right_span <= max_dense_span as i128
+            && let Some((output_len, right_validity)) =
+                dense_cycle_probe_output_len_and_validity(left_witness, right_witness)
+        {
+            let index = Index::new_known_unique_int64_unit_range(0, output_len);
+            let mut columns = std::collections::BTreeMap::new();
+            let mut column_order = Vec::with_capacity(specs.len());
+            for (spec, source) in specs.into_iter().zip(sources) {
+                let column = match spec.side {
+                    FusedInt64Side::Left => Column::from_i64_dense_cycle_probe_repeat(
+                        source,
+                        left_witness,
+                        right_witness,
+                        output_len,
+                    ),
+                    FusedInt64Side::Right => {
+                        Column::from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+                            source,
+                            left_witness,
+                            right_witness,
+                            right_validity.clone(),
+                            output_len,
+                        )
+                    }
+                };
+                debug_assert_eq!(column.len(), output_len);
+                insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+            }
+            return Ok(Some(MergedDataFrame {
+                index,
+                columns,
+                column_order,
+            }));
+        }
+    }
 
     // Dense CSR over the RIGHT key range — same gate as the position path
     // (span <= 4*(rows)+1024) so routing between fused/fallback matches
@@ -2195,8 +4181,6 @@ fn build_single_key_dense_i64_left_merge_output(
         max_key = max_key.max(key);
     }
     let span = (i128::from(max_key)) - (i128::from(min_key)) + 1;
-    let row_count = left_keys.len().saturating_add(right_keys.len());
-    let max_dense_span = row_count.saturating_mul(4).max(1024);
     if span > max_dense_span as i128 {
         return Ok(None);
     }
@@ -2243,37 +4227,36 @@ fn build_single_key_dense_i64_left_merge_output(
         plan.push(run);
     }
 
-    // One shared validity mask for every right lane: matched runs valid,
-    // unmatched rows null. Word-wise run fills.
-    let mut validity_words = vec![0_u64; output_len.div_ceil(64)];
-    {
-        let mut out_pos = 0usize;
-        for &(_, start, run_len) in &plan {
-            if start != UNMATCHED {
-                set_validity_bit_range(&mut validity_words, out_pos, out_pos + run_len);
-            }
-            out_pos += run_len;
-        }
-        debug_assert_eq!(out_pos, output_len);
-    }
-    let right_validity = fp_columnar::ValidityMask::from_words(validity_words, output_len);
+    // Shared right-lane segment descriptor (br-frankenpandas-yiqv5): the plan's
+    // `(bucket_start, run_len)` pairs are exactly the nullable repeated-slices
+    // segment format (`bucket_start == usize::MAX` == UNMATCHED ⇒ a null run), so
+    // every right lane is emitted as a LAZY `LazyNullableRepeatedSlicesInt64`
+    // over its bucket-order value tape instead of a materialized O(output_len)
+    // buffer. The validity mask is rebuilt from these segments inside the column
+    // ctor (matched runs valid, unmatched rows null) — identical to the prior
+    // word-wise fill.
+    let right_segments: Arc<[(usize, usize)]> = plan
+        .iter()
+        .map(|&(_, start, run_len)| (start, run_len))
+        .collect();
 
     // Left lanes as lazy repeat runs when the average fanout pays (3ad4n
     // gate); unmatched rows are singleton runs so the representation is
     // uniform.
     let use_repeat_runs = output_len >= plan.len().saturating_mul(2);
 
+    // Only LOW-FANOUT LEFT lanes still materialize into O(output_len) buffers;
+    // right lanes are always lazy (nullable repeated-slices) and high-fanout
+    // left lanes are lazy repeat runs.
     let full_specs: Vec<usize> = specs
         .iter()
         .enumerate()
-        .filter(|(_, spec)| !(use_repeat_runs && matches!(spec.side, FusedInt64Side::Left)))
+        .filter(|(_, spec)| matches!(spec.side, FusedInt64Side::Left) && !use_repeat_runs)
         .map(|(idx, _)| idx)
         .collect();
 
     let mut full_data: Vec<Vec<i64>> = Vec::new();
-    let thread_count = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+    let thread_count = join_parallel_thread_count();
     if !full_specs.is_empty() {
         // Right value tapes in bucket order (muis1), shared read-only.
         let tapes: Vec<Option<Vec<i64>>> = full_specs
@@ -2403,21 +4386,31 @@ fn build_single_key_dense_i64_left_merge_output(
     let mut column_order = Vec::with_capacity(specs.len());
     let mut full_iter = full_data.into_iter();
     for spec in specs {
-        let column = if use_repeat_runs && matches!(spec.side, FusedInt64Side::Left) {
-            Column::from_i64_repeat_runs(
+        let column = match spec.side {
+            FusedInt64Side::Right => {
+                // Lazy nullable repeated-slices over the bucket-order tape
+                // (br-frankenpandas-yiqv5): O(matched) descriptor, no O(output)
+                // materialization.
+                let tape: Vec<i64> = positions
+                    .iter()
+                    .map(|&right_pos| spec.values[right_pos])
+                    .collect();
+                Column::from_i64_nullable_repeated_slices_shared(
+                    tape,
+                    Arc::clone(&right_segments),
+                    output_len,
+                )
+            }
+            FusedInt64Side::Left if use_repeat_runs => Column::from_i64_repeat_runs(
                 plan.iter()
                     .map(|&(left_pos, _, run_len)| (spec.values[left_pos], run_len))
                     .collect(),
-            )
-        } else {
-            let data = full_iter
-                .next()
-                .expect("full lane buffer must exist for every non-run spec");
-            match spec.side {
-                FusedInt64Side::Left => Column::from_i64_values(data),
-                FusedInt64Side::Right => {
-                    Column::from_i64_values_with_validity(data, right_validity.clone())
-                }
+            ),
+            FusedInt64Side::Left => {
+                let data = full_iter
+                    .next()
+                    .expect("full lane buffer must exist for every non-run left spec");
+                Column::from_i64_values(data)
             }
         };
         debug_assert_eq!(column.len(), output_len);
@@ -2479,6 +4472,7 @@ fn build_single_key_dense_i64_right_merge_output(
     // but carries RIGHT key values (all output rows have a right row), so it
     // is a Right-side lane on right_keys.
     let mut specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    let mut sources = Vec::<Arc<[i64]>>::new();
     for name in left.column_names() {
         let col = left
             .columns()
@@ -2488,13 +4482,22 @@ fn build_single_key_dense_i64_right_merge_output(
             return Ok(None);
         };
         if left_key_name_set.contains(name.as_str()) && shared_key_names.contains(name.as_str()) {
+            let right_key_col = right
+                .columns()
+                .get(right_on[0])
+                .expect("right key column must exist");
+            let source = right_key_col
+                .as_i64_arc()
+                .unwrap_or_else(|| Arc::from(right_keys));
             specs.push(FusedInt64OutputColumn {
                 name: name.clone(),
                 side: FusedInt64Side::Right,
                 values: right_keys,
             });
+            sources.push(source);
             continue;
         }
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         let out_name = if left_key_name_set.contains(name.as_str()) {
             name.clone()
         } else if right_col_names.contains(name) {
@@ -2507,6 +4510,7 @@ fn build_single_key_dense_i64_right_merge_output(
             side: FusedInt64Side::Left,
             values,
         });
+        sources.push(source);
     }
     for name in right.column_names() {
         let col = right
@@ -2519,6 +4523,7 @@ fn build_single_key_dense_i64_right_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -2529,8 +4534,59 @@ fn build_single_key_dense_i64_right_merge_output(
             side: FusedInt64Side::Right,
             values,
         });
+        sources.push(source);
     }
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let row_count = left_keys.len().saturating_add(right_keys.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    let left_witness = left_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == left_keys.len());
+    let right_witness = right_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == right_keys.len());
+    if let (Some(left_witness), Some(right_witness), Some((left_min, left_max))) = (
+        left_witness,
+        right_witness,
+        left_witness.and_then(dense_cycle_domain),
+    ) {
+        let left_span = i128::from(left_max) - i128::from(left_min) + 1;
+        if left_span <= max_dense_span as i128
+            && let Some((output_len, left_validity)) =
+                dense_cycle_probe_output_len_and_validity(right_witness, left_witness)
+        {
+            let index = Index::new_known_unique_int64_unit_range(0, output_len);
+            let mut columns = std::collections::BTreeMap::new();
+            let mut column_order = Vec::with_capacity(specs.len());
+            for (spec, source) in specs.into_iter().zip(sources) {
+                let column = match spec.side {
+                    FusedInt64Side::Left => {
+                        Column::from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+                            source,
+                            right_witness,
+                            left_witness,
+                            left_validity.clone(),
+                            output_len,
+                        )
+                    }
+                    FusedInt64Side::Right => Column::from_i64_dense_cycle_probe_repeat(
+                        source,
+                        right_witness,
+                        left_witness,
+                        output_len,
+                    ),
+                };
+                debug_assert_eq!(column.len(), output_len);
+                insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+            }
+            return Ok(Some(MergedDataFrame {
+                index,
+                columns,
+                column_order,
+            }));
+        }
+    }
 
     // Dense CSR over the LEFT key range — same gate as
     // dense_int64_right_positions (span <= 4*rows+1024).
@@ -2541,8 +4597,6 @@ fn build_single_key_dense_i64_right_merge_output(
         max_key = max_key.max(key);
     }
     let span = (i128::from(max_key)) - (i128::from(min_key)) + 1;
-    let row_count = left_keys.len().saturating_add(right_keys.len());
-    let max_dense_span = row_count.saturating_mul(4).max(1024);
     if span > max_dense_span as i128 {
         return Ok(None);
     }
@@ -2590,33 +4644,30 @@ fn build_single_key_dense_i64_right_merge_output(
     }
 
     // One shared validity mask for every left lane.
-    let mut validity_words = vec![0_u64; output_len.div_ceil(64)];
-    {
-        let mut out_pos = 0usize;
-        for &(_, start, run_len) in &plan {
-            if start != UNMATCHED {
-                set_validity_bit_range(&mut validity_words, out_pos, out_pos + run_len);
-            }
-            out_pos += run_len;
-        }
-        debug_assert_eq!(out_pos, output_len);
-    }
-    let left_validity = fp_columnar::ValidityMask::from_words(validity_words, output_len);
+    // Shared left-lane segment descriptor (br-frankenpandas-yiqv5): mirror of
+    // the left builder — every null-introduced LEFT lane is a LAZY
+    // `LazyNullableRepeatedSlicesInt64` over its bucket-order tape (plan's
+    // `(bucket_start, run_len)`, `usize::MAX` ⇒ null run) instead of a
+    // materialized O(output_len) buffer; validity rebuilt in the ctor.
+    let left_segments: Arc<[(usize, usize)]> = plan
+        .iter()
+        .map(|&(_, start, run_len)| (start, run_len))
+        .collect();
 
     // Right lanes (all-valid) as lazy repeat runs when the fanout pays.
     let use_repeat_runs = output_len >= plan.len().saturating_mul(2);
 
+    // Only LOW-FANOUT RIGHT lanes still materialize; left lanes are always lazy
+    // (nullable repeated-slices) and high-fanout right lanes are lazy repeat runs.
     let full_specs: Vec<usize> = specs
         .iter()
         .enumerate()
-        .filter(|(_, spec)| !(use_repeat_runs && matches!(spec.side, FusedInt64Side::Right)))
+        .filter(|(_, spec)| matches!(spec.side, FusedInt64Side::Right) && !use_repeat_runs)
         .map(|(idx, _)| idx)
         .collect();
 
     let mut full_data: Vec<Vec<i64>> = Vec::new();
-    let thread_count = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+    let thread_count = join_parallel_thread_count();
     if !full_specs.is_empty() {
         // LEFT value tapes in bucket order, shared read-only.
         let tapes: Vec<Option<Vec<i64>>> = full_specs
@@ -2741,27 +4792,33 @@ fn build_single_key_dense_i64_right_merge_output(
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order = Vec::with_capacity(specs.len());
     let mut full_iter = full_data.into_iter();
-    let has_left_missing = plan.iter().any(|&(_, start, _)| start == UNMATCHED);
     for spec in specs {
-        let column = if use_repeat_runs && matches!(spec.side, FusedInt64Side::Right) {
-            Column::from_i64_repeat_runs(
+        let column = match spec.side {
+            FusedInt64Side::Left => {
+                // Lazy nullable repeated-slices over the left bucket-order tape
+                // (br-frankenpandas-yiqv5). When no left row is missing the
+                // segments carry no `usize::MAX` sentinel, so the ctor yields an
+                // all-valid mask — identical to the prior `from_i64_values`.
+                let tape: Vec<i64> = positions
+                    .iter()
+                    .map(|&left_pos| spec.values[left_pos])
+                    .collect();
+                Column::from_i64_nullable_repeated_slices_shared(
+                    tape,
+                    Arc::clone(&left_segments),
+                    output_len,
+                )
+            }
+            FusedInt64Side::Right if use_repeat_runs => Column::from_i64_repeat_runs(
                 plan.iter()
                     .map(|&(right_pos, _, run_len)| (spec.values[right_pos], run_len))
                     .collect(),
-            )
-        } else {
-            let data = full_iter
-                .next()
-                .expect("full lane buffer must exist for every non-run spec");
-            match spec.side {
-                FusedInt64Side::Right => Column::from_i64_values(data),
-                FusedInt64Side::Left => {
-                    if has_left_missing {
-                        Column::from_i64_values_with_validity(data, left_validity.clone())
-                    } else {
-                        Column::from_i64_values(data)
-                    }
-                }
+            ),
+            FusedInt64Side::Right => {
+                let data = full_iter
+                    .next()
+                    .expect("full lane buffer must exist for every non-run right spec");
+                Column::from_i64_values(data)
             }
         };
         debug_assert_eq!(column.len(), output_len);
@@ -2773,6 +4830,240 @@ fn build_single_key_dense_i64_right_merge_output(
         columns,
         column_order,
     }))
+}
+
+fn dense_cycle_domain(witness: Int64DenseCycleWitness) -> Option<(i64, i64)> {
+    let last_offset = i64::try_from(witness.period.checked_sub(1)?).ok()?;
+    Some((witness.start, witness.start.checked_add(last_offset)?))
+}
+
+fn dense_cycle_probe_output_len_and_validity(
+    probe_witness: Int64DenseCycleWitness,
+    build_witness: Int64DenseCycleWitness,
+) -> Option<(usize, ValidityMask)> {
+    let mut output_len = 0usize;
+    let mut invalid_ranges = Vec::<(usize, usize)>::new();
+    for probe_pos in 0..probe_witness.len {
+        let offset = i64::try_from(probe_pos % probe_witness.period).ok()?;
+        let key = probe_witness.start.checked_add(offset)?;
+        let run_len = build_witness
+            .offset_count_for_key(key)
+            .map_or(1, |(_, count)| count);
+        if build_witness.offset_count_for_key(key).is_none() {
+            push_dense_outer_invalid_range(&mut invalid_ranges, output_len, 1);
+        }
+        output_len = output_len.checked_add(run_len)?;
+    }
+    Some((
+        output_len,
+        ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), output_len),
+    ))
+}
+
+struct DenseOuterRunTape {
+    run_lens: Option<Arc<[usize]>>,
+    left_run_valid: Option<Arc<[bool]>>,
+    left_run_positions: Option<Arc<[usize]>>,
+    right_positions_csr: Option<Arc<[usize]>>,
+    right_segments: Option<Arc<[(usize, usize)]>>,
+    key_runs: Vec<(i64, usize)>,
+    left_sparse_validity: ValidityMask,
+    right_sparse_validity: ValidityMask,
+    output_len: usize,
+    has_left_missing: bool,
+    has_right_missing: bool,
+}
+
+fn push_dense_outer_invalid_range(ranges: &mut Vec<(usize, usize)>, start: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    if let Some((last_start, last_len)) = ranges.last_mut()
+        && last_start.checked_add(*last_len) == Some(start)
+    {
+        *last_len += len;
+        return;
+    }
+    ranges.push((start, len));
+}
+
+fn append_dense_cycle_positions(
+    positions: &mut Vec<usize>,
+    witness: Int64DenseCycleWitness,
+    key: i64,
+) -> Option<usize> {
+    let (mut pos, count) = witness.offset_count_for_key(key)?;
+    for _ in 0..count {
+        positions.push(pos);
+        pos = pos.checked_add(witness.period)?;
+    }
+    Some(count)
+}
+
+fn build_dense_cycle_outer_run_tape(
+    left_witness: Int64DenseCycleWitness,
+    right_witness: Int64DenseCycleWitness,
+    min_key: i64,
+    span: usize,
+) -> Option<DenseOuterRunTape> {
+    let mut run_count = 0usize;
+    let mut active_key_count = 0usize;
+    let mut output_len = 0usize;
+    let mut has_left_missing = false;
+    let mut has_right_missing = false;
+    for bucket in 0..span {
+        let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+        let ll = left_witness
+            .offset_count_for_key(key)
+            .map_or(0, |(_, count)| count);
+        let rl = right_witness
+            .offset_count_for_key(key)
+            .map_or(0, |(_, count)| count);
+        let rows = match (ll > 0, rl > 0) {
+            (true, true) => {
+                run_count = run_count.checked_add(ll)?;
+                ll.checked_mul(rl)?
+            }
+            (true, false) => {
+                has_right_missing = true;
+                run_count = run_count.checked_add(ll)?;
+                ll
+            }
+            (false, true) => {
+                has_left_missing = true;
+                run_count = run_count.checked_add(1)?;
+                rl
+            }
+            (false, false) => continue,
+        };
+        active_key_count = active_key_count.checked_add(1)?;
+        output_len = output_len.checked_add(rows)?;
+    }
+
+    let build_left_tape = !has_left_missing;
+    let mut run_lens = Vec::with_capacity(if build_left_tape { run_count } else { 0 });
+    let mut left_run_valid = Vec::with_capacity(if build_left_tape { run_count } else { 0 });
+    let mut left_run_positions = Vec::with_capacity(if build_left_tape { run_count } else { 0 });
+    let mut right_positions_csr = Vec::with_capacity(right_witness.len);
+    let mut right_segments = Vec::with_capacity(run_count);
+    let mut key_runs = Vec::with_capacity(active_key_count);
+    let mut left_invalid_ranges = Vec::<(usize, usize)>::new();
+    let mut right_invalid_ranges = Vec::<(usize, usize)>::new();
+    let mut out_pos = 0usize;
+    let build_right_tape = !has_right_missing;
+    for bucket in 0..span {
+        let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+        let left_span = left_witness.offset_count_for_key(key);
+        let right_span = right_witness.offset_count_for_key(key);
+        let ll = left_span.map_or(0, |(_, count)| count);
+        let rl = right_span.map_or(0, |(_, count)| count);
+        if ll == 0 && rl == 0 {
+            continue;
+        }
+
+        let right_start = if rl > 0 {
+            if build_right_tape {
+                let start = right_positions_csr.len();
+                let appended =
+                    append_dense_cycle_positions(&mut right_positions_csr, right_witness, key)?;
+                debug_assert_eq!(appended, rl);
+                start
+            } else {
+                0
+            }
+        } else {
+            usize::MAX
+        };
+
+        let rows = match (left_span, right_span) {
+            (Some((mut left_pos, left_count)), Some((_, right_count))) => {
+                let rows = left_count.checked_mul(right_count)?;
+                if build_left_tape {
+                    run_lens.extend(std::iter::repeat_n(right_count, left_count));
+                    left_run_valid.extend(std::iter::repeat_n(true, left_count));
+                }
+                if build_right_tape {
+                    right_segments
+                        .extend(std::iter::repeat_n((right_start, right_count), left_count));
+                }
+                if build_left_tape {
+                    for _ in 0..left_count {
+                        left_run_positions.push(left_pos);
+                        left_pos = left_pos.checked_add(left_witness.period)?;
+                    }
+                }
+                rows
+            }
+            (Some((mut left_pos, left_count)), None) => {
+                push_dense_outer_invalid_range(&mut right_invalid_ranges, out_pos, left_count);
+                if build_left_tape {
+                    run_lens.extend(std::iter::repeat_n(1, left_count));
+                    left_run_valid.extend(std::iter::repeat_n(true, left_count));
+                }
+                if build_right_tape {
+                    right_segments.extend(std::iter::repeat_n((usize::MAX, 1), left_count));
+                }
+                if build_left_tape {
+                    for _ in 0..left_count {
+                        left_run_positions.push(left_pos);
+                        left_pos = left_pos.checked_add(left_witness.period)?;
+                    }
+                }
+                left_count
+            }
+            (None, Some((_, right_count))) => {
+                push_dense_outer_invalid_range(&mut left_invalid_ranges, out_pos, right_count);
+                if build_left_tape {
+                    run_lens.push(right_count);
+                    left_run_valid.push(false);
+                    left_run_positions.push(0);
+                }
+                if build_right_tape {
+                    right_segments.push((right_start, right_count));
+                }
+                right_count
+            }
+            (None, None) => unreachable!("empty buckets are skipped above"),
+        };
+        key_runs.push((key, rows));
+        out_pos = out_pos.checked_add(rows)?;
+    }
+    if out_pos != output_len
+        || (build_left_tape
+            && (run_lens.len() != run_count
+                || left_run_valid.len() != run_count
+                || left_run_positions.len() != run_count))
+        || (!build_left_tape
+            && (!run_lens.is_empty()
+                || !left_run_valid.is_empty()
+                || !left_run_positions.is_empty()))
+        || (build_right_tape
+            && (right_segments.len() != run_count
+                || right_positions_csr.len() != right_witness.len))
+        || (!build_right_tape && (!right_segments.is_empty() || !right_positions_csr.is_empty()))
+    {
+        return None;
+    }
+
+    Some(DenseOuterRunTape {
+        run_lens: build_left_tape.then(|| Arc::from(run_lens)),
+        left_run_valid: build_left_tape.then(|| Arc::from(left_run_valid)),
+        left_run_positions: build_left_tape.then(|| Arc::from(left_run_positions)),
+        right_positions_csr: build_right_tape.then(|| Arc::from(right_positions_csr)),
+        right_segments: build_right_tape.then(|| Arc::from(right_segments)),
+        key_runs,
+        left_sparse_validity: ValidityMask::from_invalid_ranges(
+            Arc::from(left_invalid_ranges),
+            output_len,
+        ),
+        right_sparse_validity: ValidityMask::from_invalid_ranges(
+            Arc::from(right_invalid_ranges),
+            output_len,
+        ),
+        output_len,
+        has_left_missing,
+        has_right_missing,
+    })
 }
 
 /// Fused dense-i64 OUTER merge builder (br-frankenpandas-343ho).
@@ -2846,6 +5137,7 @@ fn build_single_key_dense_i64_outer_merge_output(
     let mut spec_names = Vec::<String>::new();
     let mut spec_kinds = Vec::<OuterLaneKind>::new();
     let mut spec_values = Vec::<&[i64]>::new();
+    let mut spec_sources = Vec::<Arc<[i64]>>::new();
     for name in left.column_names() {
         let col = left
             .columns()
@@ -2854,10 +5146,12 @@ fn build_single_key_dense_i64_outer_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         if name.as_str() == key_name {
             spec_names.push(name.clone());
             spec_kinds.push(OuterLaneKind::SharedKey);
             spec_values.push(values);
+            spec_sources.push(Arc::clone(&source));
             continue;
         }
         let out_name = if right_col_names.contains(name) {
@@ -2868,6 +5162,7 @@ fn build_single_key_dense_i64_outer_merge_output(
         spec_names.push(out_name);
         spec_kinds.push(OuterLaneKind::Lane(FusedInt64Side::Left));
         spec_values.push(values);
+        spec_sources.push(source);
     }
     for name in right.column_names() {
         let col = right
@@ -2877,6 +5172,7 @@ fn build_single_key_dense_i64_outer_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         if name.as_str() == key_name {
             continue;
         }
@@ -2888,17 +5184,35 @@ fn build_single_key_dense_i64_outer_merge_output(
         spec_names.push(out_name);
         spec_kinds.push(OuterLaneKind::Lane(FusedInt64Side::Right));
         spec_values.push(values);
+        spec_sources.push(source);
     }
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
     // Dense span over BOTH key sets (same gate as dense_int64_outer_positions
     // so fused/fallback routing matches).
-    let mut min_key = left_keys[0];
-    let mut max_key = left_keys[0];
-    for &key in left_keys.iter().chain(right_keys.iter()) {
-        min_key = min_key.min(key);
-        max_key = max_key.max(key);
-    }
+    let left_witness = left_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == left_keys.len());
+    let right_witness = right_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == right_keys.len());
+    let (min_key, max_key) = match (
+        left_witness.and_then(dense_cycle_domain),
+        right_witness.and_then(dense_cycle_domain),
+    ) {
+        (Some((left_min, left_max)), Some((right_min, right_max))) => {
+            (left_min.min(right_min), left_max.max(right_max))
+        }
+        _ => {
+            let mut min_key = left_keys[0];
+            let mut max_key = left_keys[0];
+            for &key in left_keys.iter().chain(right_keys.iter()) {
+                min_key = min_key.min(key);
+                max_key = max_key.max(key);
+            }
+            (min_key, max_key)
+        }
+    };
     let span = (i128::from(max_key)) - (i128::from(min_key)) + 1;
     let row_count = left_keys.len().saturating_add(right_keys.len());
     let max_dense_span = row_count.saturating_mul(4).max(1024);
@@ -2907,307 +5221,186 @@ fn build_single_key_dense_i64_outer_merge_output(
     }
     let span = usize::try_from(span).expect("span bounded by max_dense_span");
 
-    // CSR layouts for both sides (replaces the per-bucket Vec<Vec<usize>>).
-    let build_csr = |keys: &[i64]| {
-        let mut offsets = vec![0usize; span + 1];
-        for &key in keys {
-            offsets[(key - min_key) as usize + 1] += 1;
-        }
-        for i in 0..span {
-            offsets[i + 1] += offsets[i];
-        }
-        let mut positions = vec![0usize; keys.len()];
-        let mut cursor = offsets[..span].to_vec();
-        for (pos, &key) in keys.iter().enumerate() {
-            let bucket = (key - min_key) as usize;
-            positions[cursor[bucket]] = pos;
-            cursor[bucket] += 1;
-        }
-        (offsets, positions)
-    };
-    let (left_offsets, left_positions_csr) = build_csr(left_keys);
-    let (right_offsets, right_positions_csr) = build_csr(right_keys);
-
-    // Bucket walk -> compact plan + closed-form key runs + output length.
     const NONE_POS: usize = usize::MAX;
-    let mut plan = Vec::<(usize, usize, usize)>::new();
-    let mut key_runs = Vec::<(i64, usize)>::new();
-    let mut output_len = 0usize;
-    let mut has_left_missing = false; // right-only buckets exist
-    let mut has_right_missing = false; // left-only rows exist
-    for bucket in 0..span {
-        let ll = left_offsets[bucket + 1] - left_offsets[bucket];
-        let rl = right_offsets[bucket + 1] - right_offsets[bucket];
-        let bucket_rows = match (ll > 0, rl > 0) {
-            (true, true) => {
-                let Some(rows) = ll.checked_mul(rl) else {
-                    return Ok(None);
-                };
-                let rs = right_offsets[bucket];
-                for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
-                    plan.push((lp, rs, rl));
-                }
-                rows
-            }
-            (true, false) => {
-                has_right_missing = true;
-                for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
-                    plan.push((lp, NONE_POS, 1));
-                }
-                ll
-            }
-            (false, true) => {
-                has_left_missing = true;
-                plan.push((NONE_POS, right_offsets[bucket], rl));
-                rl
-            }
-            (false, false) => continue,
-        };
-        let Some(new_len) = output_len.checked_add(bucket_rows) else {
-            return Ok(None);
-        };
-        output_len = new_len;
-        key_runs.push((min_key + bucket as i64, bucket_rows));
-    }
-
-    // Per-side shared validity masks, word-filled from the plan.
-    let mut left_words = vec![0_u64; output_len.div_ceil(64)];
-    let mut right_words = vec![0_u64; output_len.div_ceil(64)];
-    {
-        let mut out_pos = 0usize;
-        for &(lp, rs, run_len) in &plan {
-            if lp != NONE_POS {
-                set_validity_bit_range(&mut left_words, out_pos, out_pos + run_len);
-            }
-            if rs != NONE_POS {
-                set_validity_bit_range(&mut right_words, out_pos, out_pos + run_len);
-            }
-            out_pos += run_len;
+    let Some(DenseOuterRunTape {
+        run_lens,
+        left_run_valid,
+        left_run_positions,
+        right_positions_csr,
+        right_segments,
+        key_runs,
+        left_sparse_validity,
+        right_sparse_validity,
+        output_len,
+        has_left_missing,
+        has_right_missing,
+    }) = (match (left_witness, right_witness) {
+        (Some(left_witness), Some(right_witness)) => {
+            build_dense_cycle_outer_run_tape(left_witness, right_witness, min_key, span)
         }
-        debug_assert_eq!(out_pos, output_len);
-    }
-    let left_validity = fp_columnar::ValidityMask::from_words(left_words, output_len);
-    let right_validity = fp_columnar::ValidityMask::from_words(right_words, output_len);
+        _ => None,
+    })
+    .or_else(|| {
+        // CSR layouts for both sides (replaces the per-bucket Vec<Vec<usize>>).
+        let build_dense_cycle_csr =
+            |witness: Int64DenseCycleWitness| -> Option<(Vec<usize>, Vec<usize>)> {
+                let mut offsets = Vec::with_capacity(span + 1);
+                offsets.push(0);
+                let mut total = 0usize;
+                for bucket in 0..span {
+                    let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+                    let count = witness
+                        .offset_count_for_key(key)
+                        .map_or(0, |(_, count)| count);
+                    total = total.checked_add(count)?;
+                    offsets.push(total);
+                }
+                if total != witness.len {
+                    return None;
+                }
+                let mut positions = Vec::with_capacity(witness.len);
+                for bucket in 0..span {
+                    let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+                    let appended =
+                        append_dense_cycle_positions(&mut positions, witness, key).unwrap_or(0);
+                    debug_assert_eq!(
+                        appended,
+                        witness
+                            .offset_count_for_key(key)
+                            .map_or(0, |(_, count)| count)
+                    );
+                }
+                (positions.len() == witness.len).then_some((offsets, positions))
+            };
+        let build_csr = |keys: &[i64], witness: Option<Int64DenseCycleWitness>| {
+            if let Some(csr) = witness
+                .filter(|witness| witness.len == keys.len())
+                .and_then(&build_dense_cycle_csr)
+            {
+                return csr;
+            }
+            let mut offsets = vec![0usize; span + 1];
+            for &key in keys {
+                offsets[(key - min_key) as usize + 1] += 1;
+            }
+            for i in 0..span {
+                offsets[i + 1] += offsets[i];
+            }
+            let mut positions = vec![0usize; keys.len()];
+            let mut cursor = offsets[..span].to_vec();
+            for (pos, &key) in keys.iter().enumerate() {
+                let bucket = (key - min_key) as usize;
+                positions[cursor[bucket]] = pos;
+                cursor[bucket] += 1;
+            }
+            (offsets, positions)
+        };
+        let (left_offsets, left_positions_csr) = build_csr(left_keys, left_witness);
+        let (right_offsets, right_positions_csr) = build_csr(right_keys, right_witness);
 
-    // Group lanes: promoted (nullable Float64) when that side has missing
-    // rows, preserved (all-valid Int64 gather semantics) otherwise.
+        // Bucket walk -> compact plan + closed-form key runs + output length.
+        let mut plan = Vec::<(usize, usize, usize)>::new();
+        let mut key_runs = Vec::<(i64, usize)>::new();
+        let mut left_invalid_ranges = Vec::<(usize, usize)>::new();
+        let mut right_invalid_ranges = Vec::<(usize, usize)>::new();
+        let mut output_len = 0usize;
+        let mut has_left_missing = false; // right-only buckets exist
+        let mut has_right_missing = false; // left-only rows exist
+        for bucket in 0..span {
+            let ll = left_offsets[bucket + 1] - left_offsets[bucket];
+            let rl = right_offsets[bucket + 1] - right_offsets[bucket];
+            let bucket_rows = match (ll > 0, rl > 0) {
+                (true, true) => {
+                    let rows = ll.checked_mul(rl)?;
+                    let rs = right_offsets[bucket];
+                    for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
+                        plan.push((lp, rs, rl));
+                    }
+                    rows
+                }
+                (true, false) => {
+                    has_right_missing = true;
+                    push_dense_outer_invalid_range(&mut right_invalid_ranges, output_len, ll);
+                    for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
+                        plan.push((lp, NONE_POS, 1));
+                    }
+                    ll
+                }
+                (false, true) => {
+                    has_left_missing = true;
+                    push_dense_outer_invalid_range(&mut left_invalid_ranges, output_len, rl);
+                    plan.push((NONE_POS, right_offsets[bucket], rl));
+                    rl
+                }
+                (false, false) => continue,
+            };
+            output_len = output_len.checked_add(bucket_rows)?;
+            key_runs.push((min_key + bucket as i64, bucket_rows));
+        }
+
+        // Shared lazy-lane descriptors (br-frankenpandas-yiqv5): the plan drives
+        // every value lane as a LAZY column rather than an O(output_len)
+        // materialized buffer. The kept side stays all-valid; the promoted
+        // side becomes the matching nullable lazy lane.
+        let run_lens: Arc<[usize]> = plan.iter().map(|&(_, _, run_len)| run_len).collect();
+        let left_run_valid: Arc<[bool]> = plan.iter().map(|&(lp, _, _)| lp < NONE_POS).collect();
+        let left_run_positions: Arc<[usize]> = plan
+            .iter()
+            .map(|&(lp, _, _)| if lp == NONE_POS { 0 } else { lp })
+            .collect();
+        let right_segments: Arc<[(usize, usize)]> =
+            plan.iter().map(|&(_, rs, run_len)| (rs, run_len)).collect();
+        Some(DenseOuterRunTape {
+            run_lens: Some(run_lens),
+            left_run_valid: Some(left_run_valid),
+            left_run_positions: Some(left_run_positions),
+            right_positions_csr: Some(Arc::from(right_positions_csr)),
+            right_segments: Some(right_segments),
+            key_runs,
+            left_sparse_validity: ValidityMask::from_invalid_ranges(
+                Arc::from(left_invalid_ranges),
+                output_len,
+            ),
+            right_sparse_validity: ValidityMask::from_invalid_ranges(
+                Arc::from(right_invalid_ranges),
+                output_len,
+            ),
+            output_len,
+            has_left_missing,
+            has_right_missing,
+        })
+    })
+    else {
+        return Ok(None);
+    };
+
+    // Promoted (nullable Float64) when that side has missing rows, preserved
+    // (all-valid Int64) otherwise.
     let promoted = |side: FusedInt64Side| match side {
         FusedInt64Side::Left => has_left_missing,
         FusedInt64Side::Right => has_right_missing,
     };
-    let mut i64_lanes = Vec::<usize>::new();
-    let mut f64_lanes = Vec::<usize>::new();
-    for (idx, kind) in spec_kinds.iter().enumerate() {
-        if let OuterLaneKind::Lane(side) = kind {
-            if promoted(*side) {
-                f64_lanes.push(idx);
-            } else {
-                i64_lanes.push(idx);
-            }
-        }
-    }
 
-    // Right value tapes in bucket order (muis1): i64 always, f64 once-cast
-    // for promoted right lanes.
-    let tape_i64 = |idx: usize| -> Vec<i64> {
-        right_positions_csr
-            .iter()
-            .map(|&pos| spec_values[idx][pos])
-            .collect()
+    // Left broadcast run values (one per run): i64 (preserved) or f64 (promoted).
+    let left_run_values_i64 = |idx: usize| -> Option<Vec<i64>> {
+        Some(
+            left_run_positions
+                .as_ref()?
+                .iter()
+                .zip(left_run_valid.as_ref()?.iter())
+                .map(|(&lp, &valid)| if valid { spec_values[idx][lp] } else { 0 })
+                .collect(),
+        )
     };
-
-    // Output-balanced chunk boundaries over the plan (6bsw3), shared by both
-    // fill groups.
-    let thread_count = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
-    let parallel = output_len >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1;
-    let mut boundaries = vec![(0usize, 0usize)];
-    if parallel {
-        let target = output_len.div_ceil(thread_count).max(1);
-        let mut cumulative = 0usize;
-        let mut next_target = target;
-        for (plan_idx, &(_, _, run_len)) in plan.iter().enumerate() {
-            cumulative += run_len;
-            if cumulative >= next_target && plan_idx + 1 < plan.len() {
-                boundaries.push((plan_idx + 1, cumulative));
-                next_target = cumulative.saturating_add(target);
-            }
-        }
-    }
-    boundaries.push((plan.len(), output_len));
-    let chunk_count = boundaries.len() - 1;
-
-    // Fill the i64 group then the f64 group with the same chunked walk.
-    // (Macro-free duplication: the two loops differ only in element type and
-    // the `as f64` widening on left values.)
-    let fill_i64: Vec<Vec<i64>> = {
-        let tapes: Vec<Option<Vec<i64>>> = i64_lanes
-            .iter()
-            .map(|&idx| match &spec_kinds[idx] {
-                OuterLaneKind::Lane(FusedInt64Side::Right) => Some(tape_i64(idx)),
-                _ => None,
-            })
-            .collect();
-        let mut bufs: Vec<Vec<i64>> = i64_lanes.iter().map(|_| vec![0i64; output_len]).collect();
-        if !i64_lanes.is_empty() {
-            let mut bundles: Vec<Vec<&mut [i64]>> = (0..chunk_count)
-                .map(|_| Vec::with_capacity(i64_lanes.len()))
-                .collect();
-            for buf in &mut bufs {
-                let mut rest: &mut [i64] = buf.as_mut_slice();
-                let mut prev = 0usize;
-                for (chunk_idx, window) in boundaries.windows(2).enumerate() {
-                    let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
-                    prev = window[1].1;
-                    rest = tail;
-                    bundles[chunk_idx].push(chunk_slice);
-                }
-            }
-            let plan = &plan;
-            let i64_lanes = &i64_lanes;
-            let spec_kinds = &spec_kinds;
-            let spec_values = &spec_values;
-            std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(chunk_count);
-                for (chunk_idx, mut bundle) in bundles.into_iter().enumerate() {
-                    let (plan_start, out_start) = boundaries[chunk_idx];
-                    let (plan_end, out_end) = boundaries[chunk_idx + 1];
-                    let tapes = &tapes;
-                    handles.push(scope.spawn(move || {
-                        let mut cursor = 0usize;
-                        for &(lp, rs, run_len) in &plan[plan_start..plan_end] {
-                            for (slice, (&idx, tape)) in
-                                bundle.iter_mut().zip(i64_lanes.iter().zip(tapes.iter()))
-                            {
-                                match &spec_kinds[idx] {
-                                    OuterLaneKind::Lane(FusedInt64Side::Left) => {
-                                        if lp != NONE_POS {
-                                            slice[cursor..cursor + run_len]
-                                                .fill(spec_values[idx][lp]);
-                                        }
-                                    }
-                                    OuterLaneKind::Lane(FusedInt64Side::Right) => {
-                                        if rs != NONE_POS {
-                                            slice[cursor..cursor + run_len].copy_from_slice(
-                                                &tape
-                                                    .as_ref()
-                                                    .expect("right lane must have a tape")
-                                                    [rs..rs + run_len],
-                                            );
-                                        }
-                                    }
-                                    OuterLaneKind::SharedKey => {
-                                        unreachable!("key lane is synthesized, not filled")
-                                    }
-                                }
-                            }
-                            cursor += run_len;
-                        }
-                        debug_assert_eq!(cursor, out_end - out_start);
-                    }));
-                }
-                for handle in handles {
-                    handle
-                        .join()
-                        .expect("dense i64 outer output worker must not panic");
-                }
-            });
-        }
-        bufs
-    };
-    let fill_f64: Vec<Vec<f64>> = {
-        let tapes: Vec<Option<Vec<f64>>> = f64_lanes
-            .iter()
-            .map(|&idx| match &spec_kinds[idx] {
-                OuterLaneKind::Lane(FusedInt64Side::Right) => Some(
-                    right_positions_csr
-                        .iter()
-                        .map(|&pos| spec_values[idx][pos] as f64)
-                        .collect(),
-                ),
-                _ => None,
-            })
-            .collect();
-        let mut bufs: Vec<Vec<f64>> = f64_lanes.iter().map(|_| vec![0f64; output_len]).collect();
-        if !f64_lanes.is_empty() {
-            let mut bundles: Vec<Vec<&mut [f64]>> = (0..chunk_count)
-                .map(|_| Vec::with_capacity(f64_lanes.len()))
-                .collect();
-            for buf in &mut bufs {
-                let mut rest: &mut [f64] = buf.as_mut_slice();
-                let mut prev = 0usize;
-                for (chunk_idx, window) in boundaries.windows(2).enumerate() {
-                    let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
-                    prev = window[1].1;
-                    rest = tail;
-                    bundles[chunk_idx].push(chunk_slice);
-                }
-            }
-            let plan = &plan;
-            let f64_lanes = &f64_lanes;
-            let spec_kinds = &spec_kinds;
-            let spec_values = &spec_values;
-            std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(chunk_count);
-                for (chunk_idx, mut bundle) in bundles.into_iter().enumerate() {
-                    let (plan_start, out_start) = boundaries[chunk_idx];
-                    let (plan_end, out_end) = boundaries[chunk_idx + 1];
-                    let tapes = &tapes;
-                    handles.push(scope.spawn(move || {
-                        let mut cursor = 0usize;
-                        for &(lp, rs, run_len) in &plan[plan_start..plan_end] {
-                            for (slice, (&idx, tape)) in
-                                bundle.iter_mut().zip(f64_lanes.iter().zip(tapes.iter()))
-                            {
-                                match &spec_kinds[idx] {
-                                    OuterLaneKind::Lane(FusedInt64Side::Left) => {
-                                        if lp != NONE_POS {
-                                            slice[cursor..cursor + run_len]
-                                                .fill(spec_values[idx][lp] as f64);
-                                        }
-                                    }
-                                    OuterLaneKind::Lane(FusedInt64Side::Right) => {
-                                        if rs != NONE_POS {
-                                            slice[cursor..cursor + run_len].copy_from_slice(
-                                                &tape
-                                                    .as_ref()
-                                                    .expect("right lane must have a tape")
-                                                    [rs..rs + run_len],
-                                            );
-                                        }
-                                    }
-                                    OuterLaneKind::SharedKey => {
-                                        unreachable!("key lane is synthesized, not filled")
-                                    }
-                                }
-                            }
-                            cursor += run_len;
-                        }
-                        debug_assert_eq!(cursor, out_end - out_start);
-                    }));
-                }
-                for handle in handles {
-                    handle
-                        .join()
-                        .expect("dense f64 outer output worker must not panic");
-                }
-            });
-        }
-        bufs
-    };
-
-    // Assemble columns in spec order.
+    // Assemble columns in spec order, each a lazy lane.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order = Vec::with_capacity(spec_names.len());
-    let mut i64_iter = fill_i64.into_iter();
-    let mut f64_iter = fill_f64.into_iter();
     for (idx, (name, kind)) in spec_names.into_iter().zip(spec_kinds.iter()).enumerate() {
         let column = match kind {
             OuterLaneKind::SharedKey => {
-                // Closed-form coalesced key: all-valid, bucket key repeated
-                // bucket_rows times, in ascending bucket order.
+                // Closed-form coalesced key: all-valid, bucket key repeated in
+                // ascending bucket order. Lazy repeat-runs when the fanout pays.
                 if output_len >= key_runs.len().saturating_mul(2) {
                     Column::from_i64_repeat_runs(key_runs.clone())
                 } else {
@@ -3218,21 +5411,100 @@ fn build_single_key_dense_i64_outer_merge_output(
                     Column::from_i64_values(data)
                 }
             }
-            OuterLaneKind::Lane(side) => {
-                if promoted(*side) {
-                    let data = f64_iter.next().expect("promoted lane buffer must exist");
-                    let validity = match side {
-                        FusedInt64Side::Left => left_validity.clone(),
-                        FusedInt64Side::Right => right_validity.clone(),
+            OuterLaneKind::Lane(side) => match (side, promoted(*side)) {
+                (FusedInt64Side::Left, false) => {
+                    let Some(run_lens) = run_lens.as_ref() else {
+                        return Ok(None);
                     };
-                    Column::from_f64_values_with_validity(data, validity)
-                } else {
-                    let data = i64_iter.next().expect("preserved lane buffer must exist");
-                    Column::from_i64_values(data)
+                    let Some(run_values) = left_run_values_i64(idx) else {
+                        return Ok(None);
+                    };
+                    Column::from_i64_repeat_values_run_lengths(run_values, Arc::clone(run_lens))
                 }
-            }
+                (FusedInt64Side::Left, true) => {
+                    if left_run_positions.is_none()
+                        && let (Some(left_witness), Some(right_witness)) =
+                            (left_witness, right_witness)
+                    {
+                        Column::from_i64_nullable_dense_cycle_left_as_f64_with_sparse_validity(
+                            Arc::clone(&spec_sources[idx]),
+                            left_witness,
+                            right_witness,
+                            min_key,
+                            span,
+                            left_sparse_validity.clone(),
+                            output_len,
+                        )
+                    } else {
+                        let Some(run_lens) = run_lens.as_ref() else {
+                            return Ok(None);
+                        };
+                        let Some(left_run_positions) = left_run_positions.as_ref() else {
+                            return Ok(None);
+                        };
+                        let Some(left_run_valid) = left_run_valid.as_ref() else {
+                            return Ok(None);
+                        };
+                        Column::from_i64_nullable_repeat_positions_as_f64_with_sparse_validity(
+                            Arc::clone(&spec_sources[idx]),
+                            Arc::clone(left_run_positions),
+                            Arc::clone(left_run_valid),
+                            Arc::clone(run_lens),
+                            left_sparse_validity.clone(),
+                            output_len,
+                        )
+                    }
+                }
+                (FusedInt64Side::Right, false) => {
+                    let Some(right_positions_csr) = right_positions_csr.as_ref() else {
+                        return Ok(None);
+                    };
+                    let Some(right_segments) = right_segments.as_ref() else {
+                        return Ok(None);
+                    };
+                    let tape_i64 = right_positions_csr
+                        .iter()
+                        .map(|&pos| spec_values[idx][pos])
+                        .collect();
+                    Column::from_i64_repeated_slices_shared(
+                        tape_i64,
+                        Arc::clone(right_segments),
+                        output_len,
+                    )
+                }
+                (FusedInt64Side::Right, true) => {
+                    if right_positions_csr.is_none()
+                        && let (Some(left_witness), Some(right_witness)) =
+                            (left_witness, right_witness)
+                    {
+                        Column::from_i64_nullable_dense_cycle_right_as_f64_with_sparse_validity(
+                            Arc::clone(&spec_sources[idx]),
+                            left_witness,
+                            right_witness,
+                            min_key,
+                            span,
+                            right_sparse_validity.clone(),
+                            output_len,
+                        )
+                    } else {
+                        let Some(right_positions_csr) = right_positions_csr.as_ref() else {
+                            return Ok(None);
+                        };
+                        let Some(right_segments) = right_segments.as_ref() else {
+                            return Ok(None);
+                        };
+                        Column::from_i64_nullable_repeated_positions_as_f64_with_sparse_validity(
+                            Arc::clone(&spec_sources[idx]),
+                            Arc::clone(right_positions_csr),
+                            Arc::clone(right_segments),
+                            right_sparse_validity.clone(),
+                            output_len,
+                        )
+                    }
+                }
+            },
         };
-        debug_assert_eq!(column.len(), output_len, "lane {idx} length");
+        debug_assert_eq!(column.len(), output_len);
         insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
     }
 
@@ -3462,6 +5734,48 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
         return Ok(None);
     };
 
+    if left_keys.is_empty() != right_keys.is_empty() {
+        return Ok(None);
+    }
+    let dense_domain = if left_keys.is_empty() {
+        None
+    } else {
+        let left_witness = left_key
+            .int64_dense_cycle_witness()
+            .filter(|witness| witness.len == left_keys.len());
+        let right_witness = right_key
+            .int64_dense_cycle_witness()
+            .filter(|witness| witness.len == right_keys.len());
+        match (
+            left_witness.and_then(dense_cycle_domain),
+            right_witness.and_then(dense_cycle_domain),
+        ) {
+            (Some(left_domain), Some(right_domain)) => {
+                if left_domain != right_domain {
+                    return Ok(None);
+                }
+                Some(left_domain)
+            }
+            _ => {
+                let min_max = |keys: &[i64]| {
+                    let mut min_key = keys[0];
+                    let mut max_key = keys[0];
+                    for &key in &keys[1..] {
+                        min_key = min_key.min(key);
+                        max_key = max_key.max(key);
+                    }
+                    (min_key, max_key)
+                };
+                let (left_min_key, left_max_key) = min_max(left_keys);
+                let (right_min_key, right_max_key) = min_max(right_keys);
+                if left_min_key != right_min_key || left_max_key != right_max_key {
+                    return Ok(None);
+                }
+                Some((left_min_key, left_max_key))
+            }
+        }
+    };
+
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
     let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
     let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
@@ -3543,12 +5857,7 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
         }));
     }
 
-    let mut min_key = left_keys[0];
-    let mut max_key = left_keys[0];
-    for &key in left_keys.iter().chain(right_keys.iter()) {
-        min_key = min_key.min(key);
-        max_key = max_key.max(key);
-    }
+    let (min_key, max_key) = dense_domain.expect("empty dense outer case returned above");
 
     let span = i128::from(max_key)
         .checked_sub(i128::from(min_key))
@@ -3650,6 +5959,255 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
     }))
 }
 
+struct FixedDecimalUtf8Domain {
+    prefix: Vec<u8>,
+    decimal_width: usize,
+    start: u64,
+    len: usize,
+}
+
+impl FixedDecimalUtf8Domain {
+    fn row_width(&self) -> usize {
+        self.prefix.len() + self.decimal_width
+    }
+}
+
+fn trailing_decimal_width(bytes: &[u8]) -> Option<usize> {
+    let width = bytes
+        .iter()
+        .rev()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    (width > 0).then_some(width)
+}
+
+fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
+    let mut out = 0u64;
+    for &byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
+    }
+    Some(out)
+}
+
+fn fixed_decimal_utf8_domain(bytes: &[u8], offsets: &[usize]) -> Option<FixedDecimalUtf8Domain> {
+    let len = offsets.len().checked_sub(1)?;
+    if len == 0 {
+        return None;
+    }
+
+    let first = utf8_span(bytes, offsets, 0);
+    let decimal_width = trailing_decimal_width(first)?;
+    let prefix_len = first.len().checked_sub(decimal_width)?;
+    let prefix = first[..prefix_len].to_vec();
+    let start = parse_decimal_u64(&first[prefix_len..])?;
+    let row_width = first.len();
+
+    for row in 0..len {
+        let span = utf8_span(bytes, offsets, row);
+        if span.len() != row_width || !span.starts_with(&prefix) {
+            return None;
+        }
+        let value = parse_decimal_u64(&span[prefix_len..])?;
+        if value != start.checked_add(row as u64)? {
+            return None;
+        }
+    }
+
+    Some(FixedDecimalUtf8Domain {
+        prefix,
+        decimal_width,
+        start,
+        len,
+    })
+}
+
+fn fixed_decimal_utf8_bucket(span: &[u8], domain: &FixedDecimalUtf8Domain) -> Option<usize> {
+    if span.len() != domain.row_width() || !span.starts_with(&domain.prefix) {
+        return None;
+    }
+    let value = parse_decimal_u64(&span[domain.prefix.len()..])?;
+    let relative = value.checked_sub(domain.start)?;
+    let bucket = usize::try_from(relative).ok()?;
+    (bucket < domain.len).then_some(bucket)
+}
+
+enum FixedDecimalUtf8OuterLane<'a> {
+    SharedKey,
+    LeftF64(&'a [f64]),
+    RightF64(&'a [f64]),
+    LeftI64(&'a [i64]),
+    RightI64(&'a [i64]),
+}
+
+fn build_single_key_fixed_decimal_utf8_outer_all_matched_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_key: &Column,
+    right_key: &Column,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<Option<MergedDataFrame>, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+
+    if left_on[0] != right_on[0] {
+        return Ok(None);
+    }
+
+    let Some((left_bytes, left_offsets)) = left_key.as_utf8_contiguous() else {
+        return Ok(None);
+    };
+    let Some((right_bytes, right_offsets)) = right_key.as_utf8_contiguous() else {
+        return Ok(None);
+    };
+    let left_len = left_offsets.len().saturating_sub(1);
+    let right_len = right_offsets.len().saturating_sub(1);
+    if left_len == 0 || right_len == 0 {
+        return Ok(None);
+    }
+
+    let Some(domain) = fixed_decimal_utf8_domain(right_bytes, right_offsets) else {
+        return Ok(None);
+    };
+
+    let mut counts = vec![0usize; right_len];
+    let mut left_buckets = Vec::<usize>::with_capacity(left_len);
+    for left_pos in 0..left_len {
+        let span = utf8_span(left_bytes, left_offsets, left_pos);
+        let Some(bucket) = fixed_decimal_utf8_bucket(span, &domain) else {
+            return Ok(None);
+        };
+        counts[bucket] = counts[bucket].checked_add(1).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(
+                "merge output row count overflowed".to_owned(),
+            ))
+        })?;
+        left_buckets.push(bucket);
+    }
+    if counts.contains(&0) {
+        return Ok(None);
+    }
+
+    let mut offsets = Vec::with_capacity(right_len + 1);
+    offsets.push(0usize);
+    for &count in &counts {
+        offsets.push(offsets.last().copied().unwrap_or(0) + count);
+    }
+    let output_len = offsets[right_len];
+    let mut left_positions = vec![0usize; output_len];
+    let mut cursor = offsets[..right_len].to_vec();
+    for (left_pos, &bucket) in left_buckets.iter().enumerate() {
+        let out = cursor[bucket];
+        left_positions[out] = left_pos;
+        cursor[bucket] += 1;
+    }
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let shared_key_names = [left_on[0]].into_iter().collect::<HashSet<&str>>();
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let mut specs = Vec::<(String, FixedDecimalUtf8OuterLane<'_>)>::new();
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let lane = if name.as_str() == left_on[0] {
+            FixedDecimalUtf8OuterLane::SharedKey
+        } else if let Some(values) = col.as_f64_slice() {
+            FixedDecimalUtf8OuterLane::LeftF64(values)
+        } else if let Some(values) = col.as_i64_slice() {
+            FixedDecimalUtf8OuterLane::LeftI64(values)
+        } else {
+            return Ok(None);
+        };
+        let out_name = if name.as_str() == left_on[0] {
+            name.clone()
+        } else if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        specs.push((out_name, lane));
+    }
+    for name in right.column_names() {
+        if name.as_str() == right_on[0] {
+            continue;
+        }
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        let lane = if let Some(values) = col.as_f64_slice() {
+            FixedDecimalUtf8OuterLane::RightF64(values)
+        } else if let Some(values) = col.as_i64_slice() {
+            FixedDecimalUtf8OuterLane::RightI64(values)
+        } else {
+            return Ok(None);
+        };
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        specs.push((out_name, lane));
+    }
+
+    let run_lens: Arc<[usize]> = Arc::from(counts.clone());
+    let index = Index::new_known_unique_int64_unit_range(0, output_len);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(specs.len());
+    for (name, lane) in specs {
+        let column = match lane {
+            FixedDecimalUtf8OuterLane::SharedKey => {
+                let row_width = domain.row_width();
+                let mut bytes = Vec::with_capacity(output_len.saturating_mul(row_width));
+                let mut out_offsets = Vec::with_capacity(output_len + 1);
+                out_offsets.push(0);
+                for (bucket, &count) in counts.iter().enumerate() {
+                    let span = utf8_span(right_bytes, right_offsets, bucket);
+                    for _ in 0..count {
+                        bytes.extend_from_slice(span);
+                        out_offsets.push(bytes.len());
+                    }
+                }
+                Column::from_utf8_contiguous(bytes, out_offsets)
+            }
+            FixedDecimalUtf8OuterLane::LeftF64(values) => {
+                let data = left_positions.iter().map(|&pos| values[pos]).collect();
+                Column::from_f64_values_all_valid_unchecked(data)
+            }
+            FixedDecimalUtf8OuterLane::RightF64(values) => {
+                let run_values = (0..right_len).map(|bucket| values[bucket]).collect();
+                Column::from_f64_repeat_values_run_lengths(run_values, Arc::clone(&run_lens))
+            }
+            FixedDecimalUtf8OuterLane::LeftI64(values) => {
+                let data = left_positions.iter().map(|&pos| values[pos]).collect();
+                Column::from_i64_values(data)
+            }
+            FixedDecimalUtf8OuterLane::RightI64(values) => {
+                let run_values = (0..right_len).map(|bucket| values[bucket]).collect();
+                Column::from_i64_repeat_values_run_lengths(run_values, Arc::clone(&run_lens))
+            }
+        };
+        debug_assert_eq!(column.len(), output_len);
+        insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
+    }
+
+    Ok(Some(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    }))
+}
+
 fn build_single_key_inner_merge_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -3659,71 +6217,239 @@ fn build_single_key_inner_merge_output(
     right_positions: &[usize],
     suffixes: &ResolvedMergeSuffixes,
 ) -> Result<MergedDataFrame, JoinError> {
+    build_single_key_inner_merge_output_with_selections(
+        left,
+        right,
+        left_on,
+        right_on,
+        PositionSelection::Positions(left_positions),
+        PositionSelection::Positions(right_positions),
+        suffixes,
+    )
+}
+
+fn build_single_key_inner_contiguous_no_overlap_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_positions: PositionSelection<'_>,
+    right_positions: PositionSelection<'_>,
+) -> Option<MergedDataFrame> {
+    let (
+        PositionSelection::ContiguousRange {
+            start: left_start,
+            len,
+        },
+        PositionSelection::ContiguousRange {
+            start: right_start,
+            len: right_len,
+        },
+    ) = (left_positions, right_positions)
+    else {
+        return None;
+    };
+    if left_on[0] != right_on[0] || len != right_len {
+        return None;
+    }
+
+    let left_col_names = left.column_names();
+    let right_col_names = right.column_names();
+    if left_col_names.iter().any(|left_name| {
+        left_name.as_str() != left_on[0]
+            && right_col_names
+                .iter()
+                .any(|right_name| right_name.as_str() == left_name.as_str())
+    }) {
+        return None;
+    }
+
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order =
+        Vec::with_capacity(left_col_names.len() + right_col_names.len().saturating_sub(1));
+    let left_selection = PositionSelection::ContiguousRange {
+        start: left_start,
+        len,
+    };
+    let right_selection = PositionSelection::ContiguousRange {
+        start: right_start,
+        len,
+    };
+
+    for name in left_col_names.iter().copied() {
+        let column = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let output_column = if name.as_str() == left_on[0] {
+            take_lower_hex_sequence_range(column, left_start, len)
+                .unwrap_or_else(|| take_position_selection_typed(column, left_selection))
+        } else {
+            take_position_selection_typed(column, left_selection)
+        };
+        column_order.push(name.clone());
+        let previous = columns.insert(name.clone(), output_column);
+        debug_assert!(previous.is_none());
+    }
+    for name in right_col_names.iter().copied() {
+        if name.as_str() == right_on[0] {
+            continue;
+        }
+        let column = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        column_order.push(name.clone());
+        let previous = columns.insert(
+            name.clone(),
+            take_position_selection_typed(column, right_selection),
+        );
+        debug_assert!(previous.is_none());
+    }
+
+    Some(MergedDataFrame {
+        index: Index::new_known_unique_int64_unit_range(0, len),
+        columns,
+        column_order,
+    })
+}
+
+fn build_single_key_inner_merge_output_with_selections(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_positions: PositionSelection<'_>,
+    right_positions: PositionSelection<'_>,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<MergedDataFrame, JoinError> {
     debug_assert_eq!(left_on.len(), 1);
     debug_assert_eq!(right_on.len(), 1);
     debug_assert_eq!(left_positions.len(), right_positions.len());
 
+    if let Some(merged) = build_single_key_inner_contiguous_no_overlap_output(
+        left,
+        right,
+        left_on,
+        right_on,
+        left_positions,
+        right_positions,
+    ) {
+        return Ok(merged);
+    }
+
     let n = left_positions.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
-    let mut columns = std::collections::BTreeMap::new();
-    let mut column_order: Vec<String> = Vec::new();
 
-    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
-    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
-    let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
-    let right_key_name_set: HashSet<&str> = right_on.iter().copied().collect();
-
-    let mut shared_name_positions = HashMap::<&str, (usize, usize)>::new();
-    if left_on[0] == right_on[0] {
-        shared_name_positions.insert(left_on[0], (0, 0));
-    }
-    let shared_key_names = shared_name_positions
-        .keys()
-        .copied()
-        .collect::<HashSet<&str>>();
-    let overlapping_names =
-        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+    let left_col_names = left.column_names();
+    let right_col_names = right.column_names();
+    let use_linear_name_lookup =
+        left_col_names.len() + right_col_names.len() <= SMALL_SCHEMA_LINEAR_COLUMN_LOOKUP_LIMIT;
+    let left_hashed_col_names = (!use_linear_name_lookup).then(|| {
+        left_col_names
+            .iter()
+            .map(|name| name.as_str())
+            .collect::<HashSet<_>>()
+    });
+    let right_hashed_col_names = (!use_linear_name_lookup).then(|| {
+        right_col_names
+            .iter()
+            .map(|name| name.as_str())
+            .collect::<HashSet<_>>()
+    });
+    let shared_key_name = (left_on[0] == right_on[0]).then_some(left_on[0]);
+    let mut overlapping_names = left_col_names
+        .iter()
+        .filter_map(|name| {
+            let name = name.as_str();
+            (Some(name) != shared_key_name
+                && column_name_lookup_contains(
+                    &right_col_names,
+                    right_hashed_col_names.as_ref(),
+                    name,
+                ))
+            .then(|| name.to_owned())
+        })
+        .collect::<Vec<_>>();
+    overlapping_names.sort();
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
-    for name in left.column_names() {
+    // Resolve output column specs in order (name/suffix resolution is cheap),
+    // then gather them. Each output column is an independent typed gather over
+    // the position vector, so wide/large outputs build every column in parallel
+    // (one column per worker) — the same disjoint-fill pattern as the dense-i64
+    // fused builder (br-frankenpandas-j3jnd). Bit-identical to the serial loop:
+    // identical per-column take_positions_typed result, inserted in spec order.
+    let mut specs: Vec<(String, &Column, PositionSelection<'_>)> = Vec::new();
+    for name in left_col_names.iter().copied() {
         let col = left
             .columns()
             .get(name)
             .expect("left column listed in column_names must exist");
-        if left_key_name_set.contains(name.as_str()) {
-            let key_column = take_positions_typed(col, left_positions);
-            insert_merged_output_column(&mut columns, &mut column_order, name.clone(), key_column)?;
-            continue;
-        }
-
-        let reindexed = take_positions_typed(col, left_positions);
-        let out_name = if right_col_names.contains(name) {
+        let out_name = if name.as_str() == left_on[0] {
+            name.clone()
+        } else if column_name_lookup_contains(
+            &right_col_names,
+            right_hashed_col_names.as_ref(),
+            name.as_str(),
+        ) {
             apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+        specs.push((out_name, col, left_positions));
     }
-
-    for name in right.column_names() {
+    for name in right_col_names.iter().copied() {
+        if name.as_str() == right_on[0] && shared_key_name == Some(name.as_str()) {
+            continue;
+        }
         let col = right
             .columns()
             .get(name)
             .expect("right column listed in column_names must exist");
-        if right_key_name_set.contains(name.as_str())
-            && shared_name_positions.contains_key(name.as_str())
-        {
-            continue;
-        }
-
-        let reindexed = take_positions_typed(col, right_positions);
-        let out_name = if left_col_names.contains(name) {
+        let out_name = if column_name_lookup_contains(
+            &left_col_names,
+            left_hashed_col_names.as_ref(),
+            name.as_str(),
+        ) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+        specs.push((out_name, col, right_positions));
+    }
+
+    let built: Vec<Column> = {
+        let thread_count = join_parallel_thread_count();
+        if specs.len() > 1 && n >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1 {
+            let mut slots: Vec<Option<Column>> = (0..specs.len()).map(|_| None).collect();
+            let chunk = specs.len().div_ceil(thread_count).max(1);
+            std::thread::scope(|scope| {
+                for (spec_chunk, slot_chunk) in specs.chunks(chunk).zip(slots.chunks_mut(chunk)) {
+                    scope.spawn(move || {
+                        for ((_, col, positions), slot) in spec_chunk.iter().zip(slot_chunk) {
+                            *slot = Some(take_position_selection_typed(col, *positions));
+                        }
+                    });
+                }
+            });
+            slots
+                .into_iter()
+                .map(|c| c.expect("every spec column must be built"))
+                .collect()
+        } else {
+            specs
+                .iter()
+                .map(|(_, col, positions)| take_position_selection_typed(col, *positions))
+                .collect()
+        }
+    };
+
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order: Vec<String> = Vec::with_capacity(specs.len());
+    for ((out_name, _, _), column) in specs.into_iter().zip(built) {
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, column)?;
     }
 
     Ok(MergedDataFrame {
@@ -3764,7 +6490,6 @@ fn build_single_key_dense_left_merge_output(
     let overlapping_names =
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
-
     for name in left.column_names() {
         let col = left
             .columns()
@@ -3837,6 +6562,14 @@ fn build_single_key_ordered_unique_left_merge_output(
     let overlapping_names =
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+    // Building the shared Utf8 gather plan is O(output_rows): it scans every
+    // optional position and, for a non-contiguous match pattern, allocates an
+    // additional position tape plus validity bitmap. Most ordered Int64 joins
+    // have only numeric payloads, where every column ignores that plan and uses
+    // its typed reindexer. Defer the work until the first Utf8 payload actually
+    // asks for it; subsequent Utf8 columns still share the single immutable
+    // plan exactly as before.
+    let right_utf8_plan: OnceLock<Option<SharedOptionalUtf8GatherPlan>> = OnceLock::new();
 
     for name in left.column_names() {
         let col = left
@@ -3863,7 +6596,14 @@ fn build_single_key_ordered_unique_left_merge_output(
             continue;
         }
 
-        let reindexed = col.reindex_by_positions(right_positions)?;
+        let utf8_plan = if col.dtype() == DType::Utf8 {
+            right_utf8_plan
+                .get_or_init(|| shared_optional_utf8_gather_plan(right_positions, right.len()))
+                .as_ref()
+        } else {
+            None
+        };
+        let reindexed = reindex_with_shared_utf8_plan(col, right_positions, utf8_plan)?;
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -4100,7 +6840,45 @@ fn build_single_key_ordered_unique_outer_merge_output(
     let all_present_right_positions = all_present_take_positions
         .as_ref()
         .map(|(_, positions)| positions.as_slice());
+    let left_has_utf8 = left
+        .columns()
+        .values()
+        .any(|column| column.dtype() == DType::Utf8);
+    let right_has_utf8 = right
+        .columns()
+        .values()
+        .any(|column| column.dtype() == DType::Utf8);
+    let left_utf8_plan = (left_has_utf8 && all_present_left_positions.is_none())
+        .then(|| shared_optional_utf8_gather_plan(left_positions, left.len()))
+        .flatten();
+    let right_utf8_plan = (right_has_utf8 && all_present_right_positions.is_none())
+        .then(|| shared_optional_utf8_gather_plan(right_positions, right.len()))
+        .flatten();
 
+    // Per-column output build is INDEPENDENT across columns and was the serial
+    // hot phase of the join (~10.5ms of str_outer_join's reindex assembly at
+    // n=150000, 12 Utf8 value columns). Build an ordered list of column specs
+    // (cheap), compute each column — the O(output) `reindex_outer_join_column`
+    // gather / take / key-coalesce — across workers, then insert in the SAME
+    // first-seen order (br-frankenpandas-uza04.102). Byte-identical: each output
+    // column is the same values in the same row order, inserted in the same
+    // left-then-right column order, so `columns`/`column_order` are unchanged.
+    enum ColBuild<'a> {
+        KeyCoalesce {
+            left_key_col: &'a Column,
+            right_key_col: &'a Column,
+        },
+        Reindex {
+            col: &'a Column,
+            positions: &'a [Option<usize>],
+            utf8_plan: Option<&'a SharedOptionalUtf8GatherPlan>,
+        },
+        Take {
+            col: &'a Column,
+            present: &'a [usize],
+        },
+    }
+    let mut jobs: Vec<(String, ColBuild<'_>)> = Vec::new();
     for name in left.column_names() {
         let col = left
             .columns()
@@ -4112,59 +6890,58 @@ fn build_single_key_ordered_unique_outer_merge_output(
                     .columns()
                     .get(left_on[*left_key_idx])
                     .expect("left key column must exist");
-                let key_column = if let Some(positions) = all_present_left_positions {
-                    take_positions_typed(left_key_col, positions)
+                let spec = if let Some(positions) = all_present_left_positions {
+                    ColBuild::Take {
+                        col: left_key_col,
+                        present: positions,
+                    }
                 } else {
                     let right_key_col = right
                         .columns()
                         .get(right_on[*right_key_idx])
                         .expect("right key column must exist");
-                    let values = left_positions
-                        .iter()
-                        .zip(right_positions.iter())
-                        .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
-                            (Some(pos), _) => left_key_col.values()[*pos].clone(),
-                            (None, Some(pos)) => right_key_col.values()[*pos].clone(),
-                            (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
-                        })
-                        .collect::<Vec<_>>();
-                    Column::from_values(values)?
+                    ColBuild::KeyCoalesce {
+                        left_key_col,
+                        right_key_col,
+                    }
                 };
-                insert_merged_output_column(
-                    &mut columns,
-                    &mut column_order,
-                    name.clone(),
-                    key_column,
-                )?;
+                jobs.push((name.clone(), spec));
             } else {
-                let key_column = if let Some(positions) = all_present_left_positions {
-                    take_positions_typed(col, positions)
+                let spec = if let Some(positions) = all_present_left_positions {
+                    ColBuild::Take {
+                        col,
+                        present: positions,
+                    }
                 } else {
-                    reindex_outer_join_column(col, left_positions)?
+                    ColBuild::Reindex {
+                        col,
+                        positions: left_positions,
+                        utf8_plan: left_utf8_plan.as_ref(),
+                    }
                 };
-                insert_merged_output_column(
-                    &mut columns,
-                    &mut column_order,
-                    name.clone(),
-                    key_column,
-                )?;
+                jobs.push((name.clone(), spec));
             }
             continue;
         }
-
-        let reindexed = if let Some(positions) = all_present_left_positions {
-            take_positions_typed(col, positions)
+        let spec = if let Some(positions) = all_present_left_positions {
+            ColBuild::Take {
+                col,
+                present: positions,
+            }
         } else {
-            reindex_outer_join_column(col, left_positions)?
+            ColBuild::Reindex {
+                col,
+                positions: left_positions,
+                utf8_plan: left_utf8_plan.as_ref(),
+            }
         };
         let out_name = if right_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+        jobs.push((out_name, spec));
     }
-
     for name in right.column_names() {
         let col = right
             .columns()
@@ -4175,18 +6952,128 @@ fn build_single_key_ordered_unique_outer_merge_output(
         {
             continue;
         }
-
-        let reindexed = if let Some(positions) = all_present_right_positions {
-            take_positions_typed(col, positions)
+        let spec = if let Some(positions) = all_present_right_positions {
+            ColBuild::Take {
+                col,
+                present: positions,
+            }
         } else {
-            reindex_outer_join_column(col, right_positions)?
+            ColBuild::Reindex {
+                col,
+                positions: right_positions,
+                utf8_plan: right_utf8_plan.as_ref(),
+            }
         };
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+        jobs.push((out_name, spec));
+    }
+
+    let compute = |spec: &ColBuild<'_>| -> Result<Column, JoinError> {
+        match spec {
+            ColBuild::KeyCoalesce {
+                left_key_col,
+                right_key_col,
+            } => {
+                if let Some(column) = coalesce_temporal_i64_key_column(
+                    left_key_col,
+                    right_key_col,
+                    left_positions,
+                    right_positions,
+                ) {
+                    return Ok(column);
+                }
+                if let (Some(left_keys), Some(right_keys)) =
+                    (left_key_col.as_i64_slice(), right_key_col.as_i64_slice())
+                {
+                    let mut data = Vec::with_capacity(left_positions.len());
+                    let mut all_positions_valid = true;
+                    for (left_pos, right_pos) in left_positions.iter().zip(right_positions.iter()) {
+                        match (*left_pos, *right_pos) {
+                            (Some(pos), _) if pos < left_keys.len() => data.push(left_keys[pos]),
+                            (None, Some(pos)) if pos < right_keys.len() => {
+                                data.push(right_keys[pos])
+                            }
+                            _ => {
+                                all_positions_valid = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_positions_valid {
+                        return Ok(Column::from_i64_values(data));
+                    }
+                }
+
+                let values = left_positions
+                    .iter()
+                    .zip(right_positions.iter())
+                    .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                        (Some(pos), _) => left_key_col.values()[*pos].clone(),
+                        (None, Some(pos)) => right_key_col.values()[*pos].clone(),
+                        (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
+                    })
+                    .collect::<Vec<_>>();
+                Ok(Column::from_values(values)?)
+            }
+            ColBuild::Reindex {
+                col,
+                positions,
+                utf8_plan,
+            } => reindex_outer_with_shared_utf8_plan(col, positions, *utf8_plan),
+            ColBuild::Take { col, present } => Ok(take_positions_typed(col, present)),
+        }
+    };
+
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(64)
+        .min(jobs.len().max(1));
+    let computed: Vec<Result<Column, JoinError>> = if worker_count >= 2 && jobs.len() >= 2 {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let jobs_ref = &jobs;
+        let compute_ref = &compute;
+        let mut slots: Vec<Option<Result<Column, JoinError>>> =
+            (0..jobs.len()).map(|_| None).collect();
+        let parts = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(worker_count);
+            for _ in 0..worker_count {
+                let next = &next;
+                handles.push(scope.spawn(move || {
+                    let mut out: Vec<(usize, Result<Column, JoinError>)> = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= jobs_ref.len() {
+                            break;
+                        }
+                        out.push((i, compute_ref(&jobs_ref[i].1)));
+                    }
+                    out
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("join assembly worker panicked"))
+                .collect::<Vec<_>>()
+        });
+        for part in parts {
+            for (i, r) in part {
+                slots[i] = Some(r);
+            }
+        }
+        slots
+            .into_iter()
+            .map(|s| s.expect("every output column computed"))
+            .collect()
+    } else {
+        jobs.iter().map(|(_, spec)| compute(spec)).collect()
+    };
+
+    for ((out_name, _), col_res) in jobs.into_iter().zip(computed) {
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, col_res?)?;
     }
 
     Ok(MergedDataFrame {
@@ -4287,6 +7174,315 @@ fn dense_int64_inner_positions(
     dense_i64_inner_positions_slices(left, right)
 }
 
+/// Typed single-key INNER positions for all-valid temporal columns. Datetime64
+/// and Timedelta64 both store exact nanoseconds in `i64`; matching those raw
+/// values is identical to matching their same-variant `IndexLabel` wrappers.
+///
+/// The fast path requires equal temporal dtypes and rejects NaT explicitly.
+/// Ordered inputs validate each newly reached value while intersecting, instead
+/// of pre-scanning both slices for NaT and strict ordering. Nullable keys
+/// therefore fall through to the Scalar oracle, preserving its Missing-to-
+/// Missing join behavior. Output construction still gathers the original
+/// temporal key column, so dtype and value representation are kept.
+fn temporal_i64_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    if !left_key.validity().all() || !right_key.validity().all() {
+        return None;
+    }
+
+    let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
+        (DType::Datetime64, DType::Datetime64) => (
+            left_key.as_datetime64_slice()?,
+            right_key.as_datetime64_slice()?,
+            fp_types::Timestamp::NAT,
+        ),
+        (DType::Timedelta64, DType::Timedelta64) => (
+            left_key.as_timedelta64_slice()?,
+            right_key.as_timedelta64_slice()?,
+            fp_types::Timedelta::NAT,
+        ),
+        _ => return None,
+    };
+    let mut left_positions = Vec::with_capacity(left.len().min(right.len()));
+    let mut right_positions = Vec::with_capacity(left_positions.capacity());
+    let (mut left_idx, mut right_idx) = (0usize, 0usize);
+    let mut ordered = newly_reached_temporal_i64_value_is_strict(left, 0, nat)
+        && newly_reached_temporal_i64_value_is_strict(right, 0, nat);
+    while ordered && left_idx < left.len() && right_idx < right.len() {
+        match left[left_idx].cmp(&right[right_idx]) {
+            Ordering::Equal => {
+                left_positions.push(left_idx);
+                right_positions.push(right_idx);
+                left_idx += 1;
+                right_idx += 1;
+                ordered = newly_reached_temporal_i64_value_is_strict(left, left_idx, nat)
+                    && newly_reached_temporal_i64_value_is_strict(right, right_idx, nat);
+            }
+            Ordering::Less => {
+                left_idx += 1;
+                ordered = newly_reached_temporal_i64_value_is_strict(left, left_idx, nat);
+            }
+            Ordering::Greater => {
+                right_idx += 1;
+                ordered = newly_reached_temporal_i64_value_is_strict(right, right_idx, nat);
+            }
+        }
+    }
+    while ordered && left_idx < left.len() {
+        left_idx += 1;
+        ordered = newly_reached_temporal_i64_value_is_strict(left, left_idx, nat);
+    }
+    while ordered && right_idx < right.len() {
+        right_idx += 1;
+        ordered = newly_reached_temporal_i64_value_is_strict(right, right_idx, nat);
+    }
+    if ordered {
+        return Some((left_positions, right_positions));
+    }
+
+    if left.contains(&nat) || right.contains(&nat) {
+        return None;
+    }
+
+    dense_i64_inner_positions_slices(left, right)
+        .or_else(|| Some(hash_i64_inner_positions_slices(left, right)))
+}
+
+/// Typed single-key LEFT positions for all-valid temporal columns. The ordered
+/// unique case uses a two-pointer match scan; remaining shapes hash the raw
+/// nanoseconds. Both emit left-major rows and ascending right positions per
+/// key, exactly matching the generic Scalar planner. Nullable keys and NaT
+/// retain that planner's Missing-key behavior by declining this path.
+fn temporal_i64_left_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    if !left_key.validity().all() || !right_key.validity().all() {
+        return None;
+    }
+
+    let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
+        (DType::Datetime64, DType::Datetime64) => (
+            left_key.as_datetime64_slice()?,
+            right_key.as_datetime64_slice()?,
+            fp_types::Timestamp::NAT,
+        ),
+        (DType::Timedelta64, DType::Timedelta64) => (
+            left_key.as_timedelta64_slice()?,
+            right_key.as_timedelta64_slice()?,
+            fp_types::Timedelta::NAT,
+        ),
+        _ => return None,
+    };
+    if left.contains(&nat) || right.contains(&nat) {
+        return None;
+    }
+
+    if left.windows(2).all(|pair| pair[0] < pair[1])
+        && right.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        let left_positions = (0..left.len()).map(Some).collect::<Vec<_>>();
+        let mut right_positions = Vec::with_capacity(left.len());
+        let mut right_idx = 0usize;
+        for &left_value in left {
+            while right_idx < right.len() && right[right_idx] < left_value {
+                right_idx += 1;
+            }
+            right_positions.push(
+                (right_idx < right.len()
+                    && matches!(right[right_idx].cmp(&left_value), Ordering::Equal))
+                .then_some(right_idx),
+            );
+        }
+        return Some((left_positions, right_positions));
+    }
+
+    if right.is_empty() {
+        return Some((
+            (0..left.len()).map(Some).collect(),
+            vec![None; left.len()],
+        ));
+    }
+    let mut right_map = FxHashMap::<i64, JoinPositionBucket>::with_capacity_and_hasher(
+        right.len(),
+        Default::default(),
+    );
+    for (pos, &key) in right.iter().enumerate() {
+        right_map.entry(key).or_default().push(pos);
+    }
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(left.len());
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(left.len());
+    for (left_pos, &key) in left.iter().enumerate() {
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+#[inline]
+fn newly_reached_temporal_i64_value_is_strict(values: &[i64], idx: usize, nat: i64) -> bool {
+    let Some(&value) = values.get(idx) else {
+        return true;
+    };
+    value != nat && (idx == 0 || values[idx - 1] < value)
+}
+
+/// Ordered-unique single-key RIGHT matches for all-valid temporal columns.
+/// Datetime64 and Timedelta64 both store exact nanoseconds in `i64`, so a
+/// monotone two-pointer scan produces the same optional left position per
+/// right row as the generic Scalar planner without materializing either key.
+/// Each newly reached value is validated for NaT and strict ordering during
+/// that scan, avoiding separate input pre-scans. Nullable, NaT-bearing,
+/// duplicate, unsorted, or mixed-dtype keys decline.
+fn ordered_unique_temporal_i64_right_match_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<Vec<Option<usize>>> {
+    if !left_key.validity().all() || !right_key.validity().all() {
+        return None;
+    }
+
+    let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
+        (DType::Datetime64, DType::Datetime64) => (
+            left_key.as_datetime64_slice()?,
+            right_key.as_datetime64_slice()?,
+            fp_types::Timestamp::NAT,
+        ),
+        (DType::Timedelta64, DType::Timedelta64) => (
+            left_key.as_timedelta64_slice()?,
+            right_key.as_timedelta64_slice()?,
+            fp_types::Timedelta::NAT,
+        ),
+        _ => return None,
+    };
+    if !newly_reached_temporal_i64_value_is_strict(left, 0, nat) {
+        return None;
+    }
+
+    let mut left_positions = Vec::with_capacity(right.len());
+    let mut left_idx = 0usize;
+    for (right_idx, &right_value) in right.iter().enumerate() {
+        if !newly_reached_temporal_i64_value_is_strict(right, right_idx, nat) {
+            return None;
+        }
+        while left_idx < left.len() && left[left_idx] < right_value {
+            left_idx += 1;
+            if !newly_reached_temporal_i64_value_is_strict(left, left_idx, nat) {
+                return None;
+            }
+        }
+        left_positions.push(
+            (left_idx < left.len()
+                && matches!(left[left_idx].cmp(&right_value), Ordering::Equal))
+            .then_some(left_idx),
+        );
+    }
+    while left_idx < left.len() {
+        left_idx += 1;
+        if !newly_reached_temporal_i64_value_is_strict(left, left_idx, nat) {
+            return None;
+        }
+    }
+    Some(left_positions)
+}
+
+/// Ordered-unique single-key OUTER union for all-valid temporal columns.
+/// Datetime64 and Timedelta64 ordering is their raw nanosecond ordering, so a
+/// three-way merge produces the same key-sorted optional position tapes as the
+/// generic Scalar planner without materializing either input key for position
+/// planning. Each newly reached value is validated for NaT and strict ordering
+/// inside that merge, avoiding separate input pre-scans. Nullable, NaT-bearing,
+/// duplicate, unsorted, or mixed-dtype keys decline.
+fn ordered_unique_temporal_i64_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    if !left_key.validity().all() || !right_key.validity().all() {
+        return None;
+    }
+
+    let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
+        (DType::Datetime64, DType::Datetime64) => (
+            left_key.as_datetime64_slice()?,
+            right_key.as_datetime64_slice()?,
+            fp_types::Timestamp::NAT,
+        ),
+        (DType::Timedelta64, DType::Timedelta64) => (
+            left_key.as_timedelta64_slice()?,
+            right_key.as_timedelta64_slice()?,
+            fp_types::Timedelta::NAT,
+        ),
+        _ => return None,
+    };
+    if !newly_reached_temporal_i64_value_is_strict(left, 0, nat)
+        || !newly_reached_temporal_i64_value_is_strict(right, 0, nat)
+    {
+        return None;
+    }
+
+    let capacity = left.len().saturating_add(right.len());
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(capacity);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(capacity);
+    let (mut left_idx, mut right_idx) = (0usize, 0usize);
+    while left_idx < left.len() && right_idx < right.len() {
+        match left[left_idx].cmp(&right[right_idx]) {
+            Ordering::Equal => {
+                left_positions.push(Some(left_idx));
+                right_positions.push(Some(right_idx));
+                left_idx += 1;
+                right_idx += 1;
+                if !newly_reached_temporal_i64_value_is_strict(left, left_idx, nat)
+                    || !newly_reached_temporal_i64_value_is_strict(right, right_idx, nat)
+                {
+                    return None;
+                }
+            }
+            Ordering::Less => {
+                left_positions.push(Some(left_idx));
+                right_positions.push(None);
+                left_idx += 1;
+                if !newly_reached_temporal_i64_value_is_strict(left, left_idx, nat) {
+                    return None;
+                }
+            }
+            Ordering::Greater => {
+                left_positions.push(None);
+                right_positions.push(Some(right_idx));
+                right_idx += 1;
+                if !newly_reached_temporal_i64_value_is_strict(right, right_idx, nat) {
+                    return None;
+                }
+            }
+        }
+    }
+    while left_idx < left.len() {
+        left_positions.push(Some(left_idx));
+        right_positions.push(None);
+        left_idx += 1;
+        if !newly_reached_temporal_i64_value_is_strict(left, left_idx, nat) {
+            return None;
+        }
+    }
+    while right_idx < right.len() {
+        left_positions.push(None);
+        right_positions.push(Some(right_idx));
+        right_idx += 1;
+        if !newly_reached_temporal_i64_value_is_strict(right, right_idx, nat) {
+            return None;
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
 /// Core counting-sort/CSR inner-join over two `i64` key slices (see
 /// [`dense_int64_inner_positions`]). Emits `(left_pos, right_pos)` pairs with
 /// right positions ascending per left key, left probed ascending — matching the
@@ -4364,6 +7560,469 @@ fn hash_int64_inner_positions(
     Some(hash_i64_inner_positions_slices(left, right))
 }
 
+/// LEFT-join positions via a typed `FxHashMap<i64>` build+probe for all-valid
+/// Int64 keys — the wide/sparse sibling of `dense_int64_left_positions` (whose
+/// direct-address table bails on a wide key span, dropping the join to the
+/// generic `JoinKeyComponent` Scalar-materialization path: left merge on a
+/// wide-i64 key was 0.65x pandas). Build the right key -> ascending-position
+/// buckets, then emit one output row per (left row, matching right row) in left
+/// order, or a single (left, None) for an unmatched left row (null-fill).
+/// Bit-identical to the dense/generic left path: same left iteration order, same
+/// ascending right positions per key bucket. `None` (falls back) unless BOTH keys
+/// are all-valid Int64 (a null-bearing key keeps the generic null-matching path).
+fn hash_int64_left_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left = left_key.as_i64_slice()?;
+    let right = right_key.as_i64_slice()?;
+    if right.is_empty() {
+        let left_positions = (0..left.len()).map(Some).collect::<Vec<_>>();
+        let right_positions = vec![None; left.len()];
+        return Some((left_positions, right_positions));
+    }
+    let mut right_map = FxHashMap::<i64, JoinPositionBucket>::with_capacity_and_hasher(
+        right.len(),
+        Default::default(),
+    );
+    for (pos, &key) in right.iter().enumerate() {
+        right_map.entry(key).or_default().push(pos);
+    }
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(left.len());
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(left.len());
+    for (left_pos, &key) in left.iter().enumerate() {
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+/// OUTER positions for wide/sparse Int64 keys. Uses a LIGHT `FxHashMap<i64,u32>`
+/// key -> gid (first-seen) plus CSR position lists per gid — far cheaper than a
+/// `FxHashMap<i64,(SmallVec,SmallVec)>` (whose 40-byte value dominated the build
+/// at ~270ms). Emits per key ASCENDING (gids argsorted by key), left×right cross
+/// product per key, else unmatched-left/right — bit-identical to
+/// `dense_int64_outer_positions` (its key-min buckets walk keys ascending with
+/// the same per-bucket order; the CSR scatter preserves ascending row order per
+/// key, matching the dense per-bucket push order).
+fn hash_int64_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left = left_key.as_i64_slice()?;
+    let right = right_key.as_i64_slice()?;
+    let mut gid_of: FxHashMap<i64, u32> = FxHashMap::with_capacity_and_hasher(
+        left.len().saturating_add(right.len()),
+        Default::default(),
+    );
+    let mut gid_keys: Vec<i64> = Vec::new();
+    let mut left_gid: Vec<u32> = Vec::with_capacity(left.len());
+    for &key in left {
+        let g = *gid_of.entry(key).or_insert_with(|| {
+            let x = gid_keys.len() as u32;
+            gid_keys.push(key);
+            x
+        });
+        left_gid.push(g);
+    }
+    let mut right_gid: Vec<u32> = Vec::with_capacity(right.len());
+    for &key in right {
+        let g = *gid_of.entry(key).or_insert_with(|| {
+            let x = gid_keys.len() as u32;
+            gid_keys.push(key);
+            x
+        });
+        right_gid.push(g);
+    }
+    let ng = gid_keys.len();
+    // CSR offsets from per-gid counts.
+    let mut loff = vec![0u32; ng + 1];
+    for &g in &left_gid {
+        loff[g as usize + 1] += 1;
+    }
+    let mut roff = vec![0u32; ng + 1];
+    for &g in &right_gid {
+        roff[g as usize + 1] += 1;
+    }
+    for g in 0..ng {
+        loff[g + 1] += loff[g];
+        roff[g + 1] += roff[g];
+    }
+    let mut lpos = vec![0u32; left.len()];
+    let mut lw = loff[..ng].to_vec();
+    for (i, &g) in left_gid.iter().enumerate() {
+        let g = g as usize;
+        lpos[lw[g] as usize] = i as u32;
+        lw[g] += 1;
+    }
+    let mut rpos = vec![0u32; right.len()];
+    let mut rw = roff[..ng].to_vec();
+    for (i, &g) in right_gid.iter().enumerate() {
+        let g = g as usize;
+        rpos[rw[g] as usize] = i as u32;
+        rw[g] += 1;
+    }
+    let mut order: Vec<u32> = (0..ng as u32).collect();
+    order.sort_unstable_by_key(|&g| gid_keys[g as usize]);
+    let mut left_positions = Vec::<Option<usize>>::new();
+    let mut right_positions = Vec::<Option<usize>>::new();
+    for &g in &order {
+        let g = g as usize;
+        let ls = &lpos[loff[g] as usize..loff[g + 1] as usize];
+        let rs = &rpos[roff[g] as usize..roff[g + 1] as usize];
+        match (ls.is_empty(), rs.is_empty()) {
+            (false, false) => {
+                for &l in ls {
+                    for &r in rs {
+                        left_positions.push(Some(l as usize));
+                        right_positions.push(Some(r as usize));
+                    }
+                }
+            }
+            (false, true) => {
+                for &l in ls {
+                    left_positions.push(Some(l as usize));
+                    right_positions.push(None);
+                }
+            }
+            (true, false) => {
+                for &r in rs {
+                    left_positions.push(None);
+                    right_positions.push(Some(r as usize));
+                }
+            }
+            (true, true) => {}
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+/// Hash build+probe over raw UTF-8 byte spans for all-valid contiguous-Utf8
+/// keys (br-frankenpandas-i388q). Mirrors the generic `JoinKeyComponent` inner
+/// path exactly — right positions pushed ascending per key bucket, left probed
+/// in order — but hashes `&[u8]` spans directly instead of materializing each
+/// key column to `Vec<Scalar>` and cloning every string into a
+/// `JoinKeyComponent::Present(IndexLabel::Utf8)` wrapper. Returns `None` unless
+/// BOTH keys are all-valid contiguous Utf8; null-bearing keys keep the generic
+/// path (which matches null-to-null — a case `as_utf8_contiguous` excludes).
+fn contiguous_utf8_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let (left_bytes, left_offsets) = left_key.as_utf8_contiguous()?;
+    let (right_bytes, right_offsets) = right_key.as_utf8_contiguous()?;
+    let left_n = left_offsets.len() - 1;
+    let right_n = right_offsets.len() - 1;
+    if left_n == 0 || right_n == 0 {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    if let Some(positions) =
+        sorted_contiguous_utf8_inner_positions(left_bytes, left_offsets, right_bytes, right_offsets)
+    {
+        return Some(positions);
+    }
+
+    let mut right_map = FxHashMap::<&[u8], JoinPositionBucket>::with_capacity_and_hasher(
+        right_n,
+        Default::default(),
+    );
+    for pos in 0..right_n {
+        let span = &right_bytes[right_offsets[pos]..right_offsets[pos + 1]];
+        right_map.entry(span).or_default().push(pos);
+    }
+
+    let mut left_positions = Vec::<usize>::with_capacity(left_n.min(right_n));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    for left_pos in 0..left_n {
+        let span = &left_bytes[left_offsets[left_pos]..left_offsets[left_pos + 1]];
+        if let Some(matches) = right_map.get(span) {
+            for &right_pos in matches {
+                left_positions.push(left_pos);
+                right_positions.push(right_pos);
+            }
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+fn collect_contiguous_utf8_position_map<'a>(
+    bytes: &'a [u8],
+    offsets: &[usize],
+) -> FxHashMap<&'a [u8], JoinPositionBucket> {
+    let n = offsets.len() - 1;
+    let mut map =
+        FxHashMap::<&[u8], JoinPositionBucket>::with_capacity_and_hasher(n, Default::default());
+    for pos in 0..n {
+        let span = &bytes[offsets[pos]..offsets[pos + 1]];
+        map.entry(span).or_default().push(pos);
+    }
+    map
+}
+
+fn contiguous_utf8_left_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let (left_bytes, left_offsets) = left_key.as_utf8_contiguous()?;
+    let (right_bytes, right_offsets) = right_key.as_utf8_contiguous()?;
+    let left_n = left_offsets.len() - 1;
+    let right_map = collect_contiguous_utf8_position_map(right_bytes, right_offsets);
+
+    let mut out_len = 0usize;
+    for left_pos in 0..left_n {
+        let span = &left_bytes[left_offsets[left_pos]..left_offsets[left_pos + 1]];
+        out_len += right_map.get(span).map_or(1, JoinPositionBucket::len);
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    for left_pos in 0..left_n {
+        let span = &left_bytes[left_offsets[left_pos]..left_offsets[left_pos + 1]];
+        if let Some(matches) = right_map.get(span) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+fn contiguous_utf8_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let (left_bytes, left_offsets) = left_key.as_utf8_contiguous()?;
+    let (right_bytes, right_offsets) = right_key.as_utf8_contiguous()?;
+    let left_n = left_offsets.len() - 1;
+    let right_n = right_offsets.len() - 1;
+
+    let left_map = collect_contiguous_utf8_position_map(left_bytes, left_offsets);
+    let right_map = collect_contiguous_utf8_position_map(right_bytes, right_offsets);
+    let mut seen = FxHashSet::<&[u8]>::with_capacity_and_hasher(
+        left_map.len() + right_map.len(),
+        Default::default(),
+    );
+    let mut keys = Vec::<&[u8]>::with_capacity(left_map.len() + right_map.len());
+    for pos in 0..left_n {
+        let span = &left_bytes[left_offsets[pos]..left_offsets[pos + 1]];
+        if seen.insert(span) {
+            keys.push(span);
+        }
+    }
+    for pos in 0..right_n {
+        let span = &right_bytes[right_offsets[pos]..right_offsets[pos + 1]];
+        if seen.insert(span) {
+            keys.push(span);
+        }
+    }
+    keys.sort_unstable();
+
+    let mut out_len = 0usize;
+    for &key in &keys {
+        out_len += match (left_map.get(key), right_map.get(key)) {
+            (Some(lefts), Some(rights)) => lefts.len() * rights.len(),
+            (Some(lefts), None) => lefts.len(),
+            (None, Some(rights)) => rights.len(),
+            (None, None) => 0,
+        };
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    for key in keys {
+        match (left_map.get(key), right_map.get(key)) {
+            (Some(lefts), Some(rights)) => {
+                for &left_pos in lefts {
+                    for &right_pos in rights {
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+            (Some(lefts), None) => {
+                for &left_pos in lefts {
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(None);
+                }
+            }
+            (None, Some(rights)) => {
+                for &right_pos in rights {
+                    left_positions.push(None);
+                    right_positions.push(Some(right_pos));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+fn scalar_utf8_values(column: &Column) -> Option<&[Scalar]> {
+    if column.dtype() != DType::Utf8 || !column.validity().all() {
+        return None;
+    }
+    let values = column.values();
+    values
+        .iter()
+        .all(|value| matches!(value, Scalar::Utf8(_)))
+        .then_some(values)
+}
+
+fn scalar_utf8_span(value: &Scalar) -> Option<&[u8]> {
+    match value {
+        Scalar::Utf8(value) => Some(value.as_bytes()),
+        _ => None,
+    }
+}
+
+fn collect_scalar_utf8_position_map(
+    values: &[Scalar],
+) -> Option<FxHashMap<&[u8], JoinPositionBucket>> {
+    let mut map = FxHashMap::<&[u8], JoinPositionBucket>::with_capacity_and_hasher(
+        values.len(),
+        Default::default(),
+    );
+    for (pos, value) in values.iter().enumerate() {
+        map.entry(scalar_utf8_span(value)?).or_default().push(pos);
+    }
+    Some(map)
+}
+
+fn scalar_utf8_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let left = scalar_utf8_values(left_key)?;
+    let right = scalar_utf8_values(right_key)?;
+    if left.is_empty() || right.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let right_map = collect_scalar_utf8_position_map(right)?;
+    let mut left_positions = Vec::<usize>::with_capacity(left.len().min(right.len()));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    for (left_pos, value) in left.iter().enumerate() {
+        if let Some(matches) = right_map.get(scalar_utf8_span(value)?) {
+            for &right_pos in matches {
+                left_positions.push(left_pos);
+                right_positions.push(right_pos);
+            }
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+fn scalar_utf8_left_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left = scalar_utf8_values(left_key)?;
+    let right = scalar_utf8_values(right_key)?;
+    let right_map = collect_scalar_utf8_position_map(right)?;
+
+    let mut out_len = 0usize;
+    for value in left {
+        out_len += right_map
+            .get(scalar_utf8_span(value)?)
+            .map_or(1, JoinPositionBucket::len);
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    for (left_pos, value) in left.iter().enumerate() {
+        if let Some(matches) = right_map.get(scalar_utf8_span(value)?) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+fn scalar_utf8_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left = scalar_utf8_values(left_key)?;
+    let right = scalar_utf8_values(right_key)?;
+    let left_map = collect_scalar_utf8_position_map(left)?;
+    let right_map = collect_scalar_utf8_position_map(right)?;
+
+    let mut seen = FxHashSet::<&[u8]>::with_capacity_and_hasher(
+        left_map.len() + right_map.len(),
+        Default::default(),
+    );
+    let mut keys = Vec::<&[u8]>::with_capacity(left_map.len() + right_map.len());
+    for value in left {
+        let span = scalar_utf8_span(value)?;
+        if seen.insert(span) {
+            keys.push(span);
+        }
+    }
+    for value in right {
+        let span = scalar_utf8_span(value)?;
+        if seen.insert(span) {
+            keys.push(span);
+        }
+    }
+    keys.sort_unstable();
+
+    let mut out_len = 0usize;
+    for &key in &keys {
+        out_len += match (left_map.get(key), right_map.get(key)) {
+            (Some(lefts), Some(rights)) => lefts.len() * rights.len(),
+            (Some(lefts), None) => lefts.len(),
+            (None, Some(rights)) => rights.len(),
+            (None, None) => 0,
+        };
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    for key in keys {
+        match (left_map.get(key), right_map.get(key)) {
+            (Some(lefts), Some(rights)) => {
+                for &left_pos in lefts {
+                    for &right_pos in rights {
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+            (Some(lefts), None) => {
+                for &left_pos in lefts {
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(None);
+                }
+            }
+            (None, Some(rights)) => {
+                for &right_pos in rights {
+                    left_positions.push(None);
+                    right_positions.push(Some(right_pos));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
 fn hash_i64_inner_positions_slices(left: &[i64], right: &[i64]) -> (Vec<usize>, Vec<usize>) {
     if right.is_empty() || left.is_empty() {
         return (Vec::new(), Vec::new());
@@ -4403,6 +8062,491 @@ fn hash_i64_inner_positions_slices(left: &[i64], right: &[i64]) -> (Vec<usize>, 
 /// byte-for-byte the same as the hash path. Returns `None` (caller falls back to
 /// the composite-hash path) for any non-Int64 / any-missing component or when
 /// the packed span exceeds the bounded direct-address gate.
+/// Typed INNER/LEFT positions for a 2-column all-valid Int64 composite key that's
+/// too WIDE for `dense_packed_int64_inner_positions` (its packed mixed-radix span
+/// exceeds the bounded gate on a high-cardinality component), which otherwise
+/// dropped multi-key merge to the generic `collect_composite_keys` Scalar path
+/// (2-i64-key merge was 0.65x inner / 0.69x left pandas). Packs each row's
+/// `(k0, k1)` into a `u128` — a bijection, so key equality is exact — builds the
+/// right key -> ascending-position map, and probes left in order: one row per
+/// (left, matching right), or (for Left) a single `(Some, None)` null-fill for an
+/// unmatched left row. Bit-identical to the generic `CompositeJoinKey` path (same
+/// left iteration + ascending-right-per-key emit). Returns `None` for non-Inner/
+/// Left, non-2-key, or any non-all-valid-Int64 component.
+fn typed_wide_two_i64_key_positions(
+    join_type: JoinType,
+    left_cols: &[&Column],
+    right_cols: &[&Column],
+) -> Option<MergeRowPositions> {
+    if !matches!(
+        join_type,
+        JoinType::Inner | JoinType::Left | JoinType::Outer
+    ) {
+        return None;
+    }
+    if left_cols.len() != 2 || right_cols.len() != 2 {
+        return None;
+    }
+    let l0 = left_cols[0].as_i64_slice()?;
+    let l1 = left_cols[1].as_i64_slice()?;
+    let r0 = right_cols[0].as_i64_slice()?;
+    let r1 = right_cols[1].as_i64_slice()?;
+    let pack = |a: i64, b: i64| -> u128 { (u128::from(a as u64) << 64) | u128::from(b as u64) };
+
+    if matches!(join_type, JoinType::Outer) {
+        // OUTER: gid-factorize the u128 composite, CSR the per-gid positions, then
+        // emit key-ASCENDING by the SEMANTIC (i64, i64) tuple (decoded from the
+        // packed key — u128 order would mis-sort negatives). The typed branch
+        // returns positions directly (the generic in-block sort is bypassed), so
+        // they must arrive pre-sorted, matching sort_merge_rows_by_join_keys.
+        let mut gid_of: FxHashMap<u128, u32> = FxHashMap::with_capacity_and_hasher(
+            l0.len().saturating_add(r0.len()),
+            Default::default(),
+        );
+        let mut gid_keys: Vec<u128> = Vec::new();
+        let mut left_gid: Vec<u32> = Vec::with_capacity(l0.len());
+        for pos in 0..l0.len() {
+            let key = pack(l0[pos], l1[pos]);
+            let g = *gid_of.entry(key).or_insert_with(|| {
+                let x = gid_keys.len() as u32;
+                gid_keys.push(key);
+                x
+            });
+            left_gid.push(g);
+        }
+        let mut right_gid: Vec<u32> = Vec::with_capacity(r0.len());
+        for pos in 0..r0.len() {
+            let key = pack(r0[pos], r1[pos]);
+            let g = *gid_of.entry(key).or_insert_with(|| {
+                let x = gid_keys.len() as u32;
+                gid_keys.push(key);
+                x
+            });
+            right_gid.push(g);
+        }
+        let ng = gid_keys.len();
+        let mut loff = vec![0u32; ng + 1];
+        for &g in &left_gid {
+            loff[g as usize + 1] += 1;
+        }
+        let mut roff = vec![0u32; ng + 1];
+        for &g in &right_gid {
+            roff[g as usize + 1] += 1;
+        }
+        for g in 0..ng {
+            loff[g + 1] += loff[g];
+            roff[g + 1] += roff[g];
+        }
+        let mut lpos = vec![0u32; l0.len()];
+        let mut lw = loff[..ng].to_vec();
+        for (i, &g) in left_gid.iter().enumerate() {
+            let g = g as usize;
+            lpos[lw[g] as usize] = i as u32;
+            lw[g] += 1;
+        }
+        let mut rpos = vec![0u32; r0.len()];
+        let mut rw = roff[..ng].to_vec();
+        for (i, &g) in right_gid.iter().enumerate() {
+            let g = g as usize;
+            rpos[rw[g] as usize] = i as u32;
+            rw[g] += 1;
+        }
+        // Argsort gids by the SEMANTIC (i64, i64) key (hi = k0, lo = k1).
+        let decode = |packed: u128| -> (i64, i64) {
+            (((packed >> 64) as u64) as i64, (packed as u64) as i64)
+        };
+        let mut order: Vec<u32> = (0..ng as u32).collect();
+        order.sort_unstable_by_key(|&g| decode(gid_keys[g as usize]));
+        let mut left_positions = Vec::<Option<usize>>::new();
+        let mut right_positions = Vec::<Option<usize>>::new();
+        for &g in &order {
+            let g = g as usize;
+            let ls = &lpos[loff[g] as usize..loff[g + 1] as usize];
+            let rs = &rpos[roff[g] as usize..roff[g + 1] as usize];
+            match (ls.is_empty(), rs.is_empty()) {
+                (false, false) => {
+                    for &l in ls {
+                        for &r in rs {
+                            left_positions.push(Some(l as usize));
+                            right_positions.push(Some(r as usize));
+                        }
+                    }
+                }
+                (false, true) => {
+                    for &l in ls {
+                        left_positions.push(Some(l as usize));
+                        right_positions.push(None);
+                    }
+                }
+                (true, false) => {
+                    for &r in rs {
+                        left_positions.push(None);
+                        right_positions.push(Some(r as usize));
+                    }
+                }
+                (true, true) => {}
+            }
+        }
+        return Some((left_positions, right_positions, None));
+    }
+
+    // Inner / Left: right key -> ascending-position map, probe left in order.
+    let mut right_map = FxHashMap::<u128, JoinPositionBucket>::with_capacity_and_hasher(
+        r0.len(),
+        Default::default(),
+    );
+    for pos in 0..r0.len() {
+        right_map
+            .entry(pack(r0[pos], r1[pos]))
+            .or_default()
+            .push(pos);
+    }
+    let is_left = matches!(join_type, JoinType::Left);
+    let mut left_positions = Vec::<Option<usize>>::new();
+    let mut right_positions = Vec::<Option<usize>>::new();
+    for left_pos in 0..l0.len() {
+        let key = pack(l0[left_pos], l1[left_pos]);
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else if is_left {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions, None))
+}
+
+/// General K-key (K >= 3) sibling of `typed_wide_two_i64_key_positions` for wide
+/// Int64 key columns that overflow `dense_packed_int64_inner_positions` and exceed
+/// the 2-key u128 packer. Factorizes each key column over left ∪ right into dense
+/// gids (first-seen), then packs each row's per-column gids into a single u128
+/// (column 0 most-significant) — a bijection whenever the summed gid bit-widths
+/// fit 127 bits (else `None` → generic Scalar composite path). With the composite
+/// as one integer, this reuses the exact same inner/left/outer emit as the 2-key
+/// path. OUTER argsorts groups by the SEMANTIC original (i64,..,i64) tuple captured
+/// at gid creation (packed-gid order is first-seen, not sorted). Bit-identical to
+/// the `CompositeJoinKey` path (same left-order probe + ascending-right-per-key emit
+/// for inner/left; same key-ascending group emit for outer). Returns `None` for
+/// non-Inner/Left/Outer, K < 3, unequal K, any non-all-valid-Int64 component, or a
+/// composite too wide for u128.
+fn typed_wide_multi_i64_key_positions(
+    join_type: JoinType,
+    left_cols: &[&Column],
+    right_cols: &[&Column],
+) -> Option<MergeRowPositions> {
+    if !matches!(
+        join_type,
+        JoinType::Inner | JoinType::Left | JoinType::Outer
+    ) {
+        return None;
+    }
+    let k = left_cols.len();
+    if k < 3 || right_cols.len() != k {
+        return None;
+    }
+    let mut ls: Vec<&[i64]> = Vec::with_capacity(k);
+    let mut rs: Vec<&[i64]> = Vec::with_capacity(k);
+    for c in 0..k {
+        ls.push(left_cols[c].as_i64_slice()?);
+        rs.push(right_cols[c].as_i64_slice()?);
+    }
+    let nl = ls[0].len();
+    let nr = rs[0].len();
+    if ls.iter().any(|s| s.len() != nl) || rs.iter().any(|s| s.len() != nr) {
+        return None;
+    }
+
+    // Factorize each key column over left ∪ right into dense first-seen gids.
+    let mut lgid: Vec<Vec<u32>> = Vec::with_capacity(k);
+    let mut rgid: Vec<Vec<u32>> = Vec::with_capacity(k);
+    let mut cards: Vec<u64> = Vec::with_capacity(k);
+    for c in 0..k {
+        let mut m: FxHashMap<i64, u32> =
+            FxHashMap::with_capacity_and_hasher(nl + nr, Default::default());
+        let mut next: u32 = 0;
+        let mut lg = Vec::with_capacity(nl);
+        for &v in ls[c] {
+            let g = *m.entry(v).or_insert_with(|| {
+                let x = next;
+                next += 1;
+                x
+            });
+            lg.push(g);
+        }
+        let mut rg = Vec::with_capacity(nr);
+        for &v in rs[c] {
+            let g = *m.entry(v).or_insert_with(|| {
+                let x = next;
+                next += 1;
+                x
+            });
+            rg.push(g);
+        }
+        cards.push(next as u64);
+        lgid.push(lg);
+        rgid.push(rg);
+    }
+
+    // Per-column bit widths; bail if the packed composite exceeds u128.
+    let mut bits: Vec<u32> = Vec::with_capacity(k);
+    let mut total: u32 = 0;
+    for &card in &cards {
+        let b = if card <= 1 {
+            0
+        } else {
+            64 - (card - 1).leading_zeros()
+        };
+        bits.push(b);
+        total += b;
+    }
+    if total > 127 {
+        return None;
+    }
+
+    let pack = |gids: &[Vec<u32>], row: usize| -> u128 {
+        let mut p: u128 = 0;
+        for c in 0..k {
+            p = (p << bits[c]) | u128::from(gids[c][row]);
+        }
+        p
+    };
+
+    if matches!(join_type, JoinType::Outer) {
+        let mut gid_of: FxHashMap<u128, u32> =
+            FxHashMap::with_capacity_and_hasher(nl.saturating_add(nr), Default::default());
+        // Semantic original tuple per composite gid (for the key-ascending sort).
+        let mut gid_tuple: Vec<Vec<i64>> = Vec::new();
+        let mut left_g: Vec<u32> = Vec::with_capacity(nl);
+        for (row, _) in ls[0].iter().enumerate().take(nl) {
+            let key = pack(&lgid, row);
+            let g = *gid_of.entry(key).or_insert_with(|| {
+                let x = gid_tuple.len() as u32;
+                gid_tuple.push((0..k).map(|c| ls[c][row]).collect());
+                x
+            });
+            left_g.push(g);
+        }
+        let mut right_g: Vec<u32> = Vec::with_capacity(nr);
+        for (row, _) in rs[0].iter().enumerate().take(nr) {
+            let key = pack(&rgid, row);
+            let g = *gid_of.entry(key).or_insert_with(|| {
+                let x = gid_tuple.len() as u32;
+                gid_tuple.push((0..k).map(|c| rs[c][row]).collect());
+                x
+            });
+            right_g.push(g);
+        }
+        let ng = gid_tuple.len();
+        let mut loff = vec![0u32; ng + 1];
+        for &g in &left_g {
+            loff[g as usize + 1] += 1;
+        }
+        let mut roff = vec![0u32; ng + 1];
+        for &g in &right_g {
+            roff[g as usize + 1] += 1;
+        }
+        for g in 0..ng {
+            loff[g + 1] += loff[g];
+            roff[g + 1] += roff[g];
+        }
+        let mut lpos = vec![0u32; nl];
+        let mut lw = loff[..ng].to_vec();
+        for (i, &g) in left_g.iter().enumerate() {
+            let g = g as usize;
+            lpos[lw[g] as usize] = i as u32;
+            lw[g] += 1;
+        }
+        let mut rpos = vec![0u32; nr];
+        let mut rw = roff[..ng].to_vec();
+        for (i, &g) in right_g.iter().enumerate() {
+            let g = g as usize;
+            rpos[rw[g] as usize] = i as u32;
+            rw[g] += 1;
+        }
+        let mut order: Vec<u32> = (0..ng as u32).collect();
+        order.sort_unstable_by(|&a, &b| gid_tuple[a as usize].cmp(&gid_tuple[b as usize]));
+        let mut left_positions = Vec::<Option<usize>>::new();
+        let mut right_positions = Vec::<Option<usize>>::new();
+        for &g in &order {
+            let g = g as usize;
+            let lsl = &lpos[loff[g] as usize..loff[g + 1] as usize];
+            let rsl = &rpos[roff[g] as usize..roff[g + 1] as usize];
+            match (lsl.is_empty(), rsl.is_empty()) {
+                (false, false) => {
+                    for &l in lsl {
+                        for &r in rsl {
+                            left_positions.push(Some(l as usize));
+                            right_positions.push(Some(r as usize));
+                        }
+                    }
+                }
+                (false, true) => {
+                    for &l in lsl {
+                        left_positions.push(Some(l as usize));
+                        right_positions.push(None);
+                    }
+                }
+                (true, false) => {
+                    for &r in rsl {
+                        left_positions.push(None);
+                        right_positions.push(Some(r as usize));
+                    }
+                }
+                (true, true) => {}
+            }
+        }
+        return Some((left_positions, right_positions, None));
+    }
+
+    // Inner / Left: right composite -> ascending-position map, probe left in order.
+    let mut right_map =
+        FxHashMap::<u128, JoinPositionBucket>::with_capacity_and_hasher(nr, Default::default());
+    for pos in 0..nr {
+        right_map.entry(pack(&rgid, pos)).or_default().push(pos);
+    }
+    let is_left = matches!(join_type, JoinType::Left);
+    let mut left_positions = Vec::<Option<usize>>::new();
+    let mut right_positions = Vec::<Option<usize>>::new();
+    for left_pos in 0..nl {
+        let key = pack(&lgid, left_pos);
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else if is_left {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions, None))
+}
+
+/// K-key (K >= 3) INNER/LEFT positions for all-valid BOUNDED-range Int64 keys
+/// whose joint mixed-radix span fits an `i64` — even when that span exceeds the
+/// direct-address gate of `dense_packed_int64_inner_positions` (2^24). Packs each
+/// row's composite into one `i64` (`Σ_c (val_c - min_c)·stride_c`, `stride_0 = 1`,
+/// `stride_c = stride_{c-1}·range_{c-1}`; a bijection on the joint key box, so
+/// composite equality IFF every component equal) and runs the SINGLE-key i64 hash
+/// merge on it — skipping the K per-column factorization `FxHashMap`s that
+/// `typed_wide_multi_i64_key_positions` builds (the khash-floor cost that left
+/// 3-key merge at 0.43-0.57x pandas). Bit-identical to that path / the generic
+/// Scalar composite path: same left iteration order, same ascending right position
+/// per composite bucket, same unmatched-left null-fill. Returns `None` (caller
+/// falls back to the factorize path) unless every key is an all-valid Int64 slice
+/// and the joint span fits `i64` — Outer bails (its key-ascending emit is handled
+/// by the factorize path's semantic gid sort).
+fn bounded_composite_multi_i64_key_positions(
+    join_type: JoinType,
+    left_cols: &[&Column],
+    right_cols: &[&Column],
+) -> Option<MergeRowPositions> {
+    if !matches!(join_type, JoinType::Inner | JoinType::Left) {
+        return None;
+    }
+    let k = left_cols.len();
+    if k < 3 || right_cols.len() != k {
+        return None;
+    }
+    let mut ls: Vec<&[i64]> = Vec::with_capacity(k);
+    let mut rs: Vec<&[i64]> = Vec::with_capacity(k);
+    for c in 0..k {
+        ls.push(left_cols[c].as_i64_slice()?);
+        rs.push(right_cols[c].as_i64_slice()?);
+    }
+    let nl = ls[0].len();
+    let nr = rs[0].len();
+    if ls.iter().any(|s| s.len() != nl) || rs.iter().any(|s| s.len() != nr) {
+        return None;
+    }
+    if nl == 0 || nr == 0 {
+        // Let the generic/factorize path handle degenerate empties (its
+        // left-null-fill / empty-output shape is already validated there).
+        return None;
+    }
+
+    // Per-column min + span over left ∪ right; bail if the joint mixed-radix
+    // product overflows i64 (a truly wide key keeps the factorize path).
+    let mut mins = vec![0i64; k];
+    let mut ranges = vec![0u128; k];
+    for c in 0..k {
+        let mut mn = i64::MAX;
+        let mut mx = i64::MIN;
+        for &v in ls[c] {
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+        }
+        for &v in rs[c] {
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+        }
+        mins[c] = mn;
+        ranges[c] = (mx as i128 - mn as i128 + 1) as u128;
+    }
+    // strides[0] = 1, strides[c] = strides[c-1] * ranges[c-1]; bail on overflow.
+    let mut strides = vec![1i64; k];
+    let mut acc: u128 = 1;
+    for c in 0..k {
+        strides[c] = acc as i64;
+        acc = acc.checked_mul(ranges[c])?;
+        if acc > i64::MAX as u128 {
+            return None;
+        }
+    }
+    let comp = |s: &[&[i64]], row: usize| -> i64 {
+        let mut p: i64 = 0;
+        for c in 0..k {
+            // (val - min) < range_c and range product fits i64 ⇒ no overflow.
+            p += (s[c][row] - mins[c]) * strides[c];
+        }
+        p
+    };
+    let lcomp: Vec<i64> = (0..nl).map(|r| comp(&ls, r)).collect();
+    let rcomp: Vec<i64> = (0..nr).map(|r| comp(&rs, r)).collect();
+
+    if matches!(join_type, JoinType::Inner) {
+        let (lp, rp) = hash_i64_inner_positions_slices(&lcomp, &rcomp);
+        return Some((
+            lp.into_iter().map(Some).collect(),
+            rp.into_iter().map(Some).collect(),
+            None,
+        ));
+    }
+
+    // LEFT: right composite -> ascending-position buckets, probe left in order
+    // (mirror of hash_int64_left_positions on the composite slices).
+    let mut right_map =
+        FxHashMap::<i64, JoinPositionBucket>::with_capacity_and_hasher(nr, Default::default());
+    for (pos, &key) in rcomp.iter().enumerate() {
+        right_map.entry(key).or_default().push(pos);
+    }
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(nl);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(nl);
+    for (left_pos, &key) in lcomp.iter().enumerate() {
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions, None))
+}
+
 fn dense_packed_int64_inner_positions(
     left_cols: &[&Column],
     right_cols: &[&Column],
@@ -4492,6 +8636,17 @@ fn merge_single_key_inner_unsorted(
             left, right, left_on, right_on, suffixes,
         );
     }
+    if let Some(merged) = build_single_key_affine_i64_inner_merge_output(
+        left,
+        right,
+        left_on,
+        right_on,
+        left_key_columns[0],
+        right_key_columns[0],
+        suffixes,
+    )? {
+        return Ok(merged);
+    }
     if let Some((left_positions, right_positions)) =
         ordered_unique_int64_inner_positions(left_key_columns[0], right_key_columns[0])
     {
@@ -4521,6 +8676,25 @@ fn merge_single_key_inner_unsorted(
         return Ok(merged);
     }
 
+    // Datetime64/Timedelta64 keys are physically i64 nanoseconds. For the
+    // all-valid, same-dtype case, plan positions directly over that backing
+    // instead of materializing one Scalar + JoinKeyComponent per row. Nullable
+    // temporal keys deliberately keep the generic path below, where NaT joins
+    // use the existing Missing-key semantics.
+    if let Some((left_positions, right_positions)) =
+        temporal_i64_inner_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            suffixes,
+        );
+    }
+
     // Hash-free dense direct-address build+probe for bounded all-valid Int64
     // keys (the common low-cardinality join-key shape). Bit-identical pairs.
     if let Some((left_positions, right_positions)) =
@@ -4538,6 +8712,74 @@ fn merge_single_key_inner_unsorted(
     }
     if let Some((left_positions, right_positions)) =
         hash_int64_inner_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            suffixes,
+        );
+    }
+
+    if let Some(position_plan) =
+        ordered_unique_utf8_inner_position_plan(left_key_columns[0], right_key_columns[0])
+    {
+        return match position_plan {
+            InnerPositionPlan::Gather {
+                left_positions,
+                right_positions,
+            } => build_single_key_inner_merge_output(
+                left,
+                right,
+                left_on,
+                right_on,
+                &left_positions,
+                &right_positions,
+                suffixes,
+            ),
+            InnerPositionPlan::ContiguousRanges {
+                left_start,
+                right_start,
+                len,
+            } => build_single_key_inner_merge_output_with_selections(
+                left,
+                right,
+                left_on,
+                right_on,
+                PositionSelection::ContiguousRange {
+                    start: left_start,
+                    len,
+                },
+                PositionSelection::ContiguousRange {
+                    start: right_start,
+                    len,
+                },
+                suffixes,
+            ),
+        };
+    }
+
+    // Byte-span build+probe for all-valid contiguous-Utf8 string keys
+    // (br-frankenpandas-i388q): skips the per-row String clone + Scalar
+    // materialization of the JoinKeyComponent path. Same pairing -> same output.
+    if let Some((left_positions, right_positions)) =
+        contiguous_utf8_inner_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            suffixes,
+        );
+    }
+    if let Some((left_positions, right_positions)) =
+        scalar_utf8_inner_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_inner_merge_output(
             left,
@@ -4712,6 +8954,43 @@ pub fn merge_dataframes_on_with_options(
         && !sort
         && indicator_name.is_none()
         && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            temporal_i64_left_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_dense_left_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some(merged) = build_single_key_dense_cycle_i64_left_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            left_key_columns[0],
+            right_key_columns[0],
+            &suffixes,
+        )?
+    {
+        return Ok(merged);
+    }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
         && let Some(merged) = build_single_key_dense_i64_inner_merge_output(
             left,
             right,
@@ -4764,6 +9043,63 @@ pub fn merge_dataframes_on_with_options(
             &suffixes,
         );
     }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            hash_int64_left_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_dense_left_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            contiguous_utf8_left_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_dense_left_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            scalar_utf8_left_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_dense_left_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
     if matches!(join_type, JoinType::Right)
         && left_on.len() == 1
         && right_on.len() == 1
@@ -4772,6 +9108,26 @@ pub fn merge_dataframes_on_with_options(
         && validate_allows_fast_positions
         && let Some(left_positions) =
             ordered_unique_int64_right_match_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_right_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Right)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some(left_positions) = ordered_unique_temporal_i64_right_match_positions(
+            left_key_columns[0],
+            right_key_columns[0],
+        )
     {
         return build_single_key_ordered_unique_right_merge_output(
             left,
@@ -4828,6 +9184,28 @@ pub fn merge_dataframes_on_with_options(
             dense_int64_right_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_dense_right_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            ordered_unique_temporal_i64_outer_positions(
+                left_key_columns[0],
+                right_key_columns[0],
+            )
+    {
+        return build_single_key_ordered_unique_outer_merge_output(
             left,
             right,
             left_on,
@@ -4911,6 +9289,81 @@ pub fn merge_dataframes_on_with_options(
             &suffixes,
         );
     }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            hash_int64_outer_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_outer_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some(merged) = build_single_key_fixed_decimal_utf8_outer_all_matched_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            left_key_columns[0],
+            right_key_columns[0],
+            &suffixes,
+        )?
+    {
+        return Ok(merged);
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            contiguous_utf8_outer_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_outer_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            scalar_utf8_outer_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_outer_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
 
     let needs_key_order = sort || matches!(join_type, JoinType::Outer);
 
@@ -4929,13 +9382,61 @@ pub fn merge_dataframes_on_with_options(
         None
     };
 
-    let (mut left_positions, mut right_positions, out_row_keys): MergeRowPositions =
+    // Typed wide 2-i64-key INNER/LEFT positions (bypasses the Scalar composite
+    // path when a component is too wide for the packed dense gate). Same fast-path
+    // gates as packed_inner (no sort/indicator, validate allows fast positions).
+    let typed_two_key = if !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && packed_inner.is_none()
+    {
+        typed_wide_two_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
+    } else {
+        None
+    };
+
+    // Typed K-key (K >= 3) BOUNDED-Int64 INNER/LEFT positions: pack the composite
+    // into one i64 + single-key i64 hash merge, skipping the K per-column
+    // factorization maps the factorize path below builds (3-key merge was
+    // 0.43-0.57x pandas — the khash floor of those maps). Same fast-path gates.
+    let composite_multi_key = if !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && packed_inner.is_none()
+        && typed_two_key.is_none()
+    {
+        bounded_composite_multi_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
+    } else {
+        None
+    };
+
+    // Typed general K-key (K >= 3) wide-Int64 positions: factorize-to-gid + u128
+    // pack, bypassing the Scalar collect_composite_keys path. Same fast-path gates.
+    let typed_multi_key = if !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && packed_inner.is_none()
+        && typed_two_key.is_none()
+        && composite_multi_key.is_none()
+    {
+        typed_wide_multi_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
+    } else {
+        None
+    };
+
+    let (left_positions, right_positions, _out_row_keys): MergeRowPositions =
         if let Some((lp, rp)) = packed_inner {
             (
                 lp.into_iter().map(Some).collect(),
                 rp.into_iter().map(Some).collect(),
                 None,
             )
+        } else if let Some(typed) = typed_two_key {
+            typed
+        } else if let Some(typed) = composite_multi_key {
+            typed
+        } else if let Some(typed) = typed_multi_key {
+            typed
         } else {
             // Convert key columns to hashable composite keys.
             let left_keys = collect_composite_keys(&left_key_columns);
@@ -4947,7 +9448,7 @@ pub fn merge_dataframes_on_with_options(
             // Build only the probe maps required by the selected join direction.
             let right_map = if matches!(
                 join_type,
-                JoinType::Inner | JoinType::Left | JoinType::Outer
+                JoinType::Inner | JoinType::Left | JoinType::Outer | JoinType::Right
             ) {
                 let mut m =
                     FxHashMap::<&CompositeJoinKey, JoinPositionBucket>::with_capacity_and_hasher(
@@ -4962,7 +9463,9 @@ pub fn merge_dataframes_on_with_options(
                 None
             };
 
-            let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
+            // Right no longer needs a left_map: its branch below probes the small
+            // right_map with a single left pass (O(right) build, not O(left)).
+            let left_map = if matches!(join_type, JoinType::Outer) {
                 let mut m =
                     FxHashMap::<&CompositeJoinKey, JoinPositionBucket>::with_capacity_and_hasher(
                         left_keys.len(),
@@ -4986,8 +9489,10 @@ pub fn merge_dataframes_on_with_options(
             };
             let mut left_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
             let mut right_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
-            let mut out_row_keys =
-                needs_key_order.then(|| Vec::<CompositeJoinKey>::with_capacity(row_capacity));
+            // No longer materialized: the post-position sort reads each row's key by
+            // reference from left_keys/right_keys via its position, so the per-row
+            // push_merge_row_key calls below no-op (no String-owning key clones).
+            let mut out_row_keys: Option<Vec<CompositeJoinKey>> = None;
 
             match join_type {
                 JoinType::Inner | JoinType::Left | JoinType::Outer => {
@@ -5023,20 +9528,39 @@ pub fn merge_dataframes_on_with_options(
                     }
                 }
                 JoinType::Right => {
-                    let left_map = left_map.as_ref().expect("left_map required for Right join");
+                    // Probe the SMALL right_map with a single left pass instead of
+                    // building a left_map over every left row (the prior path —
+                    // O(left) hash build; for a 1M⋈10k merge that was ~2.4x slower
+                    // than the symmetric Left join). Bucket each matching left
+                    // position under its right row; `left_by_right[r]` collects in
+                    // left-iteration order, and we then emit right rows in order —
+                    // byte-for-byte identical (left,right) pairs to the left_map
+                    // path (right-row order outer, left-position order inner),
+                    // including duplicate right keys and unmatched right rows.
+                    let right_map = right_map
+                        .as_ref()
+                        .expect("right_map required for Right join");
+                    let mut left_by_right: Vec<Vec<usize>> = vec![Vec::new(); right_keys.len()];
+                    for (left_pos, key) in left_keys.iter().enumerate() {
+                        if let Some(right_rows) = right_map.get(key) {
+                            for &right_pos in right_rows {
+                                left_by_right[right_pos].push(left_pos);
+                            }
+                        }
+                    }
                     for (right_pos, key) in right_keys.iter().enumerate() {
-                        if let Some(matches) = left_map.get(key) {
-                            for &left_pos in matches {
+                        let lefts = &left_by_right[right_pos];
+                        if lefts.is_empty() {
+                            push_merge_row_key(&mut out_row_keys, key);
+                            left_positions.push(None);
+                            right_positions.push(Some(right_pos));
+                        } else {
+                            for &left_pos in lefts {
                                 push_merge_row_key(&mut out_row_keys, key);
                                 left_positions.push(Some(left_pos));
                                 right_positions.push(Some(right_pos));
                             }
-                            continue;
                         }
-
-                        push_merge_row_key(&mut out_row_keys, key);
-                        left_positions.push(None);
-                        right_positions.push(Some(right_pos));
                     }
                 }
                 JoinType::Cross => {
@@ -5046,15 +9570,18 @@ pub fn merge_dataframes_on_with_options(
                 }
             }
 
+            // Sort the output rows by join key in-place while left_keys/right_keys
+            // are in scope (read by reference per row — no out_row_keys clone).
+            if needs_key_order {
+                sort_merge_rows_by_join_keys(
+                    &left_keys,
+                    &right_keys,
+                    &mut left_positions,
+                    &mut right_positions,
+                );
+            }
             (left_positions, right_positions, out_row_keys)
         };
-
-    if needs_key_order {
-        let out_row_keys = out_row_keys
-            .as_ref()
-            .expect("merge row keys required when sorting output rows");
-        sort_merge_rows_by_join_keys(out_row_keys, &mut left_positions, &mut right_positions);
-    }
 
     let all_positions_present = matches!(join_type, JoinType::Inner)
         || (matches!(
@@ -5124,16 +9651,25 @@ pub fn merge_dataframes_on_with_options(
                     take_positions_typed(left_key_col, positions)
                 } else {
                     let right_key_col = right_key_columns[*right_key_idx];
-                    let values = left_positions
-                        .iter()
-                        .zip(right_positions.iter())
-                        .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
-                            (Some(pos), _) => left_key_col.values()[*pos].clone(),
-                            (None, Some(pos)) => right_key_col.values()[*pos].clone(),
-                            (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
-                        })
-                        .collect::<Vec<_>>();
-                    Column::from_values(values)?
+                    coalesce_utf8_contiguous_key_column(
+                        left_key_col,
+                        right_key_col,
+                        &left_positions,
+                        &right_positions,
+                    )
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        let values = left_positions
+                            .iter()
+                            .zip(right_positions.iter())
+                            .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                                (Some(pos), _) => left_key_col.values()[*pos].clone(),
+                                (None, Some(pos)) => right_key_col.values()[*pos].clone(),
+                                (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
+                            })
+                            .collect::<Vec<_>>();
+                        Column::from_values(values)
+                    })?
                 };
                 insert_merged_output_column(
                     &mut columns,
@@ -5242,6 +9778,28 @@ pub fn merge_dataframes(
     on: &str,
     join_type: JoinType,
 ) -> Result<MergedDataFrame, JoinError> {
+    if matches!(join_type, JoinType::Inner) {
+        let left_key = left.column(on).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "left DataFrame missing key column '{on}'"
+            )))
+        })?;
+        let right_key = right.column(on).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "right DataFrame missing key column '{on}'"
+            )))
+        })?;
+        let suffixes = ResolvedMergeSuffixes::default();
+        return merge_single_key_inner_unsorted(
+            left,
+            right,
+            &[on],
+            &[on],
+            &[left_key],
+            &[right_key],
+            &suffixes,
+        );
+    }
     merge_dataframes_on(left, right, &[on], join_type)
 }
 
@@ -5511,7 +10069,362 @@ impl MergeAsofOptions {
     }
 }
 
+/// When BOTH `on` keys are Datetime64, extract them as f64 SHIFTED by the global
+/// minimum ns so the values fit f64's 2^53 integer precision exactly. A raw
+/// Datetime64->ns->f64 cast collapses ns (~1.6e18) to garbage (>2^53), so
+/// merge_asof previously REJECTED datetime keys ("must be numeric") — the primary
+/// time-series asof case. Shifting is order- and difference-preserving (both sides
+/// by the same min), so the f64 asof match + tolerance stay exact whenever the ns
+/// RANGE fits 2^53 (~104 days). Returns:
+/// - `None`: not both Datetime64 → caller uses the f64 numeric path unchanged.
+/// - `Some(Err)`: range too wide for exact f64 → clean rejection (better than the
+///   silently-wrong result a lossy cast would give).
+/// - `Some(Ok((left,right)))`: shifted f64 keys, NaT/null → NaN.
+type ShiftedDatetimeAsofKeys = (Vec<f64>, Vec<f64>);
+
+fn try_asof_datetime_shift(
+    left_key: &Column,
+    right_key: &Column,
+    on: &str,
+) -> Option<Result<ShiftedDatetimeAsofKeys, JoinError>> {
+    if left_key.dtype() != DType::Datetime64 || right_key.dtype() != DType::Datetime64 {
+        return None;
+    }
+    let ld = left_key.as_datetime64_slice()?;
+    let rd = right_key.as_datetime64_slice()?;
+    let lv = left_key.validity();
+    let rv = right_key.validity();
+    // All-valid fast path: when a side has no null bits, the per-element
+    // ValidityMask::get bit-test is skipped in both the min-scan and the shift
+    // (only the cheap NaT sentinel compare remains, which vectorizes). NaT/null
+    // are rare in an asof `on` key, so this is the hot path.
+    let l_all = lv.all();
+    let r_all = rv.all();
+    let is_valid = |data: &[i64], v: &fp_columnar::ValidityMask, all: bool, i: usize| -> bool {
+        (all || v.get(i)) && data[i] != fp_types::Timestamp::NAT
+    };
+    // Global min/max over the valid (non-NaT) ns of both sides.
+    let mut lo = i64::MAX;
+    let mut hi = i64::MIN;
+    let mut any = false;
+    for i in 0..ld.len() {
+        if is_valid(ld, lv, l_all, i) {
+            lo = lo.min(ld[i]);
+            hi = hi.max(ld[i]);
+            any = true;
+        }
+    }
+    for i in 0..rd.len() {
+        if is_valid(rd, rv, r_all, i) {
+            lo = lo.min(rd[i]);
+            hi = hi.max(rd[i]);
+            any = true;
+        }
+    }
+    if !any {
+        // All-NaT/empty: every shifted value is NaN; produce that directly.
+        return Some(Ok((vec![f64::NAN; ld.len()], vec![f64::NAN; rd.len()])));
+    }
+    if (hi as i128 - lo as i128) >= (1i128 << 53) {
+        return Some(Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            format!(
+                "merge_asof: Datetime64 key '{on}' spans more than ~104 days of nanoseconds, \
+             which exceeds f64 asof precision; not yet supported"
+            ),
+        ))));
+    }
+    let shift = |data: &[i64], v: &fp_columnar::ValidityMask, all: bool| -> Vec<f64> {
+        (0..data.len())
+            .map(|i| {
+                if is_valid(data, v, all, i) {
+                    (data[i] - lo) as f64
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect()
+    };
+    Some(Ok((shift(ld, lv, l_all), shift(rd, rv, r_all))))
+}
+
+#[derive(Clone, Copy)]
+struct Datetime64AsofKey<'a> {
+    data: &'a [i64],
+    validity: &'a ValidityMask,
+    all_valid: bool,
+}
+
+impl Datetime64AsofKey<'_> {
+    #[inline]
+    fn is_valid(self, i: usize) -> bool {
+        (self.all_valid || self.validity.get(i)) && self.data[i] != fp_types::Timestamp::NAT
+    }
+}
+
+fn datetime64_key_parts(column: &Column) -> Option<Datetime64AsofKey<'_>> {
+    let data = column.as_datetime64_slice()?;
+    let validity = column.validity();
+    Some(Datetime64AsofKey {
+        data,
+        validity,
+        all_valid: validity.all(),
+    })
+}
+
+fn ensure_sorted_non_decreasing_datetime64(
+    key: Datetime64AsofKey<'_>,
+    side: &str,
+    on: &str,
+) -> Result<(), JoinError> {
+    let mut prev: Option<i64> = None;
+    for i in 0..key.data.len() {
+        if !key.is_valid(i) {
+            continue;
+        }
+        let value = key.data[i];
+        if let Some(prev_value) = prev
+            && value < prev_value
+        {
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                format!("merge_asof: {side} column '{on}' must be sorted"),
+            )));
+        }
+        prev = Some(value);
+    }
+    Ok(())
+}
+
+fn within_datetime64_tolerance(left: i64, right: i64, tolerance: Option<f64>) -> bool {
+    match tolerance {
+        Some(tol) => ((left as i128 - right as i128).abs() as f64) <= tol,
+        None => true,
+    }
+}
+
+fn compute_asof_matches_datetime64(
+    left: Datetime64AsofKey<'_>,
+    right: Datetime64AsofKey<'_>,
+    direction: AsofDirection,
+    allow_exact_matches: bool,
+    tolerance: Option<f64>,
+) -> Vec<Option<usize>> {
+    let mut filtered_values = Vec::new();
+    let mut filtered_positions = Vec::new();
+    let (right_valid_values, right_valid_positions) =
+        if right.all_valid && !right.data.contains(&fp_types::Timestamp::NAT) {
+            (right.data, None)
+        } else {
+            for i in 0..right.data.len() {
+                if right.is_valid(i) {
+                    filtered_values.push(right.data[i]);
+                    filtered_positions.push(i);
+                }
+            }
+            (
+                filtered_values.as_slice(),
+                Some(filtered_positions.as_slice()),
+            )
+        };
+
+    compute_asof_matches_datetime64_prepared(
+        left,
+        right_valid_values,
+        right_valid_positions,
+        direction,
+        allow_exact_matches,
+        tolerance,
+    )
+}
+
+fn compute_asof_matches_datetime64_prepared(
+    left: Datetime64AsofKey<'_>,
+    right_valid_values: &[i64],
+    right_valid_positions: Option<&[usize]>,
+    direction: AsofDirection,
+    allow_exact_matches: bool,
+    tolerance: Option<f64>,
+) -> Vec<Option<usize>> {
+    let right_source_position =
+        |position: usize| right_valid_positions.map_or(position, |positions| positions[position]);
+
+    let mut right_matches = Vec::with_capacity(left.data.len());
+
+    match direction {
+        AsofDirection::Backward => {
+            let mut best: Option<usize> = None;
+            let mut best_val: Option<i64> = None;
+            let mut j = 0usize;
+            for i in 0..left.data.len() {
+                if !left.is_valid(i) {
+                    right_matches.push(None);
+                    continue;
+                }
+                let lv = left.data[i];
+                while j < right_valid_values.len() {
+                    let rv = right_valid_values[j];
+                    let should_include = if allow_exact_matches {
+                        rv <= lv
+                    } else {
+                        rv < lv
+                    };
+                    if !should_include {
+                        break;
+                    }
+                    best = Some(right_source_position(j));
+                    best_val = Some(rv);
+                    j += 1;
+                }
+
+                let matched = match (best, best_val) {
+                    (Some(idx), Some(rv)) if within_datetime64_tolerance(lv, rv, tolerance) => {
+                        Some(idx)
+                    }
+                    _ => None,
+                };
+                right_matches.push(matched);
+            }
+        }
+        AsofDirection::Forward => {
+            let mut j = 0usize;
+            for i in 0..left.data.len() {
+                if !left.is_valid(i) {
+                    right_matches.push(None);
+                    continue;
+                }
+                let lv = left.data[i];
+                while j < right_valid_values.len() {
+                    let rv = right_valid_values[j];
+                    let should_skip = if allow_exact_matches {
+                        rv < lv
+                    } else {
+                        rv <= lv
+                    };
+                    if !should_skip {
+                        break;
+                    }
+                    j += 1;
+                }
+
+                if j < right_valid_values.len() {
+                    let rv = right_valid_values[j];
+                    if within_datetime64_tolerance(lv, rv, tolerance) {
+                        right_matches.push(Some(right_source_position(j)));
+                    } else {
+                        right_matches.push(None);
+                    }
+                } else {
+                    right_matches.push(None);
+                }
+            }
+        }
+        AsofDirection::Nearest => {
+            for i in 0..left.data.len() {
+                if !left.is_valid(i) {
+                    right_matches.push(None);
+                    continue;
+                }
+                if right_valid_values.is_empty() {
+                    right_matches.push(None);
+                    continue;
+                }
+
+                let lv = left.data[i];
+                let (lower, upper) = if allow_exact_matches {
+                    let lo = right_valid_values.partition_point(|rv| *rv <= lv);
+                    let up = right_valid_values.partition_point(|rv| *rv < lv);
+                    (
+                        if lo > 0 { Some(lo - 1) } else { None },
+                        if up < right_valid_values.len() {
+                            Some(up)
+                        } else {
+                            None
+                        },
+                    )
+                } else {
+                    let lo = right_valid_values.partition_point(|rv| *rv < lv);
+                    let up = right_valid_values.partition_point(|rv| *rv <= lv);
+                    (
+                        if lo > 0 { Some(lo - 1) } else { None },
+                        if up < right_valid_values.len() {
+                            Some(up)
+                        } else {
+                            None
+                        },
+                    )
+                };
+
+                let chosen = match (lower, upper) {
+                    (Some(l), Some(u)) => {
+                        let lower_dist = (right_valid_values[l] as i128 - lv as i128).abs();
+                        let upper_dist = (right_valid_values[u] as i128 - lv as i128).abs();
+                        if upper_dist < lower_dist {
+                            Some(u)
+                        } else {
+                            Some(l)
+                        }
+                    }
+                    (Some(l), None) => Some(l),
+                    (None, Some(u)) => Some(u),
+                    (None, None) => None,
+                };
+
+                let matched = match chosen {
+                    Some(idx)
+                        if within_datetime64_tolerance(lv, right_valid_values[idx], tolerance) =>
+                    {
+                        Some(right_source_position(idx))
+                    }
+                    _ => None,
+                };
+                right_matches.push(matched);
+            }
+        }
+    }
+
+    right_matches
+}
+
+fn try_asof_datetime_matches(
+    left_key: &Column,
+    right_key: &Column,
+    on: &str,
+    direction: AsofDirection,
+    allow_exact_matches: bool,
+    tolerance: Option<f64>,
+) -> Option<Result<Vec<Option<usize>>, JoinError>> {
+    if left_key.dtype() != DType::Datetime64 || right_key.dtype() != DType::Datetime64 {
+        return None;
+    }
+    let left = datetime64_key_parts(left_key)?;
+    let right = datetime64_key_parts(right_key)?;
+
+    Some((|| {
+        ensure_sorted_non_decreasing_datetime64(left, "left", on)?;
+        ensure_sorted_non_decreasing_datetime64(right, "right", on)?;
+
+        Ok(compute_asof_matches_datetime64(
+            left,
+            right,
+            direction,
+            allow_exact_matches,
+            tolerance,
+        ))
+    })())
+}
+
 fn asof_numeric_values(column: &Column, side: &str, on: &str) -> Result<Vec<f64>, JoinError> {
+    // Typed fast path: an all-valid Int64/Float64 key column reads the raw slice
+    // directly, skipping the per-cell values() Scalar materialization + to_f64
+    // dispatch (merge_asof key extraction was ~0.83x pandas). Bit-identical:
+    // as_i64_slice/as_f64_slice are all-valid (no missing → no NaN-fill branch),
+    // and Scalar::Int64(v).to_f64() == v as f64, Scalar::Float64(v).to_f64() == v.
+    // Nullable / Timedelta64 / Datetime64 keys fall through to the Scalar loop.
+    if let Some(data) = column.as_i64_slice() {
+        return Ok(data.iter().map(|&v| v as f64).collect());
+    }
+    if let Some(data) = column.as_f64_slice() {
+        return Ok(data.to_vec());
+    }
     let mut out = Vec::with_capacity(column.len());
     for value in column.values() {
         // pandas merge_asof accepts Timedelta64 (and datetime) `on` columns
@@ -5610,8 +10523,28 @@ fn merge_asof_simple(
         )))
     })?;
 
-    let left_vals = asof_numeric_values(left_key, "left", on)?;
-    let right_vals = asof_numeric_values(right_key, "right", on)?;
+    if let Some(datetime_matches) = try_asof_datetime_matches(
+        left_key,
+        right_key,
+        on,
+        direction,
+        options.allow_exact_matches,
+        options.tolerance,
+    ) {
+        let right_matches = datetime_matches?;
+        return build_asof_output(left, right, on, &right_matches, None);
+    }
+
+    // Non-Datetime64 keys: use the f64 numeric path. The grouped Datetime64
+    // route below still uses the old shift-to-f64 bridge until it gets its own
+    // i64 grouped path.
+    let (left_vals, right_vals) = match try_asof_datetime_shift(left_key, right_key, on) {
+        Some(shifted) => shifted?,
+        None => (
+            asof_numeric_values(left_key, "left", on)?,
+            asof_numeric_values(right_key, "right", on)?,
+        ),
+    };
 
     // pandas pd.merge_asof accepts NaN keys: the NaN row gets a null in
     // the joined columns (no match). The strict "reject null keys" check
@@ -5664,8 +10597,15 @@ fn merge_asof_grouped(
         )))
     })?;
 
-    let left_vals = asof_numeric_values(left_key, "left", on)?;
-    let right_vals = asof_numeric_values(right_key, "right", on)?;
+    // Datetime64 keys: shift-to-f64 (exact for <~104-day ns ranges) instead of the
+    // rejected/precision-lossy direct cast. Falls back to the f64 numeric path.
+    let (left_vals, right_vals) = match try_asof_datetime_shift(left_key, right_key, on) {
+        Some(shifted) => shifted?,
+        None => (
+            asof_numeric_values(left_key, "left", on)?,
+            asof_numeric_values(right_key, "right", on)?,
+        ),
+    };
 
     // pandas pd.merge_asof accepts NaN keys: the NaN row gets a null in
     // the joined columns (no match). The strict "reject null keys" check
@@ -5763,7 +10703,7 @@ impl<'a> ByKey<'a> {
             Scalar::Utf8(s) => ByKey::Str(s.as_str()),
             Scalar::Timedelta64(v) => ByKey::Timedelta(*v),
             Scalar::Datetime64(v) => ByKey::Datetime(*v),
-            Scalar::Period(v) => ByKey::Period(*v),
+            Scalar::Period(v) => ByKey::Period(v.ordinal),
             Scalar::Float64(_) | Scalar::Interval(_) => return None,
         })
     }
@@ -6037,6 +10977,13 @@ fn compute_asof_matches(
 }
 
 /// Build the output DataFrame from computed matches.
+/// One output column of `build_asof_output`: left columns are present for every
+/// row (clone), right columns are gathered by the asof match positions.
+enum AsofOutputTask<'a> {
+    LeftClone(&'a Column),
+    RightGather(&'a Column),
+}
+
 fn build_asof_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -6082,7 +11029,15 @@ fn build_asof_output(
     let mut out_columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
 
-    // Left columns (all rows present)
+    // Resolve every output column (name + build task) in order, then build the
+    // columns — left columns clone all rows, right columns gather matched-or-null
+    // values. Each output column is independent, so wide/large outputs build all
+    // columns across a worker pool (br-frankenpandas-fu8f5; same disjoint-fill
+    // pattern as the dense-i64/inner-merge builders). Bit-identical to the serial
+    // loops: identical per-column result (left clone; right Scalar gather with
+    // Null(NullKind::NaN) on unmatched, then Column::new with the source dtype),
+    // inserted in the same order.
+    let mut specs: Vec<(String, AsofOutputTask<'_>)> = Vec::new();
     for col_name in &left_col_names {
         let col = left.columns().get(col_name).ok_or_else(|| {
             JoinError::Frame(FrameError::CompatibilityRejected(format!(
@@ -6094,15 +11049,8 @@ fn build_asof_output(
         } else {
             col_name.clone()
         };
-        insert_merged_output_column(
-            &mut out_columns,
-            &mut column_order,
-            output_name,
-            col.clone(),
-        )?;
+        specs.push((output_name, AsofOutputTask::LeftClone(col)));
     }
-
-    // Right columns (matched or null)
     for col_name in &right_col_names {
         let right_col = right.columns().get(col_name).ok_or_else(|| {
             JoinError::Frame(FrameError::CompatibilityRejected(format!(
@@ -6114,22 +11062,83 @@ fn build_asof_output(
         } else {
             col_name.clone()
         };
+        specs.push((output_name, AsofOutputTask::RightGather(right_col)));
+    }
 
-        let mut vals = Vec::with_capacity(n_out);
-        for m in right_matches {
-            match m {
-                Some(j) if *j < right_n => vals.push(right_col.values()[*j].clone()),
-                _ => {
-                    vals.push(fp_types::Scalar::Null(fp_types::NullKind::NaN));
+    let build_one = |task: &AsofOutputTask<'_>| -> Result<Column, ColumnError> {
+        match task {
+            AsofOutputTask::LeftClone(col) => Ok((*col).clone()),
+            AsofOutputTask::RightGather(right_col) => {
+                // Typed all-valid-Float64 gather (br-frankenpandas asof typed
+                // output): an `as_f64_slice` source is all-valid, so it carries
+                // NO NaN values (Float64 validity marks NaN invalid, and the
+                // slice is gated on `validity.all()`). Gather matched data into a
+                // contiguous f64 buffer + validity bitset instead of cloning a
+                // 32 B Scalar per row and re-validating in Column::new. Bit-
+                // identical to the Scalar path: a matched slot is a finite
+                // `Float64(src[j])` (valid bit), an unmatched slot is
+                // `Null(NullKind::NaN)` (cleared bit) — exactly what the Scalar
+                // gather + Column::new produce, with no matched-NaN ambiguity
+                // because the source has none.
+                if let Some(src) = right_col.as_f64_slice() {
+                    let mut data = Vec::with_capacity(n_out);
+                    let mut validity = fp_columnar::ValidityMask::all_valid(n_out);
+                    for (i, m) in right_matches.iter().enumerate() {
+                        match m {
+                            Some(j) if *j < right_n => data.push(src[*j]),
+                            _ => {
+                                // 0.0 datum + cleared bit is the gap convention:
+                                // LazyNullableFloat64 materializes Null(NaN) only
+                                // when the datum is NOT NaN, so an unmatched slot
+                                // must use 0.0 (a NaN datum would materialize a
+                                // present Float64(NaN) instead).
+                                data.push(0.0);
+                                validity.set(i, false);
+                            }
+                        }
+                    }
+                    return Ok(Column::from_f64_values_with_validity(data, validity));
                 }
+                let src = right_col.values();
+                let mut vals = Vec::with_capacity(n_out);
+                for m in right_matches {
+                    match m {
+                        Some(j) if *j < right_n => vals.push(src[*j].clone()),
+                        _ => vals.push(fp_types::Scalar::Null(fp_types::NullKind::NaN)),
+                    }
+                }
+                Column::new(right_col.dtype(), vals)
             }
         }
-        insert_merged_output_column(
-            &mut out_columns,
-            &mut column_order,
-            output_name,
-            Column::new(right_col.dtype(), vals)?,
-        )?;
+    };
+
+    let built: Vec<Result<Column, ColumnError>> = {
+        let thread_count = join_parallel_thread_count();
+        if specs.len() > 1 && n_out >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1 {
+            let mut slots: Vec<Option<Result<Column, ColumnError>>> =
+                (0..specs.len()).map(|_| None).collect();
+            let chunk = specs.len().div_ceil(thread_count).max(1);
+            let build_one = &build_one;
+            std::thread::scope(|scope| {
+                for (spec_chunk, slot_chunk) in specs.chunks(chunk).zip(slots.chunks_mut(chunk)) {
+                    scope.spawn(move || {
+                        for ((_, task), slot) in spec_chunk.iter().zip(slot_chunk) {
+                            *slot = Some(build_one(task));
+                        }
+                    });
+                }
+            });
+            slots
+                .into_iter()
+                .map(|c| c.expect("every asof output column must be built"))
+                .collect()
+        } else {
+            specs.iter().map(|(_, task)| build_one(task)).collect()
+        }
+    };
+
+    for ((output_name, _), column) in specs.into_iter().zip(built) {
+        insert_merged_output_column(&mut out_columns, &mut column_order, output_name, column?)?;
     }
 
     Ok(MergedDataFrame {
@@ -6211,15 +11220,103 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
 
 #[cfg(test)]
 mod tests {
+    use fp_columnar::{Column, ValidityMask};
     use fp_frame::Series;
-    use fp_index::IndexLabel;
-    use fp_types::{NullKind, Scalar};
+    use fp_index::{Index, IndexLabel};
+    use fp_types::{DType, NullKind, Scalar};
 
     use super::{
         DataFrameMergeExt, DenseI64InnerOutputPlan, DenseI64LaneData, FusedInt64OutputColumn,
-        FusedInt64Side, JoinExecutionOptions, JoinType, build_dense_i64_inner_output_data,
+        FusedInt64Side, InnerPositionPlan, JoinExecutionOptions, JoinType, PositionSelection,
+        ResolvedMergeSuffixes, build_dense_i64_inner_output_data,
+        build_single_key_dense_cycle_i64_left_merge_output,
+        build_single_key_dense_i64_left_merge_output,
+        build_single_key_dense_i64_right_merge_output, build_single_key_dense_left_merge_output,
+        build_single_key_inner_contiguous_no_overlap_output, dense_int64_left_positions,
         join_series, join_series_with_options, join_series_with_trace,
+        lower_hex_overlap_plan_from_certificates, ordered_unique_utf8_inner_position_plan,
+        ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
+        scalar_utf8_left_positions, scalar_utf8_outer_positions,
+        sorted_contiguous_utf8_inner_positions, strictly_increasing_utf8_key_spans,
+        utf8_span_lower_bound,
     };
+
+    fn contiguous_utf8_column(values: &[&str]) -> Column {
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::with_capacity(values.len() + 1);
+        offsets.push(0);
+        for value in values {
+            bytes.extend_from_slice(value.as_bytes());
+            offsets.push(bytes.len());
+        }
+        Column::from_utf8_contiguous(bytes, offsets)
+    }
+
+    fn utf8_key_merge_frame(keys: &[&str], value_name: &str, base: i64) -> DataFrame {
+        let index = Index::new(
+            (0..keys.len())
+                .map(|row| IndexLabel::Int64(row as i64))
+                .collect(),
+        );
+        let mut columns = std::collections::BTreeMap::new();
+        columns.insert("id".to_owned(), contiguous_utf8_column(keys));
+        columns.insert(
+            value_name.to_owned(),
+            Column::from_i64_values((0..keys.len()).map(|row| base + row as i64).collect()),
+        );
+        DataFrame::new_with_column_order(
+            index,
+            columns,
+            vec!["id".to_owned(), value_name.to_owned()],
+        )
+        .expect("utf8 key frame")
+    }
+
+    fn scalar_utf8_column(values: &[&str]) -> Column {
+        Column::from_values(
+            values
+                .iter()
+                .map(|value| Scalar::Utf8((*value).to_owned()))
+                .collect(),
+        )
+        .expect("scalar utf8 column")
+    }
+
+    #[test]
+    fn scalar_utf8_left_positions_preserve_duplicate_order_blackthrush() {
+        let left = scalar_utf8_column(&["b", "a", "b", "x"]);
+        let right = scalar_utf8_column(&["a", "b", "b"]);
+
+        let (left_positions, right_positions) =
+            scalar_utf8_left_positions(&left, &right).expect("scalar utf8 left positions");
+
+        assert_eq!(
+            left_positions,
+            vec![Some(0), Some(0), Some(1), Some(2), Some(2), Some(3)]
+        );
+        assert_eq!(
+            right_positions,
+            vec![Some(1), Some(2), Some(0), Some(1), Some(2), None]
+        );
+    }
+
+    #[test]
+    fn scalar_utf8_outer_positions_sort_keys_and_keep_unmatched_blackthrush() {
+        let left = scalar_utf8_column(&["b", "a", "b", "x"]);
+        let right = scalar_utf8_column(&["a", "b", "b", "z"]);
+
+        let (left_positions, right_positions) =
+            scalar_utf8_outer_positions(&left, &right).expect("scalar utf8 outer positions");
+
+        assert_eq!(
+            left_positions,
+            vec![Some(1), Some(0), Some(0), Some(2), Some(2), Some(3), None,]
+        );
+        assert_eq!(
+            right_positions,
+            vec![Some(0), Some(1), Some(2), Some(1), Some(2), None, Some(3),]
+        );
+    }
 
     #[test]
     fn inner_join_multiplies_cardinality_for_duplicates() {
@@ -6742,6 +11839,795 @@ mod tests {
         assert_eq!(order, ["k", "zebra", "apple", "mango"]);
     }
 
+    #[test]
+    fn join_row_count_lattice_n8npw() {
+        // Invariant (br-frankenpandas-n8npw): inner<=left<=outer and inner<=right<=outer
+        // by row count. Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e57_0b1c_2d3e_4f55;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        for iter in 0..300u32 {
+            let ln = (next() % 6) as usize + 1;
+            let rn = (next() % 6) as usize + 1;
+            let lk: Vec<Scalar> = (0..ln)
+                .map(|_| Scalar::Int64((next() % 4) as i64))
+                .collect();
+            let rk: Vec<Scalar> = (0..rn)
+                .map(|_| Scalar::Int64((next() % 4) as i64))
+                .collect();
+            let left = DataFrame::from_dict(
+                &["k", "lv"],
+                vec![
+                    ("k", lk),
+                    ("lv", (0..ln).map(|i| Scalar::Int64(i as i64)).collect()),
+                ],
+            )
+            .unwrap();
+            let right = DataFrame::from_dict(
+                &["k", "rv"],
+                vec![
+                    ("k", rk),
+                    ("rv", (0..rn).map(|i| Scalar::Int64(i as i64)).collect()),
+                ],
+            )
+            .unwrap();
+            let rows = |jt| {
+                let m = merge_dataframes(&left, &right, "k", jt).unwrap();
+                merged_values(&m, "k").unwrap().len()
+            };
+            let inner = rows(JoinType::Inner);
+            let lj = rows(JoinType::Left);
+            let rj = rows(JoinType::Right);
+            let outer = rows(JoinType::Outer);
+            assert!(
+                inner <= lj && lj <= outer,
+                "inner<=left<=outer iter={iter}: {inner} {lj} {outer}"
+            );
+            assert!(
+                inner <= rj && rj <= outer,
+                "inner<=right<=outer iter={iter}: {inner} {rj} {outer}"
+            );
+        }
+    }
+
+    #[test]
+    fn right_join_null_fill_multiset_7je8m() {
+        use std::collections::HashMap;
+        // Differential (br-frankenpandas-7je8m): RIGHT join preserves every right row;
+        // matched left payload cross-product else null. (key, lv-or-None, rv) multiset
+        // vs oracle. Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e57_0b1c_2d3e_4f54;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        for iter in 0..300u32 {
+            let ln = (next() % 6) as usize + 1;
+            let rn = (next() % 6) as usize + 1;
+            let lk: Vec<i64> = (0..ln).map(|_| (next() % 4) as i64).collect();
+            let lv: Vec<i64> = (0..ln).map(|i| i as i64).collect();
+            let rk: Vec<i64> = (0..rn).map(|_| (next() % 4) as i64).collect();
+            let rv: Vec<i64> = (0..rn).map(|i| 100 + i as i64).collect();
+            let left = DataFrame::from_dict(
+                &["k", "lv"],
+                vec![
+                    ("k", lk.iter().map(|&x| Scalar::Int64(x)).collect()),
+                    ("lv", lv.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ],
+            )
+            .unwrap();
+            let right = DataFrame::from_dict(
+                &["k", "rv"],
+                vec![
+                    ("k", rk.iter().map(|&x| Scalar::Int64(x)).collect()),
+                    ("rv", rv.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ],
+            )
+            .unwrap();
+            let merged = merge_dataframes(&left, &right, "k", JoinType::Right).unwrap();
+
+            let ks = merged_values(&merged, "k").unwrap();
+            let lvs = merged_values(&merged, "lv").unwrap();
+            let rvs = merged_values(&merged, "rv").unwrap();
+            let ki = |v: &Scalar| -> i64 {
+                match v {
+                    Scalar::Int64(x) => *x,
+                    Scalar::Float64(x) => *x as i64,
+                    _ => i64::MIN,
+                }
+            };
+            let kopt =
+                |v: &Scalar| -> Option<i64> { if v.is_missing() { None } else { Some(ki(v)) } };
+            let mut got: Vec<(i64, Option<i64>, i64)> = (0..ks.len())
+                .map(|i| (ki(&ks[i]), kopt(&lvs[i]), ki(&rvs[i])))
+                .collect();
+            // Oracle.
+            let mut lby: HashMap<i64, Vec<i64>> = HashMap::new();
+            for i in 0..ln {
+                lby.entry(lk[i]).or_default().push(lv[i]);
+            }
+            let mut exp: Vec<(i64, Option<i64>, i64)> = Vec::new();
+            for i in 0..rn {
+                match lby.get(&rk[i]) {
+                    Some(lvals) => {
+                        for &a in lvals {
+                            exp.push((rk[i], Some(a), rv[i]));
+                        }
+                    }
+                    None => exp.push((rk[i], None, rv[i])),
+                }
+            }
+            got.sort();
+            exp.sort();
+            assert_eq!(got, exp, "right join multiset iter={iter}");
+        }
+    }
+
+    #[test]
+    fn inner_join_utf8_value_multiset_fr4ns() {
+        use std::collections::HashMap;
+        // Differential (br-frankenpandas-fr4ns): inner join on Utf8 keys; the (key,
+        // lv, rv) multiset == per-key cross-product (5foyp was int/dense; jlf8d a
+        // single case). Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e57_0b1c_2d3e_4f51;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let key = |n: u32| Scalar::Utf8(format!("{}", (b'a' + (n % 4) as u8) as char));
+        for iter in 0..300u32 {
+            let ln = (next() % 6) as usize + 1;
+            let rn = (next() % 6) as usize + 1;
+            let lk: Vec<Scalar> = (0..ln).map(|_| key(next())).collect();
+            let lv: Vec<i64> = (0..ln).map(|i| i as i64).collect();
+            let rk: Vec<Scalar> = (0..rn).map(|_| key(next())).collect();
+            let rv: Vec<i64> = (0..rn).map(|i| 100 + i as i64).collect();
+            let left = DataFrame::from_dict(
+                &["k", "lv"],
+                vec![
+                    ("k", lk.clone()),
+                    ("lv", lv.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ],
+            )
+            .unwrap();
+            let right = DataFrame::from_dict(
+                &["k", "rv"],
+                vec![
+                    ("k", rk.clone()),
+                    ("rv", rv.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ],
+            )
+            .unwrap();
+            let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).unwrap();
+
+            let ks = merged_values(&merged, "k").unwrap();
+            let lvs = merged_values(&merged, "lv").unwrap();
+            let rvs = merged_values(&merged, "rv").unwrap();
+            let kstr = |v: &Scalar| -> String {
+                match v {
+                    Scalar::Utf8(x) => x.clone(),
+                    _ => String::new(),
+                }
+            };
+            let ki = |v: &Scalar| -> i64 {
+                match v {
+                    Scalar::Int64(x) => *x,
+                    _ => i64::MIN,
+                }
+            };
+            let mut got: Vec<(String, i64, i64)> = (0..ks.len())
+                .map(|i| (kstr(&ks[i]), ki(&lvs[i]), ki(&rvs[i])))
+                .collect();
+            // Oracle: per-key cross product.
+            let mut lby: HashMap<String, Vec<i64>> = HashMap::new();
+            for i in 0..ln {
+                lby.entry(kstr(&lk[i])).or_default().push(lv[i]);
+            }
+            let mut rby: HashMap<String, Vec<i64>> = HashMap::new();
+            for i in 0..rn {
+                rby.entry(kstr(&rk[i])).or_default().push(rv[i]);
+            }
+            let mut exp: Vec<(String, i64, i64)> = Vec::new();
+            for (k, lvals) in &lby {
+                if let Some(rvals) = rby.get(k) {
+                    for &a in lvals {
+                        for &b in rvals {
+                            exp.push((k.clone(), a, b));
+                        }
+                    }
+                }
+            }
+            got.sort();
+            exp.sort();
+            assert_eq!(got, exp, "inner Utf8 multiset iter={iter}");
+        }
+    }
+
+    #[test]
+    fn inner_join_utf8_keys_jlf8d() {
+        use std::collections::HashMap;
+        // br-frankenpandas-jlf8d: inner join on Utf8 keys (general/hash path).
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let left = DataFrame::from_dict(
+            &["k", "lv"],
+            vec![
+                ("k", vec![s("a"), s("b"), s("c")]),
+                (
+                    "lv",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["k", "rv"],
+            vec![
+                ("k", vec![s("b"), s("c"), s("d")]),
+                (
+                    "rv",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .expect("right");
+        let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).expect("merge");
+
+        let keys = merged_values(&merged, "k").expect("k");
+        let lv = merged_values(&merged, "lv").expect("lv");
+        let rv = merged_values(&merged, "rv").expect("rv");
+        let exp_lv: HashMap<&str, i64> = [("b", 2), ("c", 3)].into_iter().collect();
+        let exp_rv: HashMap<&str, i64> = [("b", 10), ("c", 20)].into_iter().collect();
+        assert_eq!(keys.len(), 2, "inner keys = {{b,c}}");
+        for i in 0..keys.len() {
+            let k = match &keys[i] {
+                Scalar::Utf8(x) => x.as_str(),
+                _ => "?",
+            };
+            let geti = |s: &Scalar| match s {
+                Scalar::Int64(v) => *v,
+                _ => i64::MIN,
+            };
+            assert_eq!(geti(&lv[i]), exp_lv[k], "lv at {k}");
+            assert_eq!(geti(&rv[i]), exp_rv[k], "rv at {k}");
+        }
+    }
+
+    #[test]
+    fn merge_indicator_column_d3ec6() {
+        use std::collections::BTreeSet;
+        // br-frankenpandas-d3ec6: outer-join indicator marks left_only/both/right_only.
+        let left = DataFrame::from_dict(
+            &["k"],
+            vec![(
+                "k",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["k"],
+            vec![(
+                "k",
+                vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
+            )],
+        )
+        .expect("right");
+        let opts = super::MergeExecutionOptions {
+            indicator_name: Some("_merge".to_owned()),
+            ..Default::default()
+        };
+        let m = super::merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["k"],
+            &["k"],
+            JoinType::Outer,
+            opts,
+        )
+        .expect("merge");
+
+        let keys = merged_values(&m, "k").expect("k");
+        let ind = merged_values(&m, "_merge").expect("_merge present");
+        let lset: BTreeSet<i64> = [1, 2, 3].into_iter().collect();
+        let rset: BTreeSet<i64> = [2, 3, 4].into_iter().collect();
+        assert_eq!(keys.len(), 4, "outer keys = union");
+        for i in 0..keys.len() {
+            let k = match &keys[i] {
+                Scalar::Int64(v) => *v,
+                _ => i64::MIN,
+            };
+            let exp = match (lset.contains(&k), rset.contains(&k)) {
+                (true, true) => "both",
+                (true, false) => "left_only",
+                (false, true) => "right_only",
+                (false, false) => "??",
+            };
+            assert_eq!(ind[i], Scalar::Utf8(exp.to_owned()), "indicator at key {k}");
+        }
+    }
+
+    #[test]
+    fn merge_overlapping_columns_suffixed_vb10q() {
+        // br-frankenpandas-vb10q: a non-key column present in both frames is
+        // suffixed _x (left) / _y (right) on merge.
+        let mk = |vfactor: i64| {
+            DataFrame::from_dict(
+                &["k", "v"],
+                vec![
+                    (
+                        "k",
+                        vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                    ),
+                    (
+                        "v",
+                        vec![
+                            Scalar::Int64(vfactor),
+                            Scalar::Int64(2 * vfactor),
+                            Scalar::Int64(3 * vfactor),
+                        ],
+                    ),
+                ],
+            )
+            .expect("frame")
+        };
+        let left = mk(10); // v = k*10
+        let right = mk(100); // v = k*100
+        let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).expect("merge");
+
+        let keys = merged_values(&merged, "k").expect("k");
+        let vx = merged_values(&merged, "v_x").expect("v_x present");
+        let vy = merged_values(&merged, "v_y").expect("v_y present");
+        assert_eq!(keys.len(), 3);
+        for i in 0..keys.len() {
+            let k = match &keys[i] {
+                Scalar::Int64(x) => *x,
+                _ => i64::MIN,
+            };
+            assert_eq!(vx[i], Scalar::Int64(k * 10), "v_x at key {k}");
+            assert_eq!(vy[i], Scalar::Int64(k * 100), "v_y at key {k}");
+        }
+    }
+
+    #[test]
+    fn int64_join_row_count_matches_cardinality_invariant_ya1po() {
+        use std::collections::BTreeMap;
+
+        // Metamorphic harness (br-frankenpandas-ya1po): merge_dataframes row count
+        // must equal the pandas-standard cardinality per join type — an
+        // ordering-independent invariant guarding the dense/direct-address Int64
+        // join fast paths. Deterministic seeded LCG — no rand crate, no mocks.
+        let mut state: u64 = 0xa5a5_5a5a_dead_beef;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let build = |keys: &[i64], payload_name: &str| {
+            let n = keys.len();
+            DataFrame::from_dict(
+                &["k", payload_name],
+                vec![
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
+                    (
+                        payload_name,
+                        (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
+                ],
+            )
+            .expect("frame")
+        };
+
+        for iter in 0..1500u32 {
+            let nl = (next() % 9) as usize + 1;
+            let nr = (next() % 9) as usize + 1;
+            // Small key range so many-to-many (duplicate-key) joins are common.
+            let lk: Vec<i64> = (0..nl).map(|_| (next() % 4) as i64).collect();
+            let rk: Vec<i64> = (0..nr).map(|_| (next() % 4) as i64).collect();
+            let left = build(&lk, "lv");
+            let right = build(&rk, "rv");
+
+            let mut lc: BTreeMap<i64, i64> = BTreeMap::new();
+            let mut rc: BTreeMap<i64, i64> = BTreeMap::new();
+            for &k in &lk {
+                *lc.entry(k).or_default() += 1;
+            }
+            for &k in &rk {
+                *rc.entry(k).or_default() += 1;
+            }
+            let mut all_keys: Vec<i64> = lc.keys().chain(rc.keys()).copied().collect();
+            all_keys.sort_unstable();
+            all_keys.dedup();
+
+            let g = |k: i64, m: &BTreeMap<i64, i64>| m.get(&k).copied().unwrap_or(0);
+            let inner: i64 = all_keys.iter().map(|&k| g(k, &lc) * g(k, &rc)).sum();
+            let left_exp: i64 = lc.iter().map(|(&k, &l)| l * g(k, &rc).max(1)).sum();
+            let right_exp: i64 = rc.iter().map(|(&k, &r)| r * g(k, &lc).max(1)).sum();
+            let outer: i64 = all_keys
+                .iter()
+                .map(|&k| {
+                    let (l, r) = (g(k, &lc), g(k, &rc));
+                    if l > 0 && r > 0 { l * r } else { l + r }
+                })
+                .sum();
+
+            let ctx = format!("iter={iter} lk={lk:?} rk={rk:?}");
+            for (jt, exp) in [
+                (JoinType::Inner, inner),
+                (JoinType::Left, left_exp),
+                (JoinType::Right, right_exp),
+                (JoinType::Outer, outer),
+            ] {
+                let merged = merge_dataframes(&left, &right, "k", jt).expect("merge");
+                let rows = merged_values(&merged, "k").expect("key col").len() as i64;
+                assert_eq!(rows, exp, "{jt:?} row count {ctx}");
+            }
+        }
+    }
+
+    #[test]
+    fn inner_join_value_multiset_matches_crossproduct_oracle_5foyp() {
+        use std::collections::BTreeMap;
+
+        // Value-level oracle (br-frankenpandas-5foyp): an inner join must pair the
+        // CORRECT rows, not merely produce the right count. Assert the multiset of
+        // output (key, left_payload, right_payload) triples equals the
+        // independently-computed per-key cross product. Ordering-independent
+        // (sorted-vector compare). Deterministic seeded LCG — no rand, no mocks.
+        let mut state: u64 = 0x0ddc_0ffe_e0dd_f00d;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let build = |keys: &[i64], pname: &str| {
+            let n = keys.len();
+            DataFrame::from_dict(
+                &["k", pname],
+                vec![
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
+                    // Distinct per-row payload (= row index) so mis-pairings are visible.
+                    (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
+                ],
+            )
+            .expect("frame")
+        };
+        // Extract i64; a non-Int64 maps to a sentinel that will never equal a
+        // real row index/key, so any dtype regression still fails the multiset
+        // assert below (no panic — keeps the helper side-effect-free).
+        let geti = |s: &Scalar| match s {
+            Scalar::Int64(v) => *v,
+            _ => i64::MIN,
+        };
+
+        for iter in 0..1500u32 {
+            let nl = (next() % 9) as usize + 1;
+            let nr = (next() % 9) as usize + 1;
+            let lk: Vec<i64> = (0..nl).map(|_| (next() % 4) as i64).collect();
+            let rk: Vec<i64> = (0..nr).map(|_| (next() % 4) as i64).collect();
+            let left = build(&lk, "lv");
+            let right = build(&rk, "rv");
+
+            let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).expect("merge");
+            let ks = merged_values(&merged, "k").expect("k");
+            let lvs = merged_values(&merged, "lv").expect("lv");
+            let rvs = merged_values(&merged, "rv").expect("rv");
+            let mut got: Vec<(i64, i64, i64)> = (0..ks.len())
+                .map(|i| (geti(&ks[i]), geti(&lvs[i]), geti(&rvs[i])))
+                .collect();
+            got.sort_unstable();
+
+            // Independent oracle: per-key cross product of left/right row payloads.
+            let mut lg: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            let mut rg: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (i, &k) in lk.iter().enumerate() {
+                lg.entry(k).or_default().push(i as i64);
+            }
+            for (i, &k) in rk.iter().enumerate() {
+                rg.entry(k).or_default().push(i as i64);
+            }
+            let mut exp: Vec<(i64, i64, i64)> = Vec::new();
+            for (&k, lps) in &lg {
+                if let Some(rps) = rg.get(&k) {
+                    for &a in lps {
+                        for &b in rps {
+                            exp.push((k, a, b));
+                        }
+                    }
+                }
+            }
+            exp.sort_unstable();
+
+            assert_eq!(
+                got, exp,
+                "inner join value multiset iter={iter} lk={lk:?} rk={rk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn left_outer_join_nullfill_value_oracle_kaj3t() {
+        use std::collections::BTreeMap;
+
+        // Value oracle for LEFT/OUTER null-fill (br-frankenpandas-kaj3t): unmatched
+        // rows get NULL-filled on the absent side — the subtlest join behavior.
+        // NULL is represented by the i64::MIN sentinel (payloads are 0..n and keys
+        // 0..3, so a sentinel never collides with a real value). Deterministic
+        // seeded LCG — no rand crate, no mocks.
+        const NUL: i64 = i64::MIN;
+        let mut state: u64 = 0xfeed_face_cafe_b0ba;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let build = |keys: &[i64], pname: &str| {
+            let n = keys.len();
+            DataFrame::from_dict(
+                &["k", pname],
+                vec![
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
+                    (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
+                ],
+            )
+            .expect("frame")
+        };
+        // Int64 -> value. Left/outer joins upcast Int64 payload columns to
+        // Float64 when null-fill introduces missing values (pandas parity: Int64
+        // can't hold NaN), so accept finite Float64 too. NULL / NaN -> NUL
+        // sentinel. Payloads are small whole numbers, so f64 -> i64 is exact.
+        let geti = |s: &Scalar| match s {
+            Scalar::Int64(v) => *v,
+            Scalar::Float64(v) if v.is_finite() => *v as i64,
+            _ => NUL,
+        };
+
+        for iter in 0..1500u32 {
+            let nl = (next() % 9) as usize + 1;
+            let nr = (next() % 9) as usize + 1;
+            let lk: Vec<i64> = (0..nl).map(|_| (next() % 4) as i64).collect();
+            let rk: Vec<i64> = (0..nr).map(|_| (next() % 4) as i64).collect();
+            let left = build(&lk, "lv");
+            let right = build(&rk, "rv");
+
+            // Right rows grouped by key (payload = row index).
+            let mut rg: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (j, &k) in rk.iter().enumerate() {
+                rg.entry(k).or_default().push(j as i64);
+            }
+            let lkeys: std::collections::BTreeSet<i64> = lk.iter().copied().collect();
+
+            let read = |jt: JoinType| -> Vec<(i64, i64, i64)> {
+                let merged = merge_dataframes(&left, &right, "k", jt).expect("merge");
+                let ks = merged_values(&merged, "k").expect("k");
+                let lvs = merged_values(&merged, "lv").expect("lv");
+                let rvs = merged_values(&merged, "rv").expect("rv");
+                let mut got: Vec<(i64, i64, i64)> = (0..ks.len())
+                    .map(|i| (geti(&ks[i]), geti(&lvs[i]), geti(&rvs[i])))
+                    .collect();
+                got.sort_unstable();
+                got
+            };
+
+            // LEFT oracle: every left row appears; matched -> one row per right
+            // match, unmatched -> NULL right payload (key still the left key).
+            let mut exp_left: Vec<(i64, i64, i64)> = Vec::new();
+            for (i, &k) in lk.iter().enumerate() {
+                match rg.get(&k) {
+                    Some(rps) => {
+                        for &j in rps {
+                            exp_left.push((k, i as i64, j));
+                        }
+                    }
+                    None => exp_left.push((k, i as i64, NUL)),
+                }
+            }
+            exp_left.sort_unstable();
+            assert_eq!(
+                read(JoinType::Left),
+                exp_left,
+                "left join value oracle iter={iter} lk={lk:?} rk={rk:?}"
+            );
+
+            // OUTER oracle: LEFT plus right-only rows (no left match) with NULL
+            // left payload and the coalesced key.
+            let mut exp_outer = exp_left.clone();
+            for (j, &k) in rk.iter().enumerate() {
+                if !lkeys.contains(&k) {
+                    exp_outer.push((k, NUL, j as i64));
+                }
+            }
+            exp_outer.sort_unstable();
+            assert_eq!(
+                read(JoinType::Outer),
+                exp_outer,
+                "outer join value oracle iter={iter} lk={lk:?} rk={rk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn left_join_value_multiset_matches_unmatched_oracle_gp0ik() {
+        use std::collections::BTreeMap;
+
+        // Value-level LEFT join oracle (br-frankenpandas-gp0ik): matched keys
+        // emit the left/right cross product; unmatched left rows emit exactly one
+        // row with a missing right payload. Ordering-independent sorted multiset.
+        let mut state: u64 = 0x51de_cafe_2026_0618;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let build = |keys: &[i64], pname: &str| {
+            let n = keys.len();
+            DataFrame::from_dict(
+                &["k", pname],
+                vec![
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
+                    (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
+                ],
+            )
+            .expect("frame")
+        };
+        let geti = |s: &Scalar| match s {
+            Scalar::Int64(v) => *v,
+            _ => i64::MIN,
+        };
+        let get_optional_i64 = |s: &Scalar| match s {
+            Scalar::Int64(v) => Some(*v),
+            value if value.is_missing() => None,
+            _ => Some(i64::MIN),
+        };
+
+        for iter in 0..1500u32 {
+            let nl = (next() % 9) as usize + 1;
+            let nr = (next() % 9) as usize + 1;
+            let lk: Vec<i64> = (0..nl).map(|_| (next() % 5) as i64).collect();
+            let rk: Vec<i64> = (0..nr).map(|_| (next() % 3) as i64).collect();
+            let left = build(&lk, "lv");
+            let right = build(&rk, "rv");
+
+            let merged = merge_dataframes(&left, &right, "k", JoinType::Left).expect("merge");
+            let ks = merged_values(&merged, "k").expect("k");
+            let lvs = merged_values(&merged, "lv").expect("lv");
+            let rvs = merged_values(&merged, "rv").expect("rv");
+            let mut got: Vec<(i64, i64, Option<i64>)> = (0..ks.len())
+                .map(|i| (geti(&ks[i]), geti(&lvs[i]), get_optional_i64(&rvs[i])))
+                .collect();
+            got.sort_unstable();
+
+            let mut rg: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (i, &k) in rk.iter().enumerate() {
+                rg.entry(k).or_default().push(i as i64);
+            }
+            let mut exp: Vec<(i64, i64, Option<i64>)> = Vec::new();
+            for (left_pos, &k) in lk.iter().enumerate() {
+                if let Some(right_positions) = rg.get(&k) {
+                    for &right_pos in right_positions {
+                        exp.push((k, left_pos as i64, Some(right_pos)));
+                    }
+                } else {
+                    exp.push((k, left_pos as i64, None));
+                }
+            }
+            exp.sort_unstable();
+
+            assert_eq!(
+                got, exp,
+                "left join value multiset iter={iter} lk={lk:?} rk={rk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn right_join_value_multiset_matches_unmatched_oracle_pd1h5() {
+        use std::collections::BTreeMap;
+
+        // Value-level RIGHT join oracle (br-frankenpandas-pd1h5): matched keys
+        // emit the left/right cross product; unmatched right rows emit exactly one
+        // row with a missing left payload. Ordering-independent sorted multiset.
+        let mut state: u64 = 0x7191_2026_0618_a015;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let build = |keys: &[i64], pname: &str| {
+            let n = keys.len();
+            DataFrame::from_dict(
+                &["k", pname],
+                vec![
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
+                    (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
+                ],
+            )
+            .expect("frame")
+        };
+        let geti = |s: &Scalar| match s {
+            Scalar::Int64(v) => *v,
+            Scalar::Float64(v) if v.is_finite() => *v as i64,
+            _ => i64::MIN,
+        };
+        let get_optional_i64 = |s: &Scalar| match s {
+            Scalar::Int64(v) => Some(*v),
+            Scalar::Float64(v) if v.is_finite() => Some(*v as i64),
+            value if value.is_missing() => None,
+            _ => Some(i64::MIN),
+        };
+
+        for iter in 0..1500u32 {
+            let nl = (next() % 9) as usize + 1;
+            let nr = (next() % 9) as usize + 1;
+            let lk: Vec<i64> = (0..nl).map(|_| (next() % 4) as i64).collect();
+            let rk: Vec<i64> = (0..nr).map(|_| (next() % 5) as i64).collect();
+            let left = build(&lk, "lv");
+            let right = build(&rk, "rv");
+
+            let merged = merge_dataframes(&left, &right, "k", JoinType::Right).expect("merge");
+            let ks = merged_values(&merged, "k").expect("k");
+            let lvs = merged_values(&merged, "lv").expect("lv");
+            let rvs = merged_values(&merged, "rv").expect("rv");
+            let mut got: Vec<(i64, Option<i64>, i64)> = (0..ks.len())
+                .map(|i| (geti(&ks[i]), get_optional_i64(&lvs[i]), geti(&rvs[i])))
+                .collect();
+            got.sort_unstable();
+
+            let mut lg: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (i, &k) in lk.iter().enumerate() {
+                lg.entry(k).or_default().push(i as i64);
+            }
+            let mut exp: Vec<(i64, Option<i64>, i64)> = Vec::new();
+            for (right_pos, &k) in rk.iter().enumerate() {
+                if let Some(left_positions) = lg.get(&k) {
+                    for &left_pos in left_positions {
+                        exp.push((k, Some(left_pos), right_pos as i64));
+                    }
+                } else {
+                    exp.push((k, None, right_pos as i64));
+                }
+            }
+            exp.sort_unstable();
+
+            assert_eq!(
+                got, exp,
+                "right join value multiset iter={iter} lk={lk:?} rk={rk:?}"
+            );
+        }
+    }
+
     fn merged_values<'a>(
         merged: &'a MergedDataFrame,
         name: &str,
@@ -6755,6 +12641,1421 @@ mod tests {
                 )))
             })?
             .values())
+    }
+
+    #[test]
+    fn temporal_i64_inner_positions_match_scalar_oracle_with_duplicates_b2hwb() {
+        let build_positions_from_scalar_oracle = |left: &Column, right: &Column| {
+            let left_keys = super::collect_single_join_keys(left);
+            let right_keys = super::collect_single_join_keys(right);
+            let mut left_positions = Vec::new();
+            let mut right_positions = Vec::new();
+            for (left_pos, left_key) in left_keys.iter().enumerate() {
+                for (right_pos, right_key) in right_keys.iter().enumerate() {
+                    if left_key == right_key {
+                        left_positions.push(left_pos);
+                        right_positions.push(right_pos);
+                    }
+                }
+            }
+            (left_positions, right_positions)
+        };
+
+        let left_ns = [30, 10, 20, 10];
+        let right_ns = [10, 30, 10, 40];
+        for temporal in [DType::Datetime64, DType::Timedelta64] {
+            let scalar = |ns| match temporal {
+                DType::Datetime64 => Scalar::Datetime64(ns),
+                DType::Timedelta64 => Scalar::Timedelta64(ns),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            };
+            let left = Column::from_values(left_ns.into_iter().map(scalar).collect())
+                .expect("left temporal key");
+            let right = Column::from_values(right_ns.into_iter().map(scalar).collect())
+                .expect("right temporal key");
+
+            assert_eq!(
+                super::temporal_i64_inner_positions(&left, &right),
+                Some(build_positions_from_scalar_oracle(&left, &right)),
+                "raw-nanosecond planner must preserve scalar-oracle pair order for {temporal:?}"
+            );
+        }
+
+        let nat = fp_types::Timestamp::NAT;
+        let ordered = Column::from_datetime64_values(vec![1, 2, 3, 4]);
+        let nat_middle = Column::from_datetime64_values(vec![1, 2, nat, 4]);
+        let nat_tail = Column::from_datetime64_values(vec![1, 2, 3, nat]);
+        let single_nat = Column::from_datetime64_values(vec![nat]);
+        for (left, right) in [
+            (&nat_middle, &ordered),
+            (&ordered, &nat_tail),
+            (&single_nat, &ordered),
+        ] {
+            assert!(
+                super::temporal_i64_inner_positions(left, right).is_none(),
+                "NaT anywhere must retain the scalar INNER fallback",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn bench_temporal_i64_inner_validation_fusion_71kgc() {
+        let n = 400_000_i64;
+        let input_len = usize::try_from(n).expect("positive benchmark length");
+        let left = Column::from_datetime64_values_with_validity(
+            (0..n).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let right = Column::from_datetime64_values_with_validity(
+            (0..n).map(|value| value * 2).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+
+        // Exact pre-71kgc ordered body: separate NaT and strict-order scans
+        // followed by the same two-pointer intersection.
+        let former = || {
+            if !left.validity().all() || !right.validity().all() {
+                return None;
+            }
+            let left_raw = left.as_datetime64_slice()?;
+            let right_raw = right.as_datetime64_slice()?;
+            let nat = fp_types::Timestamp::NAT;
+            if left_raw.contains(&nat) || right_raw.contains(&nat) {
+                return None;
+            }
+            if left_raw.windows(2).any(|pair| pair[0] >= pair[1])
+                || right_raw.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return None;
+            }
+
+            let mut left_positions = Vec::with_capacity(left_raw.len().min(right_raw.len()));
+            let mut right_positions = Vec::with_capacity(left_positions.capacity());
+            let (mut left_idx, mut right_idx) = (0usize, 0usize);
+            while left_idx < left_raw.len() && right_idx < right_raw.len() {
+                match left_raw[left_idx].cmp(&right_raw[right_idx]) {
+                    std::cmp::Ordering::Equal => {
+                        left_positions.push(left_idx);
+                        right_positions.push(right_idx);
+                        left_idx += 1;
+                        right_idx += 1;
+                    }
+                    std::cmp::Ordering::Less => left_idx += 1,
+                    std::cmp::Ordering::Greater => right_idx += 1,
+                }
+            }
+            Some((left_positions, right_positions))
+        };
+        let candidate = || super::temporal_i64_inner_positions(&left, &right);
+
+        let former_output = former().expect("former temporal INNER positions");
+        let candidate_output = candidate().expect("temporal INNER positions");
+        assert_eq!(candidate_output, former_output);
+        assert_eq!(candidate_output.0.len(), input_len.div_ceil(2));
+        drop((former_output, candidate_output));
+        for _ in 0..2 {
+            std::hint::black_box(former());
+            std::hint::black_box(candidate());
+        }
+
+        type InnerPositions = Option<(Vec<usize>, Vec<usize>)>;
+        let sample = |plan: &dyn Fn() -> InnerPositions| {
+            let start = std::time::Instant::now();
+            let output = std::hint::black_box(plan()).expect("supported temporal INNER plan");
+            assert_eq!(std::hint::black_box(output.0.len()), input_len.div_ceil(2));
+            drop(output);
+            start.elapsed().as_secs_f64() * 1_000.0
+        };
+        let mut former_a = Vec::with_capacity(15);
+        let mut former_b = Vec::with_capacity(15);
+        let mut candidate_a = Vec::with_capacity(15);
+        let mut candidate_b = Vec::with_capacity(15);
+        for round in 0..15 {
+            if round % 2 == 0 {
+                former_a.push(sample(&former));
+                candidate_a.push(sample(&candidate));
+                candidate_b.push(sample(&candidate));
+                former_b.push(sample(&former));
+            } else {
+                former_b.push(sample(&former));
+                candidate_b.push(sample(&candidate));
+                candidate_a.push(sample(&candidate));
+                former_a.push(sample(&former));
+            }
+        }
+
+        let report = |label: &str, mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            let p50 = samples[samples.len() / 2];
+            let p95_idx = samples
+                .len()
+                .saturating_mul(95)
+                .div_ceil(100)
+                .saturating_sub(1);
+            println!(
+                "{label}: p50={p50:.3} ms p95={:.3} ms max={:.3} ms",
+                samples[p95_idx],
+                samples[samples.len() - 1],
+            );
+        };
+        report("inner_plan_three_pass_former_a", former_a);
+        report("inner_plan_three_pass_former_b", former_b);
+        report("inner_plan_fused_candidate_a", candidate_a);
+        report("inner_plan_fused_candidate_b", candidate_b);
+    }
+
+    #[test]
+    fn merge_datetime_inner_preserves_dtype_order_and_nat_fallback_b2hwb()
+    -> Result<(), JoinError> {
+        let left = DataFrame::from_dict(
+            &["key", "lv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(30),
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(20),
+                        Scalar::Datetime64(10),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                    ],
+                ),
+            ],
+        )?;
+        let right = DataFrame::from_dict(
+            &["key", "rv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(30),
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(40),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(101),
+                        Scalar::Int64(102),
+                        Scalar::Int64(103),
+                    ],
+                ),
+            ],
+        )?;
+        let merged = merge_dataframes_on(&left, &right, &["key"], JoinType::Inner)?;
+        assert_eq!(merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(
+            merged_values(&merged, "key")?,
+            &[
+                Scalar::Datetime64(30),
+                Scalar::Datetime64(10),
+                Scalar::Datetime64(10),
+                Scalar::Datetime64(10),
+                Scalar::Datetime64(10),
+            ]
+        );
+        assert_eq!(
+            merged_values(&merged, "lv")?,
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+            ]
+        );
+        assert_eq!(
+            merged_values(&merged, "rv")?,
+            &[
+                Scalar::Int64(101),
+                Scalar::Int64(100),
+                Scalar::Int64(102),
+                Scalar::Int64(100),
+                Scalar::Int64(102),
+            ]
+        );
+
+        let nat = fp_types::Timestamp::NAT;
+        let nat_left = DataFrame::from_dict(
+            &["key", "lv"],
+            vec![
+                (
+                    "key",
+                    vec![Scalar::Datetime64(nat), Scalar::Datetime64(5)],
+                ),
+                ("lv", vec![Scalar::Int64(0), Scalar::Int64(1)]),
+            ],
+        )?;
+        let nat_right = DataFrame::from_dict(
+            &["key", "rv"],
+            vec![
+                (
+                    "key",
+                    vec![Scalar::Datetime64(nat), Scalar::Datetime64(5)],
+                ),
+                ("rv", vec![Scalar::Int64(10), Scalar::Int64(11)]),
+            ],
+        )?;
+        assert!(
+            super::temporal_i64_inner_positions(
+                nat_left.column("key").expect("left NaT key"),
+                nat_right.column("key").expect("right NaT key")
+            )
+            .is_none(),
+            "NaT must retain the scalar Missing-key fallback"
+        );
+        let nat_merged =
+            merge_dataframes_on(&nat_left, &nat_right, &["key"], JoinType::Inner)?;
+        assert_eq!(nat_merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(nat_merged.index.len(), 2);
+        assert!(merged_values(&nat_merged, "key")?[0].is_missing());
+        assert_eq!(
+            &merged_values(&nat_merged, "key")?[1..],
+            &[Scalar::Datetime64(5)]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn temporal_i64_left_positions_match_scalar_oracle_with_duplicates_lw0qg() {
+        let build_positions_from_scalar_oracle = |left: &Column, right: &Column| {
+            let left_keys = super::collect_single_join_keys(left);
+            let right_keys = super::collect_single_join_keys(right);
+            let mut left_positions = Vec::new();
+            let mut right_positions = Vec::new();
+            for (left_pos, left_key) in left_keys.iter().enumerate() {
+                let mut matched = false;
+                for (right_pos, right_key) in right_keys.iter().enumerate() {
+                    if left_key == right_key {
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(right_pos));
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(None);
+                }
+            }
+            (left_positions, right_positions)
+        };
+
+        let left_ns = [30, 10, 20, 10, 50];
+        let right_ns = [10, 30, 10, 40];
+        for temporal in [DType::Datetime64, DType::Timedelta64] {
+            let scalar = |ns| match temporal {
+                DType::Datetime64 => Scalar::Datetime64(ns),
+                DType::Timedelta64 => Scalar::Timedelta64(ns),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            };
+            let left = Column::from_values(left_ns.into_iter().map(scalar).collect())
+                .expect("left temporal key");
+            let right = Column::from_values(right_ns.into_iter().map(scalar).collect())
+                .expect("right temporal key");
+
+            assert_eq!(
+                super::temporal_i64_left_positions(&left, &right),
+                Some(build_positions_from_scalar_oracle(&left, &right)),
+                "raw-nanosecond LEFT planner must preserve scalar-oracle row order for {temporal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_datetime_left_preserves_dtype_order_and_nat_fallback_lw0qg()
+    -> Result<(), JoinError> {
+        let left = DataFrame::from_dict(
+            &["key", "lv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(30),
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(20),
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(50),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+            ],
+        )?;
+        let right = DataFrame::from_dict(
+            &["key", "rv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(30),
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(40),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(101),
+                        Scalar::Int64(102),
+                        Scalar::Int64(103),
+                    ],
+                ),
+            ],
+        )?;
+        let merged = merge_dataframes_on(&left, &right, &["key"], JoinType::Left)?;
+        assert_eq!(merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(
+            merged_values(&merged, "key")?,
+            &[
+                Scalar::Datetime64(30),
+                Scalar::Datetime64(10),
+                Scalar::Datetime64(10),
+                Scalar::Datetime64(20),
+                Scalar::Datetime64(10),
+                Scalar::Datetime64(10),
+                Scalar::Datetime64(50),
+            ]
+        );
+        assert_eq!(
+            merged_values(&merged, "lv")?,
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ]
+        );
+        let right_values = merged_values(&merged, "rv")?;
+        assert_eq!(right_values.len(), 7);
+        assert_eq!(right_values[0], Scalar::Int64(101));
+        assert_eq!(&right_values[1..3], &[Scalar::Int64(100), Scalar::Int64(102)]);
+        assert!(right_values[3].is_missing());
+        assert_eq!(&right_values[4..6], &[Scalar::Int64(100), Scalar::Int64(102)]);
+        assert!(right_values[6].is_missing());
+
+        let nat = fp_types::Timestamp::NAT;
+        let nat_left = DataFrame::from_dict(
+            &["key", "lv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(nat),
+                        Scalar::Datetime64(5),
+                        Scalar::Datetime64(7),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+            ],
+        )?;
+        let nat_right = DataFrame::from_dict(
+            &["key", "rv"],
+            vec![
+                (
+                    "key",
+                    vec![Scalar::Datetime64(nat), Scalar::Datetime64(5)],
+                ),
+                ("rv", vec![Scalar::Int64(10), Scalar::Int64(11)]),
+            ],
+        )?;
+        assert!(
+            super::temporal_i64_left_positions(
+                nat_left.column("key").expect("left NaT key"),
+                nat_right.column("key").expect("right NaT key")
+            )
+            .is_none(),
+            "NaT must retain the scalar Missing-key fallback"
+        );
+        let nat_merged =
+            merge_dataframes_on(&nat_left, &nat_right, &["key"], JoinType::Left)?;
+        assert_eq!(nat_merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(nat_merged.index.len(), 3);
+        assert!(merged_values(&nat_merged, "key")?[0].is_missing());
+        assert_eq!(
+            &merged_values(&nat_merged, "key")?[1..],
+            &[Scalar::Datetime64(5), Scalar::Datetime64(7)]
+        );
+        let nat_right_values = merged_values(&nat_merged, "rv")?;
+        assert_eq!(&nat_right_values[..2], &[Scalar::Int64(10), Scalar::Int64(11)]);
+        assert!(nat_right_values[2].is_missing());
+
+        Ok(())
+    }
+
+    #[test]
+    fn temporal_i64_right_positions_match_scalar_oracle_and_reject_unsupported_8tf5c() {
+        let scalar_oracle = |left: &Column, right: &Column| {
+            let left_keys = super::collect_single_join_keys(left);
+            let right_keys = super::collect_single_join_keys(right);
+            right_keys
+                .iter()
+                .map(|right_key| left_keys.iter().position(|left_key| left_key == right_key))
+                .collect::<Vec<_>>()
+        };
+
+        let left_ns = [-20, 10, 30, 50];
+        let right_ns = [-30, -20, 20, 30, 60];
+        for temporal in [DType::Datetime64, DType::Timedelta64] {
+            let scalar = |ns| match temporal {
+                DType::Datetime64 => Scalar::Datetime64(ns),
+                DType::Timedelta64 => Scalar::Timedelta64(ns),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            };
+            let left = Column::from_values(left_ns.into_iter().map(scalar).collect())
+                .expect("left temporal key");
+            let right = Column::from_values(right_ns.into_iter().map(scalar).collect())
+                .expect("right temporal key");
+            assert_eq!(
+                super::ordered_unique_temporal_i64_right_match_positions(&left, &right),
+                Some(scalar_oracle(&left, &right)),
+                "raw-nanosecond RIGHT planner must preserve right-major scalar matches for {temporal:?}",
+            );
+        }
+
+        let empty_left = Column::from_datetime64_values(Vec::new());
+        let ordered_right = Column::from_datetime64_values(vec![1, 2, 3]);
+        assert_eq!(
+            super::ordered_unique_temporal_i64_right_match_positions(
+                &empty_left,
+                &ordered_right,
+            ),
+            Some(vec![None; 3]),
+        );
+
+        let nat = fp_types::Timestamp::NAT;
+        let nat_left = Column::from_datetime64_values(vec![nat, 1, 2]);
+        let nat_middle_left = Column::from_datetime64_values(vec![1, nat, 3]);
+        let nat_tail_right = Column::from_datetime64_values(vec![1, 2, nat]);
+        let single_nat = Column::from_datetime64_values(vec![nat]);
+        let duplicate_left = Column::from_datetime64_values(vec![1, 1, 2]);
+        let late_duplicate_left = Column::from_datetime64_values(vec![1, 2, 3, 3]);
+        let unsorted_right = Column::from_datetime64_values(vec![2, 1, 3]);
+        let late_unsorted_right = Column::from_datetime64_values(vec![1, 2, 4, 3]);
+        let mixed_right = Column::from_values(
+            [1, 2, 3]
+                .into_iter()
+                .map(Scalar::Timedelta64)
+                .collect(),
+        )
+        .expect("mixed timedelta key");
+        let mut validity = ValidityMask::all_valid(3);
+        validity.set(1, false);
+        let nullable_left =
+            Column::from_datetime64_values_with_validity(vec![1, 2, 3], validity);
+        for (left, right) in [
+            (&nat_left, &ordered_right),
+            (&nat_middle_left, &ordered_right),
+            (&ordered_right, &nat_tail_right),
+            (&single_nat, &ordered_right),
+            (&duplicate_left, &ordered_right),
+            (&late_duplicate_left, &ordered_right),
+            (&ordered_right, &unsorted_right),
+            (&ordered_right, &late_unsorted_right),
+            (&ordered_right, &mixed_right),
+            (&nullable_left, &ordered_right),
+        ] {
+            assert!(
+                super::ordered_unique_temporal_i64_right_match_positions(left, right).is_none(),
+                "unsupported temporal RIGHT shape must retain the scalar fallback",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn bench_temporal_i64_right_validation_fusion_69e0m() {
+        let n = 400_000_i64;
+        let input_len = usize::try_from(n).expect("positive benchmark length");
+        let left = Column::from_datetime64_values_with_validity(
+            (0..n).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let right = Column::from_datetime64_values_with_validity(
+            (0..n).map(|value| value * 2).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+
+        // Exact pre-69e0m body: separate NaT and strict-order scans followed
+        // by the same right-major two-pointer match.
+        let former = || {
+            if !left.validity().all() || !right.validity().all() {
+                return None;
+            }
+            let left_raw = left.as_datetime64_slice()?;
+            let right_raw = right.as_datetime64_slice()?;
+            let nat = fp_types::Timestamp::NAT;
+            if left_raw.contains(&nat) || right_raw.contains(&nat) {
+                return None;
+            }
+            if left_raw.windows(2).any(|pair| pair[0] >= pair[1])
+                || right_raw.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return None;
+            }
+
+            let mut left_positions = Vec::with_capacity(right_raw.len());
+            let mut left_idx = 0usize;
+            for &right_value in right_raw {
+                while left_idx < left_raw.len() && left_raw[left_idx] < right_value {
+                    left_idx += 1;
+                }
+                left_positions.push(
+                    (left_idx < left_raw.len()
+                        && matches!(
+                            left_raw[left_idx].cmp(&right_value),
+                            std::cmp::Ordering::Equal
+                        ))
+                    .then_some(left_idx),
+                );
+            }
+            Some(left_positions)
+        };
+        let candidate = || {
+            super::ordered_unique_temporal_i64_right_match_positions(&left, &right)
+        };
+
+        let former_output = former().expect("former temporal RIGHT positions");
+        let candidate_output = candidate().expect("fused temporal RIGHT positions");
+        assert_eq!(candidate_output, former_output);
+        assert_eq!(candidate_output.len(), input_len);
+        drop((former_output, candidate_output));
+        for _ in 0..2 {
+            std::hint::black_box(former());
+            std::hint::black_box(candidate());
+        }
+
+        let sample = |plan: &dyn Fn() -> Option<Vec<Option<usize>>>| {
+            let start = std::time::Instant::now();
+            let output = std::hint::black_box(plan()).expect("supported temporal RIGHT plan");
+            assert_eq!(std::hint::black_box(output.len()), input_len);
+            drop(output);
+            start.elapsed().as_secs_f64() * 1_000.0
+        };
+        let mut former_a = Vec::with_capacity(15);
+        let mut former_b = Vec::with_capacity(15);
+        let mut candidate_a = Vec::with_capacity(15);
+        let mut candidate_b = Vec::with_capacity(15);
+        for round in 0..15 {
+            if round % 2 == 0 {
+                former_a.push(sample(&former));
+                candidate_a.push(sample(&candidate));
+                candidate_b.push(sample(&candidate));
+                former_b.push(sample(&former));
+            } else {
+                former_b.push(sample(&former));
+                candidate_b.push(sample(&candidate));
+                candidate_a.push(sample(&candidate));
+                former_a.push(sample(&former));
+            }
+        }
+
+        let report = |label: &str, mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            let p50 = samples[samples.len() / 2];
+            let p95_idx = samples
+                .len()
+                .saturating_mul(95)
+                .div_ceil(100)
+                .saturating_sub(1);
+            println!(
+                "{label}: p50={p50:.3} ms p95={:.3} ms max={:.3} ms",
+                samples[p95_idx],
+                samples[samples.len() - 1],
+            );
+        };
+        report("right_plan_three_pass_former_a", former_a);
+        report("right_plan_three_pass_former_b", former_b);
+        report("right_plan_fused_candidate_a", candidate_a);
+        report("right_plan_fused_candidate_b", candidate_b);
+    }
+
+    #[test]
+    fn merge_datetime_right_preserves_dtype_order_and_nat_fallback_8tf5c()
+    -> Result<(), JoinError> {
+        let left = DataFrame::from_dict(
+            &["key", "lv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(30),
+                        Scalar::Datetime64(50),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+            ],
+        )?;
+        let right = DataFrame::from_dict(
+            &["key", "rv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(0),
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(40),
+                        Scalar::Datetime64(50),
+                        Scalar::Datetime64(60),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(101),
+                        Scalar::Int64(102),
+                        Scalar::Int64(103),
+                        Scalar::Int64(104),
+                    ],
+                ),
+            ],
+        )?;
+        let merged = merge_dataframes_on(&left, &right, &["key"], JoinType::Right)?;
+        assert_eq!(merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(
+            merged_values(&merged, "key")?,
+            &[
+                Scalar::Datetime64(0),
+                Scalar::Datetime64(10),
+                Scalar::Datetime64(40),
+                Scalar::Datetime64(50),
+                Scalar::Datetime64(60),
+            ],
+        );
+        assert_eq!(
+            merged_values(&merged, "rv")?,
+            &[
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(102),
+                Scalar::Int64(103),
+                Scalar::Int64(104),
+            ],
+        );
+        let left_values = merged_values(&merged, "lv")?;
+        assert_eq!(left_values.len(), 5);
+        assert!(left_values[0].is_missing());
+        assert_eq!(left_values[1], Scalar::Int64(0));
+        assert!(left_values[2].is_missing());
+        assert_eq!(left_values[3], Scalar::Int64(2));
+        assert!(left_values[4].is_missing());
+
+        let nat = fp_types::Timestamp::NAT;
+        let nat_left = DataFrame::from_dict(
+            &["key", "lv"],
+            vec![
+                (
+                    "key",
+                    vec![Scalar::Datetime64(nat), Scalar::Datetime64(5)],
+                ),
+                ("lv", vec![Scalar::Int64(0), Scalar::Int64(1)]),
+            ],
+        )?;
+        let nat_right = DataFrame::from_dict(
+            &["key", "rv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(nat),
+                        Scalar::Datetime64(5),
+                        Scalar::Datetime64(7),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![Scalar::Int64(10), Scalar::Int64(11), Scalar::Int64(12)],
+                ),
+            ],
+        )?;
+        assert!(
+            super::ordered_unique_temporal_i64_right_match_positions(
+                nat_left.column("key").expect("left NaT key"),
+                nat_right.column("key").expect("right NaT key"),
+            )
+            .is_none(),
+            "NaT must retain the scalar Missing-key fallback",
+        );
+        let nat_merged =
+            merge_dataframes_on(&nat_left, &nat_right, &["key"], JoinType::Right)?;
+        assert_eq!(nat_merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(nat_merged.index.len(), 3);
+        assert!(merged_values(&nat_merged, "key")?[0].is_missing());
+        assert_eq!(
+            &merged_values(&nat_merged, "key")?[1..],
+            &[Scalar::Datetime64(5), Scalar::Datetime64(7)],
+        );
+        let nat_left_values = merged_values(&nat_merged, "lv")?;
+        assert_eq!(&nat_left_values[..2], &[Scalar::Int64(0), Scalar::Int64(1)]);
+        assert!(nat_left_values[2].is_missing());
+
+        Ok(())
+    }
+
+    #[test]
+    fn temporal_i64_outer_key_coalesce_matches_scalar_and_declines_unsupported_i4gzc() {
+        let left_positions = [None, Some(0), Some(1), None, Some(2), Some(3), None];
+        let right_positions = [Some(0), Some(1), None, Some(2), Some(3), None, Some(4)];
+        let left_ns = vec![-20, 10, 30, 50];
+        let right_ns = vec![-30, -20, 20, 30, 60];
+        let union_ns = [-30, -20, 10, 20, 30, 50, 60];
+        let temporal_column = |dtype, values: Vec<i64>| {
+            let len = values.len();
+            match dtype {
+                DType::Datetime64 => Column::from_datetime64_values_with_validity(
+                    values,
+                    ValidityMask::all_valid(len),
+                ),
+                DType::Timedelta64 => Column::from_timedelta64_values_with_validity(
+                    values,
+                    ValidityMask::all_valid(len),
+                ),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            }
+        };
+
+        for temporal in [DType::Datetime64, DType::Timedelta64] {
+            let left = temporal_column(temporal, left_ns.clone());
+            let right = temporal_column(temporal, right_ns.clone());
+            let candidate = super::coalesce_temporal_i64_key_column(
+                &left,
+                &right,
+                &left_positions,
+                &right_positions,
+            )
+            .expect("supported temporal key coalesce");
+            assert_eq!(candidate.dtype(), temporal);
+            assert!(candidate.validity().all());
+            let candidate_ns = match temporal {
+                DType::Datetime64 => candidate.as_datetime64_slice(),
+                DType::Timedelta64 => candidate.as_timedelta64_slice(),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            };
+            assert_eq!(candidate_ns, Some(union_ns.as_slice()));
+
+            let reference_values = left_positions
+                .iter()
+                .zip(right_positions.iter())
+                .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                    (Some(pos), _) => left.values()[*pos].clone(),
+                    (None, Some(pos)) => right.values()[*pos].clone(),
+                    (None, None) => Scalar::Null(NullKind::Null),
+                })
+                .collect::<Vec<_>>();
+            let reference = Column::from_values(reference_values).expect("scalar reference");
+            assert_eq!(candidate, reference);
+        }
+
+        let datetime_left = temporal_column(DType::Datetime64, left_ns);
+        let datetime_right = temporal_column(DType::Datetime64, right_ns);
+        let timedelta_right = temporal_column(DType::Timedelta64, vec![-30, -20, 20, 30, 60]);
+        let mut nullable_validity = ValidityMask::all_valid(datetime_left.len());
+        nullable_validity.set(1, false);
+        let nullable_left = Column::from_datetime64_values_with_validity(
+            vec![-20, 10, 30, 50],
+            nullable_validity,
+        );
+        let nat_left = Column::from_datetime64_values_with_validity(
+            vec![fp_types::Timestamp::NAT, 10, 30, 50],
+            ValidityMask::all_valid(4),
+        );
+        for (left, right, left_tape, right_tape) in [
+            (
+                &nullable_left,
+                &datetime_right,
+                left_positions.as_slice(),
+                right_positions.as_slice(),
+            ),
+            (
+                &datetime_left,
+                &timedelta_right,
+                left_positions.as_slice(),
+                right_positions.as_slice(),
+            ),
+            (&nat_left, &datetime_right, &[Some(0)], &[Some(0)]),
+            (&datetime_left, &datetime_right, &[Some(0)], &[]),
+            (&datetime_left, &datetime_right, &[Some(99)], &[None]),
+            (&datetime_left, &datetime_right, &[None], &[None]),
+        ] {
+            assert!(
+                super::coalesce_temporal_i64_key_column(
+                    left,
+                    right,
+                    left_tape,
+                    right_tape,
+                )
+                .is_none(),
+                "unsupported temporal key coalesce must retain Scalar fallback",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn bench_temporal_i64_outer_key_coalesce_i4gzc() {
+        let n = 200_000_i64;
+        let input_len = usize::try_from(n).expect("positive benchmark length");
+        let left = Column::from_datetime64_values_with_validity(
+            (0..n).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let right = Column::from_datetime64_values_with_validity(
+            (0..n).map(|value| value * 2).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let (left_positions, right_positions) =
+            super::ordered_unique_temporal_i64_outer_positions(&left, &right)
+                .expect("ordered temporal position tapes");
+        let expected_rows = 300_000usize;
+        assert_eq!(left_positions.len(), expected_rows);
+
+        let former = || {
+            let values = left_positions
+                .iter()
+                .zip(right_positions.iter())
+                .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                    (Some(pos), _) => left.values()[*pos].clone(),
+                    (None, Some(pos)) => right.values()[*pos].clone(),
+                    (None, None) => Scalar::Null(NullKind::Null),
+                })
+                .collect::<Vec<_>>();
+            Column::from_values(values).expect("former Scalar key coalesce")
+        };
+        let candidate = || {
+            super::coalesce_temporal_i64_key_column(
+                &left,
+                &right,
+                &left_positions,
+                &right_positions,
+            )
+            .expect("typed temporal key coalesce")
+        };
+
+        let former_output = former();
+        let candidate_output = candidate();
+        assert_eq!(candidate_output, former_output);
+        drop((former_output, candidate_output));
+        for _ in 0..2 {
+            std::hint::black_box(former());
+            std::hint::black_box(candidate());
+        }
+
+        let sample = |build: &dyn Fn() -> Column| {
+            let start = std::time::Instant::now();
+            let output = std::hint::black_box(build());
+            assert_eq!(std::hint::black_box(output.len()), expected_rows);
+            drop(output);
+            start.elapsed().as_secs_f64() * 1_000.0
+        };
+        let mut former_a = Vec::with_capacity(15);
+        let mut former_b = Vec::with_capacity(15);
+        let mut candidate_a = Vec::with_capacity(15);
+        let mut candidate_b = Vec::with_capacity(15);
+        for round in 0..15 {
+            if round % 2 == 0 {
+                former_a.push(sample(&former));
+                candidate_a.push(sample(&candidate));
+                candidate_b.push(sample(&candidate));
+                former_b.push(sample(&former));
+            } else {
+                former_b.push(sample(&former));
+                candidate_b.push(sample(&candidate));
+                candidate_a.push(sample(&candidate));
+                former_a.push(sample(&former));
+            }
+        }
+
+        let report = |label: &str, mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            let p50 = samples[samples.len() / 2];
+            let p95_idx = samples
+                .len()
+                .saturating_mul(95)
+                .div_ceil(100)
+                .saturating_sub(1);
+            println!(
+                "{label}: p50={p50:.3} ms p95={:.3} ms max={:.3} ms",
+                samples[p95_idx],
+                samples[samples.len() - 1],
+            );
+        };
+        report("outer_key_scalar_former_a", former_a);
+        report("outer_key_scalar_former_b", former_b);
+        report("outer_key_typed_candidate_a", candidate_a);
+        report("outer_key_typed_candidate_b", candidate_b);
+    }
+
+    #[test]
+    fn temporal_i64_outer_positions_match_ordered_union_and_reject_unsupported_rvb6u() {
+        let left_ns = [-20, 10, 30, 50];
+        let right_ns = [-30, -20, 20, 30, 60];
+        let expected = (
+            vec![None, Some(0), Some(1), None, Some(2), Some(3), None],
+            vec![Some(0), Some(1), None, Some(2), Some(3), None, Some(4)],
+        );
+        for temporal in [DType::Datetime64, DType::Timedelta64] {
+            let scalar = |ns| match temporal {
+                DType::Datetime64 => Scalar::Datetime64(ns),
+                DType::Timedelta64 => Scalar::Timedelta64(ns),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            };
+            let left = Column::from_values(left_ns.into_iter().map(scalar).collect())
+                .expect("left temporal key");
+            let right = Column::from_values(right_ns.into_iter().map(scalar).collect())
+                .expect("right temporal key");
+            assert_eq!(
+                super::ordered_unique_temporal_i64_outer_positions(&left, &right),
+                Some(expected.clone()),
+                "raw-nanosecond OUTER planner must preserve key-sorted optional positions for {temporal:?}",
+            );
+        }
+
+        let empty_left = Column::from_datetime64_values(Vec::new());
+        let ordered_right = Column::from_datetime64_values(vec![1, 2, 3]);
+        assert_eq!(
+            super::ordered_unique_temporal_i64_outer_positions(&empty_left, &ordered_right),
+            Some((vec![None; 3], vec![Some(0), Some(1), Some(2)])),
+        );
+
+        let nat = fp_types::Timestamp::NAT;
+        let nat_left = Column::from_datetime64_values(vec![nat, 1, 2]);
+        let duplicate_left = Column::from_datetime64_values(vec![1, 1, 2]);
+        let unsorted_right = Column::from_datetime64_values(vec![2, 1, 3]);
+        let mixed_right = Column::from_values(
+            [1, 2, 3]
+                .into_iter()
+                .map(Scalar::Timedelta64)
+                .collect(),
+        )
+        .expect("mixed timedelta key");
+        let mut validity = ValidityMask::all_valid(3);
+        validity.set(1, false);
+        let nullable_left =
+            Column::from_datetime64_values_with_validity(vec![1, 2, 3], validity);
+        for (left, right) in [
+            (&nat_left, &ordered_right),
+            (&duplicate_left, &ordered_right),
+            (&ordered_right, &unsorted_right),
+            (&ordered_right, &mixed_right),
+            (&nullable_left, &ordered_right),
+        ] {
+            assert!(
+                super::ordered_unique_temporal_i64_outer_positions(left, right).is_none(),
+                "unsupported temporal OUTER shape must retain the scalar fallback",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn bench_temporal_i64_outer_validation_fusion_pizud() {
+        let n = 400_000_i64;
+        let input_len = usize::try_from(n).expect("positive benchmark length");
+        let left = Column::from_datetime64_values_with_validity(
+            (0..n).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let right = Column::from_datetime64_values_with_validity(
+            (0..n).map(|value| value * 2).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let expected_rows = 600_000usize;
+
+        // Exact pre-pizud body: separate NaT and strict-order scans followed by
+        // the same three-way optional-position union.
+        let former = || {
+            if !left.validity().all() || !right.validity().all() {
+                return None;
+            }
+            let left_raw = left.as_datetime64_slice()?;
+            let right_raw = right.as_datetime64_slice()?;
+            let nat = fp_types::Timestamp::NAT;
+            if left_raw.contains(&nat) || right_raw.contains(&nat) {
+                return None;
+            }
+            if left_raw.windows(2).any(|pair| pair[0] >= pair[1])
+                || right_raw.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return None;
+            }
+
+            let capacity = left_raw.len().saturating_add(right_raw.len());
+            let mut left_positions = Vec::<Option<usize>>::with_capacity(capacity);
+            let mut right_positions = Vec::<Option<usize>>::with_capacity(capacity);
+            let (mut left_idx, mut right_idx) = (0usize, 0usize);
+            while left_idx < left_raw.len() && right_idx < right_raw.len() {
+                match left_raw[left_idx].cmp(&right_raw[right_idx]) {
+                    std::cmp::Ordering::Equal => {
+                        left_positions.push(Some(left_idx));
+                        right_positions.push(Some(right_idx));
+                        left_idx += 1;
+                        right_idx += 1;
+                    }
+                    std::cmp::Ordering::Less => {
+                        left_positions.push(Some(left_idx));
+                        right_positions.push(None);
+                        left_idx += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        left_positions.push(None);
+                        right_positions.push(Some(right_idx));
+                        right_idx += 1;
+                    }
+                }
+            }
+            while left_idx < left_raw.len() {
+                left_positions.push(Some(left_idx));
+                right_positions.push(None);
+                left_idx += 1;
+            }
+            while right_idx < right_raw.len() {
+                left_positions.push(None);
+                right_positions.push(Some(right_idx));
+                right_idx += 1;
+            }
+            Some((left_positions, right_positions))
+        };
+        let candidate = || super::ordered_unique_temporal_i64_outer_positions(&left, &right);
+
+        let former_output = former().expect("former temporal union");
+        let candidate_output = candidate().expect("fused temporal union");
+        assert_eq!(candidate_output, former_output);
+        assert_eq!(candidate_output.0.len(), expected_rows);
+        drop((former_output, candidate_output));
+        for _ in 0..2 {
+            std::hint::black_box(former());
+            std::hint::black_box(candidate());
+        }
+
+        let sample = |plan: &dyn Fn() -> Option<super::OptionalJoinPositions>| {
+            let start = std::time::Instant::now();
+            let output = std::hint::black_box(plan()).expect("supported temporal union");
+            assert_eq!(std::hint::black_box(output.0.len()), expected_rows);
+            drop(output);
+            start.elapsed().as_secs_f64() * 1_000.0
+        };
+        let mut former_a = Vec::with_capacity(15);
+        let mut former_b = Vec::with_capacity(15);
+        let mut candidate_a = Vec::with_capacity(15);
+        let mut candidate_b = Vec::with_capacity(15);
+        for round in 0..15 {
+            if round % 2 == 0 {
+                former_a.push(sample(&former));
+                candidate_a.push(sample(&candidate));
+                candidate_b.push(sample(&candidate));
+                former_b.push(sample(&former));
+            } else {
+                former_b.push(sample(&former));
+                candidate_b.push(sample(&candidate));
+                candidate_a.push(sample(&candidate));
+                former_a.push(sample(&former));
+            }
+        }
+
+        let report = |label: &str, mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            let p50 = samples[samples.len() / 2];
+            let p95_idx = samples
+                .len()
+                .saturating_mul(95)
+                .div_ceil(100)
+                .saturating_sub(1);
+            println!(
+                "{label}: p50={p50:.3} ms p95={:.3} ms max={:.3} ms",
+                samples[p95_idx],
+                samples[samples.len() - 1],
+            );
+        };
+        report("outer_plan_three_pass_former_a", former_a);
+        report("outer_plan_three_pass_former_b", former_b);
+        report("outer_plan_fused_candidate_a", candidate_a);
+        report("outer_plan_fused_candidate_b", candidate_b);
+    }
+
+    #[test]
+    fn merge_temporal_outer_matches_generic_dtype_order_and_null_fill_rvb6u()
+    -> Result<(), JoinError> {
+        let left_ns = [-20, 10, 30, 50];
+        let right_ns = [-30, -20, 20, 30, 60];
+        let union_ns = [-30, -20, 10, 20, 30, 50, 60];
+        for temporal in [DType::Datetime64, DType::Timedelta64] {
+            let scalar = |ns| match temporal {
+                DType::Datetime64 => Scalar::Datetime64(ns),
+                DType::Timedelta64 => Scalar::Timedelta64(ns),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            };
+            let left = DataFrame::from_dict(
+                &["key", "lv"],
+                vec![
+                    ("key", left_ns.into_iter().map(scalar).collect()),
+                    (
+                        "lv",
+                        vec![
+                            Scalar::Int64(100),
+                            Scalar::Int64(101),
+                            Scalar::Int64(102),
+                            Scalar::Int64(103),
+                        ],
+                    ),
+                ],
+            )?;
+            let right = DataFrame::from_dict(
+                &["key", "rv"],
+                vec![
+                    ("key", right_ns.into_iter().map(scalar).collect()),
+                    (
+                        "rv",
+                        vec![
+                            Scalar::Int64(200),
+                            Scalar::Int64(201),
+                            Scalar::Int64(202),
+                            Scalar::Int64(203),
+                            Scalar::Int64(204),
+                        ],
+                    ),
+                ],
+            )?;
+            let candidate = merge_dataframes_on(&left, &right, &["key"], JoinType::Outer)?;
+            let generic = merge_dataframes_on_with_options(
+                &left,
+                &right,
+                &["key"],
+                &["key"],
+                JoinType::Outer,
+                MergeExecutionOptions {
+                    sort: true,
+                    ..MergeExecutionOptions::default()
+                },
+            )?;
+            assert_eq!(candidate, generic, "{temporal:?} OUTER output parity");
+            assert_eq!(candidate.columns["key"].dtype(), temporal);
+            assert_eq!(
+                merged_values(&candidate, "key")?,
+                union_ns.into_iter().map(scalar).collect::<Vec<_>>().as_slice(),
+            );
+
+            let left_values = merged_values(&candidate, "lv")?;
+            assert!(left_values[0].is_missing());
+            assert_eq!(left_values[1], Scalar::Float64(100.0));
+            assert_eq!(left_values[2], Scalar::Float64(101.0));
+            assert!(left_values[3].is_missing());
+            assert_eq!(left_values[4], Scalar::Float64(102.0));
+            assert_eq!(left_values[5], Scalar::Float64(103.0));
+            assert!(left_values[6].is_missing());
+
+            let right_values = merged_values(&candidate, "rv")?;
+            assert_eq!(right_values[0], Scalar::Float64(200.0));
+            assert_eq!(right_values[1], Scalar::Float64(201.0));
+            assert!(right_values[2].is_missing());
+            assert_eq!(right_values[3], Scalar::Float64(202.0));
+            assert_eq!(right_values[4], Scalar::Float64(203.0));
+            assert!(right_values[5].is_missing());
+            assert_eq!(right_values[6], Scalar::Float64(204.0));
+        }
+
+        let nat = fp_types::Timestamp::NAT;
+        let nat_left = DataFrame::from_dict(
+            &["key", "lv"],
+            vec![
+                ("key", vec![Scalar::Datetime64(nat), Scalar::Datetime64(5)]),
+                ("lv", vec![Scalar::Int64(0), Scalar::Int64(1)]),
+            ],
+        )?;
+        let nat_right = DataFrame::from_dict(
+            &["key", "rv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(nat),
+                        Scalar::Datetime64(5),
+                        Scalar::Datetime64(7),
+                    ],
+                ),
+                ("rv", vec![Scalar::Int64(10), Scalar::Int64(11), Scalar::Int64(12)]),
+            ],
+        )?;
+        assert!(
+            super::ordered_unique_temporal_i64_outer_positions(
+                nat_left.column("key").expect("left NaT key"),
+                nat_right.column("key").expect("right NaT key"),
+            )
+            .is_none(),
+            "NaT must retain the scalar Missing-key fallback",
+        );
+        let nat_candidate =
+            merge_dataframes_on(&nat_left, &nat_right, &["key"], JoinType::Outer)?;
+        let nat_generic = merge_dataframes_on_with_options(
+            &nat_left,
+            &nat_right,
+            &["key"],
+            &["key"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )?;
+        assert_eq!(nat_candidate, nat_generic);
+        assert_eq!(nat_candidate.columns["key"].dtype(), DType::Datetime64);
+        assert!(
+            merged_values(&nat_candidate, "key")?
+                .iter()
+                .any(Scalar::is_missing),
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_composite_datetime_component_is_honored_not_missing_j0in7()
+    -> Result<(), JoinError> {
+        // A COMPOSITE join key [Utf8, Datetime64] declines the single-key temporal
+        // fast path (`temporal_i64_inner_positions`) and routes through the generic
+        // Scalar/`scalar_to_key_component` path. The Datetime64 (and Timedelta64)
+        // component must map to a Present key by value — NOT collapse to `Missing`.
+        // If it collapsed to Missing, rows sharing the Utf8 component would match
+        // regardless of timestamp (Missing == Missing), over-matching. Left has two
+        // "a" rows at ts=10/20; right has "a" at ts=10/99. Honoring the datetime,
+        // the only equal composite keys are ("a",10) and ("b",10) => exactly 2 rows.
+        // Under the old Missing-collapse this would be 5 rows.
+        let left = DataFrame::from_dict(
+            &["region", "ts", "lv"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "ts",
+                    vec![
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(20),
+                        Scalar::Datetime64(10),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+            ],
+        )?;
+        let right = DataFrame::from_dict(
+            &["region", "ts", "rv"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "ts",
+                    vec![
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(99),
+                        Scalar::Datetime64(10),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![Scalar::Int64(100), Scalar::Int64(101), Scalar::Int64(102)],
+                ),
+            ],
+        )?;
+        let merged =
+            merge_dataframes_on(&left, &right, &["region", "ts"], JoinType::Inner)?;
+        assert_eq!(
+            merged.index.len(),
+            2,
+            "datetime composite component must discriminate, not collapse to Missing"
+        );
+        assert_eq!(merged.columns["ts"].dtype(), DType::Datetime64);
+        // Pair (lv, rv) up per output row, order-independently.
+        let mut pairs: Vec<(i64, i64)> = merged_values(&merged, "lv")?
+            .iter()
+            .zip(merged_values(&merged, "rv")?)
+            .map(|(l, r)| match (l, r) {
+                (Scalar::Int64(a), Scalar::Int64(b)) => (*a, *b),
+                _ => panic!("unexpected non-Int64 value column"),
+            })
+            .collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(0, 100), (2, 102)]);
+
+        // The Timedelta64 sibling arm must behave identically.
+        let ltd = DataFrame::from_dict(
+            &["region", "td", "lv"],
+            vec![
+                (
+                    "region",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned())],
+                ),
+                ("td", vec![Scalar::Timedelta64(10), Scalar::Timedelta64(20)]),
+                ("lv", vec![Scalar::Int64(0), Scalar::Int64(1)]),
+            ],
+        )?;
+        let rtd = DataFrame::from_dict(
+            &["region", "td", "rv"],
+            vec![
+                (
+                    "region",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned())],
+                ),
+                ("td", vec![Scalar::Timedelta64(10), Scalar::Timedelta64(99)]),
+                ("rv", vec![Scalar::Int64(100), Scalar::Int64(101)]),
+            ],
+        )?;
+        let merged_td =
+            merge_dataframes_on(&ltd, &rtd, &["region", "td"], JoinType::Inner)?;
+        assert_eq!(
+            merged_td.index.len(),
+            1,
+            "timedelta composite component must discriminate, not collapse to Missing"
+        );
+        assert_eq!(merged_values(&merged_td, "lv")?, &[Scalar::Int64(0)]);
+        assert_eq!(merged_values(&merged_td, "rv")?, &[Scalar::Int64(100)]);
+
+        Ok(())
     }
 
     fn merged_values_where_indicator(
@@ -7086,6 +14387,114 @@ mod tests {
         assert_eq!(lazy.as_i64_slice(), eager.as_i64_slice());
         assert_eq!(lazy.values(), eager.values());
         assert_eq!(lazy, eager);
+    }
+
+    #[test]
+    fn dense_cycle_left_join_output_matches_dense_left_builder() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(14),
+                        Scalar::Int64(15),
+                        Scalar::Int64(16),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "rv"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let suffixes = ResolvedMergeSuffixes::default();
+        let left_key = left.column("id").unwrap();
+        let right_key = right.column("id").unwrap();
+
+        let fast = build_single_key_dense_cycle_i64_left_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left_key,
+            right_key,
+            &suffixes,
+        )
+        .unwrap()
+        .expect("dense-cycle route");
+        let old = build_single_key_dense_i64_left_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left_key,
+            right_key,
+            &suffixes,
+        )
+        .unwrap()
+        .expect("dense left route");
+
+        assert_eq!(fast.index, old.index);
+        assert_eq!(fast.column_order, old.column_order);
+        assert_eq!(fast.columns, old.columns);
+        assert_eq!(
+            fast.columns.get("v").unwrap().as_i64_slice(),
+            old.columns.get("v").unwrap().as_i64_slice()
+        );
+        assert_eq!(
+            fast.columns.get("rv").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
     }
 
     #[test]
@@ -7580,6 +14989,43 @@ mod tests {
     }
 
     #[test]
+    fn merge_left_ordered_unique_int64_retains_lazy_utf8_payload_plan() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", (0..5_i64).map(Scalar::Int64).collect::<Vec<_>>()),
+                ("v", (10..15_i64).map(Scalar::Int64).collect::<Vec<_>>()),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "tag"],
+            vec![
+                (
+                    "id",
+                    [0_i64, 2, 4, 6].into_iter().map(Scalar::Int64).collect(),
+                ),
+                (
+                    "tag",
+                    ["zero", "two", "four", "six"]
+                        .into_iter()
+                        .map(|value| Scalar::Utf8(value.to_owned()))
+                        .collect(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes(&left, &right, "id", JoinType::Left).unwrap();
+        let tags = merged.columns.get("tag").unwrap().values();
+        assert_eq!(tags[0], Scalar::Utf8("zero".to_owned()));
+        assert!(tags[1].is_missing());
+        assert_eq!(tags[2], Scalar::Utf8("two".to_owned()));
+        assert!(tags[3].is_missing());
+        assert_eq!(tags[4], Scalar::Utf8("four".to_owned()));
+    }
+
+    #[test]
     fn merge_left_dense_int64_duplicates_matches_generic_validated_route() {
         let left = DataFrame::from_dict(
             &["id", "v"],
@@ -7673,6 +15119,106 @@ mod tests {
         assert_eq!(right_values[2], Scalar::Int64(400));
         assert!(right_values[5].is_missing());
         assert!(right_values[6].is_missing());
+    }
+
+    #[test]
+    fn merge_left_dense_cycle_probe_output_matches_materialized_positions_yq96z() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(14),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let left_key = left.columns().get("id").unwrap();
+        let right_key = right.columns().get("id").unwrap();
+        assert!(left_key.int64_dense_cycle_witness().is_some());
+        assert!(right_key.int64_dense_cycle_witness().is_some());
+        let suffixes = resolve_merge_suffixes(None);
+
+        let fused = build_single_key_dense_i64_left_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left_key,
+            right_key,
+            &suffixes,
+        )
+        .unwrap()
+        .expect("dense-cycle left route should accept");
+        let (left_positions, right_positions) =
+            dense_int64_left_positions(left_key, right_key).unwrap();
+        let materialized = build_single_key_dense_left_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        )
+        .unwrap();
+
+        assert_eq!(fused.index, materialized.index);
+        assert_eq!(fused.column_order, materialized.column_order);
+        assert_eq!(fused.columns, materialized.columns);
+        assert_eq!(
+            fused.columns.get("w").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+            ]
+        );
     }
 
     #[test]
@@ -8129,6 +15675,198 @@ mod tests {
     }
 
     #[test]
+    fn merge_left_contiguous_utf8_duplicates_matches_sorted_generic_route() {
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", vec![s("a"), s("a"), s("b"), s("c")]),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                ("id", vec![s("a"), s("a"), s("c")]),
+                (
+                    "w",
+                    vec![Scalar::Int64(100), Scalar::Int64(101), Scalar::Int64(300)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Left).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Left,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[s("a"), s("a"), s("a"), s("a"), s("b"), s("c")]
+        );
+        assert!(fast.columns.get("w").unwrap().values()[4].is_missing());
+    }
+
+    #[test]
+    fn merge_outer_contiguous_utf8_duplicates_matches_sorted_generic_route() {
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", vec![s("a"), s("a"), s("b"), s("d")]),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(20),
+                        Scalar::Int64(40),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                ("id", vec![s("a"), s("c"), s("a")]),
+                (
+                    "w",
+                    vec![Scalar::Int64(100), Scalar::Int64(300), Scalar::Int64(101)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Outer).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[s("a"), s("a"), s("a"), s("a"), s("b"), s("c"), s("d")]
+        );
+        assert!(fast.columns.get("v").unwrap().values()[5].is_missing());
+        assert!(fast.columns.get("w").unwrap().values()[4].is_missing());
+        assert!(fast.columns.get("w").unwrap().values()[6].is_missing());
+    }
+
+    #[test]
+    fn merge_outer_fixed_decimal_utf8_all_matched_fuses_sorted_output_wikcu() {
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let left = DataFrame::from_dict(
+            &["id", "lv"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        s("k00000002"),
+                        s("k00000000"),
+                        s("k00000002"),
+                        s("k00000001"),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(21.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "rv"],
+            vec![
+                ("id", vec![s("k00000000"), s("k00000001"), s("k00000002")]),
+                (
+                    "rv",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(110.0),
+                        Scalar::Float64(120.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Outer).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[
+                s("k00000000"),
+                s("k00000001"),
+                s("k00000002"),
+                s("k00000002")
+            ]
+        );
+        assert_eq!(
+            fast.columns.get("lv").unwrap().values(),
+            &[
+                Scalar::Float64(0.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(21.0),
+            ]
+        );
+    }
+
+    #[test]
     fn merge_right_dense_int64_duplicates_matches_generic_validated_route() {
         let left = DataFrame::from_dict(
             &["id", "v"],
@@ -8223,6 +15961,106 @@ mod tests {
         assert_eq!(right_values[3], Scalar::Int64(201));
         assert_eq!(right_values[4], Scalar::Int64(300));
         assert_eq!(right_values[5], Scalar::Int64(400));
+    }
+
+    #[test]
+    fn merge_right_dense_cycle_probe_output_matches_materialized_positions_yq96z() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(14),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let left_key = left.columns().get("id").unwrap();
+        let right_key = right.columns().get("id").unwrap();
+        assert!(left_key.int64_dense_cycle_witness().is_some());
+        assert!(right_key.int64_dense_cycle_witness().is_some());
+        let suffixes = resolve_merge_suffixes(None);
+
+        let fused = build_single_key_dense_i64_right_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left_key,
+            right_key,
+            &suffixes,
+        )
+        .unwrap()
+        .expect("dense-cycle right route should accept");
+        let (left_positions, right_positions) =
+            dense_int64_right_positions(left_key, right_key).unwrap();
+        let materialized = build_single_key_dense_right_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        )
+        .unwrap();
+
+        assert_eq!(fused.index, materialized.index);
+        assert_eq!(fused.column_order, materialized.column_order);
+        assert_eq!(fused.columns, materialized.columns);
+        assert_eq!(
+            fused.columns.get("v").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+            ]
+        );
     }
 
     #[test]
@@ -8981,6 +16819,138 @@ mod tests {
     }
 
     #[test]
+    fn affine_i64_inner_plan_solves_nontrivial_stride_intersection() {
+        let left = super::PositiveAffineI64Witness {
+            start: -3,
+            step: 4,
+            len: 8,
+        };
+        let right = super::PositiveAffineI64Witness {
+            start: 1,
+            step: 6,
+            len: 6,
+        };
+        assert_eq!(
+            super::affine_i64_inner_position_plan(left, right),
+            Some(super::AffineInnerPositionPlan {
+                left_start: 1,
+                left_step: 3,
+                right_start: 0,
+                right_step: 2,
+                len: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn affine_i64_inner_plan_matches_brute_force_small_domain() {
+        const LENGTHS: [usize; 4] = [2, 3, 7, 11];
+        for left_start in -8i128..=8 {
+            for right_start in -8i128..=8 {
+                for left_step in 1i128..=7 {
+                    for right_step in 1i128..=7 {
+                        for left_len in LENGTHS {
+                            for right_len in LENGTHS {
+                                let left = super::PositiveAffineI64Witness {
+                                    start: left_start,
+                                    step: left_step,
+                                    len: left_len,
+                                };
+                                let right = super::PositiveAffineI64Witness {
+                                    start: right_start,
+                                    step: right_step,
+                                    len: right_len,
+                                };
+                                let plan = super::affine_i64_inner_position_plan(left, right)
+                                    .expect("small affine sequences cannot overflow");
+                                let expected = (0..left_len)
+                                    .flat_map(|left_row| {
+                                        (0..right_len).filter_map(move |right_row| {
+                                            let left_key = left_start
+                                                + left_step * i128::try_from(left_row).unwrap();
+                                            let right_key = right_start
+                                                + right_step * i128::try_from(right_row).unwrap();
+                                            (left_key == right_key).then_some((left_row, right_row))
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                let actual = (0..plan.len)
+                                    .map(|row| {
+                                        (
+                                            plan.left_start + row * plan.left_step,
+                                            plan.right_start + row * plan.right_step,
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                assert_eq!(actual, expected);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affine_i64_inner_merge_matches_left_major_values() {
+        let left_keys = vec![-3, 1, 5, 9, 13, 17, 21, 25];
+        let right_keys = vec![1, 7, 13, 19, 25, 31];
+        let mut left_columns = std::collections::BTreeMap::new();
+        left_columns.insert("id".to_owned(), Column::from_i64_values(left_keys));
+        left_columns.insert(
+            "left_value".to_owned(),
+            Column::from_f64_values((0..8).map(|row| row as f64 + 0.5).collect()),
+        );
+        let left = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 8),
+            left_columns,
+            vec!["id".to_owned(), "left_value".to_owned()],
+        )
+        .unwrap();
+        let mut right_columns = std::collections::BTreeMap::new();
+        right_columns.insert("id".to_owned(), Column::from_i64_values(right_keys));
+        right_columns.insert(
+            "right_value".to_owned(),
+            Column::from_i64_values((100..106).collect()),
+        );
+        let right = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 6),
+            right_columns,
+            vec!["id".to_owned(), "right_value".to_owned()],
+        )
+        .unwrap();
+        let suffixes = resolve_merge_suffixes(None);
+        let merged = super::build_single_key_affine_i64_inner_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left.columns().get("id").unwrap(),
+            right.columns().get("id").unwrap(),
+            &suffixes,
+        )
+        .unwrap()
+        .expect("certified affine typed inputs must use the fast path");
+
+        assert_eq!(
+            merged.columns.get("id").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(13), Scalar::Int64(25)]
+        );
+        assert_eq!(
+            merged.columns.get("left_value").unwrap().values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Float64(4.5),
+                Scalar::Float64(7.5),
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("right_value").unwrap().values(),
+            &[Scalar::Int64(100), Scalar::Int64(102), Scalar::Int64(104)]
+        );
+    }
+
+    #[test]
     fn merge_identical_duplicate_keys_cross_join_values_jdupk() {
         // Identical left/right key columns that contain duplicates must NOT take
         // the identity 1:1 fast path: pandas cross-joins each duplicate, so a=10
@@ -9019,6 +16989,349 @@ mod tests {
                 Scalar::Int64(200),
                 Scalar::Int64(100),
                 Scalar::Int64(200)
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_inner_positions_match_left_major_hash_order_53lat() {
+        let left = contiguous_utf8_column(&["a", "b", "d", "f"]);
+        let right = contiguous_utf8_column(&["b", "c", "f"]);
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+
+        assert_eq!(left_positions, vec![1, 3]);
+        assert_eq!(right_positions, vec![0, 2]);
+
+        let merged = merge_dataframes(
+            &utf8_key_merge_frame(&["a", "b", "d", "f"], "lv", 10),
+            &utf8_key_merge_frame(&["b", "c", "f"], "rv", 20),
+            "id",
+            JoinType::Inner,
+        )
+        .unwrap();
+        assert_eq!(
+            merged.columns.get("lv").unwrap().values(),
+            &[Scalar::Int64(11), Scalar::Int64(13)]
+        );
+        assert_eq!(
+            merged.columns.get("rv").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(22)]
+        );
+    }
+
+    #[test]
+    fn sorted_contiguous_utf8_inner_positions_preserves_duplicate_order_codb() {
+        let left = contiguous_utf8_column(&["a", "a", "b", "d"]);
+        let right = contiguous_utf8_column(&["a", "a", "c", "d"]);
+        let (left_bytes, left_offsets) = left.as_utf8_contiguous().expect("left contiguous");
+        let (right_bytes, right_offsets) = right.as_utf8_contiguous().expect("right contiguous");
+
+        let (left_positions, right_positions) = sorted_contiguous_utf8_inner_positions(
+            left_bytes,
+            left_offsets,
+            right_bytes,
+            right_offsets,
+        )
+        .expect("sorted spans should use two-pointer merge");
+
+        assert_eq!(left_positions, vec![0, 0, 1, 1, 3]);
+        assert_eq!(right_positions, vec![0, 1, 0, 1, 3]);
+    }
+
+    #[test]
+    fn sorted_contiguous_utf8_inner_positions_rejects_unsorted_input_codb() {
+        let left = contiguous_utf8_column(&["b", "a"]);
+        let right = contiguous_utf8_column(&["a", "b"]);
+        let (left_bytes, left_offsets) = left.as_utf8_contiguous().expect("left contiguous");
+        let (right_bytes, right_offsets) = right.as_utf8_contiguous().expect("right contiguous");
+
+        assert!(
+            sorted_contiguous_utf8_inner_positions(
+                left_bytes,
+                left_offsets,
+                right_bytes,
+                right_offsets,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_seek_bound_preserves_late_overlap_lr52z() {
+        let left = contiguous_utf8_column(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+        let right = contiguous_utf8_column(&["h", "i", "j", "k"]);
+        let (left_bytes, left_offsets) =
+            strictly_increasing_utf8_key_spans(&left).expect("sorted left");
+
+        assert_eq!(utf8_span_lower_bound(left_bytes, left_offsets, b"h"), 7);
+
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert_eq!(left_positions, vec![7, 8, 9]);
+        assert_eq!(right_positions, vec![0, 1, 2]);
+
+        let disjoint_left = contiguous_utf8_column(&["a", "b"]);
+        let disjoint_right = contiguous_utf8_column(&["c", "d"]);
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&disjoint_left, &disjoint_right)
+                .expect("ordered disjoint utf8 positions");
+        assert!(left_positions.is_empty());
+        assert!(right_positions.is_empty());
+    }
+
+    #[test]
+    fn ordered_unique_utf8_bulk_fixed_width_window_jbyuc11() {
+        let left = contiguous_utf8_column(&["k000", "k001", "k002", "k003", "k004"]);
+        let right = contiguous_utf8_column(&["k002", "k003", "k004", "k005"]);
+
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert_eq!(left_positions, vec![2, 3, 4]);
+        assert_eq!(right_positions, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn ordered_unique_utf8_bulk_window_returns_range_plan_jbyuc11111() {
+        let left = contiguous_utf8_column(&["k000", "k001", "k002", "k003", "k004"]);
+        let right = contiguous_utf8_column(&["k002", "k003", "k004", "k005"]);
+
+        let plan =
+            ordered_unique_utf8_inner_position_plan(&left, &right).expect("ordered utf8 plan");
+
+        assert_eq!(
+            plan,
+            InnerPositionPlan::ContiguousRanges {
+                left_start: 2,
+                right_start: 0,
+                len: 3
+            }
+        );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_lower_hex_certificate_returns_range_plan_jbyuc111111() {
+        let left =
+            contiguous_utf8_column(&["id_0000000a", "id_0000000b", "id_0000000c", "id_0000000d"]);
+        let right = contiguous_utf8_column(&["id_0000000c", "id_0000000d", "id_0000000e"]);
+        let (_, _, left_cert) = left
+            .as_lower_hex_sequence_utf8_contiguous()
+            .expect("left sequence certificate");
+        let (_, _, right_cert) = right
+            .as_lower_hex_sequence_utf8_contiguous()
+            .expect("right sequence certificate");
+
+        assert_eq!(
+            ordered_utf8_lower_hex_overlap_len(left_cert, right_cert, 2, 4, 0, 3),
+            Some(2)
+        );
+        assert_eq!(
+            lower_hex_overlap_plan_from_certificates(&left, &right),
+            Some(InnerPositionPlan::ContiguousRanges {
+                left_start: 2,
+                right_start: 0,
+                len: 2
+            })
+        );
+        let plan =
+            ordered_unique_utf8_inner_position_plan(&left, &right).expect("ordered utf8 plan");
+        assert_eq!(
+            plan,
+            InnerPositionPlan::ContiguousRanges {
+                left_start: 2,
+                right_start: 0,
+                len: 2
+            }
+        );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_lower_hex_arithmetic_empty_overlap_jbyuc1111111111() {
+        let left = contiguous_utf8_column(&["id_00000001", "id_00000002", "id_00000003"]);
+        let right = contiguous_utf8_column(&["id_00000008", "id_00000009"]);
+
+        assert_eq!(
+            lower_hex_overlap_plan_from_certificates(&left, &right),
+            Some(InnerPositionPlan::Gather {
+                left_positions: Vec::new(),
+                right_positions: Vec::new(),
+            })
+        );
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert!(left_positions.is_empty());
+        assert!(right_positions.is_empty());
+    }
+
+    #[test]
+    fn ordered_unique_utf8_lower_hex_prefix_mismatch_falls_back_jbyuc1111111111() {
+        let left = contiguous_utf8_column(&["aa_00000001", "aa_00000002", "aa_00000003"]);
+        let right = contiguous_utf8_column(&["bb_00000001", "bb_00000002", "bb_00000003"]);
+
+        assert!(
+            lower_hex_overlap_plan_from_certificates(&left, &right).is_none(),
+            "matching lower-hex counters with different prefixes must not use arithmetic overlap"
+        );
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert!(left_positions.is_empty());
+        assert!(right_positions.is_empty());
+    }
+
+    #[test]
+    fn ordered_utf8_contiguous_no_overlap_output_fast_path_jbyuc111111111() -> Result<(), String> {
+        let left = utf8_key_merge_frame(
+            &["id_00000000", "id_00000001", "id_00000002", "id_00000003"],
+            "lv",
+            10,
+        );
+        let right = utf8_key_merge_frame(&["id_00000002", "id_00000003", "id_00000004"], "rv", 100);
+        let plan = ordered_unique_utf8_inner_position_plan(
+            left.columns()
+                .get("id")
+                .ok_or_else(|| "left key column missing".to_owned())?,
+            right
+                .columns()
+                .get("id")
+                .ok_or_else(|| "right key column missing".to_owned())?,
+        )
+        .ok_or_else(|| "ordered utf8 plan unavailable".to_owned())?;
+        let InnerPositionPlan::ContiguousRanges {
+            left_start,
+            right_start,
+            len,
+        } = plan
+        else {
+            return Err("expected contiguous range plan".to_owned());
+        };
+
+        let merged = build_single_key_inner_contiguous_no_overlap_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            PositionSelection::ContiguousRange {
+                start: left_start,
+                len,
+            },
+            PositionSelection::ContiguousRange {
+                start: right_start,
+                len,
+            },
+        )
+        .ok_or_else(|| "no-overlap contiguous output fast path missed".to_owned())?;
+
+        assert_eq!(merged.column_order, ["id", "lv", "rv"]);
+        let id_output = merged
+            .columns
+            .get("id")
+            .ok_or_else(|| "id output missing".to_owned())?;
+        let (prefix, certificate, certificate_len) = id_output
+            .as_lower_hex_sequence_utf8()
+            .ok_or_else(|| "id output lost lower-hex sequence witness".to_owned())?;
+        assert_eq!(prefix, b"id_");
+        assert_eq!(certificate.start(), 2);
+        assert_eq!(certificate.hex_width(), 8);
+        assert_eq!(certificate_len, 2);
+        assert_eq!(
+            id_output.values(),
+            &[
+                Scalar::Utf8("id_00000002".to_owned()),
+                Scalar::Utf8("id_00000003".to_owned())
+            ]
+        );
+        assert_eq!(
+            merged
+                .columns
+                .get("lv")
+                .ok_or_else(|| "lv output missing".to_owned())?
+                .values(),
+            &[Scalar::Int64(12), Scalar::Int64(13)]
+        );
+        assert_eq!(
+            merged
+                .columns
+                .get("rv")
+                .ok_or_else(|| "rv output missing".to_owned())?
+                .values(),
+            &[Scalar::Int64(100), Scalar::Int64(101)]
+        );
+
+        let overlapping_right =
+            utf8_key_merge_frame(&["id_00000002", "id_00000003", "id_00000004"], "lv", 100);
+        assert!(
+            build_single_key_inner_contiguous_no_overlap_output(
+                &left,
+                &overlapping_right,
+                &["id"],
+                &["id"],
+                PositionSelection::ContiguousRange {
+                    start: left_start,
+                    len,
+                },
+                PositionSelection::ContiguousRange {
+                    start: right_start,
+                    len,
+                },
+            )
+            .is_none(),
+            "overlapping non-key columns must keep the suffix/error generic path"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ordered_unique_utf8_uncertified_fixed_width_still_matches_jbyuc111111() {
+        let left = contiguous_utf8_column(&["k00A", "k00B", "k00C", "k00D"]);
+        let right = contiguous_utf8_column(&["k00B", "k00D"]);
+
+        assert!(left.as_lower_hex_sequence_utf8_contiguous().is_none());
+        assert!(right.as_lower_hex_sequence_utf8_contiguous().is_none());
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert_eq!(left_positions, vec![1, 3]);
+        assert_eq!(right_positions, vec![0, 1]);
+    }
+
+    #[test]
+    fn ordered_unique_utf8_fixed_width_gap_falls_back_jbyuc11() {
+        let left = contiguous_utf8_column(&["k000", "k001", "k003", "k004"]);
+        let right = contiguous_utf8_column(&["k001", "k002", "k004"]);
+
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert_eq!(left_positions, vec![1, 3]);
+        assert_eq!(right_positions, vec![0, 2]);
+    }
+
+    #[test]
+    fn ordered_unique_utf8_rejects_unsorted_or_duplicate_keys_53lat() {
+        let unsorted_left = contiguous_utf8_column(&["b", "a", "b"]);
+        let duplicate_right = contiguous_utf8_column(&["b", "b", "a"]);
+        assert!(ordered_unique_utf8_inner_positions(&unsorted_left, &duplicate_right).is_none());
+
+        let left = utf8_key_merge_frame(&["b", "a", "b"], "lv", 10);
+        let right = utf8_key_merge_frame(&["b", "b", "a"], "rv", 20);
+        let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
+
+        assert_eq!(
+            merged.columns.get("lv").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(11),
+                Scalar::Int64(12),
+                Scalar::Int64(12)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("rv").unwrap().values(),
+            &[
+                Scalar::Int64(20),
+                Scalar::Int64(21),
+                Scalar::Int64(22),
+                Scalar::Int64(20),
+                Scalar::Int64(21)
             ]
         );
     }
@@ -9073,9 +17386,9 @@ mod tests {
             // Naive reference: pandas inner merge is left-major, right-minor.
             let mut exp_a = Vec::new();
             let mut exp_b = Vec::new();
-            for (i, &left_key) in lk.iter().enumerate() {
-                for (j, &right_key) in rk.iter().enumerate() {
-                    if left_key == right_key {
+            for (i, &left_value) in lk.iter().enumerate() {
+                for (j, &right_value) in rk.iter().enumerate() {
+                    if left_value == right_value {
                         exp_a.push(Scalar::Int64(i as i64 + 1000));
                         exp_b.push(Scalar::Int64(j as i64 + 2000));
                     }
@@ -9553,6 +17866,90 @@ mod tests {
     }
 
     #[test]
+    fn merge_composite_outer_contiguous_utf8_key_coalesce_matches_scalar_route_blackthrush() {
+        let contiguous_frame =
+            |k1: &[&str], k2: &[&str], value_name: &str, values: &[i64]| -> DataFrame {
+                let index = Index::new(
+                    (0..k1.len())
+                        .map(|row| IndexLabel::Int64(row as i64))
+                        .collect(),
+                );
+                let mut columns = std::collections::BTreeMap::new();
+                columns.insert("k1".to_owned(), contiguous_utf8_column(k1));
+                columns.insert("k2".to_owned(), contiguous_utf8_column(k2));
+                columns.insert(
+                    value_name.to_owned(),
+                    Column::from_i64_values(values.to_vec()),
+                );
+                DataFrame::new_with_column_order(
+                    index,
+                    columns,
+                    vec!["k1".to_owned(), "k2".to_owned(), value_name.to_owned()],
+                )
+                .expect("contiguous frame")
+            };
+        let scalar_frame =
+            |k1: &[&str], k2: &[&str], value_name: &str, values: &[i64]| -> DataFrame {
+                DataFrame::from_dict(
+                    &["k1", "k2", value_name],
+                    vec![
+                        (
+                            "k1",
+                            k1.iter()
+                                .map(|value| Scalar::Utf8((*value).to_owned()))
+                                .collect(),
+                        ),
+                        (
+                            "k2",
+                            k2.iter()
+                                .map(|value| Scalar::Utf8((*value).to_owned()))
+                                .collect(),
+                        ),
+                        (
+                            value_name,
+                            values.iter().copied().map(Scalar::Int64).collect(),
+                        ),
+                    ],
+                )
+                .expect("scalar frame")
+            };
+
+        let left_fast =
+            contiguous_frame(&["b", "a", "c"], &["y", "x", "z"], "left_v", &[20, 10, 30]);
+        let right_fast = contiguous_frame(&["b", "d"], &["y", "w"], "right_v", &[200, 400]);
+        let left_scalar = scalar_frame(&["b", "a", "c"], &["y", "x", "z"], "left_v", &[20, 10, 30]);
+        let right_scalar = scalar_frame(&["b", "d"], &["y", "w"], "right_v", &[200, 400]);
+
+        let fast =
+            merge_dataframes_on(&left_fast, &right_fast, &["k1", "k2"], JoinType::Outer).unwrap();
+        let scalar =
+            merge_dataframes_on(&left_scalar, &right_scalar, &["k1", "k2"], JoinType::Outer)
+                .unwrap();
+
+        for name in ["k1", "k2", "left_v", "right_v"] {
+            assert_eq!(
+                fast.columns.get(name).unwrap().values(),
+                scalar.columns.get(name).unwrap().values(),
+                "column {name}"
+            );
+        }
+        assert!(
+            fast.columns
+                .get("k1")
+                .unwrap()
+                .as_utf8_contiguous()
+                .is_some()
+        );
+        assert!(
+            fast.columns
+                .get("k2")
+                .unwrap()
+                .as_utf8_contiguous()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn merge_composite_inner_matches_missing_key_components() {
         let left = DataFrame::from_dict(
             &["k1", "k2", "left_v"],
@@ -9989,6 +18386,56 @@ mod tests {
     }
 
     #[test]
+    fn merge_cross_validate_mode_contract_ohb5f() {
+        let left = DataFrame::from_dict(
+            &["l"],
+            vec![("l", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["r"],
+            vec![("r", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        )
+        .expect("right");
+
+        let many_to_many = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["missing_left_key"],
+            &["missing_right_key"],
+            JoinType::Cross,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("cross merge validate=many_to_many");
+        assert_eq!(many_to_many.index.len(), 4);
+
+        for validate_mode in [
+            MergeValidateMode::OneToOne,
+            MergeValidateMode::OneToMany,
+            MergeValidateMode::ManyToOne,
+        ] {
+            let err = merge_dataframes_on_with_options(
+                &left,
+                &right,
+                &["missing_left_key"],
+                &["missing_right_key"],
+                JoinType::Cross,
+                MergeExecutionOptions {
+                    validate_mode: Some(validate_mode),
+                    ..MergeExecutionOptions::default()
+                },
+            )
+            .expect_err("enforcing validate modes are not meaningful for cross joins");
+            let message = format!("{err}");
+            assert!(message.contains(validate_mode.as_str()));
+            assert!(message.contains("not supported for cross join"));
+        }
+    }
+
+    #[test]
     fn merge_validate_one_to_one_rejects_duplicate_left_keys() {
         let left = DataFrame::from_dict(
             &["id", "left_v"],
@@ -10063,6 +18510,40 @@ mod tests {
     }
 
     #[test]
+    fn merge_validate_one_to_many_rejects_duplicate_left_keys_9hsb3() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("left_v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right frame");
+
+        let err = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect_err("one_to_many must reject duplicate left keys");
+        assert!(format!("{err}").contains("left keys are not unique"));
+    }
+
+    #[test]
     fn merge_validate_many_to_one_rejects_duplicate_right_keys() {
         let left = DataFrame::from_dict(
             &["id", "left_v"],
@@ -10094,6 +18575,46 @@ mod tests {
         )
         .expect_err("many_to_one must reject duplicate right keys");
         assert!(format!("{err}").contains("right keys are not unique"));
+    }
+
+    #[test]
+    fn merge_validate_many_to_one_allows_duplicate_left_keys_9hsb3() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(10), Scalar::Int64(11), Scalar::Int64(20)],
+                ),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right frame");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("many_to_one should allow duplicate left keys");
+        assert_eq!(merged.columns.get("id").expect("id").values().len(), 3);
     }
 
     #[test]
@@ -10217,6 +18738,161 @@ mod tests {
     }
 
     // ── merge_asof tests ──
+
+    fn compute_asof_matches_datetime64_former_nsslz(
+        left: super::Datetime64AsofKey<'_>,
+        right: super::Datetime64AsofKey<'_>,
+        direction: super::AsofDirection,
+        allow_exact_matches: bool,
+        tolerance: Option<f64>,
+    ) -> Vec<Option<usize>> {
+        let mut right_valid_values = Vec::new();
+        let mut right_valid_positions = Vec::new();
+        for i in 0..right.data.len() {
+            if right.is_valid(i) {
+                right_valid_values.push(right.data[i]);
+                right_valid_positions.push(i);
+            }
+        }
+        super::compute_asof_matches_datetime64_prepared(
+            left,
+            &right_valid_values,
+            Some(&right_valid_positions),
+            direction,
+            allow_exact_matches,
+            tolerance,
+        )
+    }
+
+    #[test]
+    fn merge_asof_datetime64_borrowed_dense_right_matches_former_nsslz() {
+        let dense_left = Column::from_datetime64_values_with_validity(
+            vec![-15, -10, -5, 0, 5, 30, 35],
+            ValidityMask::all_valid(7),
+        );
+        let dense_right = Column::from_datetime64_values_with_validity(
+            vec![-10, 0, 10, 20, 30],
+            ValidityMask::all_valid(5),
+        );
+
+        let nat_right = Column::from_datetime64_values_with_validity(
+            vec![fp_types::Timestamp::NAT, -10, 0, 20, 30],
+            ValidityMask::all_valid(5),
+        );
+        let nat_left = Column::from_datetime64_values_with_validity(
+            vec![fp_types::Timestamp::NAT, -10, -5, 0, 5, 30, 35],
+            ValidityMask::all_valid(7),
+        );
+
+        for (left, right) in [
+            (&dense_left, &dense_right),
+            (&dense_left, &nat_right),
+            (&nat_left, &dense_right),
+        ] {
+            let left_key = super::datetime64_key_parts(left).expect("Datetime64 left key");
+            let right_key = super::datetime64_key_parts(right).expect("Datetime64 right key");
+            for direction in [
+                super::AsofDirection::Backward,
+                super::AsofDirection::Forward,
+                super::AsofDirection::Nearest,
+            ] {
+                for allow_exact_matches in [false, true] {
+                    for tolerance in [None, Some(7.0)] {
+                        assert_eq!(
+                            super::compute_asof_matches_datetime64(
+                                left_key,
+                                right_key,
+                                direction,
+                                allow_exact_matches,
+                                tolerance,
+                            ),
+                            compute_asof_matches_datetime64_former_nsslz(
+                                left_key,
+                                right_key,
+                                direction,
+                                allow_exact_matches,
+                                tolerance,
+                            ),
+                            "direction={direction:?} exact={allow_exact_matches} tolerance={tolerance:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B only"]
+    fn datetime64_asof_borrowed_dense_right_ab_nsslz() {
+        use std::{hint::black_box, time::Instant};
+
+        const ITEMS: usize = 131_072;
+        const SAMPLES: usize = 10;
+
+        fn elapsed(run: impl FnOnce() -> Vec<Option<usize>>) -> u128 {
+            let started = Instant::now();
+            let output = black_box(run());
+            black_box(output.len());
+            let elapsed = started.elapsed().as_nanos();
+            drop(output);
+            elapsed
+        }
+
+        let left = Column::from_datetime64_values_with_validity(
+            (0..ITEMS).map(|i| i as i64 * 4 + 1).collect(),
+            ValidityMask::all_valid(ITEMS),
+        );
+        let right = Column::from_datetime64_values_with_validity(
+            (0..ITEMS).map(|i| i as i64 * 4).collect(),
+            ValidityMask::all_valid(ITEMS),
+        );
+        let left_key = super::datetime64_key_parts(&left).expect("Datetime64 left key");
+        let right_key = super::datetime64_key_parts(&right).expect("Datetime64 right key");
+        let former = || {
+            compute_asof_matches_datetime64_former_nsslz(
+                left_key,
+                right_key,
+                super::AsofDirection::Backward,
+                true,
+                None,
+            )
+        };
+        let candidate = || {
+            super::compute_asof_matches_datetime64(
+                left_key,
+                right_key,
+                super::AsofDirection::Backward,
+                true,
+                None,
+            )
+        };
+
+        assert_eq!(candidate(), former());
+        black_box(former());
+        black_box(candidate());
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_ns.push(elapsed(former));
+                candidate_ns.push(elapsed(candidate));
+            } else {
+                candidate_ns.push(elapsed(candidate));
+                former_ns.push(elapsed(former));
+            }
+        }
+        former_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let candidate_p50 = candidate_ns[SAMPLES / 2];
+        println!(
+            "datetime64_asof_borrowed_dense_right_ab items={ITEMS} samples={SAMPLES} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup={:.6}x",
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        println!("former_samples_ns={former_ns:?}");
+        println!("candidate_samples_ns={candidate_ns:?}");
+    }
 
     #[test]
     fn merge_asof_backward() {
@@ -10434,6 +19110,45 @@ mod tests {
             result.columns.get("quote").unwrap().values()[0],
             Scalar::Float64(20.0)
         );
+    }
+
+    #[test]
+    fn merge_asof_datetime64_wide_ns_range_uses_i64_path() {
+        use super::AsofDirection;
+
+        let day_ns = 86_400_000_000_000i64;
+        let base = 1_600_000_000_000_000_000i64;
+        let dt = |days: i64| Scalar::Datetime64(base + days * day_ns);
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![dt(0), dt(200), dt(400)]),
+                (
+                    "val",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![dt(-1), dt(199), dt(401)]),
+                (
+                    "quote",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        let quote_col = result.columns.get("quote").unwrap();
+        assert_eq!(quote_col.values()[0], Scalar::Int64(10));
+        assert_eq!(quote_col.values()[1], Scalar::Int64(20));
+        assert_eq!(quote_col.values()[2], Scalar::Int64(20));
     }
 
     #[test]

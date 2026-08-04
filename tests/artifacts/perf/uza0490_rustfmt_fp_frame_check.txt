@@ -1,0 +1,733 @@
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:15135:
+             } else {
+                 (1_u64 << (offset + 1)) - 1
+             };
+-            let rank_or_lower =
+-                full_lower_blocks + u64::from((word & low_mask).count_ones());
++            let rank_or_lower = full_lower_blocks + u64::from((word & low_mask).count_ones());
+             inversions += seen - rank_or_lower;
+             seen_words[block] = word | bit;
+
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:25175:
+     let chars: Vec<char> = s.chars().collect();
+     let len = chars.len() as i64;
+     let resolve = |i: i64| -> usize {
+-        if i < 0 { (len + i).max(0) as usize } else { i.min(len) as usize }
++        if i < 0 {
++            (len + i).max(0) as usize
++        } else {
++            i.min(len) as usize
++        }
+     };
+     let lo = resolve(start);
+     let hi = match end {
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:25186:
+         return -1;
+     }
+     let slice: String = chars[lo..hi].iter().collect();
+-    let found = if reverse { slice.rfind(sub) } else { slice.find(sub) };
++    let found = if reverse {
++        slice.rfind(sub)
++    } else {
++        slice.find(sub)
++    };
+     match found {
+         Some(byte_pos) => lo as i64 + slice[..byte_pos].chars().count() as i64,
+         None => -1,
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:28398:
+         fn p(y: i64) -> i64 {
+             (y + y.div_euclid(4) - y.div_euclid(100) + y.div_euclid(400)).rem_euclid(7)
+         }
+-        if p(year) == 4 || p(year - 1) == 3 { 53 } else { 52 }
++        if p(year) == 4 || p(year - 1) == 3 {
++            53
++        } else {
++            52
++        }
+     }
+
+     /// ISO 8601 `(year, week, weekday)` for a civil date, weekday 1=Mon..7=Sun.
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:28408:
+     /// 2020-12-31 -> (2020, 53, 4), matching pandas `isocalendar()`.
+     fn iso_year_week_day(y: i64, m: i64, d: i64) -> (i64, i64, i64) {
+         let is_leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+-        let days_in_month: [i64; 12] =
+-            [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
++        let days_in_month: [i64; 12] = [
++            31,
++            if is_leap { 29 } else { 28 },
++            31,
++            30,
++            31,
++            30,
++            31,
++            31,
++            30,
++            31,
++            30,
++            31,
++        ];
+         let doy: i64 = days_in_month[..(m - 1) as usize].iter().sum::<i64>() + d;
+         // Day of week (Monday=1..Sunday=7 for ISO) via a Sakamoto-style table.
+         let t: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:28416:
+         let y_adj = if m < 3 { y - 1 } else { y };
+-        let dow_sun0 = (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400 + t[(m - 1) as usize] + d) % 7;
++        let dow_sun0 =
++            (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400 + t[(m - 1) as usize] + d) % 7;
+         let iso_dow = if dow_sun0 == 0 { 7 } else { dow_sun0 };
+         // ISO week: the week containing Jan 4 is always week 1.
+         let week = (doy - iso_dow + 10) / 7;
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:28572:
+     /// Matches `pd.Series.dt.is_quarter_start`.
+     pub fn is_quarter_start(&self) -> Result<Series, FrameError> {
+         if self.is_typed_datetime() {
+-            return self.extract_component_typed_bool(|ts| ts.is_quarter_start(), self.series.name());
++            return self
++                .extract_component_typed_bool(|ts| ts.is_quarter_start(), self.series.name());
+         }
+         self.extract_component(
+             |s| {
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:30828:
+
+     // Text month names (English, matching pandas' default): January 15, 2024 /
+     // Jan 15, 2024 / 15-Jan-2024 / 15 January 2024 / 15 Jan 2024.
+-    for fmt in [
+-        "%B %d, %Y",
+-        "%b %d, %Y",
+-        "%d-%b-%Y",
+-        "%d %B %Y",
+-        "%d %b %Y",
+-    ] {
++    for fmt in ["%B %d, %Y", "%b %d, %Y", "%d-%b-%Y", "%d %B %Y", "%d %b %Y"] {
+         if let Ok(d) = NaiveDate::parse_from_str(trimmed, fmt) {
+             return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
+         }
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:30844:
+     // Guarded to the exact YYYY-MM shape so it cannot catch times like "10:30".
+     if trimmed.len() == 7
+         && trimmed.as_bytes()[4] == b'-'
+-        && trimmed.bytes().enumerate().all(|(i, b)| if i == 4 { b == b'-' } else { b.is_ascii_digit() })
++        && trimmed.bytes().enumerate().all(|(i, b)| {
++            if i == 4 {
++                b == b'-'
++            } else {
++                b.is_ascii_digit()
++            }
++        })
+         && let Ok(d) = NaiveDate::parse_from_str(&format!("{trimmed}-01"), "%Y-%m-%d")
+     {
+         return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:31299:
+     let floats: Vec<Option<f64>> = series
+         .values()
+         .iter()
+-        .map(|v| if v.is_missing() { None } else { v.to_f64().ok() })
++        .map(|v| {
++            if v.is_missing() {
++                None
++            } else {
++                v.to_f64().ok()
++            }
++        })
+         .collect();
+
+     let valid: Vec<f64> = floats.iter().filter_map(|v| *v).collect();
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:31397:
+     let floats: Vec<Option<f64>> = series
+         .values()
+         .iter()
+-        .map(|v| if v.is_missing() { None } else { v.to_f64().ok() })
++        .map(|v| {
++            if v.is_missing() {
++                None
++            } else {
++                v.to_f64().ok()
++            }
++        })
+         .collect();
+
+     let mut valid: Vec<f64> = floats.iter().filter_map(|v| *v).collect();
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:37501:
+                 Scalar::Float64(Self::quantile_select(&mut nums, q))
+             })
+         })?;
+-        let labels: Vec<IndexLabel> =
+-            allowed.iter().map(|name| IndexLabel::Utf8(name.clone())).collect();
++        let labels: Vec<IndexLabel> = allowed
++            .iter()
++            .map(|name| IndexLabel::Utf8(name.clone()))
++            .collect();
+         Series::from_values(format!("{q}"), labels, values)
+     }
+
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:38576:
+                 for _ in 0..worker_count {
+                     let next = &next;
+                     let rank_one = &rank_one;
+-                    handles.push(scope.spawn(move || -> Result<Vec<(String, Column)>, FrameError> {
+-                        let mut out = Vec::new();
+-                        loop {
+-                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+-                            if i >= self.column_order.len() {
+-                                break;
++                    handles.push(scope.spawn(
++                        move || -> Result<Vec<(String, Column)>, FrameError> {
++                            let mut out = Vec::new();
++                            loop {
++                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                                if i >= self.column_order.len() {
++                                    break;
++                                }
++                                out.push(rank_one(&self.column_order[i])?);
+                             }
+-                            out.push(rank_one(&self.column_order[i])?);
+-                        }
+-                        Ok(out)
+-                    }));
++                            Ok(out)
++                        },
++                    ));
+                 }
+                 let mut ranked_cols = BTreeMap::new();
+                 for handle in handles {
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:38593:
+-                    let worker_out = handle
+-                        .join()
+-                        .map_err(|_| {
+-                            FrameError::CompatibilityRejected("rank worker thread panicked".into())
+-                        })??;
++                    let worker_out = handle.join().map_err(|_| {
++                        FrameError::CompatibilityRejected("rank worker thread panicked".into())
++                    })??;
+                     ranked_cols.extend(worker_out);
+                 }
+                 Ok(ranked_cols)
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:44074:
+         // count is independent, so spread the columns across par_map_columns
+         // scope workers. Bit-identical — identical per-column typed/hashed arms,
+         // reassembled in column_order.
+-        let values: Vec<Scalar> = self
+-            .par_map_columns(&self.column_order, |n| {
+-                let col = &self.columns[n];
+-                // Typed Float64 fast path (br-frankenpandas-zl16n): dedup the
+-                // present values straight from the f64 + validity slices into an
+-                // Fx-hashed set of normalized bits, skipping the col.values()
+-                // Vec<Scalar> materialization and the ScalarKey SipHash map.
+-                // Bit-identical to scalar_key_skip_missing's Float64 arm: a present
+-                // slot is validity-set AND datum-not-NaN (Float64(NaN)/Null are
+-                // missing), keyed by FloatBits of the -0.0->+0.0 normalized datum;
+-                // every other slot is a missing value (one shared bucket, counted
+-                // iff !dropna).
+-                if let Some((data, validity)) = col.as_f64_slice_with_validity() {
+-                    let mut seen: FxHashSet<u64> = FxHashSet::default();
+-                    let mut missing_seen = false;
+-                    for (i, &v) in data.iter().enumerate() {
+-                        if validity.get(i) && !v.is_nan() {
+-                            let normalized = if v == 0.0 { 0.0 } else { v };
+-                            seen.insert(normalized.to_bits());
+-                        } else if !dropna {
+-                            missing_seen = true;
+-                        }
++        let values: Vec<Scalar> = self.par_map_columns(&self.column_order, |n| {
++            let col = &self.columns[n];
++            // Typed Float64 fast path (br-frankenpandas-zl16n): dedup the
++            // present values straight from the f64 + validity slices into an
++            // Fx-hashed set of normalized bits, skipping the col.values()
++            // Vec<Scalar> materialization and the ScalarKey SipHash map.
++            // Bit-identical to scalar_key_skip_missing's Float64 arm: a present
++            // slot is validity-set AND datum-not-NaN (Float64(NaN)/Null are
++            // missing), keyed by FloatBits of the -0.0->+0.0 normalized datum;
++            // every other slot is a missing value (one shared bucket, counted
++            // iff !dropna).
++            if let Some((data, validity)) = col.as_f64_slice_with_validity() {
++                let mut seen: FxHashSet<u64> = FxHashSet::default();
++                let mut missing_seen = false;
++                for (i, &v) in data.iter().enumerate() {
++                    if validity.get(i) && !v.is_nan() {
++                        let normalized = if v == 0.0 { 0.0 } else { v };
++                        seen.insert(normalized.to_bits());
++                    } else if !dropna {
++                        missing_seen = true;
+                     }
+-                    return Ok(Scalar::Int64((seen.len() + usize::from(missing_seen)) as i64));
+                 }
+-                // Hash-free direct-address fast path (br-frankenpandas-zf96l):
+-                // an all-valid bounded-range Int64 column counts distinct via a
+-                // dense seen-bit table (same helper Series::nunique uses), skipping
+-                // the col.values() materialization + ScalarKey SipHash. All-valid
+-                // (as_i64_slice) => no missing, so dropna is moot and the distinct
+-                // count is bit-identical to the HashMap distinct count.
+-                if let Some(data) = col.as_i64_slice()
+-                    && let Some((min, range)) = i64_dense_histogram_range(data)
+-                {
+-                    let mut seen_slot = vec![false; range];
+-                    let mut distinct = 0usize;
+-                    for &v in data {
+-                        let slot = (v as i128 - min as i128) as usize;
+-                        if !seen_slot[slot] {
+-                            seen_slot[slot] = true;
+-                            distinct += 1;
+-                        }
++                return Ok(Scalar::Int64(
++                    (seen.len() + usize::from(missing_seen)) as i64,
++                ));
++            }
++            // Hash-free direct-address fast path (br-frankenpandas-zf96l):
++            // an all-valid bounded-range Int64 column counts distinct via a
++            // dense seen-bit table (same helper Series::nunique uses), skipping
++            // the col.values() materialization + ScalarKey SipHash. All-valid
++            // (as_i64_slice) => no missing, so dropna is moot and the distinct
++            // count is bit-identical to the HashMap distinct count.
++            if let Some(data) = col.as_i64_slice()
++                && let Some((min, range)) = i64_dense_histogram_range(data)
++            {
++                let mut seen_slot = vec![false; range];
++                let mut distinct = 0usize;
++                for &v in data {
++                    let slot = (v as i128 - min as i128) as usize;
++                    if !seen_slot[slot] {
++                        seen_slot[slot] = true;
++                        distinct += 1;
+                     }
+-                    return Ok(Scalar::Int64(distinct as i64));
+                 }
+-                let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
+-                let mut missing_seen = false;
+-                for v in col.values() {
+-                    if v.is_missing() {
+-                        if dropna {
+-                            continue;
+-                        }
+-                        missing_seen = true;
++                return Ok(Scalar::Int64(distinct as i64));
++            }
++            let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
++            let mut missing_seen = false;
++            for v in col.values() {
++                if v.is_missing() {
++                    if dropna {
+                         continue;
+                     }
+-                    if let Some(key) = scalar_key_skip_missing(v) {
+-                        seen.insert(key, ());
+-                    }
++                    missing_seen = true;
++                    continue;
+                 }
+-                Ok(Scalar::Int64((seen.len() + usize::from(missing_seen)) as i64))
+-            })?;
++                if let Some(key) = scalar_key_skip_missing(v) {
++                    seen.insert(key, ());
++                }
++            }
++            Ok(Scalar::Int64(
++                (seen.len() + usize::from(missing_seen)) as i64,
++            ))
++        })?;
+         Series::from_values("nunique".to_string(), labels, values)
+     }
+
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:44573:
+                     let next = &next;
+                     let mode_one = &mode_one;
+                     let selected = &selected_columns;
+-                    handles.push(
+-                        scope.spawn(move || -> Result<Vec<(usize, String, Series)>, FrameError> {
++                    handles.push(scope.spawn(
++                        move || -> Result<Vec<(usize, String, Series)>, FrameError> {
+                             let mut out = Vec::new();
+                             loop {
+                                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:44585:
+                                 out.push((i, name, modes));
+                             }
+                             Ok(out)
+-                        }),
+-                    );
++                        },
++                    ));
+                 }
+                 let mut slots: Vec<Option<(String, Series)>> = (0..ncols).map(|_| None).collect();
+                 for handle in handles {
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:44748:
+         const PAR_MIN_VALUES: usize = 16_384;
+
+         let ncols = names.len();
+-        let worker_count = if ncols >= PAR_MIN_COLS
+-            && ncols.saturating_mul(self.len()) >= PAR_MIN_VALUES
+-        {
+-            std::thread::available_parallelism()
+-                .map_or(1, std::num::NonZeroUsize::get)
+-                .min(ncols)
+-        } else {
+-            1
+-        };
++        let worker_count =
++            if ncols >= PAR_MIN_COLS && ncols.saturating_mul(self.len()) >= PAR_MIN_VALUES {
++                std::thread::available_parallelism()
++                    .map_or(1, std::num::NonZeroUsize::get)
++                    .min(ncols)
++            } else {
++                1
++            };
+
+         if worker_count < 2 {
+             return names.iter().map(|name| f(name)).collect();
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:44839:
+                 }
+             })
+         })?;
+-        let labels: Vec<IndexLabel> =
+-            allowed.iter().map(|name| IndexLabel::Utf8(name.clone())).collect();
++        let labels: Vec<IndexLabel> = allowed
++            .iter()
++            .map(|name| IndexLabel::Utf8(name.clone()))
++            .collect();
+         Series::from_values(func.to_string(), labels, values)
+     }
+
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:44879:
+                 }
+             })
+         })?;
+-        let labels: Vec<IndexLabel> =
+-            allowed.iter().map(|name| IndexLabel::Utf8(name.clone())).collect();
++        let labels: Vec<IndexLabel> = allowed
++            .iter()
++            .map(|name| IndexLabel::Utf8(name.clone()))
++            .collect();
+         Series::from_values(func.to_string(), labels, values)
+     }
+
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:45033:
+                 .iter()
+                 .filter_map(|&col_name| {
+                     let v = &self.columns[col_name].values()[row_idx];
+-                    if v.is_missing() { None } else { v.to_f64().ok() }
++                    if v.is_missing() {
++                        None
++                    } else {
++                        v.to_f64().ok()
++                    }
+                 })
+                 .collect();
+             if row_vals.is_empty() {
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:46166:
+     /// mapping column name -> decimals. Columns absent from the map are left
+     /// UNCHANGED (pandas only rounds the listed columns); a listed non-numeric
+     /// column is also left unchanged (rounding is a no-op on object dtype).
+-    pub fn round_columns(
+-        &self,
+-        decimals: &BTreeMap<String, i32>,
+-    ) -> Result<Self, FrameError> {
++    pub fn round_columns(&self, decimals: &BTreeMap<String, i32>) -> Result<Self, FrameError> {
+         let mut result_cols = BTreeMap::new();
+         for name in &self.column_order {
+             let col = &self.columns[name];
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:47201:
+             if computed.iter().all(Option::is_some) {
+                 let mut result_cols = BTreeMap::new();
+                 for (name, column) in self.column_order.iter().zip(computed) {
+-                    result_cols
+-                        .insert(name.clone(), column.expect("all columns checked is_some"));
++                    result_cols.insert(name.clone(), column.expect("all columns checked is_some"));
+                 }
+                 return Ok(Self {
+                     columns: result_cols,
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:55243:
+         CsvQuoting, DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions,
+         DataFrameDictAxisLabels, DropNaHow, DuplicateKeep, FrameError, IndexLabel,
+         SORTED_UNIQUE_UNION_FINGERPRINT_CACHE, SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX, Series,
+-        SortedUniqueUnionFingerprintKey, TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy,
+-        align_union, align_union_duplicate_aware, align_union_sorted_unique, cut,
+-        datetime64_label_from_naive, index_to_frame, index_to_series, int64_unit_range_alignment,
+-        parse_datetime64_nanos, parse_naive_datetime_value, qcut,
+-        record_alignment_semantic_witness, semantic_index_identity,
+-        semantic_int64_unit_range_labels_fingerprint, semantic_integer_index_labels_fingerprint,
+-        semantic_sorted_unique_union_output_fingerprint, to_numeric, to_numeric_with_options,
+-        typed_dense_values_already_sorted,
++        SortedUniqueUnionFingerprintKey, ToNumericErrors, ToNumericOptions, TzAmbiguousPolicy,
++        TzLocalizeOptions, TzNonexistentPolicy, align_union, align_union_duplicate_aware,
++        align_union_sorted_unique, cut, datetime64_label_from_naive, index_to_frame,
++        index_to_series, int64_unit_range_alignment, parse_datetime64_nanos,
++        parse_naive_datetime_value, qcut, record_alignment_semantic_witness,
++        semantic_index_identity, semantic_int64_unit_range_labels_fingerprint,
++        semantic_integer_index_labels_fingerprint, semantic_sorted_unique_union_output_fingerprint,
++        to_numeric, to_numeric_with_options, typed_dense_values_already_sorted,
+     };
+-    use super::{ToNumericErrors, ToNumericOptions};
+
+     fn assert_text_golden(golden_name: &str, actual: &str) {
+         let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:75364:
+         assert_eq!(norm.values()[1], Scalar::Datetime64(midnight_b));
+         // floor("h") on ts_b -> 2021-02-10 01:00:00.
+         let floor_h = s.dt().floor("h").unwrap();
+-        assert_eq!(floor_h.values()[1], Scalar::Datetime64(midnight_b + 3_600 * NS));
++        assert_eq!(
++            floor_h.values()[1],
++            Scalar::Datetime64(midnight_b + 3_600 * NS)
++        );
+         // round("D") on ts_b (01:01:01 < noon) rounds down to midnight.
+         let round_d = s.dt().round("D").unwrap();
+         assert_eq!(round_d.values()[1], Scalar::Datetime64(midnight_b));
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:77950:
+         decimals.insert("a".to_string(), 1);
+         decimals.insert("b".to_string(), 2);
+         let result = df.round_columns(&decimals).unwrap();
+-        assert_eq!(result.column("a").unwrap().values()[0], Scalar::Float64(1.2));
+-        assert_eq!(result.column("b").unwrap().values()[0], Scalar::Float64(5.68));
++        assert_eq!(
++            result.column("a").unwrap().values()[0],
++            Scalar::Float64(1.2)
++        );
++        assert_eq!(
++            result.column("b").unwrap().values()[0],
++            Scalar::Float64(5.68)
++        );
+         // 'c' not in the map -> unchanged.
+-        assert_eq!(result.column("c").unwrap().values()[0], Scalar::Float64(9.8765));
++        assert_eq!(
++            result.column("c").unwrap().values()[0],
++            Scalar::Float64(9.8765)
++        );
+     }
+
+     // --- DataFrame to_csv/to_json tests ---
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78789:
+         let mk = |vals: Vec<Scalar>| {
+             Series::from_values(
+                 "x",
+-                (0..vals.len() as i64).map(IndexLabel::from).collect::<Vec<_>>(),
++                (0..vals.len() as i64)
++                    .map(IndexLabel::from)
++                    .collect::<Vec<_>>(),
+                 vals,
+             )
+             .unwrap()
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78836:
+         let m = |v: &Series| -> Vec<Option<f64>> {
+             v.values()
+                 .iter()
+-                .map(|x| if x.is_missing() { None } else { x.to_f64().ok() })
++                .map(|x| {
++                    if x.is_missing() {
++                        None
++                    } else {
++                        x.to_f64().ok()
++                    }
++                })
+                 .collect()
+         };
+         // forward (no limit) == the bare interpolate().
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78846:
+         );
+         assert_eq!(
+             m(&s.interpolate_with_direction(None, "forward").unwrap()),
+-            vec![None, None, Some(3.0), Some(4.0), Some(5.0), Some(6.0), Some(6.0)]
++            vec![
++                None,
++                None,
++                Some(3.0),
++                Some(4.0),
++                Some(5.0),
++                Some(6.0),
++                Some(6.0)
++            ]
+         );
+         assert_eq!(
+             m(&s.interpolate_with_direction(None, "backward").unwrap()),
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78853:
+-            vec![Some(3.0), Some(3.0), Some(3.0), Some(4.0), Some(5.0), Some(6.0), None]
++            vec![
++                Some(3.0),
++                Some(3.0),
++                Some(3.0),
++                Some(4.0),
++                Some(5.0),
++                Some(6.0),
++                None
++            ]
+         );
+         assert_eq!(
+             m(&s.interpolate_with_direction(None, "both").unwrap()),
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78857:
+-            vec![Some(3.0), Some(3.0), Some(3.0), Some(4.0), Some(5.0), Some(6.0), Some(6.0)]
++            vec![
++                Some(3.0),
++                Some(3.0),
++                Some(3.0),
++                Some(4.0),
++                Some(5.0),
++                Some(6.0),
++                Some(6.0)
++            ]
+         );
+         assert_eq!(
+             m(&s.interpolate_with_direction(Some(1), "backward").unwrap()),
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78862:
+         );
+         assert_eq!(
+             m(&s.interpolate_with_direction(Some(1), "both").unwrap()),
+-            vec![None, Some(3.0), Some(3.0), Some(4.0), Some(5.0), Some(6.0), Some(6.0)]
++            vec![
++                None,
++                Some(3.0),
++                Some(3.0),
++                Some(4.0),
++                Some(5.0),
++                Some(6.0),
++                Some(6.0)
++            ]
+         );
+         assert!(s.interpolate_with_direction(None, "sideways").is_err());
+     }
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78883:
+         let m = |v: &Series| -> Vec<Option<f64>> {
+             v.values()
+                 .iter()
+-                .map(|x| if x.is_missing() { None } else { x.to_f64().ok() })
++                .map(|x| {
++                    if x.is_missing() {
++                        None
++                    } else {
++                        x.to_f64().ok()
++                    }
++                })
+                 .collect()
+         };
+         // inside (both direction): only the interior gap fills.
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78890:
+         assert_eq!(
+-            m(&s.interpolate_with_options(None, "both", Some("inside")).unwrap()),
++            m(&s.interpolate_with_options(None, "both", Some("inside"))
++                .unwrap()),
+             vec![None, None, Some(3.0), Some(4.0), Some(5.0), Some(6.0), None]
+         );
+         // outside (both direction): only the leading + trailing edge gaps fill.
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78895:
+         assert_eq!(
+-            m(&s.interpolate_with_options(None, "both", Some("outside")).unwrap()),
+-            vec![Some(3.0), Some(3.0), Some(3.0), None, None, Some(6.0), Some(6.0)]
++            m(&s.interpolate_with_options(None, "both", Some("outside"))
++                .unwrap()),
++            vec![
++                Some(3.0),
++                Some(3.0),
++                Some(3.0),
++                None,
++                None,
++                Some(6.0),
++                Some(6.0)
++            ]
+         );
+         // outside + backward: trailing edge can't fill backward (no right anchor).
+         assert_eq!(
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:78901:
+-            m(&s.interpolate_with_options(None, "backward", Some("outside")).unwrap()),
++            m(
++                &s.interpolate_with_options(None, "backward", Some("outside"))
++                    .unwrap()
++            ),
+             vec![Some(3.0), Some(3.0), Some(3.0), None, None, Some(6.0), None]
+         );
+         assert!(
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:79684:
+         // "abcabcabc".find("abc", 1) == 3  (search starts at index 1)
+         assert_eq!(one(&s.str().find_with_bounds("abc", 1, None).unwrap()), 3);
+         // .find("abc", 1, 5) -> s[1:5]="bcab", no "abc" -> -1
+-        assert_eq!(one(&s.str().find_with_bounds("abc", 1, Some(5)).unwrap()), -1);
++        assert_eq!(
++            one(&s.str().find_with_bounds("abc", 1, Some(5)).unwrap()),
++            -1
++        );
+         // negative start: .find("abc", -3) -> from index 6 -> 6
+         assert_eq!(one(&s.str().find_with_bounds("abc", -3, None).unwrap()), 6);
+         // start past len clamps: .find("abc", 100) -> -1
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:79691:
+-        assert_eq!(one(&s.str().find_with_bounds("abc", 100, None).unwrap()), -1);
++        assert_eq!(
++            one(&s.str().find_with_bounds("abc", 100, None).unwrap()),
++            -1
++        );
+         // empty sub at start position: .find("", 4) -> 4
+         assert_eq!(one(&s.str().find_with_bounds("", 4, None).unwrap()), 4);
+
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:79695:
+         // rfind: last "abc" overall is at 6.
+         assert_eq!(one(&s.str().rfind_with_bounds("abc", 0, None).unwrap()), 6);
+         // rfind within s[0:6]="abcabc" -> last "abc" at 3.
+-        assert_eq!(one(&s.str().rfind_with_bounds("abc", 0, Some(6)).unwrap()), 3);
++        assert_eq!(
++            one(&s.str().rfind_with_bounds("abc", 0, Some(6)).unwrap()),
++            3
++        );
+
+         // Char-based (not byte): a multibyte prefix shifts the index by chars.
+         let s2 = Series::from_values(
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:79766:
+         // negative start: index("abc", -3) == 6
+         assert_eq!(one(&s.str().index_with_bounds("abc", -3, None).unwrap()), 6);
+         // rindex within s[0:6] -> 3
+-        assert_eq!(one(&s.str().rindex_with_bounds("abc", 0, Some(6)).unwrap()), 3);
++        assert_eq!(
++            one(&s.str().rindex_with_bounds("abc", 0, Some(6)).unwrap()),
++            3
++        );
+         // not found in the slice -> raises (Python ValueError)
+         let err = s.str().index_with_bounds("abc", 1, Some(5)).unwrap_err();
+         assert!(err.to_string().contains("substring not found"));
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:86854:
+             &["a", "b", "c"],
+             vec![
+                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(f64::NAN)]),
+-                ("b", vec![Scalar::Float64(f64::NAN), Scalar::Float64(f64::NAN)]),
++                (
++                    "b",
++                    vec![Scalar::Float64(f64::NAN), Scalar::Float64(f64::NAN)],
++                ),
+                 ("c", vec![Scalar::Float64(2.0), Scalar::Float64(f64::NAN)]),
+             ],
+         )
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:95247:
+         .unwrap();
+         assert_eq!(s.dtype(), DType::Datetime64);
+         let ic = s.dt().isocalendar().unwrap();
+-        assert_eq!(ic.get_column("year").column().values()[0], Scalar::Int64(2020));
+-        assert_eq!(ic.get_column("week").column().values()[0], Scalar::Int64(53));
++        assert_eq!(
++            ic.get_column("year").column().values()[0],
++            Scalar::Int64(2020)
++        );
++        assert_eq!(
++            ic.get_column("week").column().values()[0],
++            Scalar::Int64(53)
++        );
+         assert_eq!(ic.get_column("day").column().values()[0], Scalar::Int64(5));
+-        assert_eq!(ic.get_column("year").column().values()[1], Scalar::Int64(2020));
+-        assert_eq!(ic.get_column("week").column().values()[1], Scalar::Int64(53));
++        assert_eq!(
++            ic.get_column("year").column().values()[1],
++            Scalar::Int64(2020)
++        );
++        assert_eq!(
++            ic.get_column("week").column().values()[1],
++            Scalar::Int64(53)
++        );
+         assert_eq!(ic.get_column("day").column().values()[1], Scalar::Int64(4));
+     }
+
+Diff in /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/src/lib.rs:100529:
+             ("2024-05", "2024-05-01 00:00:00"),          // year-month -> first
+         ];
+         for (input, expected) in cases {
+-            let s =
+-                Series::from_values("d", vec![0_i64.into()], vec![Scalar::Utf8(input.into())])
+-                    .unwrap();
++            let s = Series::from_values("d", vec![0_i64.into()], vec![Scalar::Utf8(input.into())])
++                .unwrap();
+             let result = super::to_datetime(&s).unwrap();
+             assert_eq!(
+                 result.values()[0],
+rustfmt_status=1

@@ -6,12 +6,12 @@
 //! index sorts by raw i64, so Column's stable typed radix argsort (O(n)) is
 //! bit-identical — including stable tie order for duplicate labels.
 
+use std::{collections::BTreeMap, time::Instant};
+
 use fp_columnar::Column;
 use fp_frame::{DataFrame, Series};
 use fp_index::{Index, IndexLabel};
 use fp_types::Scalar;
-use std::collections::BTreeMap;
-use std::time::Instant;
 
 fn series(labels: Vec<i64>, vals: Vec<i64>) -> Series {
     let idx: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Int64).collect();
@@ -71,7 +71,9 @@ fn main() {
     let mut x: u64 = 0x1234_5678;
     let labels: Vec<i64> = (0..n)
         .map(|_| {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (x >> 16) as i64 % (n as i64)
         })
         .collect();

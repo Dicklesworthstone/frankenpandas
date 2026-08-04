@@ -1,0 +1,503 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 2502704135
+#
+# Overhead  Command       Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                                            
+# ........  ............  ....................  ..................................................................................................................................................................................................................................................................................................................................................................................
+#
+     9.15%  perf_profile  perf_profile          [.] fp_join::build_single_key_inner_merge_output_with_selections
+            |          
+             --5.32%--fp_join::build_single_key_inner_merge_output_with_selections
+                       |          
+                       |--0.92%--fp_join::merge_single_key_inner_unsorted
+                       |          |          
+                       |           --0.88%--fp_join::merge_dataframes_on_with_options
+                       |                     perf_profile::main
+                       |                     merge_dataframes_on (inlined)
+                       |                     merge_dataframes (inlined)
+                       |                     perf_profile::main
+                       |          
+                       |--0.75%--perf_profile::main
+                       |          
+                        --0.59%--fp_join::merge_dataframes_on_with_options
+                                  |          
+                                   --0.55%--perf_profile::main
+                                             merge_dataframes_on (inlined)
+                                             merge_dataframes (inlined)
+                                             perf_profile::main
+
+     6.57%  perf_profile  libc.so.6             [.] __memmove_avx_unaligned_erms
+            |          
+             --5.86%--__memcpy_avx_unaligned_erms (inlined)
+                       |          
+                        --0.51%--fp_join::build_single_key_inner_merge_output_with_selections
+                                  fp_join::merge_single_key_inner_unsorted
+                                  fp_join::merge_dataframes_on_with_options
+                                  perf_profile::main
+                                  merge_dataframes_on (inlined)
+                                  merge_dataframes (inlined)
+                                  perf_profile::main
+
+     4.99%  perf_profile  libc.so.6             [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+
+     4.65%  perf_profile  libc.so.6             [.] cfree@GLIBC_2.2.5
+            |          
+            |--3.45%--__GI___libc_free (inlined)
+            |          
+             --0.91%--tcache_put_n (inlined)
+                       tcache_put (inlined)
+                       __GI___libc_free (inlined)
+
+     4.43%  perf_profile  perf_profile          [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |          
+             --2.00%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                       |          
+                        --0.58%--fp_join::merge_single_key_inner_unsorted
+                                  fp_join::merge_dataframes_on_with_options
+                                  perf_profile::main
+                                  merge_dataframes_on (inlined)
+                                  merge_dataframes (inlined)
+                                  perf_profile::main
+
+     3.93%  perf_profile  libc.so.6             [.] malloc
+            |          
+            |--2.01%--__GI___libc_malloc (inlined)
+            |          
+            |--1.06%--tcache_get_n (inlined)
+            |          tcache_get (inlined)
+            |          __GI___libc_malloc (inlined)
+            |          
+             --0.86%--checked_request2size (inlined)
+                       __GI___libc_malloc (inlined)
+
+     3.86%  perf_profile  perf_profile          [.] perf_profile::build_str_join_frame
+            |          
+             --1.32%--perf_profile::build_str_join_frame
+
+     3.81%  perf_profile  libc.so.6             [.] _int_malloc
+            |          
+             --2.90%--_int_malloc
+                       |          
+                        --0.57%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+
+     3.43%  perf_profile  perf_profile          [.] fp_join::merge_single_key_inner_unsorted
+            |          
+             --1.30%--fp_join::merge_single_key_inner_unsorted
+
+     3.32%  perf_profile  perf_profile          [.] fp_join::merge_dataframes_on_with_options
+            |          
+             --1.91%--fp_join::merge_dataframes_on_with_options
+                       |          
+                        --0.53%--fp_join::merge_single_key_inner_unsorted
+                                  fp_join::merge_dataframes_on_with_options
+                                  perf_profile::main
+                                  merge_dataframes_on (inlined)
+                                  merge_dataframes (inlined)
+                                  perf_profile::main
+
+     2.93%  perf_profile  perf_profile          [.] <fp_columnar::Column>::take_contiguous_range
+            |          
+             --1.37%--<fp_columnar::Column>::take_contiguous_range
+
+     2.59%  perf_profile  perf_profile          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+            |          
+             --0.99%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+
+     2.31%  perf_profile  perf_profile          [.] fp_join::collect_join_key_columns
+            |          
+             --1.07%--fp_join::collect_join_key_columns
+
+     2.28%  perf_profile  libc.so.6             [.] _int_free_chunk
+            |          
+             --2.16%--_int_free_chunk
+                       |          
+                        --0.63%--fp_join::build_single_key_inner_merge_output_with_selections
+                                  |          
+                                   --0.55%--build_single_key_inner_merge_output_with_selections (inlined)
+                                             fp_join::merge_single_key_inner_unsorted
+                                             fp_join::merge_dataframes_on_with_options
+                                             perf_profile::main
+                                             merge_dataframes_on (inlined)
+                                             merge_dataframes (inlined)
+                                             perf_profile::main
+
+     2.15%  perf_profile  perf_profile          [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          
+             --1.04%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+     2.07%  perf_profile  perf_profile          [.] <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+            |          
+             --1.16%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+
+     2.00%  perf_profile  perf_profile          [.] <hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+            |          
+             --1.06%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+
+     1.95%  perf_profile  perf_profile          [.] <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+            |          
+             --1.03%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+
+     1.88%  perf_profile  perf_profile          [.] <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+            |          
+             --0.90%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+
+     1.77%  perf_profile  perf_profile          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |          
+             --0.78%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+
+     1.73%  perf_profile  perf_profile          [.] <alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+            |          
+             --0.52%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+
+     1.51%  perf_profile  perf_profile          [.] <std::sys::sync::once::futex::Once>::call
+            |          
+             --0.61%--<std::sys::sync::once::futex::Once>::call
+
+     1.37%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+            |          
+             --0.80%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+
+     1.33%  perf_profile  [unknown]             [k] 0xffffffff8621b2b7
+     1.32%  perf_profile  libc.so.6             [.] malloc_consolidate
+            |
+            ---malloc_consolidate
+
+     1.29%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+     1.20%  perf_profile  [unknown]             [k] 0xffffffff84c01192
+     1.11%  perf_profile  libc.so.6             [.] __libc_malloc2
+            |          
+             --1.07%--__libc_malloc2
+
+     1.05%  perf_profile  libc.so.6             [.] _int_free_merge_chunk
+            |          
+             --0.66%--_int_free_merge_chunk
+
+     0.84%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<fp_columnar::Column>
+            |          
+             --0.56%--core::ptr::drop_in_place::<fp_columnar::Column>
+
+     0.83%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<core::option::Option<fp_columnar::ColumnData>>
+     0.81%  perf_profile  perf_profile          [.] <fp_index::Index>::new_known_unique_int64_unit_range
+            |          
+             --0.58%--<fp_index::Index>::new_known_unique_int64_unit_range
+
+     0.78%  perf_profile  perf_profile          [.] <fp_columnar::Column>::as_i64_slice
+     0.77%  perf_profile  perf_profile          [.] fp_join::build_single_key_dense_i64_inner_merge_output
+            |          
+             --0.59%--fp_join::build_single_key_dense_i64_inner_merge_output
+
+     0.76%  perf_profile  perf_profile          [.] <fp_columnar::Column>::float64_arc_view_source
+     0.60%  perf_profile  perf_profile          [.] perf_profile::main
+     0.55%  perf_profile  perf_profile          [.] <fp_columnar::Column>::utf8_arc_view_source
+     0.49%  perf_profile  perf_profile          [.] <alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>::drop_slow
+     0.46%  perf_profile  perf_profile          [.] <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<std::sync::once_lock::OnceLock<bool>>::try_insert::{closure#0}>::{closure#0}, !>
+     0.45%  perf_profile  perf_profile          [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.35%  perf_profile  [unknown]             [k] 0xffffffff84d0410b
+     0.32%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<fp_index::Index>
+     0.29%  perf_profile  libc.so.6             [.] __memset_avx2_unaligned_erms
+     0.23%  perf_profile  [unknown]             [k] 0xffffffff85452a61
+     0.19%  perf_profile  [unknown]             [k] 0xffffffff853d7d8d
+     0.19%  perf_profile  perf_profile          [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<std::sync::once_lock::OnceLock<bool>>::try_insert::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.18%  perf_profile  [unknown]             [k] 0xffffffff85392d17
+     0.18%  perf_profile  [unknown]             [k] 0xffffffff85452a65
+     0.17%  perf_profile  [unknown]             [k] 0xffffffff853d7e8a
+     0.17%  perf_profile  perf_profile          [.] <fp_columnar::Column>::from_f64_values
+     0.16%  perf_profile  perf_profile          [.] <fp_columnar::Column>::as_f64_slice
+     0.16%  perf_profile  perf_profile          [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.14%  perf_profile  [unknown]             [k] 0xffffffff84d04109
+     0.14%  perf_profile  [unknown]             [k] 0xffffffff84c01248
+     0.14%  perf_profile  [unknown]             [k] 0xffffffff853dc6c9
+     0.12%  perf_profile  [unknown]             [k] 0xffffffff85123f6d
+     0.12%  perf_profile  perf_profile          [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::initialize<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::get_or_init<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::try_insert::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.11%  perf_profile  [unknown]             [k] 0xffffffff84c00b90
+     0.11%  perf_profile  [unknown]             [k] 0xffffffff8623a6a7
+     0.11%  perf_profile  perf_profile          [.] <std::sync::once_lock::OnceLock<fp_index::SortOrder>>::initialize::<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::get_or_init<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::try_insert::{closure#0}>::{closure#0}, !>
+     0.09%  perf_profile  libc.so.6             [.] _int_free_maybe_consolidate
+     0.08%  perf_profile  [unknown]             [k] 0xffffffff85455557
+     0.08%  perf_profile  [unknown]             [k] 0xffffffff853d7e8c
+     0.08%  perf_profile  [unknown]             [k] 0xffffffff857c023f
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff853a33d2
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff85342161
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff854049f5
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff853a5151
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff853a4e56
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff853d7e86
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff86223c8e
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff853db06b
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff853d7e8f
+     0.06%  perf_profile  [unknown]             [k] 0xffffffff85395f6c
+     0.06%  perf_profile  [unknown]             [k] 0xffffffff84fea905
+     0.06%  perf_profile  [unknown]             [k] 0xffffffff853a56ff
+     0.06%  perf_profile  [unknown]             [k] 0xffffffff8621b866
+     0.05%  perf_profile  [unknown]             [k] 0xffffffff85458faf
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8622811f
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff86228131
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853bb57b
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85452c97
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a3847
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff84feb935
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853d71e4
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a33ec
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a56b1
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853b814c
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85404a1a
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a4d07
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a3437
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8507914b
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a390a
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff854578a4
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85162a09
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85452a69
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853d249f
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85342003
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85456d95
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85393d64
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8534112b
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853d8daa
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8545555f
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853b8171
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff850818d5
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8541df51
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a4ee9
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85455337
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff861f6879
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85452965
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85456f75
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8534389c
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8541a990
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85091343
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8508129a
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8545557e
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8539b919
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853bbce1
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff854529b3
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff84feb755
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85104b40
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85452c87
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff850a77f6
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8541a9e8
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853ddbde
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85456e30
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a33d5
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853d2336
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853b84d5
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853d2335
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8541ddab
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85455236
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8536b5f5
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8583befa
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a37ce
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8541df27
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853db12a
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85458fe5
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a4d2e
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8534116d
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8536b975
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a376b
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853d2333
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853b84f7
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85343277
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853b84d9
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a5707
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85452969
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853436a6
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853442bf
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853d2330
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85452a27
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853437ba
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853adf35
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853ddbdb
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8541df1b
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff854049f0
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85342072
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8539b78a
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8510f1e4
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff85452e42
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff84f8a447
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff84c00ba4
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a33e1
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff862287c1
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853d9114
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff8623a34e
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853d9102
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8541aa00
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff84f8c9d1
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85455447
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a3ae4
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85394553
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85392dcf
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a37ad
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a37a5
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85452c65
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8544f979
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85452a0a
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853dda9e
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a4de7
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85138fbf
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85392d4c
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a3432
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853974b5
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff857c0244
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853442aa
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85452cc2
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff84f88b2e
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff84c01698
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff862287f7
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a5627
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff854578cd
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a5540
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853d908d
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff862287f5
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff857c02ad
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a3946
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853436a3
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85087a16
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853d8e04
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff84c00002
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a37a9
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8514c13d
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8545296f
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8530d384
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8539b7b7
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8536ba10
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853d90f0
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff84d04104
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8541aa0e
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff862276f3
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8583befd
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85455546
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853d9108
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853d9576
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff861f6602
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a395e
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85452db5
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8539b813
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a4d3b
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85395f30
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853b84e5
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff85452aa6
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853d7d07
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a3428
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853439ec
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff84f9d372
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a50d8
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff853a37ea
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff854c528e
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8545725c
+     0.03%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_relocate_object_no_relro
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff853a3402
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff853dd919
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff853dda90
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff85394744
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff85393d97
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff85395f6b
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff8541a7cd
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff853b8161
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff853439a9
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff853b8462
+     0.01%  perf_profile  [unknown]             [k] 0xffffffff851a2b20
+     0.01%  perf_profile  [unknown]             [k] 0xffffffff8519f720
+     0.01%  perf_profile  [unknown]             [k] 0xffffffff85452966
+     0.01%  perf_profile  [unknown]             [k] 0xffffffff8623ba46
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff861f65c0
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8510f1e6
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853a37a0
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c001bd
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853dda43
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86229b48
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff854524e5
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853029fd
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850bf83d
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff861f65d3
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85138f8c
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8621c6a9
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff861f6579
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85139f5d
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8510f1d5
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853a3baf
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8508755c
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850219b5
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff861f5ee7
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850cd884
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853267c9
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0188e
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff852ff0c5
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff851c3805
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f91001
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85123fc0
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228848
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8508a436
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8621f93a
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862288d9
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85152482
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86209a1d
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862288af
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85078c65
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8622889f
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8532651d
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff854574d0
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8623a4fc
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86224b8e
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8620d9ec
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e5b1
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2bc
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcb
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d280
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff86224ba3
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e603
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862249a5
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e59f
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850c2840
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b43
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b66
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228550
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e5b7
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b65
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d38a
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e58f
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e594
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e580
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2e8
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d372
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d325
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850c2847
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300d60
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e5a4
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e5ac
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e5a8
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f2e570
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850c2906
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850c2910
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d289
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2c3
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2e8
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300d66
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b60
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d286
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2cc
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff85104b43
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d280
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2c3
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f32f8e
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcd
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b20
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b25
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b34
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b69
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b80
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d28b
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d29c
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d29f
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2d0
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862251d0
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

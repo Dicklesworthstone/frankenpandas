@@ -1,0 +1,69 @@
+{
+  "schema_version": "v3",
+  "timestamp": "2026-06-20T09:52:28.350313+00:00",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.0",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle"
+    }
+  },
+  "parameters": {
+    "sizes": [
+      "100k"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "linalg"
+    ],
+    "cv_threshold": 5.0,
+    "min_iterations": 10,
+    "warmup_iterations": 3
+  },
+  "results": [
+    {
+      "workload": "df_dot",
+      "category": "linalg",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 1113.1,
+        "p95_us": 4035.33,
+        "p99_us": 4870.24,
+        "mean_us": 1781.94,
+        "stddev_us": 1284.98,
+        "cv_pct": 72.11,
+        "throughput_rows_sec": 89839269,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 10871.84,
+        "p95_us": 17290.04,
+        "p99_us": 22882.68,
+        "mean_us": 9366.36,
+        "stddev_us": 5524.61,
+        "cv_pct": 58.98,
+        "throughput_rows_sec": 9198078,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    }
+  ],
+  "summary": {
+    "total_workloads": 1,
+    "valid_workloads": 0,
+    "dropped_high_cv": 1,
+    "category_scores": {},
+    "weighted_score": 1.3,
+    "claim_validated": false
+  }
+}

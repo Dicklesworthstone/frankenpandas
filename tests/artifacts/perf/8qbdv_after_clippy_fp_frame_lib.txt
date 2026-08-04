@@ -1,0 +1,115 @@
+[RCH] local (no admissible workers: insufficient_slots=2,hard_preflight=10)
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling serde_core v1.0.228
+   Compiling thiserror v2.0.18
+   Compiling autocfg v1.5.0
+    Checking typenum v1.20.0
+   Compiling serde v1.0.228
+    Checking memchr v2.8.0
+   Compiling zmij v1.0.21
+    Checking const-oid v0.10.2
+    Checking rustc-hash v2.1.2
+    Checking hashbrown v0.17.0
+    Checking equivalent v1.0.2
+   Compiling serde_json v1.0.150
+    Checking siphasher v1.0.2
+    Checking regex-syntax v0.8.10
+    Checking tinyvec_macros v0.1.1
+    Checking itoa v1.0.18
+    Checking cfg-if v1.0.4
+    Checking cpufeatures v0.3.0
+   Compiling chrono-tz v0.10.4
+    Checking ucd v0.1.1
+    Checking unicode-casefold v0.2.0
+    Checking tinyvec v1.11.0
+    Checking phf_shared v0.12.1
+    Checking phf v0.12.1
+   Compiling num-traits v0.2.19
+    Checking unicode-normalization v0.1.25
+    Checking aho-corasick v1.1.4
+    Checking indexmap v2.14.0
+   Compiling syn v2.0.117
+    Checking hybrid-array v0.4.10
+    Checking chrono v0.4.45
+    Checking block-buffer v0.12.0
+    Checking crypto-common v0.2.1
+    Checking regex-automata v0.4.14
+    Checking digest v0.11.2
+    Checking sha2 v0.11.0
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+    Checking regex v1.12.3
+    Checking fp-types v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-types)
+    Checking fp-runtime v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-runtime)
+    Checking fp-columnar v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-columnar)
+    Checking fp-index v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-index)
+    Checking fp-frame v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame)
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> crates/fp-frame/src/lib.rs:605:20
+    |
+605 |         |scope| -> Result<Vec<(Vec<IndexLabel>, Vec<Scalar>)>, FrameError> {
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+    = note: `-D clippy::type-complexity` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::type_complexity)]`
+
+error: could not compile `fp-frame` (lib) due to 1 previous error

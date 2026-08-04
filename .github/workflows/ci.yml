@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    # br-frankenpandas-edn3q: periodically catch workspace-wide test rot
+    # that crate-scoped swarm validation can miss.
+    - cron: "37 8 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -16,7 +21,7 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -61,7 +66,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-lint
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -107,7 +112,7 @@ jobs:
       FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -136,8 +141,11 @@ jobs:
       - name: Install pinned pandas oracle dependency
         run: python -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt
 
-      - name: Workspace tests
-        run: cargo test --workspace
+      - name: Workspace tests (--no-fail-fast)
+        # br-frankenpandas-edn3q: keep collecting failures across all
+        # workspace targets so stray examples and stale integration tests
+        # are visible in a single gate run.
+        run: cargo test --workspace --no-fail-fast
 
       - name: Doctest (--doc)
         # Per br-frankenpandas-ddox: `cargo test --workspace` does NOT
@@ -159,7 +167,7 @@ jobs:
       FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -217,7 +225,7 @@ jobs:
       FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -289,7 +297,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-audit
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -330,7 +338,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-deny
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -358,7 +366,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -375,7 +383,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/.target
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain

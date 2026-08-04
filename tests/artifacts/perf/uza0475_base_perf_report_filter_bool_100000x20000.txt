@@ -1,0 +1,118 @@
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 178  of event 'cycles:P'
+# Event count (approx.): 2997421598
+#
+# Overhead  Command       Shared Object     Symbol
+# ........  ............  ................  ...................................................................................................................................................................................................................................................................................................................................................................
+#
+    92.35%  perf_profile  perf_profile      [.] <fp_frame::DataFrame>::loc_bool
+            |
+            |--87.92%--<fp_frame::DataFrame>::loc_bool
+            |          <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+            |
+            |--1.53%--__memmove_avx_unaligned_erms
+            |          |
+            |           --1.44%--0x2
+            |
+            |--1.45%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |
+             --1.45%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+
+     1.45%  perf_profile  [unknown]         [k] 0xffffffff8583c1b4
+            |
+            ---0xffffffff8507fd91
+               0xffffffff85091594
+               0xffffffff850919e2
+               0xffffffff85079d0c
+               0xffffffff85137e40
+               0xffffffff851524f6
+               0xffffffff85139003
+               0xffffffff85139f5d
+               0xffffffff84fc4bc8
+               0xffffffff86227724
+               0xffffffff84c00f0b
+               <fp_frame::DataFrame>::loc_bool
+               <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     1.45%  perf_profile  [unknown]         [k] 0xffffffff85137de6
+            |
+            ---0xffffffff8506f907
+               0xffffffff85079c83
+               0xffffffff85137e40
+               0xffffffff851524f6
+               0xffffffff85139003
+               0xffffffff85139f5d
+               0xffffffff84fc4bc8
+               0xffffffff86227724
+               0xffffffff84c00f0b
+               <fp_frame::DataFrame>::loc_bool
+               <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     1.45%  perf_profile  perf_profile      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+            |
+            ---_int_free_chunk
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+
+     1.45%  perf_profile  perf_profile      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+            |
+            ---<fp_frame::DataFrame>::loc_bool
+               <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     1.45%  perf_profile  perf_profile      [.] <fp_frame::DataFrame>::new_with_axes
+            |
+            ---core::ptr::drop_in_place::<fp_columnar::Column>
+
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff853d2961
+     0.11%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64>>>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<alloc::sync::Arc<alloc::vec::Vec<i64>>>>>::get_or_init<<fp_index::IndexLabels>::int64_view::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.08%  perf_profile  [unknown]         [k] 0xffffffff85392d40
+     0.06%  perf_profile  perf_profile      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff853a562d
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff853af9a6
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff854529f6
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff853d43ec
+     0.00%  perf_profile  libc.so.6         [.] _int_malloc
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85392ddb
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85841403
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850136e5
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2bc
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d280
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2c3
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d285
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcb
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b80
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b60
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b66
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d286
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2cc
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff84fdedcb
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff85300b80
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2af
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84d0410b
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f32f8e
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f337e6
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcd
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85104b20
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b65
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b69
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d289
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2db
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff862251d0
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

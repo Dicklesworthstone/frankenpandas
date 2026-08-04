@@ -1,0 +1,12 @@
+  [2m2026-06-14T23:07:15.633696Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 3 --runs 10 --export-json tests/artifacts/perf/lavender_uza04132_pair_reversed_csv_parse_dates_dt_year_100000x5.json -n after '/data/projects/.scratch/cargo-target-lavender-uza04132-after/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 5' -n base '.rch-target-lavenderstone-current/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 5'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: after
+  Time (mean ± σ):     633.8 ms ±  82.4 ms    [User: 425.4 ms, System: 70.7 ms]
+  Range (min … max):   533.8 ms … 804.6 ms    10 runs
+Benchmark 2: base
+  Time (mean ± σ):      1.417 s ±  0.126 s    [User: 1.113 s, System: 0.071 s]
+  Range (min … max):    1.253 s …  1.700 s    10 runs
+Summary
+  after ran
+    2.24 ± 0.35 times faster than base

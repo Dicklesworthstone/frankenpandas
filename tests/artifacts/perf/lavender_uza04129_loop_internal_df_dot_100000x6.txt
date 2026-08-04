@@ -1,0 +1,2 @@
+perf_profile: scenario=df_dot n=100000 iters=6
+perf_profile: done 6 iters in 1.378s (229.618 ms/iter), sink=600000

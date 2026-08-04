@@ -1,0 +1,30 @@
+br-frankenpandas-2bgtq — differential harness for fp-index Int64 mutation/grouping
+==================================================================================
+
+Completes the differential coverage of the recent fp-index Int64 fast-path wave.
+Companion to: yfyb9 (predicates), q70pn (affine lookups), 59dk2 (Series predicates).
+
+Targets: insert (uza04.152), delete (uza04.150), groupby (xk18v), take.
+
+Harness (test fp-index: int64_index_mutation_fast_paths_match_materialized_2bgtq):
+deterministic seeded LCG (no rand crate, no mocks). For 2500 random i64 sequences
+(len 0..10, 1/3 forced-sorted) it builds a lazy index (Index::from_i64_values =>
+fast path) and the materialized equivalent (Index::new of IndexLabel::Int64 =>
+fallback), then asserts they agree on:
+  - groupby()                 (HashMap<IndexLabel, Vec<usize>>)
+  - insert(loc, item).labels() for a random valid loc and an Int64 item, with a
+    1/4 chance of a Utf8 item to exercise the dtype-transition path
+  - delete(loc).labels()       for a random valid loc
+  - take(positions).labels()   for random in-range (possibly repeated/reordered) positions
+
+Result: PASS (1 passed). insert/delete/groupby/take on lazy Int64 indexes produce
+exactly the same labels / grouping as the materialized fallback, including
+dtype-transition inserts. Guards uza04.152 / uza04.150 / xk18v against regression.
+
+With this, the full recent fp-index Int64 fast-path family — predicates, lookups,
+and mutations/grouping — is differentially covered (no divergence found in any).
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-index int64_index_mutation_fast_paths_match_materialized_2bgtq -> 1 passed
+  cargo test -p fp-index (full)  -> all passed, 0 failed
+  ubs crates/fp-index/src/lib.rs -> 0 critical

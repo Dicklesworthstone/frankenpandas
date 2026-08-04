@@ -1,0 +1,1710 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 147  of event 'cycles:P'
+# Event count (approx.): 395194795
+#
+# Children      Self  Symbol                                                                                                                                                                                                                                                                                                                                                                              IPC   [IPC Coverage]
+# ........  ........  ..................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    99.81%     0.00%  [.] _start                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               |          
+               |--70.80%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--19.98%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--12.06%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --12.06%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--9.05%--0xffffffff84feb96b
+               |          |          |                     |          0xffffffff853a5627
+               |          |          |                     |          0xffffffff853a53ad
+               |          |          |                     |          |          
+               |          |          |                     |           --8.05%--0xffffffff853a4de7
+               |          |          |                     |                     |          
+               |          |          |                     |                      --6.42%--0xffffffff853a37ea
+               |          |          |                     |                                |          
+               |          |          |                     |                                 --4.43%--0xffffffff853a33d2
+               |          |          |                     |                                           0xffffffff8541df1b
+               |          |          |                     |                                           0xffffffff8541a9e8
+               |          |          |                     |                                           |          
+               |          |          |                     |                                            --4.43%--0xffffffff853dda90
+               |          |          |                     |                                                      |          
+               |          |          |                     |                                                       --2.02%--0xffffffff853dc6c9
+               |          |          |                     |                                                                 0xffffffff8621b2b7
+               |          |          |                     |          
+               |          |          |                      --2.00%--0xffffffff84feb92c
+               |          |          |          
+               |          |           --3.67%--0xffffffff84c00b90
+               |          |          
+               |          |--17.16%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --15.30%--0xffffffff8622811f
+               |          |                     |          
+               |          |                      --14.30%--0xffffffff84feb96b
+               |          |                                |          
+               |          |                                 --13.31%--0xffffffff853a5627
+               |          |                                           |          
+               |          |                                            --12.31%--0xffffffff853a53ad
+               |          |                                                      |          
+               |          |                                                       --11.31%--0xffffffff853a4de7
+               |          |                                                                 |          
+               |          |                                                                  --9.40%--0xffffffff853a37ea
+               |          |                                                                            |          
+               |          |                                                                            |--6.57%--0xffffffff853a33d2
+               |          |                                                                            |          0xffffffff8541df1b
+               |          |                                                                            |          0xffffffff8541a9e8
+               |          |                                                                            |          |          
+               |          |                                                                            |           --5.57%--0xffffffff853dda90
+               |          |                                                                            |                     |          
+               |          |                                                                            |                      --3.60%--0xffffffff853dc6c9
+               |          |                                                                            |                                0xffffffff8621b2b7
+               |          |                                                                            |          
+               |          |                                                                             --2.83%--0xffffffff853a3437
+               |          |                                                                                       0xffffffff85404a1a
+               |          |          
+               |          |--2.15%--0xffffffff84c01199
+               |          |          
+               |           --2.14%--<fp_columnar::Column>::from_f64_values
+               |          
+               |--22.05%--join_bench::merge_once
+               |          fp_join::merge_dataframes
+               |          fp_join::merge_single_key_inner_unsorted
+               |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          |          
+               |          |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          |          <std::sys::sync::once::futex::Once>::call
+               |          |          |          
+               |          |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          |          
+               |          |           --2.86%--__memcmp_avx2_movbe
+               |          |          
+               |           --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               |                     <std::sys::sync::once::futex::Once>::call
+               |                     |          
+               |                      --4.77%--__memcmp_avx2_movbe
+               |          
+               |--3.98%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+               |          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |          core::ptr::drop_in_place::<fp_columnar::Column>
+               |          |          
+               |           --2.98%--_int_free_chunk
+               |                     systrim.constprop.0
+               |                     __default_morecore@GLIBC_2.2.5
+               |                     __brk
+               |                     0xffffffff84c0012b
+               |                     0xffffffff86220551
+               |                     0xffffffff84f24dda
+               |                     0xffffffff853ab362
+               |                     0xffffffff853ab2c0
+               |                     0xffffffff853cc7f5
+               |                     0xffffffff853cb02c
+               |          
+                --2.98%--join_bench::add_numeric_checksum
+
+    99.81%     0.00%  [.] __libc_start_main@@GLIBC_2.34                                                                                                                                                                                                                                                                                                                                                   -      -            
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               |          
+               |--70.80%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--19.98%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--12.06%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --12.06%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--9.05%--0xffffffff84feb96b
+               |          |          |                     |          0xffffffff853a5627
+               |          |          |                     |          0xffffffff853a53ad
+               |          |          |                     |          |          
+               |          |          |                     |           --8.05%--0xffffffff853a4de7
+               |          |          |                     |                     |          
+               |          |          |                     |                      --6.42%--0xffffffff853a37ea
+               |          |          |                     |                                |          
+               |          |          |                     |                                 --4.43%--0xffffffff853a33d2
+               |          |          |                     |                                           0xffffffff8541df1b
+               |          |          |                     |                                           0xffffffff8541a9e8
+               |          |          |                     |                                           |          
+               |          |          |                     |                                            --4.43%--0xffffffff853dda90
+               |          |          |                     |                                                      |          
+               |          |          |                     |                                                       --2.02%--0xffffffff853dc6c9
+               |          |          |                     |                                                                 0xffffffff8621b2b7
+               |          |          |                     |          
+               |          |          |                      --2.00%--0xffffffff84feb92c
+               |          |          |          
+               |          |           --3.67%--0xffffffff84c00b90
+               |          |          
+               |          |--17.16%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --15.30%--0xffffffff8622811f
+               |          |                     |          
+               |          |                      --14.30%--0xffffffff84feb96b
+               |          |                                |          
+               |          |                                 --13.31%--0xffffffff853a5627
+               |          |                                           |          
+               |          |                                            --12.31%--0xffffffff853a53ad
+               |          |                                                      |          
+               |          |                                                       --11.31%--0xffffffff853a4de7
+               |          |                                                                 |          
+               |          |                                                                  --9.40%--0xffffffff853a37ea
+               |          |                                                                            |          
+               |          |                                                                            |--6.57%--0xffffffff853a33d2
+               |          |                                                                            |          0xffffffff8541df1b
+               |          |                                                                            |          0xffffffff8541a9e8
+               |          |                                                                            |          |          
+               |          |                                                                            |           --5.57%--0xffffffff853dda90
+               |          |                                                                            |                     |          
+               |          |                                                                            |                      --3.60%--0xffffffff853dc6c9
+               |          |                                                                            |                                0xffffffff8621b2b7
+               |          |                                                                            |          
+               |          |                                                                             --2.83%--0xffffffff853a3437
+               |          |                                                                                       0xffffffff85404a1a
+               |          |          
+               |          |--2.15%--0xffffffff84c01199
+               |          |          
+               |           --2.14%--<fp_columnar::Column>::from_f64_values
+               |          
+               |--22.05%--join_bench::merge_once
+               |          fp_join::merge_dataframes
+               |          fp_join::merge_single_key_inner_unsorted
+               |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          |          
+               |          |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          |          <std::sys::sync::once::futex::Once>::call
+               |          |          |          
+               |          |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          |          
+               |          |           --2.86%--__memcmp_avx2_movbe
+               |          |          
+               |           --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               |                     <std::sys::sync::once::futex::Once>::call
+               |                     |          
+               |                      --4.77%--__memcmp_avx2_movbe
+               |          
+               |--3.98%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+               |          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |          core::ptr::drop_in_place::<fp_columnar::Column>
+               |          |          
+               |           --2.98%--_int_free_chunk
+               |                     systrim.constprop.0
+               |                     __default_morecore@GLIBC_2.2.5
+               |                     __brk
+               |                     0xffffffff84c0012b
+               |                     0xffffffff86220551
+               |                     0xffffffff84f24dda
+               |                     0xffffffff853ab362
+               |                     0xffffffff853ab2c0
+               |                     0xffffffff853cc7f5
+               |                     0xffffffff853cb02c
+               |          
+                --2.98%--join_bench::add_numeric_checksum
+
+    99.81%     0.00%  [.] __libc_start_call_main                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |
+            ---main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               |          
+               |--70.80%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--19.98%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--12.06%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --12.06%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--9.05%--0xffffffff84feb96b
+               |          |          |                     |          0xffffffff853a5627
+               |          |          |                     |          0xffffffff853a53ad
+               |          |          |                     |          |          
+               |          |          |                     |           --8.05%--0xffffffff853a4de7
+               |          |          |                     |                     |          
+               |          |          |                     |                      --6.42%--0xffffffff853a37ea
+               |          |          |                     |                                |          
+               |          |          |                     |                                 --4.43%--0xffffffff853a33d2
+               |          |          |                     |                                           0xffffffff8541df1b
+               |          |          |                     |                                           0xffffffff8541a9e8
+               |          |          |                     |                                           |          
+               |          |          |                     |                                            --4.43%--0xffffffff853dda90
+               |          |          |                     |                                                      |          
+               |          |          |                     |                                                       --2.02%--0xffffffff853dc6c9
+               |          |          |                     |                                                                 0xffffffff8621b2b7
+               |          |          |                     |          
+               |          |          |                      --2.00%--0xffffffff84feb92c
+               |          |          |          
+               |          |           --3.67%--0xffffffff84c00b90
+               |          |          
+               |          |--17.16%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --15.30%--0xffffffff8622811f
+               |          |                     |          
+               |          |                      --14.30%--0xffffffff84feb96b
+               |          |                                |          
+               |          |                                 --13.31%--0xffffffff853a5627
+               |          |                                           |          
+               |          |                                            --12.31%--0xffffffff853a53ad
+               |          |                                                      |          
+               |          |                                                       --11.31%--0xffffffff853a4de7
+               |          |                                                                 |          
+               |          |                                                                  --9.40%--0xffffffff853a37ea
+               |          |                                                                            |          
+               |          |                                                                            |--6.57%--0xffffffff853a33d2
+               |          |                                                                            |          0xffffffff8541df1b
+               |          |                                                                            |          0xffffffff8541a9e8
+               |          |                                                                            |          |          
+               |          |                                                                            |           --5.57%--0xffffffff853dda90
+               |          |                                                                            |                     |          
+               |          |                                                                            |                      --3.60%--0xffffffff853dc6c9
+               |          |                                                                            |                                0xffffffff8621b2b7
+               |          |                                                                            |          
+               |          |                                                                             --2.83%--0xffffffff853a3437
+               |          |                                                                                       0xffffffff85404a1a
+               |          |          
+               |          |--2.15%--0xffffffff84c01199
+               |          |          
+               |           --2.14%--<fp_columnar::Column>::from_f64_values
+               |          
+               |--22.05%--join_bench::merge_once
+               |          fp_join::merge_dataframes
+               |          fp_join::merge_single_key_inner_unsorted
+               |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          |          
+               |          |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          |          <std::sys::sync::once::futex::Once>::call
+               |          |          |          
+               |          |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          |          
+               |          |           --2.86%--__memcmp_avx2_movbe
+               |          |          
+               |           --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               |                     <std::sys::sync::once::futex::Once>::call
+               |                     |          
+               |                      --4.77%--__memcmp_avx2_movbe
+               |          
+               |--3.98%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+               |          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |          core::ptr::drop_in_place::<fp_columnar::Column>
+               |          |          
+               |           --2.98%--_int_free_chunk
+               |                     systrim.constprop.0
+               |                     __default_morecore@GLIBC_2.2.5
+               |                     __brk
+               |                     0xffffffff84c0012b
+               |                     0xffffffff86220551
+               |                     0xffffffff84f24dda
+               |                     0xffffffff853ab362
+               |                     0xffffffff853ab2c0
+               |                     0xffffffff853cc7f5
+               |                     0xffffffff853cb02c
+               |          
+                --2.98%--join_bench::add_numeric_checksum
+
+    99.81%     0.00%  [.] main                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               |          
+               |--70.80%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--19.98%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--12.06%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --12.06%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--9.05%--0xffffffff84feb96b
+               |          |          |                     |          0xffffffff853a5627
+               |          |          |                     |          0xffffffff853a53ad
+               |          |          |                     |          |          
+               |          |          |                     |           --8.05%--0xffffffff853a4de7
+               |          |          |                     |                     |          
+               |          |          |                     |                      --6.42%--0xffffffff853a37ea
+               |          |          |                     |                                |          
+               |          |          |                     |                                 --4.43%--0xffffffff853a33d2
+               |          |          |                     |                                           0xffffffff8541df1b
+               |          |          |                     |                                           0xffffffff8541a9e8
+               |          |          |                     |                                           |          
+               |          |          |                     |                                            --4.43%--0xffffffff853dda90
+               |          |          |                     |                                                      |          
+               |          |          |                     |                                                       --2.02%--0xffffffff853dc6c9
+               |          |          |                     |                                                                 0xffffffff8621b2b7
+               |          |          |                     |          
+               |          |          |                      --2.00%--0xffffffff84feb92c
+               |          |          |          
+               |          |           --3.67%--0xffffffff84c00b90
+               |          |          
+               |          |--17.16%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --15.30%--0xffffffff8622811f
+               |          |                     |          
+               |          |                      --14.30%--0xffffffff84feb96b
+               |          |                                |          
+               |          |                                 --13.31%--0xffffffff853a5627
+               |          |                                           |          
+               |          |                                            --12.31%--0xffffffff853a53ad
+               |          |                                                      |          
+               |          |                                                       --11.31%--0xffffffff853a4de7
+               |          |                                                                 |          
+               |          |                                                                  --9.40%--0xffffffff853a37ea
+               |          |                                                                            |          
+               |          |                                                                            |--6.57%--0xffffffff853a33d2
+               |          |                                                                            |          0xffffffff8541df1b
+               |          |                                                                            |          0xffffffff8541a9e8
+               |          |                                                                            |          |          
+               |          |                                                                            |           --5.57%--0xffffffff853dda90
+               |          |                                                                            |                     |          
+               |          |                                                                            |                      --3.60%--0xffffffff853dc6c9
+               |          |                                                                            |                                0xffffffff8621b2b7
+               |          |                                                                            |          
+               |          |                                                                             --2.83%--0xffffffff853a3437
+               |          |                                                                                       0xffffffff85404a1a
+               |          |          
+               |          |--2.15%--0xffffffff84c01199
+               |          |          
+               |           --2.14%--<fp_columnar::Column>::from_f64_values
+               |          
+               |--22.05%--join_bench::merge_once
+               |          fp_join::merge_dataframes
+               |          fp_join::merge_single_key_inner_unsorted
+               |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          |          
+               |          |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          |          <std::sys::sync::once::futex::Once>::call
+               |          |          |          
+               |          |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          |          
+               |          |           --2.86%--__memcmp_avx2_movbe
+               |          |          
+               |           --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               |                     <std::sys::sync::once::futex::Once>::call
+               |                     |          
+               |                      --4.77%--__memcmp_avx2_movbe
+               |          
+               |--3.98%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+               |          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |          core::ptr::drop_in_place::<fp_columnar::Column>
+               |          |          
+               |           --2.98%--_int_free_chunk
+               |                     systrim.constprop.0
+               |                     __default_morecore@GLIBC_2.2.5
+               |                     __brk
+               |                     0xffffffff84c0012b
+               |                     0xffffffff86220551
+               |                     0xffffffff84f24dda
+               |                     0xffffffff853ab362
+               |                     0xffffffff853ab2c0
+               |                     0xffffffff853cc7f5
+               |                     0xffffffff853cb02c
+               |          
+                --2.98%--join_bench::add_numeric_checksum
+
+    99.81%     0.00%  [.] std::rt::lang_start_internal                                                                                                                                                                                                                                                                                                                                                    -      -            
+            |
+            ---std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               |          
+               |--70.80%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--19.98%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--12.06%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --12.06%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--9.05%--0xffffffff84feb96b
+               |          |          |                     |          0xffffffff853a5627
+               |          |          |                     |          0xffffffff853a53ad
+               |          |          |                     |          |          
+               |          |          |                     |           --8.05%--0xffffffff853a4de7
+               |          |          |                     |                     |          
+               |          |          |                     |                      --6.42%--0xffffffff853a37ea
+               |          |          |                     |                                |          
+               |          |          |                     |                                 --4.43%--0xffffffff853a33d2
+               |          |          |                     |                                           0xffffffff8541df1b
+               |          |          |                     |                                           0xffffffff8541a9e8
+               |          |          |                     |                                           |          
+               |          |          |                     |                                            --4.43%--0xffffffff853dda90
+               |          |          |                     |                                                      |          
+               |          |          |                     |                                                       --2.02%--0xffffffff853dc6c9
+               |          |          |                     |                                                                 0xffffffff8621b2b7
+               |          |          |                     |          
+               |          |          |                      --2.00%--0xffffffff84feb92c
+               |          |          |          
+               |          |           --3.67%--0xffffffff84c00b90
+               |          |          
+               |          |--17.16%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --15.30%--0xffffffff8622811f
+               |          |                     |          
+               |          |                      --14.30%--0xffffffff84feb96b
+               |          |                                |          
+               |          |                                 --13.31%--0xffffffff853a5627
+               |          |                                           |          
+               |          |                                            --12.31%--0xffffffff853a53ad
+               |          |                                                      |          
+               |          |                                                       --11.31%--0xffffffff853a4de7
+               |          |                                                                 |          
+               |          |                                                                  --9.40%--0xffffffff853a37ea
+               |          |                                                                            |          
+               |          |                                                                            |--6.57%--0xffffffff853a33d2
+               |          |                                                                            |          0xffffffff8541df1b
+               |          |                                                                            |          0xffffffff8541a9e8
+               |          |                                                                            |          |          
+               |          |                                                                            |           --5.57%--0xffffffff853dda90
+               |          |                                                                            |                     |          
+               |          |                                                                            |                      --3.60%--0xffffffff853dc6c9
+               |          |                                                                            |                                0xffffffff8621b2b7
+               |          |                                                                            |          
+               |          |                                                                             --2.83%--0xffffffff853a3437
+               |          |                                                                                       0xffffffff85404a1a
+               |          |          
+               |          |--2.15%--0xffffffff84c01199
+               |          |          
+               |           --2.14%--<fp_columnar::Column>::from_f64_values
+               |          
+               |--22.05%--join_bench::merge_once
+               |          fp_join::merge_dataframes
+               |          fp_join::merge_single_key_inner_unsorted
+               |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          |          
+               |          |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          |          <std::sys::sync::once::futex::Once>::call
+               |          |          |          
+               |          |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          |          
+               |          |           --2.86%--__memcmp_avx2_movbe
+               |          |          
+               |           --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               |                     <std::sys::sync::once::futex::Once>::call
+               |                     |          
+               |                      --4.77%--__memcmp_avx2_movbe
+               |          
+               |--3.98%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+               |          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |          core::ptr::drop_in_place::<fp_columnar::Column>
+               |          |          
+               |           --2.98%--_int_free_chunk
+               |                     systrim.constprop.0
+               |                     __default_morecore@GLIBC_2.2.5
+               |                     __brk
+               |                     0xffffffff84c0012b
+               |                     0xffffffff86220551
+               |                     0xffffffff84f24dda
+               |                     0xffffffff853ab362
+               |                     0xffffffff853ab2c0
+               |                     0xffffffff853cc7f5
+               |                     0xffffffff853cb02c
+               |          
+                --2.98%--join_bench::add_numeric_checksum
+
+    99.81%     0.00%  [.] std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}                                                                                                                                                                                                                                                                         -      -            
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               |          
+               |--70.80%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--19.98%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--12.06%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --12.06%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--9.05%--0xffffffff84feb96b
+               |          |          |                     |          0xffffffff853a5627
+               |          |          |                     |          0xffffffff853a53ad
+               |          |          |                     |          |          
+               |          |          |                     |           --8.05%--0xffffffff853a4de7
+               |          |          |                     |                     |          
+               |          |          |                     |                      --6.42%--0xffffffff853a37ea
+               |          |          |                     |                                |          
+               |          |          |                     |                                 --4.43%--0xffffffff853a33d2
+               |          |          |                     |                                           0xffffffff8541df1b
+               |          |          |                     |                                           0xffffffff8541a9e8
+               |          |          |                     |                                           |          
+               |          |          |                     |                                            --4.43%--0xffffffff853dda90
+               |          |          |                     |                                                      |          
+               |          |          |                     |                                                       --2.02%--0xffffffff853dc6c9
+               |          |          |                     |                                                                 0xffffffff8621b2b7
+               |          |          |                     |          
+               |          |          |                      --2.00%--0xffffffff84feb92c
+               |          |          |          
+               |          |           --3.67%--0xffffffff84c00b90
+               |          |          
+               |          |--17.16%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --15.30%--0xffffffff8622811f
+               |          |                     |          
+               |          |                      --14.30%--0xffffffff84feb96b
+               |          |                                |          
+               |          |                                 --13.31%--0xffffffff853a5627
+               |          |                                           |          
+               |          |                                            --12.31%--0xffffffff853a53ad
+               |          |                                                      |          
+               |          |                                                       --11.31%--0xffffffff853a4de7
+               |          |                                                                 |          
+               |          |                                                                  --9.40%--0xffffffff853a37ea
+               |          |                                                                            |          
+               |          |                                                                            |--6.57%--0xffffffff853a33d2
+               |          |                                                                            |          0xffffffff8541df1b
+               |          |                                                                            |          0xffffffff8541a9e8
+               |          |                                                                            |          |          
+               |          |                                                                            |           --5.57%--0xffffffff853dda90
+               |          |                                                                            |                     |          
+               |          |                                                                            |                      --3.60%--0xffffffff853dc6c9
+               |          |                                                                            |                                0xffffffff8621b2b7
+               |          |                                                                            |          
+               |          |                                                                             --2.83%--0xffffffff853a3437
+               |          |                                                                                       0xffffffff85404a1a
+               |          |          
+               |          |--2.15%--0xffffffff84c01199
+               |          |          
+               |           --2.14%--<fp_columnar::Column>::from_f64_values
+               |          
+               |--22.05%--join_bench::merge_once
+               |          fp_join::merge_dataframes
+               |          fp_join::merge_single_key_inner_unsorted
+               |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          |          
+               |          |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          |          <std::sys::sync::once::futex::Once>::call
+               |          |          |          
+               |          |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          |          
+               |          |           --2.86%--__memcmp_avx2_movbe
+               |          |          
+               |           --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               |                     <std::sys::sync::once::futex::Once>::call
+               |                     |          
+               |                      --4.77%--__memcmp_avx2_movbe
+               |          
+               |--3.98%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+               |          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |          core::ptr::drop_in_place::<fp_columnar::Column>
+               |          |          
+               |           --2.98%--_int_free_chunk
+               |                     systrim.constprop.0
+               |                     __default_morecore@GLIBC_2.2.5
+               |                     __brk
+               |                     0xffffffff84c0012b
+               |                     0xffffffff86220551
+               |                     0xffffffff84f24dda
+               |                     0xffffffff853ab362
+               |                     0xffffffff853ab2c0
+               |                     0xffffffff853cc7f5
+               |                     0xffffffff853cb02c
+               |          
+                --2.98%--join_bench::add_numeric_checksum
+
+    99.81%     0.00%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>                                                                                                                                                                           -      -            
+            |
+            ---join_bench::main
+               |          
+               |--70.80%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--19.98%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--12.06%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --12.06%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--9.05%--0xffffffff84feb96b
+               |          |          |                     |          0xffffffff853a5627
+               |          |          |                     |          0xffffffff853a53ad
+               |          |          |                     |          |          
+               |          |          |                     |           --8.05%--0xffffffff853a4de7
+               |          |          |                     |                     |          
+               |          |          |                     |                      --6.42%--0xffffffff853a37ea
+               |          |          |                     |                                |          
+               |          |          |                     |                                 --4.43%--0xffffffff853a33d2
+               |          |          |                     |                                           0xffffffff8541df1b
+               |          |          |                     |                                           0xffffffff8541a9e8
+               |          |          |                     |                                           |          
+               |          |          |                     |                                            --4.43%--0xffffffff853dda90
+               |          |          |                     |                                                      |          
+               |          |          |                     |                                                       --2.02%--0xffffffff853dc6c9
+               |          |          |                     |                                                                 0xffffffff8621b2b7
+               |          |          |                     |          
+               |          |          |                      --2.00%--0xffffffff84feb92c
+               |          |          |          
+               |          |           --3.67%--0xffffffff84c00b90
+               |          |          
+               |          |--17.16%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --15.30%--0xffffffff8622811f
+               |          |                     |          
+               |          |                      --14.30%--0xffffffff84feb96b
+               |          |                                |          
+               |          |                                 --13.31%--0xffffffff853a5627
+               |          |                                           |          
+               |          |                                            --12.31%--0xffffffff853a53ad
+               |          |                                                      |          
+               |          |                                                       --11.31%--0xffffffff853a4de7
+               |          |                                                                 |          
+               |          |                                                                  --9.40%--0xffffffff853a37ea
+               |          |                                                                            |          
+               |          |                                                                            |--6.57%--0xffffffff853a33d2
+               |          |                                                                            |          0xffffffff8541df1b
+               |          |                                                                            |          0xffffffff8541a9e8
+               |          |                                                                            |          |          
+               |          |                                                                            |           --5.57%--0xffffffff853dda90
+               |          |                                                                            |                     |          
+               |          |                                                                            |                      --3.60%--0xffffffff853dc6c9
+               |          |                                                                            |                                0xffffffff8621b2b7
+               |          |                                                                            |          
+               |          |                                                                             --2.83%--0xffffffff853a3437
+               |          |                                                                                       0xffffffff85404a1a
+               |          |          
+               |          |--2.15%--0xffffffff84c01199
+               |          |          
+               |           --2.14%--<fp_columnar::Column>::from_f64_values
+               |          
+               |--22.05%--join_bench::merge_once
+               |          fp_join::merge_dataframes
+               |          fp_join::merge_single_key_inner_unsorted
+               |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          |          
+               |          |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          |          <std::sys::sync::once::futex::Once>::call
+               |          |          |          
+               |          |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          |          
+               |          |           --2.86%--__memcmp_avx2_movbe
+               |          |          
+               |           --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               |                     <std::sys::sync::once::futex::Once>::call
+               |                     |          
+               |                      --4.77%--__memcmp_avx2_movbe
+               |          
+               |--3.98%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+               |          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |          core::ptr::drop_in_place::<fp_columnar::Column>
+               |          |          
+               |           --2.98%--_int_free_chunk
+               |                     systrim.constprop.0
+               |                     __default_morecore@GLIBC_2.2.5
+               |                     __brk
+               |                     0xffffffff84c0012b
+               |                     0xffffffff86220551
+               |                     0xffffffff84f24dda
+               |                     0xffffffff853ab362
+               |                     0xffffffff853ab2c0
+               |                     0xffffffff853cc7f5
+               |                     0xffffffff853cb02c
+               |          
+                --2.98%--join_bench::add_numeric_checksum
+
+    99.81%     0.00%  [.] join_bench::main                                                                                                                                                                                                                                                                                                                                                                -      -            
+            |          
+            |--70.80%--join_bench::build_ordered_utf8_frame
+            |          |          
+            |          |--19.98%--__memmove_avx_unaligned_erms
+            |          |          |          
+            |          |          |--12.06%--0xffffffff84c00bb7
+            |          |          |          |          
+            |          |          |           --12.06%--0xffffffff8622811f
+            |          |          |                     |          
+            |          |          |                     |--9.05%--0xffffffff84feb96b
+            |          |          |                     |          0xffffffff853a5627
+            |          |          |                     |          0xffffffff853a53ad
+            |          |          |                     |          |          
+            |          |          |                     |           --8.05%--0xffffffff853a4de7
+            |          |          |                     |                     |          
+            |          |          |                     |                      --6.42%--0xffffffff853a37ea
+            |          |          |                     |                                |          
+            |          |          |                     |                                 --4.43%--0xffffffff853a33d2
+            |          |          |                     |                                           0xffffffff8541df1b
+            |          |          |                     |                                           0xffffffff8541a9e8
+            |          |          |                     |                                           |          
+            |          |          |                     |                                            --4.43%--0xffffffff853dda90
+            |          |          |                     |                                                      |          
+            |          |          |                     |                                                       --2.02%--0xffffffff853dc6c9
+            |          |          |                     |                                                                 0xffffffff8621b2b7
+            |          |          |                     |          
+            |          |          |                      --2.00%--0xffffffff84feb92c
+            |          |          |          
+            |          |           --3.67%--0xffffffff84c00b90
+            |          |          
+            |          |--17.16%--0xffffffff84c00bb7
+            |          |          |          
+            |          |           --15.30%--0xffffffff8622811f
+            |          |                     |          
+            |          |                      --14.30%--0xffffffff84feb96b
+            |          |                                |          
+            |          |                                 --13.31%--0xffffffff853a5627
+            |          |                                           |          
+            |          |                                            --12.31%--0xffffffff853a53ad
+            |          |                                                      |          
+            |          |                                                       --11.31%--0xffffffff853a4de7
+            |          |                                                                 |          
+            |          |                                                                  --9.40%--0xffffffff853a37ea
+            |          |                                                                            |          
+            |          |                                                                            |--6.57%--0xffffffff853a33d2
+            |          |                                                                            |          0xffffffff8541df1b
+            |          |                                                                            |          0xffffffff8541a9e8
+            |          |                                                                            |          |          
+            |          |                                                                            |           --5.57%--0xffffffff853dda90
+            |          |                                                                            |                     |          
+            |          |                                                                            |                      --3.60%--0xffffffff853dc6c9
+            |          |                                                                            |                                0xffffffff8621b2b7
+            |          |                                                                            |          
+            |          |                                                                             --2.83%--0xffffffff853a3437
+            |          |                                                                                       0xffffffff85404a1a
+            |          |          
+            |          |--2.15%--0xffffffff84c01199
+            |          |          
+            |           --2.14%--<fp_columnar::Column>::from_f64_values
+            |          
+            |--22.05%--join_bench::merge_once
+            |          fp_join::merge_dataframes
+            |          fp_join::merge_single_key_inner_unsorted
+            |          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+            |          |          
+            |          |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+            |          |          <std::sys::sync::once::futex::Once>::call
+            |          |          |          
+            |          |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          |          |          
+            |          |           --2.86%--__memcmp_avx2_movbe
+            |          |          
+            |           --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+            |                     <std::sys::sync::once::futex::Once>::call
+            |                     |          
+            |                      --4.77%--__memcmp_avx2_movbe
+            |          
+            |--3.98%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+            |          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+            |          core::ptr::drop_in_place::<fp_columnar::Column>
+            |          |          
+            |           --2.98%--_int_free_chunk
+            |                     systrim.constprop.0
+            |                     __default_morecore@GLIBC_2.2.5
+            |                     __brk
+            |                     0xffffffff84c0012b
+            |                     0xffffffff86220551
+            |                     0xffffffff84f24dda
+            |                     0xffffffff853ab362
+            |                     0xffffffff853ab2c0
+            |                     0xffffffff853cc7f5
+            |                     0xffffffff853cb02c
+            |          
+             --2.98%--join_bench::add_numeric_checksum
+
+    70.80%    25.24%  [.] join_bench::build_ordered_utf8_frame                                                                                                                                                                                                                                                                                                                                            -      -            
+            |          
+            |--45.55%--join_bench::build_ordered_utf8_frame
+            |          |          
+            |          |--19.98%--__memmove_avx_unaligned_erms
+            |          |          |          
+            |          |          |--12.06%--0xffffffff84c00bb7
+            |          |          |          |          
+            |          |          |           --12.06%--0xffffffff8622811f
+            |          |          |                     |          
+            |          |          |                     |--9.05%--0xffffffff84feb96b
+            |          |          |                     |          0xffffffff853a5627
+            |          |          |                     |          0xffffffff853a53ad
+            |          |          |                     |          |          
+            |          |          |                     |           --8.05%--0xffffffff853a4de7
+            |          |          |                     |                     |          
+            |          |          |                     |                      --6.42%--0xffffffff853a37ea
+            |          |          |                     |                                |          
+            |          |          |                     |                                 --4.43%--0xffffffff853a33d2
+            |          |          |                     |                                           0xffffffff8541df1b
+            |          |          |                     |                                           0xffffffff8541a9e8
+            |          |          |                     |                                           |          
+            |          |          |                     |                                            --4.43%--0xffffffff853dda90
+            |          |          |                     |                                                      |          
+            |          |          |                     |                                                       --2.02%--0xffffffff853dc6c9
+            |          |          |                     |                                                                 0xffffffff8621b2b7
+            |          |          |                     |          
+            |          |          |                      --2.00%--0xffffffff84feb92c
+            |          |          |          
+            |          |           --3.67%--0xffffffff84c00b90
+            |          |          
+            |          |--10.55%--0xffffffff84c00bb7
+            |          |          |          
+            |          |           --8.69%--0xffffffff8622811f
+            |          |                     |          
+            |          |                      --7.70%--0xffffffff84feb96b
+            |          |                                |          
+            |          |                                 --6.71%--0xffffffff853a5627
+            |          |                                           0xffffffff853a53ad
+            |          |                                           0xffffffff853a4de7
+            |          |                                           |          
+            |          |                                            --4.80%--0xffffffff853a37ea
+            |          |                                                      |          
+            |          |                                                       --2.83%--0xffffffff853a3437
+            |          |                                                                 0xffffffff85404a1a
+            |          |          
+            |          |--2.15%--0xffffffff84c01199
+            |          |          
+            |           --2.14%--<fp_columnar::Column>::from_f64_values
+            |          
+             --25.24%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       join_bench::main
+                       join_bench::build_ordered_utf8_frame
+                       |          
+                        --6.61%--0xffffffff84c00bb7
+                                  0xffffffff8622811f
+                                  0xffffffff84feb96b
+                                  0xffffffff853a5627
+                                  |          
+                                   --5.61%--0xffffffff853a53ad
+                                             |          
+                                              --4.60%--0xffffffff853a4de7
+                                                        0xffffffff853a37ea
+                                                        0xffffffff853a33d2
+                                                        0xffffffff8541df1b
+                                                        0xffffffff8541a9e8
+                                                        |          
+                                                         --3.60%--0xffffffff853dda90
+                                                                   0xffffffff853dc6c9
+                                                                   0xffffffff8621b2b7
+
+    29.33%     0.00%  [.] 0xffffffff84c00bb7                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --27.47%--0xffffffff8622811f
+                       |          
+                       |--23.46%--0xffffffff84feb96b
+                       |          |          
+                       |           --22.37%--0xffffffff853a5627
+                       |                     |          
+                       |                      --21.36%--0xffffffff853a53ad
+                       |                                |          
+                       |                                 --19.36%--0xffffffff853a4de7
+                       |                                           |          
+                       |                                            --15.82%--0xffffffff853a37ea
+                       |                                                      |          
+                       |                                                      |--11.00%--0xffffffff853a33d2
+                       |                                                      |          0xffffffff8541df1b
+                       |                                                      |          0xffffffff8541a9e8
+                       |                                                      |          |          
+                       |                                                      |           --10.00%--0xffffffff853dda90
+                       |                                                      |                     |          
+                       |                                                      |                     |--5.63%--0xffffffff853dc6c9
+                       |                                                      |                     |          0xffffffff8621b2b7
+                       |                                                      |                     |          
+                       |                                                      |                      --3.37%--0xffffffff853dc432
+                       |                                                      |                                0xffffffff853da487
+                       |                                                      |                                0xffffffff853d9102
+                       |                                                      |                                0xffffffff853d8f99
+                       |                                                      |                                0xffffffff853d7d2a
+                       |                                                      |          
+                       |                                                       --3.84%--0xffffffff853a3437
+                       |                                                                 |          
+                       |                                                                  --2.83%--0xffffffff85404a1a
+                       |          
+                        --3.00%--0xffffffff84feb92c
+
+    27.47%     0.00%  [.] 0xffffffff8622811f                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--23.46%--0xffffffff84feb96b
+            |          |          
+            |           --22.37%--0xffffffff853a5627
+            |                     |          
+            |                      --21.36%--0xffffffff853a53ad
+            |                                |          
+            |                                 --19.36%--0xffffffff853a4de7
+            |                                           |          
+            |                                            --15.82%--0xffffffff853a37ea
+            |                                                      |          
+            |                                                      |--11.00%--0xffffffff853a33d2
+            |                                                      |          0xffffffff8541df1b
+            |                                                      |          0xffffffff8541a9e8
+            |                                                      |          |          
+            |                                                      |           --10.00%--0xffffffff853dda90
+            |                                                      |                     |          
+            |                                                      |                     |--5.63%--0xffffffff853dc6c9
+            |                                                      |                     |          0xffffffff8621b2b7
+            |                                                      |                     |          
+            |                                                      |                      --3.37%--0xffffffff853dc432
+            |                                                      |                                0xffffffff853da487
+            |                                                      |                                0xffffffff853d9102
+            |                                                      |                                0xffffffff853d8f99
+            |                                                      |                                0xffffffff853d7d2a
+            |                                                      |          
+            |                                                       --3.84%--0xffffffff853a3437
+            |                                                                 |          
+            |                                                                  --2.83%--0xffffffff85404a1a
+            |          
+             --3.00%--0xffffffff84feb92c
+
+    23.46%     0.00%  [.] 0xffffffff84feb96b                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --22.37%--0xffffffff853a5627
+                       |          
+                        --21.36%--0xffffffff853a53ad
+                                  |          
+                                   --19.36%--0xffffffff853a4de7
+                                             |          
+                                              --15.82%--0xffffffff853a37ea
+                                                        |          
+                                                        |--11.00%--0xffffffff853a33d2
+                                                        |          0xffffffff8541df1b
+                                                        |          0xffffffff8541a9e8
+                                                        |          |          
+                                                        |           --10.00%--0xffffffff853dda90
+                                                        |                     |          
+                                                        |                     |--5.63%--0xffffffff853dc6c9
+                                                        |                     |          0xffffffff8621b2b7
+                                                        |                     |          
+                                                        |                      --3.37%--0xffffffff853dc432
+                                                        |                                0xffffffff853da487
+                                                        |                                0xffffffff853d9102
+                                                        |                                0xffffffff853d8f99
+                                                        |                                0xffffffff853d7d2a
+                                                        |          
+                                                         --3.84%--0xffffffff853a3437
+                                                                   |          
+                                                                    --2.83%--0xffffffff85404a1a
+
+    22.37%     1.00%  [.] 0xffffffff853a53ad                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --21.36%--0xffffffff853a53ad
+                       |          
+                        --19.36%--0xffffffff853a4de7
+                                  |          
+                                   --15.82%--0xffffffff853a37ea
+                                             |          
+                                             |--11.00%--0xffffffff853a33d2
+                                             |          0xffffffff8541df1b
+                                             |          0xffffffff8541a9e8
+                                             |          |          
+                                             |           --10.00%--0xffffffff853dda90
+                                             |                     |          
+                                             |                     |--5.63%--0xffffffff853dc6c9
+                                             |                     |          0xffffffff8621b2b7
+                                             |                     |          
+                                             |                      --3.37%--0xffffffff853dc432
+                                             |                                0xffffffff853da487
+                                             |                                0xffffffff853d9102
+                                             |                                0xffffffff853d8f99
+                                             |                                0xffffffff853d7d2a
+                                             |          
+                                              --3.84%--0xffffffff853a3437
+                                                        |          
+                                                         --2.83%--0xffffffff85404a1a
+
+    22.37%     0.00%  [.] 0xffffffff853a5627                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --21.36%--0xffffffff853a53ad
+                       |          
+                        --19.36%--0xffffffff853a4de7
+                                  |          
+                                   --15.82%--0xffffffff853a37ea
+                                             |          
+                                             |--11.00%--0xffffffff853a33d2
+                                             |          0xffffffff8541df1b
+                                             |          0xffffffff8541a9e8
+                                             |          |          
+                                             |           --10.00%--0xffffffff853dda90
+                                             |                     |          
+                                             |                     |--5.63%--0xffffffff853dc6c9
+                                             |                     |          0xffffffff8621b2b7
+                                             |                     |          
+                                             |                      --3.37%--0xffffffff853dc432
+                                             |                                0xffffffff853da487
+                                             |                                0xffffffff853d9102
+                                             |                                0xffffffff853d8f99
+                                             |                                0xffffffff853d7d2a
+                                             |          
+                                              --3.84%--0xffffffff853a3437
+                                                        |          
+                                                         --2.83%--0xffffffff85404a1a
+
+    22.05%     0.00%  [.] join_bench::merge_once                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |
+            ---fp_join::merge_dataframes
+               fp_join::merge_single_key_inner_unsorted
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          
+               |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          <std::sys::sync::once::futex::Once>::call
+               |          |          
+               |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          
+               |           --2.86%--__memcmp_avx2_movbe
+               |          
+                --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+                          <std::sys::sync::once::futex::Once>::call
+                          |          
+                           --4.77%--__memcmp_avx2_movbe
+
+    22.05%     0.00%  [.] fp_join::merge_dataframes                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---fp_join::merge_single_key_inner_unsorted
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          
+               |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          <std::sys::sync::once::futex::Once>::call
+               |          |          
+               |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          
+               |           --2.86%--__memcmp_avx2_movbe
+               |          
+                --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+                          <std::sys::sync::once::futex::Once>::call
+                          |          
+                           --4.77%--__memcmp_avx2_movbe
+
+    22.05%     0.00%  [.] fp_join::merge_single_key_inner_unsorted                                                                                                                                                                                                                                                                                                                                        -      -            
+            |
+            ---<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          
+               |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               |          <std::sys::sync::once::futex::Once>::call
+               |          |          
+               |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          |          
+               |           --2.86%--__memcmp_avx2_movbe
+               |          
+                --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+                          <std::sys::sync::once::futex::Once>::call
+                          |          
+                           --4.77%--__memcmp_avx2_movbe
+
+    22.05%     0.00%  [.] <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous                                                                                                                                                                                                                                                                                                                    -      -            
+            |          
+            |--15.32%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+            |          <std::sys::sync::once::futex::Once>::call
+            |          |          
+            |          |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          |          
+            |           --2.86%--__memcmp_avx2_movbe
+            |          
+             --5.74%--<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+                       <std::sys::sync::once::futex::Once>::call
+                       |          
+                        --4.77%--__memcmp_avx2_movbe
+
+    22.05%     0.00%  [.] <std::sys::sync::once::futex::Once>::call                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+            |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          
+             --7.63%--__memcmp_avx2_movbe
+
+    19.98%     5.06%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                                                                                    -      -            
+            |          
+            |--14.92%--__memmove_avx_unaligned_erms
+            |          |          
+            |          |--8.12%--0xffffffff84c00bb7
+            |          |          |          
+            |          |           --8.12%--0xffffffff8622811f
+            |          |                     |          
+            |          |                     |--5.11%--0xffffffff84feb96b
+            |          |                     |          0xffffffff853a5627
+            |          |                     |          0xffffffff853a53ad
+            |          |                     |          0xffffffff853a4de7
+            |          |                     |          |          
+            |          |                     |           --3.48%--0xffffffff853a37ea
+            |          |                     |          
+            |          |                      --2.00%--0xffffffff84feb92c
+            |          |          
+            |           --3.67%--0xffffffff84c00b90
+            |          
+             --5.06%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       join_bench::main
+                       join_bench::build_ordered_utf8_frame
+                       __memmove_avx_unaligned_erms
+                       |          
+                        --3.94%--0xffffffff84c00bb7
+                                  0xffffffff8622811f
+                                  0xffffffff84feb96b
+                                  0xffffffff853a5627
+                                  0xffffffff853a53ad
+                                  |          
+                                   --2.94%--0xffffffff853a4de7
+                                             0xffffffff853a37ea
+                                             0xffffffff853a33d2
+                                             0xffffffff8541df1b
+                                             0xffffffff8541a9e8
+                                             0xffffffff853dda90
+
+    19.36%     0.00%  [.] 0xffffffff853a4de7                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --15.82%--0xffffffff853a37ea
+                       |          
+                       |--11.00%--0xffffffff853a33d2
+                       |          0xffffffff8541df1b
+                       |          0xffffffff8541a9e8
+                       |          |          
+                       |           --10.00%--0xffffffff853dda90
+                       |                     |          
+                       |                     |--5.63%--0xffffffff853dc6c9
+                       |                     |          0xffffffff8621b2b7
+                       |                     |          
+                       |                      --3.37%--0xffffffff853dc432
+                       |                                0xffffffff853da487
+                       |                                0xffffffff853d9102
+                       |                                0xffffffff853d8f99
+                       |                                0xffffffff853d7d2a
+                       |          
+                        --3.84%--0xffffffff853a3437
+                                  |          
+                                   --2.83%--0xffffffff85404a1a
+
+    15.82%     0.00%  [.] 0xffffffff853a37ea                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--11.00%--0xffffffff853a33d2
+            |          0xffffffff8541df1b
+            |          0xffffffff8541a9e8
+            |          |          
+            |           --10.00%--0xffffffff853dda90
+            |                     |          
+            |                     |--5.63%--0xffffffff853dc6c9
+            |                     |          0xffffffff8621b2b7
+            |                     |          
+            |                      --3.37%--0xffffffff853dc432
+            |                                0xffffffff853da487
+            |                                0xffffffff853d9102
+            |                                0xffffffff853d8f99
+            |                                0xffffffff853d7d2a
+            |          
+             --3.84%--0xffffffff853a3437
+                       |          
+                        --2.83%--0xffffffff85404a1a
+
+    15.32%     0.00%  [.] <std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>                                                                      -      -            
+            |
+            ---<std::sys::sync::once::futex::Once>::call
+               |          
+               |--12.46%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          
+                --2.86%--__memcmp_avx2_movbe
+
+    14.32%    13.46%  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -            
+            |          
+             --13.46%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       join_bench::main
+                       join_bench::merge_once
+                       fp_join::merge_dataframes
+                       fp_join::merge_single_key_inner_unsorted
+                       <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                       <std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                       <std::sys::sync::once::futex::Once>::call
+                       |          
+                        --11.60%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    11.00%     0.00%  [.] 0xffffffff853a33d2                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8541df1b
+               0xffffffff8541a9e8
+               |          
+                --10.00%--0xffffffff853dda90
+                          |          
+                          |--5.63%--0xffffffff853dc6c9
+                          |          0xffffffff8621b2b7
+                          |          
+                           --3.37%--0xffffffff853dc432
+                                     0xffffffff853da487
+                                     0xffffffff853d9102
+                                     0xffffffff853d8f99
+                                     0xffffffff853d7d2a
+
+    11.00%     0.00%  [.] 0xffffffff8541df1b                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8541a9e8
+               |          
+                --10.00%--0xffffffff853dda90
+                          |          
+                          |--5.63%--0xffffffff853dc6c9
+                          |          0xffffffff8621b2b7
+                          |          
+                           --3.37%--0xffffffff853dc432
+                                     0xffffffff853da487
+                                     0xffffffff853d9102
+                                     0xffffffff853d8f99
+                                     0xffffffff853d7d2a
+
+    11.00%     0.00%  [.] 0xffffffff8541a9e8                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --10.00%--0xffffffff853dda90
+                       |          
+                       |--5.63%--0xffffffff853dc6c9
+                       |          0xffffffff8621b2b7
+                       |          
+                        --3.37%--0xffffffff853dc432
+                                  0xffffffff853da487
+                                  0xffffffff853d9102
+                                  0xffffffff853d8f99
+                                  0xffffffff853d7d2a
+
+    10.00%     0.00%  [.] 0xffffffff853dda90                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--5.63%--0xffffffff853dc6c9
+            |          0xffffffff8621b2b7
+            |          
+             --3.37%--0xffffffff853dc432
+                       0xffffffff853da487
+                       0xffffffff853d9102
+                       0xffffffff853d8f99
+                       0xffffffff853d7d2a
+
+     9.67%     4.04%  [.] 0xffffffff8621b2b7                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--5.63%--0xffffffff8621b2b7
+            |          
+             --4.04%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       join_bench::main
+                       join_bench::build_ordered_utf8_frame
+
+     8.48%     1.86%  [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                                                                                                                             -      -            
+            |          
+             --6.62%--__memcmp_avx2_movbe
+
+     7.05%     0.00%  [k] 0xffffffff84c0012b                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --6.99%--0xffffffff86220551
+                       |          
+                       |--3.99%--0xffffffff84f24dad
+                       |          0xffffffff853aa42b
+                       |          0xffffffff853ceac8
+                       |          0xffffffff853cc961
+                       |          0xffffffff853cc7f5
+                       |          0xffffffff853cb02c
+                       |          |          
+                       |           --3.00%--0xffffffff853c9794
+                       |                     0xffffffff853ae78e
+                       |                     0xffffffff853adcca
+                       |                     0xffffffff853fc79e
+                       |          
+                        --2.98%--0xffffffff84f24dda
+                                  0xffffffff853ab362
+                                  0xffffffff853ab2c0
+                                  0xffffffff853cc7f5
+                                  0xffffffff853cb02c
+
+     6.99%     0.00%  [k] 0xffffffff86220551                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--3.99%--0xffffffff84f24dad
+            |          0xffffffff853aa42b
+            |          0xffffffff853ceac8
+            |          0xffffffff853cc961
+            |          0xffffffff853cc7f5
+            |          0xffffffff853cb02c
+            |          |          
+            |           --3.00%--0xffffffff853c9794
+            |                     0xffffffff853ae78e
+            |                     0xffffffff853adcca
+            |                     0xffffffff853fc79e
+            |          
+             --2.98%--0xffffffff84f24dda
+                       0xffffffff853ab362
+                       0xffffffff853ab2c0
+                       0xffffffff853cc7f5
+                       0xffffffff853cb02c
+
+     6.97%     0.00%  [.] 0xffffffff853cc7f5                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853cb02c
+               |          
+               |--3.99%--0xffffffff853c9794
+               |          |          
+               |           --3.00%--0xffffffff853ae78e
+               |                     0xffffffff853adcca
+               |                     0xffffffff853fc79e
+               |          
+                --2.98%--0xffffffff853c9742
+                          0xffffffff8539cea1
+                          0xffffffff8539cd76
+                          0xffffffff8539cb30
+                          0xffffffff8539c594
+                          0xffffffff8539c06e
+
+     6.97%     0.00%  [.] 0xffffffff853cb02c                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--3.99%--0xffffffff853c9794
+            |          |          
+            |           --3.00%--0xffffffff853ae78e
+            |                     0xffffffff853adcca
+            |                     0xffffffff853fc79e
+            |          
+             --2.98%--0xffffffff853c9742
+                       0xffffffff8539cea1
+                       0xffffffff8539cd76
+                       0xffffffff8539cb30
+                       0xffffffff8539c594
+                       0xffffffff8539c06e
+
+     5.74%     5.74%  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}                                                                                                       -      -            
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               join_bench::merge_once
+               fp_join::merge_dataframes
+               fp_join::merge_single_key_inner_unsorted
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               <std::sys::sync::once::futex::Once>::call
+               |          
+                --4.77%--__memcmp_avx2_movbe
+
+     5.74%     0.00%  [.] <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>                                                                                                                                                                            -      -            
+            |
+            ---<std::sys::sync::once::futex::Once>::call
+               |          
+                --4.77%--__memcmp_avx2_movbe
+
+     5.63%     0.00%  [.] 0xffffffff853dc6c9                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8621b2b7
+
+     5.57%     0.00%  [.] 0xffffffff84c00b90                                                                                                                                                                                                                                                                                                                                                              -      -            
+     5.37%     1.99%  [.] 0xffffffff853dc432                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --3.37%--0xffffffff853dc432
+                       0xffffffff853da487
+                       0xffffffff853d9102
+                       0xffffffff853d8f99
+                       0xffffffff853d7d2a
+
+     3.99%     0.00%  [.] __munmap                                                                                                                                                                                                                                                                                                                                                                        -      -            
+            |
+            ---0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dad
+               0xffffffff853aa42b
+               0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               |          
+                --3.00%--0xffffffff853c9794
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc79e
+
+     3.99%     0.00%  [.] 0xffffffff84f24dad                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853aa42b
+               0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               |          
+                --3.00%--0xffffffff853c9794
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc79e
+
+     3.99%     0.00%  [.] 0xffffffff853aa42b                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               |          
+                --3.00%--0xffffffff853c9794
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc79e
+
+     3.99%     0.00%  [.] 0xffffffff853ceac8                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               |          
+                --3.00%--0xffffffff853c9794
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc79e
+
+     3.99%     0.00%  [.] 0xffffffff853cc961                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853cc7f5
+               0xffffffff853cb02c
+               |          
+                --3.00%--0xffffffff853c9794
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc79e
+
+     3.99%     0.00%  [.] 0xffffffff853c9794                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --3.00%--0xffffffff853ae78e
+                       0xffffffff853adcca
+                       0xffffffff853fc79e
+
+     3.98%     0.00%  [.] core::ptr::drop_in_place::<fp_frame::DataFrame>                                                                                                                                                                                                                                                                                                                                 -      -            
+            |
+            ---core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               |          
+                --2.98%--_int_free_chunk
+                          systrim.constprop.0
+                          __default_morecore@GLIBC_2.2.5
+                          __brk
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f24dda
+                          0xffffffff853ab362
+                          0xffffffff853ab2c0
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+
+     3.98%     0.00%  [.] core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>                                                                                                                                                                                                                                                                -      -            
+            |
+            ---core::ptr::drop_in_place::<fp_columnar::Column>
+               |          
+                --2.98%--_int_free_chunk
+                          systrim.constprop.0
+                          __default_morecore@GLIBC_2.2.5
+                          __brk
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f24dda
+                          0xffffffff853ab362
+                          0xffffffff853ab2c0
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+
+     3.98%     0.00%  [.] core::ptr::drop_in_place::<fp_columnar::Column>                                                                                                                                                                                                                                                                                                                                 -      -            
+            |          
+             --2.98%--_int_free_chunk
+                       systrim.constprop.0
+                       __default_morecore@GLIBC_2.2.5
+                       __brk
+                       0xffffffff84c0012b
+                       0xffffffff86220551
+                       0xffffffff84f24dda
+                       0xffffffff853ab362
+                       0xffffffff853ab2c0
+                       0xffffffff853cc7f5
+                       0xffffffff853cb02c
+
+     3.90%     3.90%  [k] 0xffffffff84c01192                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               join_bench::build_ordered_utf8_frame
+
+     3.84%     0.00%  [.] 0xffffffff853a3437                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --2.83%--0xffffffff85404a1a
+
+     3.37%     0.97%  [k] 0xffffffff853d7d2a                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --2.40%--0xffffffff853d7d2a
+
+     3.37%     0.00%  [.] 0xffffffff853da487                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853d9102
+               0xffffffff853d8f99
+               0xffffffff853d7d2a
+
+     3.37%     0.00%  [.] 0xffffffff853d9102                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853d8f99
+               0xffffffff853d7d2a
+
+     3.37%     0.00%  [.] 0xffffffff853d8f99                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853d7d2a
+
+     3.29%     0.00%  [.] 0xffffffff84c01199                                                                                                                                                                                                                                                                                                                                                              -      -            
+     3.00%     0.00%  [.] 0xffffffff84feb92c                                                                                                                                                                                                                                                                                                                                                              -      -            
+     3.00%     0.00%  [.] 0xffffffff853ae78e                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853adcca
+               0xffffffff853fc79e
+
+     3.00%     0.00%  [.] 0xffffffff853adcca                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853fc79e
+
+     3.00%     0.00%  [.] 0xffffffff853fc79e                                                                                                                                                                                                                                                                                                                                                              -      -            
+     2.98%     2.98%  [.] join_bench::add_numeric_checksum                                                                                                                                                                                                                                                                                                                                                -      -            
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               join_bench::add_numeric_checksum
+
+     2.98%     0.00%  [.] 0xffffffff853c9742                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+
+     2.98%     0.00%  [.] 0xffffffff8539cea1                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+
+     2.98%     0.00%  [.] 0xffffffff8539cd76                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+
+     2.98%     0.00%  [.] 0xffffffff8539cb30                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8539c594
+               0xffffffff8539c06e
+
+     2.98%     0.00%  [.] 0xffffffff8539c594                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8539c06e
+
+     2.98%     0.00%  [.] 0xffffffff8539c06e                                                                                                                                                                                                                                                                                                                                                              -      -            
+     2.98%     0.00%  [.] _int_free_chunk                                                                                                                                                                                                                                                                                                                                                                 -      -            
+            |
+            ---systrim.constprop.0
+               __default_morecore@GLIBC_2.2.5
+               __brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     2.98%     0.00%  [.] systrim.constprop.0                                                                                                                                                                                                                                                                                                                                                             -      -            
+            |
+            ---__default_morecore@GLIBC_2.2.5
+               __brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     2.98%     0.00%  [.] __default_morecore@GLIBC_2.2.5                                                                                                                                                                                                                                                                                                                                                  -      -            
+            |
+            ---__brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     2.98%     0.00%  [.] __brk                                                                                                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     2.98%     0.00%  [.] 0xffffffff84f24dda                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     2.98%     0.00%  [.] 0xffffffff853ab362                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     2.98%     0.00%  [.] 0xffffffff853ab2c0                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     2.83%     0.00%  [.] 0xffffffff85404a1a                                                                                                                                                                                                                                                                                                                                                              -      -            
+     2.82%     2.82%  [k] 0xffffffff84d04109                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               join_bench::build_ordered_utf8_frame
+
+     2.40%     2.40%  [k] 0xffffffff853d7d8d                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               join_bench::build_ordered_utf8_frame
+
+     2.14%     1.14%  [.] <fp_columnar::Column>::from_f64_values                                                                                                                                                                                                                                                                                                                                          -      -            
+     2.08%     0.67%  [.] 0xffffffff853a3963                                                                                                                                                                                                                                                                                                                                                              -      -            
+     2.03%     1.03%  [.] 0xffffffff853a4c5e                                                                                                                                                                                                                                                                                                                                                              -      -            
+     2.01%     0.99%  [k] 0xffffffff85452e38                                                                                                                                                                                                                                                                                                                                                              -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

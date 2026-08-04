@@ -7,8 +7,9 @@
 //! per label — O(n·k) for high-cardinality categoricals. A seen-set makes it
 //! O(n+k). First-seen category order and dedup are preserved exactly.
 
-use fp_index::CategoricalIndex;
 use std::time::Instant;
+
+use fp_index::CategoricalIndex;
 
 fn ci(labels: &[&str], ordered: bool) -> CategoricalIndex {
     CategoricalIndex::from_values(labels.iter().map(|s| s.to_string()).collect(), ordered)

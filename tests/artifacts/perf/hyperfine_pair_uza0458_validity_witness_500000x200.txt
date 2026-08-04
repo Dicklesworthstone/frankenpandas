@@ -1,0 +1,14 @@
+  [2m2026-06-09T19:30:33.154194Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 2 --runs 6 --export-json tests/artifacts/perf/hyperfine_pair_uza0458_validity_witness_500000x200.json '/data/projects/.scratch/cargo-target-orangepeak-uza0458-base/release-perf/examples/perf_profile outer_join 500000 200' '/data/projects/.scratch/cargo-target-orangepeak-uza0458-after/release-perf/examples/perf_profile outer_join 500000 200'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza0458-base/release-perf/examples/perf_profile outer_join 500000 200
+  Time (mean ± σ):      2.379 s ±  0.046 s    [User: 2.292 s, System: 0.083 s]
+  Range (min … max):    2.333 s …  2.440 s    6 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-uza0458-after/release-perf/examples/perf_profile outer_join 500000 200
+  Time (mean ± σ):      2.113 s ±  0.116 s    [User: 2.025 s, System: 0.084 s]
+  Range (min … max):    1.942 s …  2.248 s    6 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-uza0458-after/release-perf/examples/perf_profile outer_join 500000 200 ran
+    1.13 ± 0.07 times faster than /data/projects/.scratch/cargo-target-orangepeak-uza0458-base/release-perf/examples/perf_profile outer_join 500000 200

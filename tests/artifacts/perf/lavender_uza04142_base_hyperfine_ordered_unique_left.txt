@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-uza04142-joinlocal/release-perf/join-bench --join-type left --ordered-unique --rows 100000 --right-rows 100000 --iters 200 --warmup 2
+  Time (mean ± σ):     228.6 ms ±   9.4 ms    [User: 214.7 ms, System: 13.7 ms]
+  Range (min … max):   205.3 ms … 240.2 ms    10 runs
+ 

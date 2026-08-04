@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza0481-after/release-perf/high_ram_perf_baseline --profile uza0481-after-paired-rev --rows 100000 --iters 20 --warmup 3 --frame-cols 10 --key-cardinality 100000
+  Time (mean ± σ):      2.362 s ±  0.075 s    [User: 1.736 s, System: 0.645 s]
+  Range (min … max):    2.246 s …  2.478 s    10 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-uza0481-base/release-perf/high_ram_perf_baseline --profile uza0481-base-paired-rev --rows 100000 --iters 20 --warmup 3 --frame-cols 10 --key-cardinality 100000
+  Time (mean ± σ):      3.136 s ±  0.106 s    [User: 2.478 s, System: 0.674 s]
+  Range (min … max):    2.996 s …  3.301 s    10 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-uza0481-after/release-perf/high_ram_perf_baseline --profile uza0481-after-paired-rev --rows 100000 --iters 20 --warmup 3 --frame-cols 10 --key-cardinality 100000 ran
+    1.33 ± 0.06 times faster than /data/projects/.scratch/cargo-target-orangepeak-uza0481-base/release-perf/high_ram_perf_baseline --profile uza0481-base-paired-rev --rows 100000 --iters 20 --warmup 3 --frame-cols 10 --key-cardinality 100000

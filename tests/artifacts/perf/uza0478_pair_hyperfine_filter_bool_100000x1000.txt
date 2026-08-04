@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-icyvalley-uza0478-base/release-perf/examples/perf_profile filter_bool 100000 1000
+  Time (mean ± σ):      45.9 ms ±   2.5 ms    [User: 20.1 ms, System: 25.5 ms]
+  Range (min … max):    41.6 ms …  50.6 ms    30 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-icyvalley-uza0478-clean-candidate/release-perf/examples/perf_profile filter_bool 100000 1000
+  Time (mean ± σ):      43.8 ms ±   3.7 ms    [User: 18.3 ms, System: 25.2 ms]
+  Range (min … max):    37.7 ms …  51.8 ms    30 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-icyvalley-uza0478-clean-candidate/release-perf/examples/perf_profile filter_bool 100000 1000 ran
+    1.05 ± 0.11 times faster than /data/projects/.scratch/cargo-target-icyvalley-uza0478-base/release-perf/examples/perf_profile filter_bool 100000 1000

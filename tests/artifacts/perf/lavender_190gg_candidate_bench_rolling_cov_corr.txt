@@ -1,0 +1,3 @@
+n=100000 window=100
+rolling cov  OLD    14.674 ms -> NEW    26.117 ms = 0.56x
+rolling corr OLD    15.395 ms -> NEW    26.130 ms = 0.59x

@@ -1,0 +1,1476 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 231  of event 'cycles:P'
+# Event count (approx.): 599107981
+#
+# Overhead  Command       Shared Object         Symbol
+# ........  ............  ....................  .....................................................
+#
+    74.38%  perf_profile  perf_profile          [.] <fp_frame::DataFrame>::loc_bool
+            |
+            |--37.46%--<fp_frame::DataFrame>::loc_bool
+            |          |
+            |          |--6.73%--push<i64, alloc::alloc::Global> (inlined)
+            |          |          take_rows_by_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          perf_profile::main
+            |          |          perf_profile::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main_impl (inlined)
+            |          |          _start
+            |          |
+            |          |--6.11%--spec_next<usize> (inlined)
+            |          |          next<usize> (inlined)
+            |          |          take_rows_by_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          perf_profile::main
+            |          |          perf_profile::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main_impl (inlined)
+            |          |          _start
+            |          |
+            |          |--5.69%--take_rows_by_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          |
+            |          |          |--4.92%--perf_profile::main
+            |          |          |          perf_profile::main
+            |          |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |          |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |          |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |          |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |          |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          |          std::rt::lang_start_internal
+            |          |          |          main
+            |          |          |          __libc_start_call_main
+            |          |          |          __libc_start_main_impl (inlined)
+            |          |          |          _start
+            |          |          |
+            |          |           --0.77%--take_rows_by_affine_certificate_unchecked (inlined)
+            |          |                     loc_bool (inlined)
+            |          |                     perf_profile::main
+            |          |                     perf_profile::main
+            |          |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |                     __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |                     std::rt::lang_start::<()>::{closure#0}
+            |          |                     <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |                     std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |                     std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |                     std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |                     std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |                     std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |                     std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |                     std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |                     std::rt::lang_start_internal
+            |          |                     main
+            |          |                     __libc_start_call_main
+            |          |                     __libc_start_main_impl (inlined)
+            |          |                     _start
+            |          |
+            |          |--5.07%--deref<i64, alloc::alloc::Global> (inlined)
+            |          |          index<i64, usize, alloc::alloc::Global> (inlined)
+            |          |          take_rows_by_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          perf_profile::main
+            |          |          perf_profile::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main_impl (inlined)
+            |          |          _start
+            |          |
+            |          |--4.76%--boolean_mask_affine_certificate (inlined)
+            |          |          loc_bool (inlined)
+            |          |          perf_profile::main
+            |          |          perf_profile::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main_impl (inlined)
+            |          |          _start
+            |          |
+            |          |--3.65%--ptr<alloc::alloc::Global, i64> (inlined)
+            |          |          ptr<i64, alloc::alloc::Global> (inlined)
+            |          |          |
+            |          |          |--2.15%--as_ptr<i64, alloc::alloc::Global> (inlined)
+            |          |          |          as_slice<i64, alloc::alloc::Global> (inlined)
+            |          |          |          deref<i64, alloc::alloc::Global> (inlined)
+            |          |          |          index<i64, usize, alloc::alloc::Global> (inlined)
+            |          |          |          take_rows_by_affine_certificate_unchecked (inlined)
+            |          |          |          loc_bool (inlined)
+            |          |          |          perf_profile::main
+            |          |          |          perf_profile::main
+            |          |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |          |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |          |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |          |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |          |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          |          std::rt::lang_start_internal
+            |          |          |          main
+            |          |          |          __libc_start_call_main
+            |          |          |          __libc_start_main_impl (inlined)
+            |          |          |          _start
+            |          |          |
+            |          |           --1.51%--as_mut_ptr<i64, alloc::alloc::Global> (inlined)
+            |          |                     push_mut<i64, alloc::alloc::Global> (inlined)
+            |          |                     push<i64, alloc::alloc::Global> (inlined)
+            |          |                     take_rows_by_affine_certificate_unchecked (inlined)
+            |          |                     loc_bool (inlined)
+            |          |                     perf_profile::main
+            |          |                     perf_profile::main
+            |          |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |                     __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |                     std::rt::lang_start::<()>::{closure#0}
+            |          |                     <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |                     std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |                     std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |                     std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |                     std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |                     std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |                     std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |                     std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |                     std::rt::lang_start_internal
+            |          |                     main
+            |          |                     __libc_start_call_main
+            |          |                     __libc_start_main_impl (inlined)
+            |          |                     _start
+            |          |
+            |          |--2.62%--push_mut<i64, alloc::alloc::Global> (inlined)
+            |          |          push<i64, alloc::alloc::Global> (inlined)
+            |          |          take_rows_by_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          perf_profile::main
+            |          |          perf_profile::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main_impl (inlined)
+            |          |          _start
+            |          |
+            |          |--1.40%--index<i64, usize> (inlined)
+            |          |          index<i64, usize, alloc::alloc::Global> (inlined)
+            |          |          take_rows_by_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          perf_profile::main
+            |          |          perf_profile::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main_impl (inlined)
+            |          |          _start
+            |          |
+            |          |--0.73%--loc_bool (inlined)
+            |          |          perf_profile::main
+            |          |          perf_profile::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main_impl (inlined)
+            |          |          _start
+            |          |
+            |           --0.71%--next<bool> (inlined)
+            |                     next<core::slice::iter::ChunksExact<bool>> (inlined)
+            |                     boolean_mask_affine_certificate (inlined)
+            |                     loc_bool (inlined)
+            |                     perf_profile::main
+            |                     perf_profile::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |                     __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |                     std::rt::lang_start::<()>::{closure#0}
+            |                     <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |                     std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |                     std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |                     std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |                     std::rt::lang_start_internal::{closure#0} (inlined)
+            |                     std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |                     std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |                     std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main_impl (inlined)
+            |                     _start
+            |
+            |--19.32%--boolean_mask_affine_certificate (inlined)
+            |          loc_bool (inlined)
+            |          perf_profile::main
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main_impl (inlined)
+            |          _start
+            |
+            |--10.38%--push (inlined)
+            |          boolean_mask_affine_certificate (inlined)
+            |          loc_bool (inlined)
+            |          perf_profile::main
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main_impl (inlined)
+            |          _start
+            |
+            |--3.96%--take_rows_by_affine_certificate_unchecked (inlined)
+            |          loc_bool (inlined)
+            |          perf_profile::main
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main_impl (inlined)
+            |          _start
+            |
+            |--1.97%--split_at_checked<bool> (inlined)
+            |          next<bool> (inlined)
+            |          next<core::slice::iter::ChunksExact<bool>> (inlined)
+            |          boolean_mask_affine_certificate (inlined)
+            |          loc_bool (inlined)
+            |          perf_profile::main
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main_impl (inlined)
+            |          _start
+            |
+             --1.28%--push_mut<i64, alloc::alloc::Global> (inlined)
+                       push<i64, alloc::alloc::Global> (inlined)
+                       take_rows_by_affine_certificate_unchecked (inlined)
+                       loc_bool (inlined)
+                       perf_profile::main
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       __rust_begin_short_backtrace<fn(), ()> (inlined)
+                       std::rt::lang_start::<()>::{closure#0}
+                       <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+                       std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                       std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+                       std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                       std::rt::lang_start_internal::{closure#0} (inlined)
+                       std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                       std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+                       std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main_impl (inlined)
+                       _start
+
+     2.95%  perf_profile  libc.so.6             [.] __memmove_avx_unaligned_erms
+            |
+            |--1.53%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |
+            |--0.69%--0xffffffff85458fe8
+            |          0xffffffff853a33ec
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |
+             --0.68%--0xffffffff853a3437
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+
+     1.65%  perf_profile  perf_profile          [.] <fp_columnar::Column>::new
+            |
+            ---<fp_columnar::Column>::new
+               |
+               |--1.00%--{closure#5} (inlined)
+               |          {closure#0}<fp_types::Scalar, fp_types::Scalar, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>, fp_columnar::{impl#19}::new::{closure_env#5}, alloc::vec::in_place_collect::write_in_place_with_drop::{closure_env#0}<fp_types::Scalar>> (inlined)
+               |          try_fold<fp_types::Scalar, alloc::alloc::Global, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, core::iter::adapters::map::map_try_fold::{closure_env#0}<fp_types::Scalar, fp_types::Scalar, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>, fp_columnar::{impl#19}::new::{closure_env#5}, alloc::vec::in_place_collect::write_in_place_with_drop::{closure_env#0}<fp_types::Scalar>>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>> (inlined)
+               |          try_fold<fp_types::Scalar, alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, alloc::vec::in_place_collect::write_in_place_with_drop::{closure_env#0}<fp_types::Scalar>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>> (inlined)
+               |          collect_in_place<fp_types::Scalar, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>> (inlined)
+               |          from_iter_in_place<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>, fp_types::Scalar> (inlined)
+               |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>> (inlined)
+               |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>> (inlined)
+               |          collect<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               |          new (inlined)
+               |          <fp_columnar::Column>::from_values
+               |          perf_profile::build_numeric_frame
+               |          perf_profile::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+               |          std::rt::lang_start::<()>::{closure#0}
+               |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::rt::lang_start_internal::{closure#0} (inlined)
+               |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main_impl (inlined)
+               |          _start
+               |
+                --0.58%--read<fp_types::Scalar> (inlined)
+                          try_fold<fp_types::Scalar, alloc::alloc::Global, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, core::iter::adapters::map::map_try_fold::{closure_env#0}<fp_types::Scalar, fp_types::Scalar, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>, fp_columnar::{impl#19}::new::{closure_env#5}, alloc::vec::in_place_collect::write_in_place_with_drop::{closure_env#0}<fp_types::Scalar>>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>> (inlined)
+                          try_fold<fp_types::Scalar, alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, alloc::vec::in_place_collect::write_in_place_with_drop::{closure_env#0}<fp_types::Scalar>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>> (inlined)
+                          collect_in_place<fp_types::Scalar, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>> (inlined)
+                          from_iter_in_place<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>, fp_types::Scalar> (inlined)
+                          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>> (inlined)
+                          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>> (inlined)
+                          collect<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                          new (inlined)
+                          <fp_columnar::Column>::from_values
+                          perf_profile::build_numeric_frame
+                          perf_profile::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                          __rust_begin_short_backtrace<fn(), ()> (inlined)
+                          std::rt::lang_start::<()>::{closure#0}
+                          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+                          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+                          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::rt::lang_start_internal::{closure#0} (inlined)
+                          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+                          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main_impl (inlined)
+                          _start
+
+     1.35%  perf_profile  [unknown]             [k] 0xffffffff85458fa4
+            |
+            |--0.78%--<fp_columnar::ColumnData>::from_scalars
+            |          fold<f64, core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}>>>> (inlined)
+            |          for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}>>> (inlined)
+            |          extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}>> (inlined)
+            |          spec_extend<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}>, alloc::alloc::Global> (inlined)
+            |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}>> (inlined)
+            |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}>> (inlined)
+            |          from_iter<f64, core::iter::adapters::map::Map<core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}>> (inlined)
+            |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<fp_types::Scalar>, fp_columnar::{impl#6}::from_scalars::{closure_env#0}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+            |          from_scalars (inlined)
+            |          <fp_columnar::Column>::new
+            |          new (inlined)
+            |          <fp_columnar::Column>::from_values
+            |          perf_profile::build_numeric_frame
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main_impl (inlined)
+            |          _start
+            |
+             --0.56%--0xffffffff84c01199
+
+     1.20%  perf_profile  [unknown]             [k] 0xffffffff84c01192
+            |
+            |--0.64%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memcpy_avx_unaligned_erms (inlined)
+            |          <fp_columnar::ColumnData>::from_scalars
+            |          from<f64, alloc::alloc::Global> (inlined)
+            |          from_scalars (inlined)
+            |          <fp_columnar::Column>::new
+            |          new (inlined)
+            |          <fp_columnar::Column>::from_values
+            |          perf_profile::build_numeric_frame
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          __rust_begin_short_backtrace<fn(), ()> (inlined)
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main_impl (inlined)
+            |          _start
+            |
+             --0.55%--0xffffffff8541de28
+                       0xffffffff8541deff
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memcpy_avx_unaligned_erms (inlined)
+                       <fp_columnar::ColumnData>::from_scalars
+                       from<f64, alloc::alloc::Global> (inlined)
+                       from_scalars (inlined)
+                       <fp_columnar::Column>::new
+                       new (inlined)
+                       <fp_columnar::Column>::from_values
+                       perf_profile::build_numeric_frame
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       __rust_begin_short_backtrace<fn(), ()> (inlined)
+                       std::rt::lang_start::<()>::{closure#0}
+                       <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+                       std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                       std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+                       std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                       std::rt::lang_start_internal::{closure#0} (inlined)
+                       std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                       std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+                       std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main_impl (inlined)
+                       _start
+
+     0.92%  perf_profile  [unknown]             [k] 0xffffffff853bb5d6
+            |
+            ---0xffffffff84feb7e4
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.91%  perf_profile  perf_profile          [.] <fp_columnar::ColumnData>::from_scalars
+            |
+            ---0xffffffff853a4c38
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+
+     0.79%  perf_profile  libc.so.6             [.] _int_malloc
+            |
+            ---_int_malloc
+               <fp_frame::DataFrame>::new_with_axes
+               from_iter<alloc::string::String, core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, fp_frame::{impl#64}::normalize_column_order::{closure_env#0}>>> (inlined)
+               from_iter<alloc::string::String, core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, fp_frame::{impl#64}::normalize_column_order::{closure_env#0}>>> (inlined)
+               collect<core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, fp_frame::{impl#64}::normalize_column_order::{closure_env#0}>>, alloc::vec::Vec<alloc::string::String, alloc::alloc::Global>> (inlined)
+               normalize_column_order (inlined)
+               new_with_axes (inlined)
+               <fp_frame::DataFrame>::loc_bool
+               loc_bool (inlined)
+               perf_profile::main
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.74%  perf_profile  [unknown]             [k] 0xffffffff853d4356
+            |
+            ---0xffffffff84d04104
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI_munmap (inlined)
+               _int_free_chunk
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               drop_in_place<alloc::sync::Arc<[fp_types::Scalar], alloc::alloc::Global>> (inlined)
+               drop_in_place<fp_columnar::ScalarValues> (inlined)
+               drop_in_place<fp_columnar::Column> (inlined)
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+               drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.73%  perf_profile  perf_profile          [.] <alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow
+            |
+            ---<alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow
+               drop_in_place<[fp_types::Scalar]> (inlined)
+               drop_slow<[fp_types::Scalar], alloc::alloc::Global> (inlined)
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               drop_in_place<alloc::sync::Arc<[fp_types::Scalar], alloc::alloc::Global>> (inlined)
+               drop_in_place<fp_columnar::ScalarValues> (inlined)
+               drop_in_place<fp_columnar::Column> (inlined)
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+               drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.73%  perf_profile  [unknown]             [k] 0xffffffff853d7e8c
+            |
+            ---0xffffffff853d8287
+               0xffffffff853d8f99
+               0xffffffff853d9102
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.72%  perf_profile  [unknown]             [k] 0xffffffff85452a61
+            |
+            ---0xffffffff8539b7d0
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __GI___sbrk (inlined)
+               __glibc_morecore (inlined)
+               systrim (inlined)
+               _int_free_chunk
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+               drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.72%  perf_profile  [unknown]             [k] 0xffffffff8539b7bc
+            |
+            ---0xffffffff8539b7d0
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __GI___sbrk (inlined)
+               __glibc_morecore (inlined)
+               systrim (inlined)
+               _int_free_chunk
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+               drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.72%  perf_profile  [unknown]             [k] 0xffffffff853d2333
+            |
+            ---0xffffffff853d2980
+               0xffffffff853d3d35
+               0xffffffff853d43b0
+               0xffffffff853db06b
+               0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __GI___sbrk (inlined)
+               __glibc_morecore (inlined)
+               systrim (inlined)
+               _int_free_chunk
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+               drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.71%  perf_profile  [unknown]             [k] 0xffffffff853d43ec
+            |
+            ---0xffffffff853432fa
+               0xffffffff853436a3
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __GI___sbrk (inlined)
+               __glibc_morecore (inlined)
+               systrim (inlined)
+               _int_free_chunk
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+               drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.71%  perf_profile  [unknown]             [k] 0xffffffff8621b2b7
+            |
+             --0.68%--0xffffffff84c01199
+
+     0.71%  perf_profile  perf_profile          [.] <fp_frame::DataFrame>::new_with_axes
+            |
+            ---from_iter<alloc::string::String, core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, fp_frame::{impl#64}::normalize_column_order::{closure_env#0}>>> (inlined)
+               from_iter<alloc::string::String, core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, fp_frame::{impl#64}::normalize_column_order::{closure_env#0}>>> (inlined)
+               from_iter<alloc::string::String, core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, fp_frame::{impl#64}::normalize_column_order::{closure_env#0}>>> (inlined)
+               collect<core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, fp_frame::{impl#64}::normalize_column_order::{closure_env#0}>>, alloc::vec::Vec<alloc::string::String, alloc::alloc::Global>> (inlined)
+               normalize_column_order (inlined)
+               new_with_axes (inlined)
+               perf_profile::main
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.70%  perf_profile  perf_profile          [.] perf_profile::build_numeric_frame
+            |
+             --0.59%--0xffffffff8541df03
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+
+     0.70%  perf_profile  [unknown]             [k] 0xffffffff853d7e86
+            |
+            ---0xffffffff853d7d2a
+               0xffffffff853d8f99
+               0xffffffff853d9102
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.70%  perf_profile  [unknown]             [k] 0xffffffff853b8390
+            |
+            ---0xffffffff8510f1d0
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::ColumnData>::from_scalars
+               from<f64, alloc::alloc::Global> (inlined)
+               from_scalars (inlined)
+               <fp_columnar::Column>::new
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.68%  perf_profile  [unknown]             [k] 0xffffffff853a3872
+            |
+            ---0xffffffff84c00b90
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.68%  perf_profile  libc.so.6             [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+               <fp_frame::DataFrame>::new_with_axes
+               cmp<u8> (inlined)
+               cmp<u8, alloc::alloc::Global> (inlined)
+               cmp (inlined)
+               find_key_index<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+               search_node<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal, alloc::string::String> (inlined)
+               search_tree<alloc::collections::btree::node::marker::Immut, alloc::string::String, fp_columnar::Column, alloc::string::String> (inlined)
+               get<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+               contains_key<alloc::string::String, fp_columnar::Column, alloc::alloc::Global, alloc::string::String> (inlined)
+               normalize_column_order (inlined)
+               new_with_axes (inlined)
+               <fp_frame::DataFrame>::loc_bool
+               loc_bool (inlined)
+               perf_profile::main
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.67%  perf_profile  perf_profile          [.] fp_types::infer_dtype
+            |
+            ---fp_types::infer_dtype
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.66%  perf_profile  [unknown]             [k] 0xffffffff853d7e8a
+            |
+            ---0xffffffff853d7d2a
+               0xffffffff853d8f99
+               0xffffffff853d9102
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.63%  perf_profile  [unknown]             [k] 0xffffffff853a3963
+            |
+            ---0xffffffff853b83b4
+               0xffffffff853a4c5e
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.60%  perf_profile  [unknown]             [k] 0xffffffff85123fc2
+            |
+            ---0xffffffff8541a8a2
+               0xffffffff8541a995
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.60%  perf_profile  [unknown]             [k] 0xffffffff853dda3b
+            |
+            ---0xffffffff853a37ad
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.59%  perf_profile  [unknown]             [k] 0xffffffff853a3413
+            |
+            ---0xffffffff861f6651
+               0xffffffff85392d40
+               0xffffffff84feb92c
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.58%  perf_profile  [unknown]             [k] 0xffffffff853439a6
+            |
+            ---0xffffffff84c00b90
+               perf_profile::build_numeric_frame
+               {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>> (inlined)
+               {closure#0}<usize, fp_types::Scalar, (), perf_profile::build_numeric_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>> (inlined)
+               fold<core::ops::range::Range<usize>, (), core::iter::adapters::map::map_fold::{closure_env#0}<usize, fp_types::Scalar, (), perf_profile::build_numeric_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>>> (inlined)
+               fold<fp_types::Scalar, core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>> (inlined)
+               extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::alloc::Global> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               collect<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               build_numeric_frame (inlined)
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     0.53%  perf_profile  [unknown]             [k] 0xffffffff8539f745
+            |
+            ---0xffffffff84c01199
+
+     0.47%  perf_profile  [unknown]             [k] 0xffffffff85455436
+     0.25%  perf_profile  [unknown]             [k] 0xffffffff84c015d7
+     0.25%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_check_map_versions
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff861e55c4
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84feb7bc
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853b811c
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c00b90
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853d43d1
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84feb96b
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff854523ef
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86202122
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fd0b99
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0188e
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84d0410b
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86227468
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85326435
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f8ca79
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8622742a
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853d8e7f
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86224b76
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff86227da0
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86224c51
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2bc
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d280
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d285
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcb
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228550
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228551
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b66
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b80
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862251d0
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff84d0410b
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d280
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2db
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcd
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850c2900
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850c2905
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b40
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b41
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b43
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b45
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d286
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d29c
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

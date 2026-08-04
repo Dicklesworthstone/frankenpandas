@@ -1,0 +1,11 @@
+Benchmark 1: df_cov
+  Time (mean ± σ):     309.4 ms ±  22.8 ms    [User: 528.4 ms, System: 242.1 ms]
+  Range (min … max):   280.6 ms … 341.9 ms    10 runs
+ 
+Benchmark 2: df_corr
+  Time (mean ± σ):     304.3 ms ±  15.1 ms    [User: 536.8 ms, System: 237.7 ms]
+  Range (min … max):   284.1 ms … 329.8 ms    10 runs
+ 
+Summary
+  df_corr ran
+    1.02 ± 0.09 times faster than df_cov

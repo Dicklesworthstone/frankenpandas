@@ -10,6 +10,7 @@ members = [
   "crates/fp-join",
   "crates/fp-io",
   "crates/fp-conformance",
+  "crates/fp-bench",
   "crates/fp-runtime",
   "crates/fp-frankentui",
   "crates/fp-python",
@@ -18,12 +19,11 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
-# SPDX expression identifies the base license (MIT) so cargo-deny and
-# crates.io can match against allow-lists. The LICENSE file additionally
-# attaches a non-MIT rider on AI-assistant usage; the rider does not
-# change the SPDX classification of the underlying license terms.
-license = "MIT"
+version = "0.2.0"
+# The LICENSE file is MIT plus a non-MIT rider on AI-assistant usage, which is
+# not expressible as a standard SPDX expression. The file itself is therefore the
+# license of record; no `license = "MIT"` SPDX field is set (it would understate
+# the rider, and cargo flags it as redundant alongside `license-file`).
 license-file = "LICENSE"
 authors = ["Jeffrey Emanuel <jeff141421@gmail.com>"]
 repository = "https://github.com/Dicklesworthstone/frankenpandas"
@@ -34,25 +34,24 @@ keywords = ["dataframe", "pandas", "analytics", "columnar", "rust"]
 categories = ["data-structures", "science"]
 
 [workspace.dependencies]
-arrow = { version = "58.3.0", default-features = false, features = ["prettyprint", "ipc"] }
+arrow = { version = "59.0.0", default-features = false, features = ["prettyprint", "ipc"] }
 bumpalo = { version = "3.20.3", features = ["collections"] }
 bytes = "1.11.1"
-calamine = "0.35.0"
-chrono = { version = "0.4.44", default-features = false, features = ["std"] }
+calamine = "0.36.0"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 csv = "1.4.0"
 dta = "0.6.0"
 fast-float2 = "0.2.3"
 hdf5 = { package = "hdf5-metno", version = "0.12.4" }
-orc-rust = "0.8.0"
-parquet = { version = "58.3.0", default-features = false, features = ["arrow", "snap"] }
-postgres = { version = "0.19", features = ["with-chrono-0_4"] }
+parquet = { version = "59.0.0", default-features = false, features = ["arrow", "snap"] }
 mysql = "28.0"
-pyo3 = { version = "0.28", features = ["extension-module"] }
-quick-xml = "0.40.1"
+mimalloc = "0.1"
+pyo3 = { version = "0.29", features = ["extension-module"] }
+quick-xml = "0.41"
 regex = "1.12.3"
-rust_xlsxwriter = "0.95.0"
-rusqlite = { version = "0.40.0", features = ["bundled", "column_decltype"] }
+rust_xlsxwriter = "0.96.0"
+rusqlite = { version = "0.40.1", features = ["bundled", "column_decltype"] }
 ryu = "1.0.23"
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive"] }

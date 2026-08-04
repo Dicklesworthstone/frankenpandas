@@ -1,0 +1,12 @@
+WARNING: Ignored open failure for pid 3827301
+WARNING: Ignored open failure for pid 3827302
+WARNING: Ignored open failure for pid 3827303
+WARNING: Ignored open failure for pid 3827304
+WARNING: Ignored open failure for pid 3827305
+WARNING: Ignored open failure for pid 3827306
+WARNING: Ignored open failure for pid 3827307
+WARNING: Ignored open failure for pid 3827308
+WARNING: Ignored open failure for pid 3827309
+WARNING: Ignored open failure for pid 3827310
+[ perf record: Woken up 359 times to write data ]
+[ perf record: Captured and wrote 139.163 MB /data/projects/frankenpandas-dfabs-claim6189-20260729/profile/perf.data (8779 samples) ]

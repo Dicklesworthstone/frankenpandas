@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/lavender_0mtyz_bins/perf_profile_base_75d9f7a0 value_counts_nan50 1000000 10
+  Time (mean ± σ):     615.1 ms ±   5.4 ms    [User: 413.8 ms, System: 231.2 ms]
+  Range (min … max):   604.9 ms … 622.0 ms    7 runs
+ 
+Benchmark 2: /data/projects/.scratch/lavender_0mtyz_target/release/examples/perf_profile value_counts_nan50 1000000 10
+  Time (mean ± σ):     590.3 ms ±  22.2 ms    [User: 393.3 ms, System: 223.0 ms]
+  Range (min … max):   548.1 ms … 612.6 ms    7 runs
+ 
+Summary
+  /data/projects/.scratch/lavender_0mtyz_target/release/examples/perf_profile value_counts_nan50 1000000 10 ran
+    1.04 ± 0.04 times faster than /data/projects/.scratch/lavender_0mtyz_bins/perf_profile_base_75d9f7a0 value_counts_nan50 1000000 10

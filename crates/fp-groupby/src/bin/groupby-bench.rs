@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use fp_frame::Series;
 use fp_groupby::{
-    GroupByOptions, groupby_count, groupby_first, groupby_last, groupby_max, groupby_mean,
-    groupby_median, groupby_min, groupby_nunique, groupby_prod, groupby_size, groupby_std,
-    groupby_sum, groupby_var,
+    AggFunc, GroupByOptions, groupby_agg, groupby_count, groupby_first, groupby_last, groupby_max,
+    groupby_mean, groupby_median, groupby_min, groupby_nunique, groupby_prod, groupby_size,
+    groupby_std, groupby_sum, groupby_var,
 };
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
@@ -52,6 +52,12 @@ fn run_agg(
         "nunique" => groupby_nunique(keys, values, opts, &policy, &mut ledger)?,
         "median" => groupby_median(keys, values, opts, &policy, &mut ledger)?,
         "sum" => groupby_sum(keys, values, opts, &policy, &mut ledger)?,
+        "agg-sum" => groupby_agg(keys, values, AggFunc::Sum, opts, &policy, &mut ledger)?,
+        "agg-prod" => groupby_agg(keys, values, AggFunc::Prod, opts, &policy, &mut ledger)?,
+        "agg-var" => groupby_agg(keys, values, AggFunc::Var, opts, &policy, &mut ledger)?,
+        "agg-std" => groupby_agg(keys, values, AggFunc::Std, opts, &policy, &mut ledger)?,
+        "agg-median" => groupby_agg(keys, values, AggFunc::Median, opts, &policy, &mut ledger)?,
+        "agg-nunique" => groupby_agg(keys, values, AggFunc::Nunique, opts, &policy, &mut ledger)?,
         other => return Err(format!("unknown agg '{other}'").into()),
     };
     Ok(out)
@@ -87,19 +93,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_cardinality = parse_arg("key-cardinality", 512usize);
     let iters = parse_arg("iters", 25usize);
     let agg = parse_arg("agg", "mean".to_string());
+    let key_kind = parse_arg("key-kind", "int64".to_string());
+    let value_kind = parse_arg("value-kind", "int64".to_string());
     let golden = has_flag("golden");
 
     let mut index_labels = Vec::with_capacity(rows);
     let mut key_values = Vec::with_capacity(rows);
     let mut value_values = Vec::with_capacity(rows);
+    let utf8_keys = if key_kind == "utf8" {
+        (0..key_cardinality)
+            .map(|key| format!("key_{key:06}"))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     for i in 0..rows {
         index_labels.push((i as i64).into());
-        key_values.push(Scalar::Int64((i % key_cardinality) as i64));
+        key_values.push(match key_kind.as_str() {
+            "int64" => Scalar::Int64((i % key_cardinality) as i64),
+            "utf8" => Scalar::Utf8(utf8_keys[i % key_cardinality].clone()),
+            other => return Err(format!("unknown key-kind '{other}'").into()),
+        });
         // Sprinkle nulls to exercise the skipna fold paths.
         if i % 37 == 0 {
             value_values.push(Scalar::Null(fp_types::NullKind::NaN));
         } else {
-            value_values.push(Scalar::Int64(((i * 7 + 3) % 97) as i64));
+            value_values.push(match value_kind.as_str() {
+                "int64" => Scalar::Int64(((i * 7 + 3) % 97) as i64),
+                "float64" => Scalar::Float64(1.0 + (((i * 7 + 3) % 97) as f64 / 97.0)),
+                other => return Err(format!("unknown value-kind '{other}'").into()),
+            });
         }
     }
     let keys = Series::from_values("keys", index_labels.clone(), key_values)?;
@@ -108,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if golden {
         let out = run_agg(&agg, &keys, &values)?;
         println!(
-            "groupby_golden agg={agg} rows={rows} key_cardinality={key_cardinality} out_rows={} digest={:016x}",
+            "groupby_golden agg={agg} key_kind={key_kind} value_kind={value_kind} rows={rows} key_cardinality={key_cardinality} out_rows={} digest={:016x}",
             out.len(),
             digest(&out)
         );
@@ -125,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mean_ms = (total_ns as f64) / (iters as f64) / 1_000_000.0;
     println!(
-        "groupby_bench agg={agg} rows={rows} key_cardinality={key_cardinality} iters={iters} mean_ms={mean_ms:.3} checksum={checksum:.3}"
+        "groupby_bench agg={agg} key_kind={key_kind} value_kind={value_kind} rows={rows} key_cardinality={key_cardinality} iters={iters} mean_ms={mean_ms:.3} checksum={checksum:.3}"
     );
     Ok(())
 }

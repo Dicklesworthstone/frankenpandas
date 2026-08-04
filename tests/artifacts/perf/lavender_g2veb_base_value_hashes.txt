@@ -1,0 +1,5 @@
+rolling_skew: 6f4ee13001d85e37
+rolling_kurt: fcf2ade53dc4beb8
+expanding_skew: fe7ed19352f5a8c5
+expanding_kurt: 120ef936042f9b07
+combined_checksum ff53e5eaa40edb2d

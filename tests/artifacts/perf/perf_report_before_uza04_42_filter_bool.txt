@@ -1,0 +1,168 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 712  of event 'cycles:P'
+# Event count (approx.): 2612379382
+#
+# Overhead  Command       Shared Object     Symbol                                                                            
+# ........  ............  ................  ..................................................................................
+#
+    49.13%  perf_profile  perf_profile      [.] <fp_columnar::Column>::take_positions
+            |          
+             --48.80%--<fp_columnar::Column>::take_positions
+                       <fp_frame::DataFrame>::take_rows_by_positions_unchecked
+                       <fp_frame::DataFrame>::loc_bool
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+    31.91%  perf_profile  perf_profile      [.] <fp_frame::DataFrame>::loc_bool
+            |          
+             --31.76%--<fp_frame::DataFrame>::loc_bool
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     8.40%  perf_profile  perf_profile      [.] <fp_frame::DataFrame>::take_rows_by_positions_unchecked
+            |          
+             --7.96%--<fp_frame::DataFrame>::take_rows_by_positions_unchecked
+                       <fp_frame::DataFrame>::loc_bool
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.21%  perf_profile  perf_profile      [.] <fp_columnar::Column>::new
+            |
+            ---<fp_columnar::Column>::new
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.72%  perf_profile  perf_profile      [.] fp_types::infer_dtype
+            |
+            ---fp_types::infer_dtype
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.60%  perf_profile  perf_profile      [.] core::ptr::drop_in_place::<fp_columnar::Column>
+            |
+            ---core::ptr::drop_in_place::<fp_columnar::Column>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.45%  perf_profile  perf_profile      [.] perf_profile::build_numeric_frame
+     0.41%  perf_profile  libc.so.6         [.] __memcmp_avx2_movbe
+     0.39%  perf_profile  [unknown]         [k] 0xffffffff84c01192
+     0.36%  perf_profile  [unknown]         [k] 0xffffffff8621b2b7
+     0.34%  perf_profile  libc.so.6         [.] unlink_chunk.isra.0
+     0.29%  perf_profile  [unknown]         [k] 0xffffffff853d7d8d
+     0.25%  perf_profile  perf_profile      [.] <fp_columnar::ColumnData>::from_scalars
+     0.25%  perf_profile  [unknown]         [k] 0xffffffff86223c8e
+     0.23%  perf_profile  [unknown]         [k] 0xffffffff853d7d6c
+     0.23%  perf_profile  perf_profile      [.] main
+     0.20%  perf_profile  [unknown]         [k] 0xffffffff85139e60
+     0.20%  perf_profile  [unknown]         [k] 0xffffffff853d911a
+     0.20%  perf_profile  libc.so.6         [.] _int_free_chunk
+     0.19%  perf_profile  [unknown]         [k] 0xffffffff853d9080
+     0.19%  perf_profile  [unknown]         [k] 0xffffffff853a3ae4
+     0.18%  perf_profile  perf_profile      [.] perf_profile::main
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853d7d56
+     0.17%  perf_profile  [unknown]         [k] 0xffffffff8507e5d4
+     0.17%  perf_profile  [unknown]         [k] 0xffffffff853a3437
+     0.16%  perf_profile  [unknown]         [k] 0xffffffff8507e5a9
+     0.16%  perf_profile  libc.so.6         [.] __memmove_avx_unaligned_erms
+     0.15%  perf_profile  perf_profile      [.] core::ptr::drop_in_place::<fp_index::Index>
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff850815f7
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff85089bf5
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff85452ded
+     0.15%  perf_profile  libc.so.6         [.] _int_malloc
+     0.15%  perf_profile  libc.so.6         [.] _int_free_maybe_consolidate
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff853bbcc2
+     0.15%  perf_profile  perf_profile      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&&str>
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff853daefe
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff85452de9
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff85452de1
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff84c01248
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff85404a45
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff85342161
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff8622742a
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff850ee316
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff85457885
+     0.15%  perf_profile  [unknown]         [k] 0xffffffff8508129a
+     0.11%  perf_profile  [unknown]         [k] 0xffffffff85110cef
+     0.03%  perf_profile  [unknown]         [k] 0xffffffff8507dbaf
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff861f8af9
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8506b7d5
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850bc635
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84c0188e
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86227da0
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8621c6a9
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff84c0188e
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff862251d2
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86228929
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84c01884
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84c0185b
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84c0181e
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff862249a5
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86224c2a
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d280
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcb
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2bc
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b66
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2c3
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f337e5
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcd
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b70
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b80
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d285
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d280
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2bc
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2c3
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b60
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b65
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2cc
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

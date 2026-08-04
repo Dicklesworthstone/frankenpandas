@@ -6,10 +6,11 @@
 //! computes the identical tau-b in O(n log n). The golden battery pins the
 //! exact f64 output on tied data so the fast path proves bit-identical.
 
+use std::time::Instant;
+
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::Scalar;
-use std::time::Instant;
 
 fn s_from(vals: &[f64]) -> Series {
     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
@@ -21,7 +22,10 @@ fn golden() -> String {
     let mut out = String::new();
     let cases: &[(&[f64], &[f64])] = &[
         // ties in both x and y
-        (&[1.0, 2.0, 2.0, 3.0, 3.0, 3.0], &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0]),
+        (
+            &[1.0, 2.0, 2.0, 3.0, 3.0, 3.0],
+            &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+        ),
         // joint ties (identical (x,y) pairs)
         (&[1.0, 1.0, 2.0, 2.0], &[5.0, 5.0, 9.0, 9.0]),
         // discordant-heavy with ties

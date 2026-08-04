@@ -1,0 +1,11 @@
+Benchmark 1: base_dt_year
+  Time (mean ± σ):     282.4 ms ±  10.7 ms    [User: 266.6 ms, System: 15.3 ms]
+  Range (min … max):   270.0 ms … 300.2 ms    12 runs
+
+Benchmark 2: candidate_dt_year
+  Time (mean ± σ):     226.3 ms ±  11.7 ms    [User: 210.4 ms, System: 15.6 ms]
+  Range (min … max):   205.7 ms … 246.6 ms    12 runs
+
+Summary
+  candidate_dt_year ran
+    1.25 ± 0.08 times faster than base_dt_year

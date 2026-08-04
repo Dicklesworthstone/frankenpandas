@@ -1,0 +1,21 @@
+  [2m2026-06-11T02:33:24.097813Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: perf record -F 99 -g -o tests/artifacts/perf/uza0475_after_perf_filter_bool_100000x20000.data -- /data/projects/.scratch/cargo-target-orangepeak-uza0475-after/release-perf/examples/perf_profile filter_bool 100000 20000[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+WARNING: Kernel address maps (/proc/{kallsyms,modules}) are restricted,
+check /proc/sys/kernel/kptr_restrict and /proc/sys/kernel/perf_event_paranoid.
+
+Samples in kernel functions may not be resolved if a suitable vmlinux
+file is not found in the buildid cache or in the vmlinux path.
+
+Samples in kernel modules won't be resolved at all.
+
+If some relocation was applied (e.g. kexec) symbols may be misresolved
+even with a suitable vmlinux or kallsyms file.
+
+Couldn't record kernel reference relocation symbol
+Symbol resolution may be skewed if relocation was used (e.g. kexec).
+Check /proc/kallsyms permission or run as root.
+perf_profile: scenario=filter_bool n=100000 iters=20000
+perf_profile: done 20000 iters in 0.170s (0.009 ms/iter), sink=1000000000
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 0.023 MB tests/artifacts/perf/uza0475_after_perf_filter_bool_100000x20000.data (94 samples) ]

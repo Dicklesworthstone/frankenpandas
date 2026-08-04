@@ -1,0 +1,118 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 8581932185
+#
+# Overhead  Shared Object         Symbol                                                                                                                                            IPC   [IPC Coverage]
+# ........  ....................  ................................................................................................................................................  ....................
+#
+    95.25%  perf_profile          [.] <fp_frame::DataFrame>::loc_bool                                                                                                               -      -
+            |
+            |--94.34%--<fp_frame::DataFrame>::loc_bool
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+            |--0.14%--_int_malloc
+            |          __libc_malloc2
+            |
+            |--0.14%--malloc_consolidate
+            |          _int_malloc
+            |          __libc_malloc2
+            |          <fp_frame::DataFrame>::loc_bool
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.13%--__memcmp_avx2_movbe
+
+     0.39%  perf_profile          [.] <fp_frame::DataFrame>::new_with_axes                                                                                                          -      -
+            |
+             --0.11%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                       <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                       <fp_frame::DataFrame>::new_with_axes
+                       <fp_frame::DataFrame>::loc_bool
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     0.37%  libc.so.6             [.] _int_malloc                                                                                                                                   -      -
+     0.29%  perf_profile          [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert                                                -      -
+     0.23%  libc.so.6             [.] __memcmp_avx2_movbe                                                                                                                           -      -
+     0.18%  perf_profile          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                          -      -
+            |
+             --0.14%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                       <fp_frame::DataFrame>::new_with_axes
+                       <fp_frame::DataFrame>::loc_bool
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     0.18%  libc.so.6             [.] _int_free_chunk                                                                                                                               -      -
+            |
+            ---<fp_frame::DataFrame>::loc_bool
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.14%  libc.so.6             [.] malloc_consolidate                                                                                                                            -      -
+            |
+            ---<fp_frame::DataFrame>::loc_bool
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.14%  perf_profile          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                                               -      -
+     0.14%  perf_profile          [.] <fp_columnar::Column>::new                                                                                                                    -      -
+            |
+            ---<fp_columnar::Column>::new
+               <fp_columnar::Column>::from_values
+               perf_profile::build_numeric_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.11%  [unknown]             [k] 0xffffffff84c01192                                                                                                                            -      -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

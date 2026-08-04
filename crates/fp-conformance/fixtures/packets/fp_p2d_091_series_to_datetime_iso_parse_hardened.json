@@ -5,32 +5,68 @@
   "operation": "series_to_datetime",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "f5804c80d2a8e5511f54765ed6a7490ac2a122b8ded70050b844796be468c128",
+    "generated_at": "2026-06-14T08:38:16Z"
   },
   "left": {
     "name": "dates",
     "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" },
-      { "kind": "utf8", "value": "c" }
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "utf8",
+        "value": "b"
+      },
+      {
+        "kind": "utf8",
+        "value": "c"
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-01-15" },
-      { "kind": "utf8", "value": "2024-06-30 12:30:00" },
-      { "kind": "utf8", "value": "2024-12-31T23:59:59" }
+      {
+        "kind": "utf8",
+        "value": "2024-01-15"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-06-30 12:30:00"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-12-31T23:59:59"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" },
-      { "kind": "utf8", "value": "c" }
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "utf8",
+        "value": "b"
+      },
+      {
+        "kind": "utf8",
+        "value": "c"
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-01-15 00:00:00" },
-      { "kind": "utf8", "value": "2024-06-30 12:30:00" },
-      { "kind": "utf8", "value": "2024-12-31 23:59:59" }
+      {
+        "kind": "datetime64",
+        "value": 1705276800000000000
+      },
+      {
+        "kind": "datetime64",
+        "value": 1719750600000000000
+      },
+      {
+        "kind": "datetime64",
+        "value": 1735689599000000000
+      }
     ]
   }
 }

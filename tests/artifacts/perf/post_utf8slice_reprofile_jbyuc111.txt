@@ -1,0 +1,140 @@
+BIN=/data/tmp/cargo-target/release-perf/examples/perf_profile
+76d2f388645ed3f3578017c5e2d919fa809e4230793a86d54d5ca93a6d0bc10e  -
+WARNING: Kernel address maps (/proc/{kallsyms,modules}) are restricted,
+check /proc/sys/kernel/kptr_restrict and /proc/sys/kernel/perf_event_paranoid.
+
+Samples in kernel functions may not be resolved if a suitable vmlinux
+file is not found in the buildid cache or in the vmlinux path.
+
+Samples in kernel modules won't be resolved at all.
+
+If some relocation was applied (e.g. kexec) symbols may be misresolved
+even with a suitable vmlinux or kallsyms file.
+
+Couldn't record kernel reference relocation symbol
+Symbol resolution may be skewed if relocation was used (e.g. kexec).
+Check /proc/kallsyms permission or run as root.
+perf_profile: scenario=str_inner_join n=1000000 iters=500
+perf_profile: done 500 iters in 0.301s (0.602 ms/iter), sink=50000000
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 0.071 MB /tmp/perf_after_utf8slice_jbyuc111.data (388 samples) ]
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 388  of event 'cycles:P'
+# Event count (approx.): 1184508452
+#
+# Overhead  Command       Shared Object     Symbol
+# ........  ............  ................  .......................................................................................................................................................................................................................................................................................................................................
+#
+    40.57%  perf_profile  perf_profile      [.] <fp_columnar::Column>::take_positions
+            |
+             --40.57%--<fp_columnar::Column>::take_positions
+                       fp_join::build_single_key_inner_merge_output
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     9.70%  perf_profile  perf_profile      [.] perf_profile::build_str_join_frame
+            |
+            |--5.92%--perf_profile::build_str_join_frame
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --2.56%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       perf_profile::build_str_join_frame
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     6.37%  perf_profile  libc.so.6         [.] __memcmp_avx2_movbe
+            |
+            |--5.65%--__memcmp_avx2_movbe
+            |          |
+            |           --5.29%--fp_join::merge_dataframes_on_with_options
+            |                     perf_profile::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |                     std::rt::lang_start::<()>::{closure#0}
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |
+             --0.72%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+                       <std::sys::sync::once::futex::Once>::call
+                       <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>
+                       <fp_columnar::Column>::as_strictly_increasing_utf8_contiguous
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     4.25%  perf_profile  libc.so.6         [.] __memmove_avx_unaligned_erms
+            |
+             --3.23%--__memmove_avx_unaligned_erms
+                       fp_join::build_single_key_inner_merge_output
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     2.54%  perf_profile  perf_profile      [.] <alloc::vec::Vec<usize>>::extend_trusted::<core::ops::range::Range<usize>>
+            |
+            ---<alloc::vec::Vec<usize>>::extend_trusted::<core::ops::range::Range<usize>>
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     2.38%  perf_profile  [unknown]         [k] 0xffffffff84c01192

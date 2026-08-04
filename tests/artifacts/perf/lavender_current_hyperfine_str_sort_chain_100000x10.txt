@@ -1,0 +1,4 @@
+Benchmark 1: .rch-target-lavenderstone-current/release-perf/examples/perf_profile str_sort_chain 100000 10
+  Time (mean ± σ):     137.7 ms ±   8.0 ms    [User: 189.4 ms, System: 32.4 ms]
+  Range (min … max):   128.0 ms … 156.9 ms    10 runs
+ 

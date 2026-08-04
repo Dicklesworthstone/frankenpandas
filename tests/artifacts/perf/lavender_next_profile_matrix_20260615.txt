@@ -1,0 +1,42 @@
+  [2m2026-06-15T19:05:05.178476Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -lc '
+set -euo pipefail
+specs=(
+  "df_dot 100000 3"
+  "csv_read 100000 5"
+  "csv_read_options 100000 5"
+  "csv_read_no_na_filter 100000 5"
+  "series_add_align 100000 10"
+  "filter_bool 100000 50"
+  "inner_join 100000 20"
+  "str_inner_join 100000 20"
+  "str_sort_chain 100000 3"
+  "str_groupby_sum 100000 20"
+  "groupby_transform_median 100000 10"
+  "df_kendall 20000 1"
+)
+for spec in "${specs[@]}"; do
+  cargo run -q -p fp-conformance --profile release-perf --example perf_profile -- $spec
+ done
+'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+error[E0463]: can't find crate for `fp_frame`
+  --> crates/fp-conformance/examples/perf_profile.rs:24:5
+   |
+24 | use fp_frame::{DataFrame, Series, to_datetime};
+   |     ^^^^^^^^ can't find crate
+
+error[E0463]: can't find crate for `fp_io`
+  --> crates/fp-conformance/examples/perf_profile.rs:26:5
+   |
+26 | use fp_io::{CsvReadOptions, read_csv_str, read_csv_with_options};
+   |     ^^^^^ can't find crate
+
+error[E0463]: can't find crate for `fp_join`
+  --> crates/fp-conformance/examples/perf_profile.rs:27:5
+   |
+27 | use fp_join::{AsofDirection, JoinType, merge_asof, merge_dataframes};
+   |     ^^^^^^^ can't find crate
+
+For more information about this error, try `rustc --explain E0463`.
+error: could not compile `fp-conformance` (example "perf_profile") due to 3 previous errors

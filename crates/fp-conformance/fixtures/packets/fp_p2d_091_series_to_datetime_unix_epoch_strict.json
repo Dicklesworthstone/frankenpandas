@@ -5,32 +5,68 @@
   "operation": "series_to_datetime",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "f5804c80d2a8e5511f54765ed6a7490ac2a122b8ded70050b844796be468c128",
+    "generated_at": "2026-06-14T08:38:16Z"
   },
   "left": {
     "name": "timestamps",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1704067200 },
-      { "kind": "int64", "value": 1704153600 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1704067200
+      },
+      {
+        "kind": "int64",
+        "value": 1704153600
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "1970-01-01 00:00:00" },
-      { "kind": "utf8", "value": "2024-01-01 00:00:00" },
-      { "kind": "utf8", "value": "2024-01-02 00:00:00" }
+      {
+        "kind": "datetime64",
+        "value": 0
+      },
+      {
+        "kind": "datetime64",
+        "value": 1704067200000000000
+      },
+      {
+        "kind": "datetime64",
+        "value": 1704153600000000000
+      }
     ]
   }
 }

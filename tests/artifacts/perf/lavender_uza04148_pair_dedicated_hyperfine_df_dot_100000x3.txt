@@ -1,0 +1,11 @@
+Benchmark 1: base
+  Time (mean ± σ):     236.5 ms ±   6.8 ms    [User: 137.6 ms, System: 98.4 ms]
+  Range (min … max):   221.8 ms … 245.9 ms    10 runs
+
+Benchmark 2: candidate
+  Time (mean ± σ):     236.4 ms ±  10.9 ms    [User: 137.7 ms, System: 98.2 ms]
+  Range (min … max):   222.7 ms … 255.5 ms    10 runs
+
+Summary
+  candidate ran
+    1.00 ± 0.05 times faster than base

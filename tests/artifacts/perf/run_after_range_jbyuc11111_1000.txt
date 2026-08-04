@@ -1,0 +1,2 @@
+perf_profile: scenario=str_inner_join n=1000000 iters=1000
+perf_profile: done 1000 iters in 0.201s (0.201 ms/iter), sink=100000000

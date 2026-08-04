@@ -1,0 +1,3 @@
+Benchmark 1: .rch-target-lavender-current-profile/release-perf/examples/perf_profile df_dot 100000 6
+  Time (mean ± σ):     770.4 ms ±  25.6 ms    [User: 17398.7 ms, System: 680.2 ms]
+  Range (min … max):   733.3 ms … 812.3 ms    6 runs

@@ -1,0 +1,156 @@
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:3826:
+                 Some(fp_columnar::radix_argsort_f64(&data, true))
+             } else {
+                 let mut keyed: Vec<(usize, f64)> = data.into_iter().enumerate().collect();
+[31m-                keyed.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
+[m[32m+                keyed
+[m[32m+                    .sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
+[m                 Some(keyed.into_iter().map(|(position, _)| position).collect())
+             }
+         }
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:34885:
+         // `take_positions` is already typed; only the owning thread differs, so
+         // the gathered columns are byte-identical. Shared by boolean-filter /
+         // loc_bool / positional take.
+[31m-        let col_refs: Vec<&Column> =
+[m[31m-            self.column_order.iter().map(|name| &self.columns[name]).collect();
+[m[32m+        let col_refs: Vec<&Column> = self
+[m[32m+            .column_order
+[m[32m+            .iter()
+[m[32m+            .map(|name| &self.columns[name])
+[m[32m+            .collect();
+[m         let build_col = |column: &Column| -> Column {
+             if let Some(certificate) = certificate {
+                 column.take_positions_with_affine_certificate(
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:34935:
+                     slots[i] = Some(c);
+                 }
+             }
+[31m-            slots.into_iter().map(|s| s.expect("every column gathered")).collect()
+[m[32m+            slots
+[m[32m+                .into_iter()
+[m[32m+                .map(|s| s.expect("every column gathered"))
+[m[32m+                .collect()
+[m         } else {
+             col_refs.iter().map(|c| build_col(c)).collect()
+         };
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:42182:
+                 } else {
+                     let vals = col.values();
+                     std::borrow::Cow::Owned(
+[31m-                        (0..m).map(|i| vals[i].to_f64().unwrap_or(f64::NAN)).collect(),
+[m[32m+                        (0..m)
+[m[32m+                            .map(|i| vals[i].to_f64().unwrap_or(f64::NAN))
+[m[32m+                            .collect(),
+[m                     )
+                 }
+             })
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:42364:
+                     slots[j] = Some(col);
+                 }
+             }
+[31m-            columns.extend(slots.into_iter().map(|s| s.expect("every output column built")));
+[m[32m+            columns.extend(
+[m[32m+                slots
+[m[32m+                    .into_iter()
+[m[32m+                    .map(|s| s.expect("every output column built")),
+[m[32m+            );
+[m         } else {
+             columns.extend((0..n).map(build_col));
+         }
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:42925:
+         // 100k×10 reindex that was ~58x slower than pandas. Resolve each new
+         // label to `Some(row)`/`None` ONCE, shared across all columns.
+         let new_len = new_labels.len();
+[31m-        let positions: Vec<Option<usize>> = if let Some((start, len)) =
+[m[31m-            self.index.int64_unit_range_labels()
+[m[31m-        {
+[m[31m-            // Unit-range Int64 index (the pandas RangeIndex default): a label
+[m[31m-            // Int64(v) maps to position v-start arithmetically — O(1) per label,
+[m[31m-            // NO hashmap build/probe (br-frankenpandas-uza04.112). The unit range
+[m[31m-            // is strictly unique, so this matches the `or_insert` first-seen map
+[m[31m-            // exactly; a non-Int64 / out-of-range label is absent (None), same as
+[m[31m-            // a hashmap miss against an all-Int64 index.
+[m[31m-            new_labels
+[m[31m-                .iter()
+[m[31m-                .map(|label| match label {
+[m[31m-                    IndexLabel::Int64(v) => {
+[m[31m-                        let off = v.wrapping_sub(start);
+[m[31m-                        if off >= 0 && (off as u64) < len as u64 {
+[m[31m-                            Some(off as usize)
+[m[31m-                        } else {
+[m[31m-                            None
+[m[32m+        let positions: Vec<Option<usize>> =
+[m[32m+            if let Some((start, len)) = self.index.int64_unit_range_labels() {
+[m[32m+                // Unit-range Int64 index (the pandas RangeIndex default): a label
+[m[32m+                // Int64(v) maps to position v-start arithmetically — O(1) per label,
+[m[32m+                // NO hashmap build/probe (br-frankenpandas-uza04.112). The unit range
+[m[32m+                // is strictly unique, so this matches the `or_insert` first-seen map
+[m[32m+                // exactly; a non-Int64 / out-of-range label is absent (None), same as
+[m[32m+                // a hashmap miss against an all-Int64 index.
+[m[32m+                new_labels
+[m[32m+                    .iter()
+[m[32m+                    .map(|label| match label {
+[m[32m+                        IndexLabel::Int64(v) => {
+[m[32m+                            let off = v.wrapping_sub(start);
+[m[32m+                            if off >= 0 && (off as u64) < len as u64 {
+[m[32m+                                Some(off as usize)
+[m[32m+                            } else {
+[m[32m+                                None
+[m[32m+                            }
+[m                         }
+[31m-                    }
+[m[31m-                    _ => None,
+[m[31m-                })
+[m[31m-                .collect()
+[m[31m-        } else {
+[m[31m-            let mut old_lookup: FxHashMap<&IndexLabel, usize> =
+[m[31m-                FxHashMap::with_capacity_and_hasher(self.index.len(), Default::default());
+[m[31m-            for (i, label) in self.index.labels().iter().enumerate() {
+[m[31m-                old_lookup.entry(label).or_insert(i);
+[m[31m-            }
+[m[31m-            new_labels.iter().map(|label| old_lookup.get(label).copied()).collect()
+[m[31m-        };
+[m[32m+                        _ => None,
+[m[32m+                    })
+[m[32m+                    .collect()
+[m[32m+            } else {
+[m[32m+                let mut old_lookup: FxHashMap<&IndexLabel, usize> =
+[m[32m+                    FxHashMap::with_capacity_and_hasher(self.index.len(), Default::default());
+[m[32m+                for (i, label) in self.index.labels().iter().enumerate() {
+[m[32m+                    old_lookup.entry(label).or_insert(i);
+[m[32m+                }
+[m[32m+                new_labels
+[m[32m+                    .iter()
+[m[32m+                    .map(|label| old_lookup.get(label).copied())
+[m[32m+                    .collect()
+[m[32m+            };
+[m
+         // Gather each output column from the shared `positions`. The per-column
+         // gather is the reindex hot phase (10 cols × new_len); columns are
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:42998:
+             }
+         };
+
+[31m-        let col_refs: Vec<&Column> =
+[m[31m-            self.column_order.iter().map(|name| &self.columns[name]).collect();
+[m[32m+        let col_refs: Vec<&Column> = self
+[m[32m+            .column_order
+[m[32m+            .iter()
+[m[32m+            .map(|name| &self.columns[name])
+[m[32m+            .collect();
+[m         let ncols = col_refs.len();
+         let worker_count = std::thread::available_parallelism()
+             .map_or(1, std::num::NonZeroUsize::get)
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:43043:
+                 .map(|s| s.expect("every column built"))
+                 .collect::<Result<Vec<_>, _>>()?
+         } else {
+[31m-            col_refs.iter().map(|c| build_col(c)).collect::<Result<Vec<_>, _>>()?
+[m[32m+            col_refs
+[m[32m+                .iter()
+[m[32m+                .map(|c| build_col(c))
+[m[32m+                .collect::<Result<Vec<_>, _>>()?
+[m         };
+
+         let mut result_cols = BTreeMap::new();

@@ -1,0 +1,37 @@
+br-frankenpandas-ay8o9 — property test for Scalar::semantic_cmp order axioms
+===========================================================================
+
+Scalar::semantic_cmp (fp-types) is the FOUNDATION of all ordering in the
+library: sort_values, min/max, is_monotonic, searchsorted, groupby key order,
+and the reference that every differential harness (59dk2/yfyb9/q70pn/2bgtq/k3zcv/
+ya1po/5foyp/kaj3t) relies on (semantic_le/semantic_ge delegate to it). It had no
+property test of its order axioms.
+
+Harness (test fp-types: semantic_cmp_total_order_axioms_ay8o9): deterministic
+seeded LCG (no rand crate, no mocks). For 6000 iterations over random SAME-dtype
+finite/non-NaT scalars (Int64, finite Float64 in -5.0..=5.0, Utf8, Bool) it
+asserts the total-order axioms:
+  - reflexivity:   cmp(a,a) == Equal
+  - antisymmetry:  cmp(a,b) == cmp(b,a).reverse()
+  - transitivity:  a<=b && b<=c  =>  a<=c
+  - le/ge/eq consistency: semantic_le(a,b)==(cmp!=Greater),
+    semantic_ge(a,b)==(cmp!=Less), (le && ge)==(cmp==Equal)
+
+It then PINS the intentional NaN degeneracy: a Float64 NaN compares Equal to
+every finite Float64 and to itself (semantic_cmp uses partial_cmp().unwrap_or(
+Equal)). This is exactly why ordering ops must treat NaN/NaT as MISSING rather
+than relying on semantic_cmp to order it — and why the value-side differential
+harnesses defer Float64/NaN to the Scalar path.
+
+Result: PASS (1 passed; 6000 iterations + NaN pinning). The foundational
+comparison is a sound total order over finite same-dtype values, with documented
+NaN degeneracy.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-types semantic_cmp_total_order_axioms_ay8o9 -> 1 passed
+  cargo test -p fp-types (full)  -> all passed, 0 failed
+  ubs crates/fp-types/src/lib.rs -> 3 pre-existing panic! criticals (already in
+                                    HEAD; my test adds none). The one finding on a
+                                    new line is a non-critical cast-truncation
+                                    warning on the test PRNG's `(state >> 33) as
+                                    u32` — benign, intentional.

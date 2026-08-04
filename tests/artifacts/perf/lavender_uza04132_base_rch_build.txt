@@ -1,0 +1,388 @@
+[RCH] CARGO_TARGET_DIR forwarding detected from environment
+[RCH] Cargo target sync active; forcing worker CARGO_TARGET_DIR to an isolated remote target and syncing back to /data/projects/.scratch/cargo-target-lavender-uza04132-base-rch
+  [2m2026-06-14T22:44:33.125018Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1227854 at root@109.123.245.77 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+[RCH] project path normalized: received_input=/data/projects/frankenpandas
+[RCH] project path normalized: verified_absolute_input=/data/projects/frankenpandas
+[RCH] project path normalized: canonical_root_resolved=/data/projects
+[RCH] project path normalized: canonical_input_resolved=/data/projects/frankenpandas
+[RCH] project path normalized: verified_within_root=/data/projects/frankenpandas root=/data/projects
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-runtime (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-types (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-columnar (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-index (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-frame (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-expr (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-groupby (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-io (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-bench (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-join (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-conformance (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-frankentui (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/fp-python (WorkspaceMember)
+[RCH] dependency root /data/projects/frankenpandas/crates/frankenpandas (WorkspaceMember)
+  [2m2026-06-14T22:44:33.450538Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenpandas (hash: 083459920a9d3c69)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+[RCH] dependency sync roots planned: 15
+[RCH] dependency sync root 1/15: /data/projects/frankenpandas
+[RCH] dependency sync root 2/15: /data/projects/frankenpandas/crates/fp-bench
+[RCH] dependency sync root 3/15: /data/projects/frankenpandas/crates/fp-columnar
+[RCH] dependency sync root 4/15: /data/projects/frankenpandas/crates/fp-conformance
+[RCH] dependency sync root 5/15: /data/projects/frankenpandas/crates/fp-expr
+[RCH] dependency sync root 6/15: /data/projects/frankenpandas/crates/fp-frame
+[RCH] dependency sync root 7/15: /data/projects/frankenpandas/crates/fp-frankentui
+[RCH] dependency sync root 8/15: /data/projects/frankenpandas/crates/fp-groupby
+[RCH] dependency sync root 9/15: /data/projects/frankenpandas/crates/fp-index
+[RCH] dependency sync root 10/15: /data/projects/frankenpandas/crates/fp-io
+[RCH] dependency sync root 11/15: /data/projects/frankenpandas/crates/fp-join
+[RCH] dependency sync root 12/15: /data/projects/frankenpandas/crates/fp-python
+[RCH] dependency sync root 13/15: /data/projects/frankenpandas/crates/fp-runtime
+[RCH] dependency sync root 14/15: /data/projects/frankenpandas/crates/fp-types
+[RCH] dependency sync root 15/15: /data/projects/frankenpandas/crates/frankenpandas
+[RCH] dependency sync manifest: {"schema_version":"rch.sync_closure_manifest.v2","generated_at_unix_ms":1781477073397,"project_root":"/data/projects/frankenpandas","entries":[{"order":1,"local_root":"/data/projects/frankenpandas","remote_root":"/data/projects/frankenpandas","project_id":"frankenpandas","root_hash":"083459920a9d3c69","is_primary":true,"mode":"full"},{"order":2,"local_root":"/data/projects/frankenpandas/crates/fp-bench","remote_root":"/data/projects/frankenpandas/crates/fp-bench","project_id":"fp-bench","root_hash":"f7f46044a56a6549","is_primary":false,"mode":"full"},{"order":3,"local_root":"/data/projects/frankenpandas/crates/fp-columnar","remote_root":"/data/projects/frankenpandas/crates/fp-columnar","project_id":"fp-columnar","root_hash":"e01745eebdcc67e7","is_primary":false,"mode":"full"},{"order":4,"local_root":"/data/projects/frankenpandas/crates/fp-conformance","remote_root":"/data/projects/frankenpandas/crates/fp-conformance","project_id":"fp-conformance","root_hash":"8c174a0188268500","is_primary":false,"mode":"full"},{"order":5,"local_root":"/data/projects/frankenpandas/crates/fp-expr","remote_root":"/data/projects/frankenpandas/crates/fp-expr","project_id":"fp-expr","root_hash":"fbe9f269f4fd6a74","is_primary":false,"mode":"full"},{"order":6,"local_root":"/data/projects/frankenpandas/crates/fp-frame","remote_root":"/data/projects/frankenpandas/crates/fp-frame","project_id":"fp-frame","root_hash":"c1cf23e8b8f87f3d","is_primary":false,"mode":"full"},{"order":7,"local_root":"/data/projects/frankenpandas/crates/fp-frankentui","remote_root":"/data/projects/frankenpandas/crates/fp-frankentui","project_id":"fp-frankentui","root_hash":"3db99e368275a4e6","is_primary":false,"mode":"full"},{"order":8,"local_root":"/data/projects/frankenpandas/crates/fp-groupby","remote_root":"/data/projects/frankenpandas/crates/fp-groupby","project_id":"fp-groupby","root_hash":"480feda5ec7b1dfe","is_primary":false,"mode":"full"},{"order":9,"local_root":"/data/projects/frankenpandas/crates/fp-index","remote_root":"/data/projects/frankenpandas/crates/fp-index","project_id":"fp-index","root_hash":"4fa150a9562cefe8","is_primary":false,"mode":"full"},{"order":10,"local_root":"/data/projects/frankenpandas/crates/fp-io","remote_root":"/data/projects/frankenpandas/crates/fp-io","project_id":"fp-io","root_hash":"4f3ca2c56946b871","is_primary":false,"mode":"full"},{"order":11,"local_root":"/data/projects/frankenpandas/crates/fp-join","remote_root":"/data/projects/frankenpandas/crates/fp-join","project_id":"fp-join","root_hash":"43870fdf520ed3b4","is_primary":false,"mode":"full"},{"order":12,"local_root":"/data/projects/frankenpandas/crates/fp-python","remote_root":"/data/projects/frankenpandas/crates/fp-python","project_id":"fp-python","root_hash":"e9e29492da7d075d","is_primary":false,"mode":"full"},{"order":13,"local_root":"/data/projects/frankenpandas/crates/fp-runtime","remote_root":"/data/projects/frankenpandas/crates/fp-runtime","project_id":"fp-runtime","root_hash":"94fde3e57dc10457","is_primary":false,"mode":"full"},{"order":14,"local_root":"/data/projects/frankenpandas/crates/fp-types","remote_root":"/data/projects/frankenpandas/crates/fp-types","project_id":"fp-types","root_hash":"b25c21efc72d786f","is_primary":false,"mode":"full"},{"order":15,"local_root":"/data/projects/frankenpandas/crates/frankenpandas","remote_root":"/data/projects/frankenpandas/crates/frankenpandas","project_id":"frankenpandas","root_hash":"23fc819dda4c282f","is_primary":false,"mode":"full"}]}
+  [2m2026-06-14T22:44:33.450609Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 15 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+[RCH] sync start (project frankenpandas on vmi1227854)
+[RCH] topology preflight ok on vmi1227854 (/dp -> /data/projects enforced)
+[RCH] repo_updater pre-sync skipped (dirty local sync roots: /data/projects/frankenpandas, /data/projects/frankenpandas/crates/fp-bench, /data/projects/frankenpandas/crates/fp-columnar, /data/projects/frankenpandas/crates/fp-conformance, /data/projects/frankenpandas/crates/fp-expr, /data/projects/frankenpandas/crates/fp-frame, /data/projects/frankenpandas/crates/fp-frankentui, /data/projects/frankenpandas/crates/fp-groupby, /data/projects/frankenpandas/crates/fp-index, /data/projects/frankenpandas/crates/fp-io, /data/projects/frankenpandas/crates/fp-join, /data/projects/frankenpandas/crates/fp-python, /data/projects/frankenpandas/crates/fp-runtime, /data/projects/frankenpandas/crates/fp-types, /data/projects/frankenpandas/crates/frankenpandas)
+  [2m2026-06-14T22:44:35.501751Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1227854...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankenpandas
+[RCH] syncing dependency root /data/projects/frankenpandas to remote /data/projects/frankenpandas
+  [2m2026-06-14T22:44:35.501815Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas -> /data/projects/frankenpandas on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T22:44:39.262097Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3760ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankenpandas/crates/fp-bench
+[RCH] syncing dependency root /data/projects/frankenpandas/crates/fp-bench to remote /data/projects/frankenpandas/crates/fp-bench
+  [2m2026-06-14T22:44:39.262165Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-bench -> /data/projects/frankenpandas/crates/fp-bench on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T22:44:41.199663Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1937ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankenpandas/crates/fp-columnar
+[RCH] syncing dependency root /data/projects/frankenpandas/crates/fp-columnar to remote /data/projects/frankenpandas/crates/fp-columnar
+  [2m2026-06-14T22:44:41.199759Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-columnar -> /data/projects/frankenpandas/crates/fp-columnar on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T22:44:41.409482Z[0m [33m WARN[0m [1;33mrch::transfer[0m[33m: [33mrsync failed with retryable error (retries exhausted): kex_exchange_identification: read: Connection reset by peer
+Connection reset by 109.123.245.77 port 22
+rsync: connection unexpectedly closed (0 bytes received so far) [sender]
+rsync error: unexplained error (code 255) at io.c(232) [sender=3.4.1]
+[0m
+    [2;3mat[0m rch/src/transfer.rs:1464 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T22:44:41.463166Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mRemote execution failed: Project sync failed: rsync failed, running locally[0m
+    [2;3mat[0m rch/src/hook.rs:658 [2;3mon[0m ThreadId(1)
+
+[RCH] local (remote execution failed)
+warning: /data/projects/frankenpandas/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling autocfg v1.5.0
+   Compiling libm v0.2.16
+   Compiling siphasher v1.0.2
+   Compiling foldhash v0.2.0
+   Compiling zerocopy v0.8.48
+   Compiling memchr v2.8.0
+   Compiling serde_core v1.0.228
+   Compiling getrandom v0.3.4
+   Compiling iana-time-zone v0.1.65
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling chrono-tz v0.10.4
+   Compiling serde v1.0.228
+   Compiling bytes v1.11.1
+   Compiling once_cell v1.21.4
+   Compiling itoa v1.0.18
+   Compiling version_check v0.9.5
+   Compiling equivalent v1.0.2
+   Compiling fastrand v2.4.1
+   Compiling pkg-config v0.3.33
+   Compiling arrow-schema v58.3.0
+   Compiling zmij v1.0.21
+   Compiling bitflags v2.11.1
+   Compiling regex-syntax v0.8.10
+   Compiling serde_json v1.0.150
+   Compiling smallvec v1.15.1
+   Compiling thiserror v2.0.18
+   Compiling lexical-util v1.0.7
+   Compiling typenum v1.20.0
+   Compiling rustc-hash v2.1.2
+   Compiling log v0.4.29
+   Compiling crc32fast v1.5.0
+   Compiling semver v1.0.28
+   Compiling parking_lot_core v0.9.12
+   Compiling unicode-width v0.2.2
+   Compiling const-oid v0.10.2
+   Compiling new_debug_unreachable v1.0.6
+   Compiling scopeguard v1.2.0
+   Compiling simd-adler32 v0.3.9
+   Compiling zstd-safe v7.2.4
+   Compiling ryu v1.0.23
+   Compiling unicode-segmentation v1.13.2
+   Compiling tinyvec_macros v0.1.1
+   Compiling cpufeatures v0.3.0
+   Compiling adler2 v2.0.1
+   Compiling precomputed-hash v0.1.1
+   Compiling bumpalo v3.20.3
+   Compiling byteorder v1.5.0
+   Compiling twox-hash v2.1.2
+   Compiling base64 v0.22.1
+   Compiling zlib-rs v0.6.3
+   Compiling anyhow v1.0.102
+   Compiling vcpkg v0.2.15
+   Compiling dtoa v1.0.11
+   Compiling ucd v0.1.1
+   Compiling pin-project-lite v0.2.17
+   Compiling encoding_rs v0.8.35
+   Compiling thiserror v1.0.69
+   Compiling unicode-casefold v0.2.0
+   Compiling hashbrown v0.17.0
+   Compiling phf_shared v0.12.1
+   Compiling phf_shared v0.13.1
+   Compiling either v1.15.0
+   Compiling futures-core v0.3.32
+   Compiling futures-sink v0.3.32
+   Compiling snap v1.1.1
+   Compiling utf-8 v0.7.6
+   Compiling simdutf8 v0.1.5
+   Compiling stable_deref_trait v1.2.1
+   Compiling typed-path v0.12.3
+   Compiling num-traits v0.2.19
+   Compiling ahash v0.8.12
+   Compiling getrandom v0.4.2
+   Compiling rustix v1.1.4
+   Compiling tinyvec v1.11.0
+   Compiling lz4_flex v0.13.0
+   Compiling tendril v0.5.0
+   Compiling lock_api v0.4.14
+   Compiling futures-io v0.3.32
+   Compiling slab v0.4.12
+   Compiling futures-task v0.3.32
+   Compiling paste v1.0.15
+   Compiling heck v0.5.0
+   Compiling integer-encoding v3.0.4
+   Compiling rustc_version v0.4.1
+   Compiling miniz_oxide v0.8.9
+   Compiling dtoa-short v0.3.5
+   Compiling linux-raw-sys v0.12.1
+   Compiling phf v0.12.1
+   Compiling aho-corasick v1.1.4
+   Compiling csv-core v0.1.13
+   Compiling futures-channel v0.3.32
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling debug_unsafe v0.1.4
+   Compiling getopts v0.2.24
+   Compiling phf_generator v0.13.1
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling comfy-table v7.2.2
+   Compiling itertools v0.13.0
+   Compiling lz4_flex v0.11.6
+   Compiling clap_lex v1.1.0
+   Compiling iter-read v1.1.0
+   Compiling ciborium-io v0.2.2
+   Compiling anstyle v1.0.14
+   Compiling ego-tree v0.11.0
+   Compiling seq-macro v0.3.6
+   Compiling atoi_simd v0.17.0
+   Compiling fallible-iterator v0.3.0
+   Compiling bytemuck v1.25.0
+   Compiling fast-float2 v0.2.3
+   Compiling quick-xml v0.40.1
+   Compiling same-file v1.0.6
+   Compiling quick-error v1.2.3
+   Compiling cast v0.3.0
+   Compiling flatbuffers v25.12.19
+   Compiling bit-vec v0.8.0
+   Compiling unsafe-libyaml v0.2.11
+   Compiling fnv v1.0.7
+   Compiling unarray v0.1.4
+   Compiling servo_arc v0.4.3
+   Compiling phf_codegen v0.13.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling zopfli v0.8.3
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling walkdir v2.5.0
+   Compiling lexical-write-float v1.0.6
+   Compiling selectors v0.38.0
+   Compiling unicode-normalization v0.1.25
+   Compiling indexmap v2.14.0
+   Compiling hashlink v0.12.0
+   Compiling syn v2.0.117
+   Compiling string_cache_codegen v0.6.1
+   Compiling clap_builder v4.6.0
+   Compiling hybrid-array v0.4.10
+   Compiling bit-set v0.8.0
+   Compiling codepage v0.1.2
+   Compiling quick-xml v0.39.2
+   Compiling dta v0.6.0
+   Compiling lexical-core v1.0.6
+   Compiling web_atoms v0.2.4
+   Compiling wait-timeout v0.2.1
+   Compiling page_size v0.6.0
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling jobserver v0.1.34
+   Compiling rand_core v0.9.5
+   Compiling parking_lot v0.12.5
+   Compiling cc v1.2.60
+   Compiling rand v0.9.4
+   Compiling rand_xorshift v0.4.0
+   Compiling string_cache v0.9.0
+   Compiling regex-automata v0.4.14
+   Compiling num-integer v0.1.46
+   Compiling chrono v0.4.45
+   Compiling num-complex v0.4.6
+   Compiling atoi v2.0.0
+   Compiling ordered-float v2.10.1
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling num-bigint v0.4.6
+   Compiling num-iter v0.1.45
+   Compiling thrift v0.17.0
+   Compiling criterion-plot v0.8.2
+   Compiling tempfile v3.27.0
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling libsqlite3-sys v0.38.1
+   Compiling alloca v0.4.0
+   Compiling flate2 v1.1.9
+   Compiling csv v1.4.0
+   Compiling rusty-fork v0.3.1
+   Compiling clap v4.6.1
+   Compiling zip v7.2.0
+   Compiling num-rational v0.4.2
+   Compiling num v0.4.3
+   Compiling rust_xlsxwriter v0.95.0
+   Compiling regex v1.12.3
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling phf_macros v0.13.1
+   Compiling thiserror-impl v1.0.69
+   Compiling derive_more-impl v2.1.1
+   Compiling cssparser-macros v0.7.0
+   Compiling futures-macro v0.3.32
+   Compiling tokio-macros v2.7.0
+   Compiling snafu-derive v0.8.9
+   Compiling prost-derive v0.13.5
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.52.3
+   Compiling phf v0.13.1
+   Compiling futures-util v0.3.32
+   Compiling cssparser v0.37.0
+   Compiling derive_more v2.1.1
+   Compiling lzokay-native v0.1.0
+   Compiling prost v0.13.5
+   Compiling snafu v0.8.9
+   Compiling markup5ever v0.39.0
+   Compiling html5ever v0.39.0
+   Compiling scraper v0.27.0
+   Compiling fp-types v0.1.0 (/data/projects/frankenpandas/crates/fp-types)
+   Compiling fp-runtime v0.1.0 (/data/projects/frankenpandas/crates/fp-runtime)
+   Compiling serde-pickle v1.2.0
+   Compiling calamine v0.35.0
+   Compiling tinytemplate v1.2.1
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling raptorq v2.0.1
+   Compiling fp-columnar v0.1.0 (/data/projects/frankenpandas/crates/fp-columnar)
+   Compiling fp-index v0.1.0 (/data/projects/frankenpandas/crates/fp-index)
+   Compiling futures v0.3.32
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling arrow-buffer v58.3.0
+   Compiling ciborium-ll v0.2.2
+   Compiling proptest v1.11.0
+   Compiling ciborium v0.2.2
+   Compiling fp-frame v0.1.0 (/data/projects/frankenpandas/crates/fp-frame)
+   Compiling criterion v0.8.2
+   Compiling arrow-data v58.3.0
+   Compiling arrow-array v58.3.0
+   Compiling arrow-select v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling arrow-row v58.3.0
+   Compiling arrow-ord v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling zstd v0.13.3
+   Compiling arrow-ipc v58.3.0
+   Compiling arrow-cast v58.3.0
+   Compiling parquet v58.3.0
+   Compiling arrow-json v58.3.0
+   Compiling arrow-csv v58.3.0
+   Compiling arrow v58.3.0
+   Compiling orc-rust v0.8.0
+   Compiling fp-groupby v0.1.0 (/data/projects/frankenpandas/crates/fp-groupby)
+   Compiling fp-join v0.1.0 (/data/projects/frankenpandas/crates/fp-join)
+   Compiling fp-expr v0.1.0 (/data/projects/frankenpandas/crates/fp-expr)
+   Compiling rusqlite v0.40.1
+   Compiling fp-io v0.1.0 (/data/projects/frankenpandas/crates/fp-io)
+   Compiling fp-conformance v0.1.0 (/data/projects/frankenpandas/crates/fp-conformance)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 6m 21s

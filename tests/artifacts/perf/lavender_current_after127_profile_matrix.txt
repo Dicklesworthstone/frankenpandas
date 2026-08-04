@@ -1,0 +1,40 @@
+
+== series_add_align n=100000 iters=100 ==
+perf_profile: scenario=series_add_align n=100000 iters=100
+perf_profile: done 100 iters in 0.079s (0.787 ms/iter), sink=10000100
+
+== csv_read n=100000 iters=10 ==
+perf_profile: scenario=csv_read n=100000 iters=10
+perf_profile: done 10 iters in 0.063s (6.315 ms/iter), sink=1000000
+
+== join_1to1 n=100000 iters=20 ==
+perf_profile: scenario=join_1to1 n=100000 iters=20
+perf_profile: done 20 iters in 0.017s (0.864 ms/iter), sink=2000000
+
+== filter_bool n=100000 iters=100 ==
+perf_profile: scenario=filter_bool n=100000 iters=100
+perf_profile: done 100 iters in 0.015s (0.146 ms/iter), sink=5000000
+
+== df_dot n=100000 iters=6 ==
+perf_profile: scenario=df_dot n=100000 iters=6
+perf_profile: done 6 iters in 0.708s (118.058 ms/iter), sink=600000
+
+== str_factorize n=500000 iters=10 ==
+perf_profile: scenario=str_factorize n=500000 iters=10
+perf_profile: done 10 iters in 0.060s (5.959 ms/iter), sink=5004240
+
+== str_sort_chain n=100000 iters=10 ==
+perf_profile: scenario=str_sort_chain n=100000 iters=10
+perf_profile: done 10 iters in 0.131s (13.059 ms/iter), sink=1000000
+
+== rank_avg n=100000 iters=20 ==
+perf_profile: scenario=rank_avg n=100000 iters=20
+perf_profile: done 20 iters in 0.073s (3.670 ms/iter), sink=2000000
+
+== groupby_transform_std n=100000 iters=10 ==
+perf_profile: scenario=groupby_transform_std n=100000 iters=10
+perf_profile: done 10 iters in 0.057s (5.664 ms/iter), sink=1000000
+
+== drop_duplicates n=100000 iters=20 ==
+perf_profile: scenario=drop_duplicates n=100000 iters=20
+perf_profile: done 20 iters in 0.030s (1.513 ms/iter), sink=2000000

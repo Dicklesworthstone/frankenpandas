@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-uza0481-current-base/release-perf/high_ram_perf_baseline --profile uza0481-current-base-hyperfine --rows 100000 --iters 20 --warmup 3 --frame-cols 10 --key-cardinality 100000",
+      "mean": 3.4897868007199997,
+      "stddev": 0.10670077961908332,
+      "median": 3.48279959322,
+      "user": 2.8222329999999998,
+      "system": 0.6825882999999999,
+      "min": 3.31342582572,
+      "max": 3.6953677267200002,
+      "times": [
+        3.31342582572,
+        3.39293734472,
+        3.4829980167200003,
+        3.43033731872,
+        3.6953677267200002,
+        3.58932618572,
+        3.52616684872,
+        3.5415586727200004,
+        3.48260116972,
+        3.44314889772
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

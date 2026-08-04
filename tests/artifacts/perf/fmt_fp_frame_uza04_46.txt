@@ -1,0 +1,593 @@
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_contains_any.rs:7:
+ //! alternation (Aho-Corasick under the hood) scans each string once: O(L).
+ //! Boolean output is identical (contains any pattern as a substring).
+ 
+[32m+use std::time::Instant;
+[m[32m+
+[m use fp_frame::Series;
+ use fp_index::IndexLabel;
+ use fp_types::Scalar;
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_contains_any.rs:13:
+[31m-use std::time::Instant;
+[m 
+ fn s_from(strings: Vec<&str>) -> Series {
+     let idx: Vec<IndexLabel> = (0..strings.len() as i64).map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_corrwith.rs:8:
+ //! Bit-identical: position_map_first records the FIRST occurrence, exactly
+ //! what Index::position returns; unmatched rows are still dropped.
+ 
+[32m+use std::{collections::BTreeMap, time::Instant};
+[m[32m+
+[m use fp_columnar::Column;
+ use fp_frame::DataFrame;
+ use fp_index::{Index, IndexLabel};
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_corrwith.rs:14:
+ use fp_types::Scalar;
+[31m-use std::collections::BTreeMap;
+[m[31m-use std::time::Instant;
+[m 
+ fn frame(labels: Vec<IndexLabel>, cols: Vec<(&str, Vec<f64>)>) -> DataFrame {
+     let order: Vec<String> = cols.iter().map(|(n, _)| (*n).to_string()).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_df_iloc_gather.rs:7:
+ //! Column::take_positions keeps the contiguous Int64/Float64 buffer. Output is
+ //! bit-identical (values, dtype, negative/duplicate indices, NaN).
+ 
+[32m+use std::{collections::BTreeMap, time::Instant};
+[m[32m+
+[m use fp_columnar::Column;
+ use fp_frame::DataFrame;
+ use fp_index::{Index, IndexLabel};
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_df_iloc_gather.rs:13:
+ use fp_types::Scalar;
+[31m-use std::collections::BTreeMap;
+[m[31m-use std::time::Instant;
+[m 
+ fn frame(labels: Vec<i64>, a: Vec<i64>, b: Vec<Scalar>) -> DataFrame {
+     let idx = Index::new(labels.into_iter().map(IndexLabel::Int64).collect());
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_df_iloc_gather.rs:49:
+     );
+ 
+     // iloc: reorder + negative + duplicate
+[31m-    out.push_str(&format!("iloc={}\n", dump(&df.iloc(&[4, 0, -1, 2, 2]).unwrap())));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "iloc={}\n",
+[m[32m+        dump(&df.iloc(&[4, 0, -1, 2, 2]).unwrap())
+[m[32m+    ));
+[m     out.push_str(&format!("iloc_oob_err={}\n", df.iloc(&[99]).is_err()));
+     // take axis=0
+[31m-    out.push_str(&format!("take={}\n", dump(&df.take(&[3, 1, 0], 0).unwrap())));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "take={}\n",
+[m[32m+        dump(&df.take(&[3, 1, 0], 0).unwrap())
+[m[32m+    ));
+[m     out.push_str(&format!("take_oob_err={}\n", df.take(&[99], 0).is_err()));
+     // sample deterministic (fixed seed)
+     out.push_str(&format!(
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_df_iloc_gather.rs:75:
+     let mut x: u64 = 0xabcd_1234;
+     let pos: Vec<i64> = (0..n)
+         .map(|_| {
+[31m-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+[m[32m+            x = x
+[m[32m+                .wrapping_mul(6364136223846793005)
+[m[32m+                .wrapping_add(1442695040888963407);
+[m             (x >> 16) as i64 % (n as i64)
+         })
+         .collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_df_loc.rs:7:
+ //! index labels return all matches in ascending index order; selector order
+ //! and duplicate selectors are preserved; a missing label fails closed.
+ 
+[32m+use std::{collections::BTreeMap, time::Instant};
+[m[32m+
+[m use fp_columnar::Column;
+ use fp_frame::DataFrame;
+ use fp_index::{Index, IndexLabel};
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_df_loc.rs:13:
+ use fp_types::Scalar;
+[31m-use std::collections::BTreeMap;
+[m[31m-use std::time::Instant;
+[m 
+ fn df_from(labels: Vec<i64>, c0: Vec<i64>, c1: Vec<i64>) -> DataFrame {
+     let index = Index::new(labels.into_iter().map(IndexLabel::Int64).collect());
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_df_loc.rs:31:
+ fn golden() -> String {
+     let mut out = String::new();
+     // Duplicate index label 10 at positions 0 and 2.
+[31m-    let df = df_from(vec![10, 20, 10, 30], vec![100, 200, 300, 400], vec![1, 2, 3, 4]);
+[m[32m+    let df = df_from(
+[m[32m+        vec![10, 20, 10, 30],
+[m[32m+        vec![100, 200, 300, 400],
+[m[32m+        vec![1, 2, 3, 4],
+[m[32m+    );
+[m     // Selector order [30, 10, 20]; 10 returns both matches (ascending position).
+     let r = df
+         .loc(&[
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_df_loc.rs:47:
+     let r2 = df
+         .loc(&[IndexLabel::Int64(20), IndexLabel::Int64(20)])
+         .unwrap();
+[31m-    out.push_str(&format!("dup_a={:?}\n", r2.columns().get("a").unwrap().values()));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "dup_a={:?}\n",
+[m[32m+        r2.columns().get("a").unwrap().values()
+[m[32m+    ));
+[m     // Missing label fails closed.
+     let err = df.loc(&[IndexLabel::Int64(99)]);
+     out.push_str(&format!("missing_is_err={}\n", err.is_err()));
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_iloc_gather.rs:7:
+ //! Column::take_positions keeps an all-valid Int64/Float64 buffer contiguous.
+ //! Output (values, dtype, negative-index handling) is bit-identical.
+ 
+[32m+use std::time::Instant;
+[m[32m+
+[m use fp_frame::Series;
+ use fp_index::IndexLabel;
+ use fp_types::{NullKind, Scalar};
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_iloc_gather.rs:13:
+[31m-use std::time::Instant;
+[m 
+ fn s_i64(vals: Vec<i64>) -> Series {
+     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_iloc_gather.rs:48:
+ 
+     // Utf8 + Bool
+     let u = s_scalars(
+[31m-        vec!["a", "b", "c"].into_iter().map(|x| Scalar::Utf8(x.into())).collect(),
+[m[32m+        vec!["a", "b", "c"]
+[m[32m+            .into_iter()
+[m[32m+            .map(|x| Scalar::Utf8(x.into()))
+[m[32m+            .collect(),
+[m     );
+     out.push_str(&format!("utf8={:?}\n", u.iloc(&[2, -3]).unwrap().values()));
+     let b = s_scalars(vec![Scalar::Bool(true), Scalar::Bool(false)]);
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_iloc_gather.rs:55:
+[31m-    out.push_str(&format!("bool={:?}\n", b.iloc(&[1, 0, 1]).unwrap().values()));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "bool={:?}\n",
+[m[32m+        b.iloc(&[1, 0, 1]).unwrap().values()
+[m[32m+    ));
+[m 
+     // Out-of-bounds errors
+     out.push_str(&format!("oob_err={}\n", s.iloc(&[99]).is_err()));
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_iloc_gather.rs:69:
+     let mut x: u64 = 0xdead_beef;
+     let mut pos: Vec<i64> = (0..n as i64).collect();
+     for i in (1..n).rev() {
+[31m-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+[m[32m+        x = x
+[m[32m+            .wrapping_mul(6364136223846793005)
+[m[32m+            .wrapping_add(1442695040888963407);
+[m         let j = (x >> 16) as usize % (i + 1);
+         pos.swap(i, j);
+     }
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_kendall.rs:6:
+ //! computes the identical tau-b in O(n log n). The golden battery pins the
+ //! exact f64 output on tied data so the fast path proves bit-identical.
+ 
+[32m+use std::time::Instant;
+[m[32m+
+[m use fp_frame::Series;
+ use fp_index::IndexLabel;
+ use fp_types::Scalar;
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_kendall.rs:12:
+[31m-use std::time::Instant;
+[m 
+ fn s_from(vals: &[f64]) -> Series {
+     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_kendall.rs:21:
+     let mut out = String::new();
+     let cases: &[(&[f64], &[f64])] = &[
+         // ties in both x and y
+[31m-        (&[1.0, 2.0, 2.0, 3.0, 3.0, 3.0], &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0]),
+[m[32m+        (
+[m[32m+            &[1.0, 2.0, 2.0, 3.0, 3.0, 3.0],
+[m[32m+            &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+[m[32m+        ),
+[m         // joint ties (identical (x,y) pairs)
+         (&[1.0, 1.0, 2.0, 2.0], &[5.0, 5.0, 9.0, 9.0]),
+         // discordant-heavy with ties
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_loc.rs:7:
+ //! labels return all matches in ascending index order; selector order and
+ //! duplicate selectors are preserved; a missing label fails closed.
+ 
+[32m+use std::time::Instant;
+[m[32m+
+[m use fp_frame::Series;
+ use fp_index::IndexLabel;
+ use fp_types::Scalar;
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_loc.rs:13:
+[31m-use std::time::Instant;
+[m 
+ fn s_from(labels: Vec<i64>, vals: Vec<i64>) -> Series {
+     let idx: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_loc.rs:23:
+     // Duplicate index label 10 at positions 0 and 2.
+     let s = s_from(vec![10, 20, 10, 30], vec![100, 200, 300, 400]);
+     // Selector order [10, 30, 20]; 10 returns both matches (asc position).
+[31m-    let r = s.loc(&[IndexLabel::Int64(10), IndexLabel::Int64(30), IndexLabel::Int64(20)]).unwrap();
+[m[32m+    let r = s
+[m[32m+        .loc(&[
+[m[32m+            IndexLabel::Int64(10),
+[m[32m+            IndexLabel::Int64(30),
+[m[32m+            IndexLabel::Int64(20),
+[m[32m+        ])
+[m[32m+        .unwrap();
+[m     out.push_str(&format!("labels={:?}\n", r.index().labels()));
+     out.push_str(&format!("values={:?}\n", r.values()));
+     // Duplicate selector entries preserved.
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_loc.rs:30:
+[31m-    let r2 = s.loc(&[IndexLabel::Int64(20), IndexLabel::Int64(20)]).unwrap();
+[m[32m+    let r2 = s
+[m[32m+        .loc(&[IndexLabel::Int64(20), IndexLabel::Int64(20)])
+[m[32m+        .unwrap();
+[m     out.push_str(&format!("dup_sel_values={:?}\n", r2.values()));
+     // Missing label fails closed.
+     let err = s.loc(&[IndexLabel::Int64(99)]);
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_searchsorted.rs:9:
+ //! sorted input (the documented precondition); a sortedness guard falls back
+ //! to the exact linear scan for unsorted input so behavior is unchanged.
+ 
+[32m+use std::time::Instant;
+[m[32m+
+[m use fp_frame::Series;
+ use fp_index::IndexLabel;
+ use fp_types::Scalar;
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_searchsorted.rs:15:
+[31m-use std::time::Instant;
+[m 
+ fn s_i64(vals: Vec<i64>) -> Series {
+     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_searchsorted.rs:88:
+ 
+     // UNSORTED input: must fall back to the exact linear-scan behavior.
+     let uns = s_i64(vec![30, 10, 40, 20, 20]);
+[31m-    let un_needles: Vec<Scalar> = vec![5, 20, 35, 40]
+[m[31m-        .into_iter()
+[m[31m-        .map(Scalar::Int64)
+[m[31m-        .collect();
+[m[32m+    let un_needles: Vec<Scalar> = vec![5, 20, 35, 40].into_iter().map(Scalar::Int64).collect();
+[m     out.push_str(&format!(
+         "unsorted_left={:?}\n",
+         uns.searchsorted_values(&un_needles, "left").unwrap()
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_searchsorted.rs:116:
+     ));
+     out.push_str(&format!(
+         "single_missing_right={}\n",
+[31m-        fs.searchsorted(&Scalar::Float64(f64::NAN), "right").unwrap()
+[m[32m+        fs.searchsorted(&Scalar::Float64(f64::NAN), "right")
+[m[32m+            .unwrap()
+[m     ));
+ 
+     out
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_index.rs:6:
+ //! index sorts by raw i64, so Column's stable typed radix argsort (O(n)) is
+ //! bit-identical — including stable tie order for duplicate labels.
+ 
+[32m+use std::{collections::BTreeMap, time::Instant};
+[m[32m+
+[m use fp_columnar::Column;
+ use fp_frame::{DataFrame, Series};
+ use fp_index::{Index, IndexLabel};
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_index.rs:12:
+ use fp_types::Scalar;
+[31m-use std::collections::BTreeMap;
+[m[31m-use std::time::Instant;
+[m 
+ fn series(labels: Vec<i64>, vals: Vec<i64>) -> Series {
+     let idx: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_index.rs:71:
+     let mut x: u64 = 0x1234_5678;
+     let labels: Vec<i64> = (0..n)
+         .map(|_| {
+[31m-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+[m[32m+            x = x
+[m[32m+                .wrapping_mul(6364136223846793005)
+[m[32m+                .wrapping_add(1442695040888963407);
+[m             (x >> 16) as i64 % (n as i64)
+         })
+         .collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_values_gather.rs:7:
+ //! re-validated in Column::new; routing through Column::take_positions keeps
+ //! the gather on the contiguous typed buffer. Output is bit-identical.
+ 
+[32m+use std::time::Instant;
+[m[32m+
+[m use fp_frame::Series;
+ use fp_index::IndexLabel;
+ use fp_types::{NullKind, Scalar};
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_values_gather.rs:13:
+[31m-use std::time::Instant;
+[m 
+ fn s_i64(vals: Vec<i64>) -> Series {
+     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_values_gather.rs:26:
+     let mut out = String::new();
+     // Int64 ascending/descending with ties (stable).
+     let s = s_i64(vec![3, 1, 2, 1, 3]);
+[31m-    out.push_str(&format!("i64_asc={:?}\n", s.sort_values(true).unwrap().values()));
+[m[31m-    out.push_str(&format!("i64_desc={:?}\n", s.sort_values(false).unwrap().values()));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "i64_asc={:?}\n",
+[m[32m+        s.sort_values(true).unwrap().values()
+[m[32m+    ));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "i64_desc={:?}\n",
+[m[32m+        s.sort_values(false).unwrap().values()
+[m[32m+    ));
+[m 
+     // Float64 with NaN (NaN sorts last under na_position='last').
+     let f = s_scalars(vec![
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_values_gather.rs:36:
+         Scalar::Float64(-1.0),
+         Scalar::Float64(2.5),
+     ]);
+[31m-    out.push_str(&format!("f64_asc={:?}\n", f.sort_values(true).unwrap().values()));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "f64_asc={:?}\n",
+[m[32m+        f.sort_values(true).unwrap().values()
+[m[32m+    ));
+[m 
+     // Nullable Int64 (Null mixed in) via na_position first/last.
+     let ni = s_scalars(vec![
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_values_gather.rs:61:
+             .map(|x| Scalar::Utf8(x.to_string()))
+             .collect(),
+     );
+[31m-    out.push_str(&format!("utf8_asc={:?}\n", u.sort_values(true).unwrap().values()));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "utf8_asc={:?}\n",
+[m[32m+        u.sort_values(true).unwrap().values()
+[m[32m+    ));
+[m 
+     // Bool.
+     let b = s_scalars(vec![
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_values_gather.rs:69:
+         Scalar::Bool(false),
+         Scalar::Bool(true),
+     ]);
+[31m-    out.push_str(&format!("bool_asc={:?}\n", b.sort_values(true).unwrap().values()));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "bool_asc={:?}\n",
+[m[32m+        b.sort_values(true).unwrap().values()
+[m[32m+    ));
+[m     out
+ }
+ 
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_sort_values_gather.rs:81:
+     let mut x: u64 = 0x9e37_79b9;
+     let vals: Vec<i64> = (0..n)
+         .map(|_| {
+[31m-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+[m[32m+            x = x
+[m[32m+                .wrapping_mul(6364136223846793005)
+[m[32m+                .wrapping_add(1442695040888963407);
+[m             (x >> 16) as i64 % 1_000_000
+         })
+         .collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_startswith_any.rs:7:
+ //! patterns share a long common prefix. One anchored literal-alternation regex
+ //! (`\A(?:…)` / `(?:…)\z`) matches each string once: O(prefix) per element.
+ 
+[32m+use std::time::Instant;
+[m[32m+
+[m use fp_frame::Series;
+ use fp_index::IndexLabel;
+ use fp_types::Scalar;
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_startswith_any.rs:13:
+[31m-use std::time::Instant;
+[m 
+ fn s_from(strings: Vec<&str>) -> Series {
+     let idx: Vec<IndexLabel> = (0..strings.len() as i64).map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_startswith_any.rs:43:
+     let sn = Series::from_values(
+         "s",
+         vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+[31m-        vec![Scalar::Utf8("https://z".into()), Scalar::Null(fp_types::NullKind::NaN)],
+[m[32m+        vec![
+[m[32m+            Scalar::Utf8("https://z".into()),
+[m[32m+            Scalar::Null(fp_types::NullKind::NaN),
+[m[32m+        ],
+[m     )
+     .unwrap();
+[31m-    let rn = sn.str().startswith_any_with_na(&["https://"], Some(true)).unwrap();
+[m[32m+    let rn = sn
+[m[32m+        .str()
+[m[32m+        .startswith_any_with_na(&["https://"], Some(true))
+[m[32m+        .unwrap();
+[m     out.push_str(&format!("na_fill={:?}\n", rn.values()));
+     out
+ }
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_startswith_any.rs:56:
+     print!("GOLDEN_BEGIN\n{g}GOLDEN_END\n");
+ 
+     // Worst case: many prefixes sharing a long common stem.
+[31m-    let pats_owned: Vec<String> = (0..200).map(|i| format!("https://cdn.example.com/path/{i:04}/")).collect();
+[m[32m+    let pats_owned: Vec<String> = (0..200)
+[m[32m+        .map(|i| format!("https://cdn.example.com/path/{i:04}/"))
+[m[32m+        .collect();
+[m     let pats: Vec<&str> = pats_owned.iter().map(String::as_str).collect();
+     let one = "https://cdn.example.com/path/9999/asset/file/deep/name.bin";
+     let n = 40_000;
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_take_gather.rs:8:
+ //! Column::take_positions keeps the contiguous Int64/Float64 buffer. Output is
+ //! bit-identical (values, dtype, negative/dup indices, group order).
+ 
+[32m+use std::time::Instant;
+[m[32m+
+[m use fp_frame::Series;
+ use fp_index::IndexLabel;
+ use fp_types::{NullKind, Scalar};
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_take_gather.rs:14:
+[31m-use std::time::Instant;
+[m 
+ fn s_i64(vals: Vec<i64>) -> Series {
+     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_take_gather.rs:38:
+         Scalar::Float64(f64::NAN),
+         Scalar::Float64(-3.0),
+     ]);
+[31m-    out.push_str(&format!("take_f64={:?}\n", f.take(&[2, 1, 0]).unwrap().values()));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "take_f64={:?}\n",
+[m[32m+        f.take(&[2, 1, 0]).unwrap().values()
+[m[32m+    ));
+[m     let ni = s_scalars(vec![
+         Scalar::Int64(7),
+         Scalar::Null(NullKind::NaN),
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_take_gather.rs:45:
+         Scalar::Int64(9),
+     ]);
+[31m-    out.push_str(&format!("take_ni={:?}\n", ni.take(&[1, 2, 0]).unwrap().values()));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "take_ni={:?}\n",
+[m[32m+        ni.take(&[1, 2, 0]).unwrap().values()
+[m[32m+    ));
+[m     let u = s_scalars(
+[31m-        vec!["a", "b", "c"].into_iter().map(|x| Scalar::Utf8(x.into())).collect(),
+[m[32m+        vec!["a", "b", "c"]
+[m[32m+            .into_iter()
+[m[32m+            .map(|x| Scalar::Utf8(x.into()))
+[m[32m+            .collect(),
+[m     );
+[31m-    out.push_str(&format!("take_utf8={:?}\n", u.take(&[2, -3]).unwrap().values()));
+[m[32m+    out.push_str(&format!(
+[m[32m+        "take_utf8={:?}\n",
+[m[32m+        u.take(&[2, -3]).unwrap().values()
+[m[32m+    ));
+[m 
+     // SeriesGroupBy gather paths (nlargest / head) route through take_positions.
+     let data = s_i64(vec![5, 1, 9, 3, 7, 2, 8]);
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_take_gather.rs:76:
+     let mut x: u64 = 0xfeed_face;
+     let idxs: Vec<i64> = (0..n)
+         .map(|_| {
+[31m-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+[m[32m+            x = x
+[m[32m+                .wrapping_mul(6364136223846793005)
+[m[32m+                .wrapping_add(1442695040888963407);
+[m             (x >> 16) as i64 % (n as i64)
+         })
+         .collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_translate.rs:7:
+ //! O(total_chars). First occurrence in `from` wins (same as the linear scan);
+ //! a source char beyond `to`'s length is deleted; unmapped chars pass through.
+ 
+[32m+use std::time::Instant;
+[m[32m+
+[m use fp_frame::Series;
+ use fp_index::IndexLabel;
+ use fp_types::Scalar;
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/bench_translate.rs:13:
+[31m-use std::time::Instant;
+[m 
+ fn s_from(strings: Vec<&str>) -> Series {
+     let idx: Vec<IndexLabel> = (0..strings.len() as i64).map(IndexLabel::Int64).collect();
+Diff in /data/projects/frankenpandas/crates/fp-frame/examples/repro_pct.rs:4:
+ 
+ fn main() {
+     let vals: Vec<i64> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 999, 0];
+[31m-    let scalars: Vec<Scalar> = vals.iter().map(|&v| if v==999 {Scalar::Null(fp_types::NullKind::Null)} else {Scalar::Int64(v)}).collect();
+[m[32m+    let scalars: Vec<Scalar> = vals
+[m[32m+        .iter()
+[m[32m+        .map(|&v| {
+[m[32m+            if v == 999 {
+[m[32m+                Scalar::Null(fp_types::NullKind::Null)
+[m[32m+            } else {
+[m[32m+                Scalar::Int64(v)
+[m[32m+            }
+[m[32m+        })
+[m[32m+        .collect();
+[m     let labels: Vec<IndexLabel> = vals.iter().map(|_| IndexLabel::Int64(0)).collect();
+     let s = Series::from_values("pct_change", labels, scalars).unwrap();
+ 
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:23323:
+             if pat.is_empty() {
+                 // `s.contains("")` is true for every row, including empty.
+                 out.fill(true);
+[31m-            } else if let Ok(re) =
+[m[31m-                regex::bytes::Regex::new(&regex::escape(pat))
+[m[31m-            {
+[m[32m+            } else if let Ok(re) = regex::bytes::Regex::new(&regex::escape(pat)) {
+[m                 let mut pos = 0usize;
+                 while pos < bytes.len() {
+[31m-                    let Some(m) = re.find_at(bytes, pos) else { break };
+[m[32m+                    let Some(m) = re.find_at(bytes, pos) else {
+[m[32m+                        break;
+[m[32m+                    };
+[m                     // Row containing the match start: offsets is ascending
+                     // with offsets[0] == 0, so partition_point gives the
+                     // first offset > start; minus one is the row.
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:23346:
+                 return self.apply_str_bool(|s| s.contains(pat), self.series.name());
+             }
+             let index = self.series.index().clone();
+[31m-            return Series::new(
+[m[31m-                self.series.name(),
+[m[31m-                index,
+[m[31m-                Column::from_bool_values(out),
+[m[31m-            );
+[m[32m+            return Series::new(self.series.name(), index, Column::from_bool_values(out));
+[m         }
+         self.apply_str_bool(|s| s.contains(pat), self.series.name())
+     }
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:45184:
+         // their first-seen representative scalar (preserving the historical
+         // stringified-bucket merge quirk while ordering numerically).
+         row_keys.sort_by(pivot_axis_scalar_cmp);
+[31m-        let mut col_pairs: Vec<(Scalar, String)> =
+[m[31m-            col_reps.into_iter().zip(col_keys).collect();
+[m[32m+        let mut col_pairs: Vec<(Scalar, String)> = col_reps.into_iter().zip(col_keys).collect();
+[m         col_pairs.sort_by(|a, b| pivot_axis_scalar_cmp(&a.0, &b.0));
+         let col_keys: Vec<String> = col_pairs.into_iter().map(|(_, k)| k).collect();
+ 
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:50014:
+             .expect("cache-field normalizer regex")
+         });
+         let after_cache = cache_re.replace_all(&stripped, "$1: OnceLock(_)");
+[31m-        let validity_re = VALIDITY_RE
+[m[31m-            .get_or_init(|| {
+[m[31m-                regex::Regex::new(r"ValidityMask \{ words: \[[^]]*\], len: (\d+) \}")
+[m[31m-                    .expect("validity normalizer regex")
+[m[31m-            });
+[m[32m+        let validity_re = VALIDITY_RE.get_or_init(|| {
+[m[32m+            regex::Regex::new(r"ValidityMask \{ words: \[[^]]*\], len: (\d+) \}")
+[m[32m+                .expect("validity normalizer regex")
+[m[32m+        });
+[m         validity_re
+             .replace_all(&after_cache, "ValidityMask { len: $1 }")
+             .into_owned()
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:54058:
+             ],
+         )
+         .unwrap();
+[31m-        let out = s.value_counts_with_options(false, true, false, false).unwrap();
+[m[32m+        let out = s
+[m[32m+            .value_counts_with_options(false, true, false, false)
+[m[32m+            .unwrap();
+[m         assert_eq!(
+             out.index().labels(),
+             &[
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:54108:
+         );
+ 
+         // dropna=true (the default surface) still excludes every null kind.
+[31m-        let dropped = s.value_counts_with_options(false, true, false, true).unwrap();
+[m[32m+        let dropped = s
+[m[32m+            .value_counts_with_options(false, true, false, true)
+[m[32m+            .unwrap();
+[m         assert_eq!(dropped.index().labels(), &[IndexLabel::Int64(1)]);
+ 
+         // The typed null labels render like pandas' repr (None / NaN).
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:62133:
+                 IndexLabel::Null(NullKind::NaN),
+             ]
+         );
+[31m-        assert_eq!(pivoted.column_order, vec!["c1".to_owned(), "NaN".to_owned()]);
+[m[32m+        assert_eq!(
+[m[32m+            pivoted.column_order,
+[m[32m+            vec!["c1".to_owned(), "NaN".to_owned()]
+[m[32m+        );
+[m         assert_eq!(
+             pivoted.columns["c1"].values(),
+             &[

@@ -1,0 +1,958 @@
+//! Generative perf gap-hunt probe (measurement only): times un-benchmarked
+//! DataFrame ops at scale to surface a fresh vs-pandas algorithmic gap.
+//! Run: cargo run -p fp-conformance --profile release-perf --example gap_hunt -- 200000
+use std::time::Instant;
+
+use fp_columnar::Column;
+use fp_frame::DataFrame;
+use fp_index::{DuplicateKeep, Index, IndexLabel};
+use fp_types::Scalar;
+
+fn numeric_frame(n: usize, cols: usize, with_nulls: bool) -> DataFrame {
+    // TYPED columns (from_f64_values / _with_validity) — the realistic backing
+    // a CSV read or numeric computation produces. This isolates per-op typed
+    // fast-path gaps from the from_dict-Scalar-backing question.
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut order = Vec::new();
+    for c in 0..cols {
+        let name = format!("c{c}");
+        let v: Vec<f64> = (0..n)
+            .map(|i| ((i * (c + 1)) % 9973) as f64 * 0.25)
+            .collect();
+        let col = if with_nulls {
+            let mut validity = fp_columnar::ValidityMask::all_valid(n);
+            for i in 0..n {
+                if (i + c) % 7 == 0 {
+                    validity.set(i, false);
+                }
+            }
+            Column::from_f64_values_with_validity(v, validity)
+        } else {
+            Column::from_f64_values(v)
+        };
+        columns.insert(name.clone(), col);
+        order.push(name);
+    }
+    DataFrame::new_with_column_order(index, columns, order).expect("frame")
+}
+
+fn shuffled_index_frame(n: usize, cols: usize) -> DataFrame {
+    // Deterministic shuffle of the Int64 index so sort_index does real work.
+    let mut labels: Vec<IndexLabel> = (0..n)
+        .map(|i| {
+            let mixed = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(17)
+                ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            IndexLabel::Int64((mixed % (n as u64 * 4)) as i64)
+        })
+        .collect();
+    // ensure uniqueness not required for sort_index timing
+    labels.truncate(n);
+    let index = Index::new(labels);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut order = Vec::new();
+    for c in 0..cols {
+        let name = format!("c{c}");
+        let v: Vec<f64> = (0..n)
+            .map(|i| ((i * (c + 1)) % 9973) as f64 * 0.25)
+            .collect();
+        columns.insert(name.clone(), Column::from_f64_values(v));
+        order.push(name);
+    }
+    DataFrame::new_with_column_order(index, columns, order).expect("shuffled frame")
+}
+
+fn int_frame(n: usize, cols: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let mut columns = std::collections::BTreeMap::new();
+    let mut order = Vec::new();
+    for c in 0..cols {
+        let name = format!("c{c}");
+        let v: Vec<i64> = (0..n)
+            .map(|i| ((i * (c + 1)) % 9973) as i64 - 4000)
+            .collect();
+        columns.insert(name.clone(), Column::from_i64_values(v));
+        order.push(name);
+    }
+    DataFrame::new_with_column_order(Index::new(labels), columns, order).expect("int frame")
+}
+
+// Frame with a scattered Int64 "key" column (`groups` distinct values) plus
+// `cols` Float64 value columns — for DataFrameGroupBy agg probing.
+fn keyed_frame(n: usize, cols: usize, groups: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let mut columns = std::collections::BTreeMap::new();
+    let mut order = Vec::new();
+    let keys: Vec<i64> = (0..n)
+        .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % groups as u64) as i64)
+        .collect();
+    columns.insert("key".to_string(), Column::from_i64_values(keys));
+    order.push("key".to_string());
+    for c in 0..cols {
+        let name = format!("v{c}");
+        let v: Vec<f64> = (0..n)
+            .map(|i| ((i * (c + 1)) % 9973) as f64 * 0.25)
+            .collect();
+        columns.insert(name.clone(), Column::from_f64_values(v));
+        order.push(name);
+    }
+    DataFrame::new_with_column_order(Index::new(labels), columns, order).expect("keyed frame")
+}
+
+fn time_it<F: FnMut()>(label: &str, warmup: usize, iters: usize, mut f: F) {
+    for _ in 0..warmup {
+        f();
+    }
+    let start = Instant::now();
+    for _ in 0..iters {
+        f();
+    }
+    let ms = start.elapsed().as_secs_f64() * 1e3 / iters as f64;
+    println!("{ms:>10.3} ms/iter  {label}");
+}
+
+fn golden_dump(df: &DataFrame) -> String {
+    let mut out = String::new();
+    for name in df.column_names() {
+        out.push_str(name);
+        out.push(':');
+        for v in df.columns()[name].values().iter() {
+            out.push_str(&format!("{v:?};"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("golden") {
+        // Deterministic small frames (typed + nullable) for sha256 isomorphism
+        // proofs across the diff/pct_change typed fast paths.
+        let f = numeric_frame(5000, 4, false);
+        let fnull = numeric_frame(5000, 4, true);
+        print!("{}", golden_dump(&f.diff(1).unwrap()));
+        print!("{}", golden_dump(&f.diff(3).unwrap()));
+        print!("{}", golden_dump(&f.diff(-2).unwrap()));
+        print!("{}", golden_dump(&fnull.diff(1).unwrap()));
+        print!("{}", golden_dump(&f.pct_change(1).unwrap()));
+        print!("{}", golden_dump(&fnull.pct_change(1).unwrap()));
+        // combine_first: nullable self over nullable other (overlapping nulls),
+        // and nullable self over all-valid other.
+        let other_null = numeric_frame(5000, 4, true);
+        print!(
+            "{}",
+            golden_dump(&fnull.combine_first(&other_null).unwrap())
+        );
+        print!("{}", golden_dump(&fnull.combine_first(&f).unwrap()));
+        // ffill / bfill (carry fills) over a nullable frame, with and without limit.
+        print!("{}", golden_dump(&fnull.ffill(None).unwrap()));
+        print!("{}", golden_dump(&fnull.ffill(Some(2)).unwrap()));
+        print!("{}", golden_dump(&fnull.bfill(None).unwrap()));
+        print!("{}", golden_dump(&fnull.bfill(Some(2)).unwrap()));
+        // corrwith: all-valid self over nullable other (pairs dropped), and
+        // nullable self over nullable other.
+        print!(
+            "{}",
+            golden_dump(
+                &f.corrwith(&other_null)
+                    .unwrap()
+                    .to_frame(Some("c"))
+                    .unwrap()
+            )
+        );
+        print!(
+            "{}",
+            golden_dump(
+                &fnull
+                    .corrwith(&other_null)
+                    .unwrap()
+                    .to_frame(Some("c"))
+                    .unwrap()
+            )
+        );
+        // interpolate: interior gaps linear-filled, trailing carried, leading NaN.
+        print!("{}", golden_dump(&fnull.interpolate().unwrap()));
+        // apply_per_column family (round/cumsum/cumprod/abs) — all route through
+        // the column-parallel apply_per_column helper; f is 5000x4 (>=16384
+        // values) so the parallel path is exercised bit-for-bit.
+        print!("{}", golden_dump(&f.round(2).unwrap()));
+        print!("{}", golden_dump(&fnull.round(3).unwrap()));
+        print!("{}", golden_dump(&f.cumsum().unwrap()));
+        print!("{}", golden_dump(&f.cumprod().unwrap()));
+        print!("{}", golden_dump(&f.abs().unwrap()));
+        print!("{}", golden_dump(&fnull.cumsum().unwrap()));
+        // scalar arithmetic (apply_scalar_op): typed f64 arm (f) + Scalar arm
+        // with nulls (fnull). All route through the column-parallel helper.
+        print!("{}", golden_dump(&f.add_scalar(1.0).unwrap()));
+        print!("{}", golden_dump(&f.mul_scalar(2.0).unwrap()));
+        print!("{}", golden_dump(&f.sub_scalar(0.5).unwrap()));
+        print!("{}", golden_dump(&f.div_scalar(3.0).unwrap()));
+        print!("{}", golden_dump(&fnull.add_scalar(2.0).unwrap()));
+        print!("{}", golden_dump(&fnull.mul_scalar(0.0).unwrap()));
+        // rank: all methods over the multi-column frame (>=2 cols + >=16384
+        // values => exercises the column-parallel rank path bit-for-bit).
+        for method in ["average", "min", "max", "first", "dense"] {
+            print!("{}", golden_dump(&f.rank(method, true, "keep").unwrap()));
+            print!("{}", golden_dump(&f.rank(method, false, "keep").unwrap()));
+            print!(
+                "{}",
+                golden_dump(&fnull.rank(method, true, "keep").unwrap())
+            );
+        }
+        // duplicated / drop_duplicates: n>9973 gives real period-9973 row dups;
+        // nullable variant exercises missing-equality. All keep modes.
+        let dup = numeric_frame(20000, 3, false);
+        let dupn = numeric_frame(20000, 3, true);
+        for keep in [
+            DuplicateKeep::First,
+            DuplicateKeep::Last,
+            DuplicateKeep::None,
+        ] {
+            print!(
+                "{}",
+                golden_dump(
+                    &dup.duplicated(None, keep)
+                        .unwrap()
+                        .to_frame(Some("d"))
+                        .unwrap()
+                )
+            );
+            print!(
+                "{}",
+                golden_dump(
+                    &dupn
+                        .duplicated(None, keep)
+                        .unwrap()
+                        .to_frame(Some("d"))
+                        .unwrap()
+                )
+            );
+            print!(
+                "{}",
+                golden_dump(&dup.drop_duplicates(None, keep, false).unwrap())
+            );
+            print!(
+                "{}",
+                golden_dump(&dupn.drop_duplicates(None, keep, false).unwrap())
+            );
+        }
+        // clip: two-sided, nullable, reversed-bound swap (GH2747), one-sided.
+        print!("{}", golden_dump(&f.clip(Some(0.0), Some(1000.0)).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&fnull.clip(Some(100.0), Some(500.0)).unwrap())
+        );
+        print!("{}", golden_dump(&f.clip(Some(7.0), Some(3.0)).unwrap()));
+        print!("{}", golden_dump(&fnull.clip(None, Some(400.0)).unwrap()));
+        // fillna: nullable filled with a finite constant; all-valid is a no-op.
+        print!(
+            "{}",
+            golden_dump(&fnull.fillna(&Scalar::Float64(0.0)).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.fillna(&Scalar::Float64(-1.5)).unwrap())
+        );
+        print!("{}", golden_dump(&f.fillna(&Scalar::Float64(9.0)).unwrap()));
+        // frame-vs-frame comparison: all-valid vs nullable (result has nulls),
+        // and all-valid vs all-valid (all-valid Bool result).
+        print!("{}", golden_dump(&f.gt(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.lt(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.eq(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.ge(&f).unwrap()));
+        print!("{}", golden_dump(&fnull.ne(&other_null).unwrap()));
+        // where_cond / mask: cond has nulls (from gt vs nullable); self all-valid
+        // and nullable; finite fill and the default (None) fill.
+        let cond = f.gt(&other_null).unwrap();
+        print!(
+            "{}",
+            golden_dump(&f.where_cond(&cond, Some(&Scalar::Float64(0.0))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.mask(&cond, Some(&Scalar::Float64(-1.0))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(
+                &fnull
+                    .where_cond(&cond, Some(&Scalar::Float64(7.0)))
+                    .unwrap()
+            )
+        );
+        print!("{}", golden_dump(&f.where_cond(&cond, None).unwrap()));
+        // frame-vs-frame arithmetic: missing propagation (nullable other) and a
+        // NaN op result (div by self: 0.0/0.0 at row 0 -> Float64(NaN)).
+        print!("{}", golden_dump(&f.add_df(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.sub_df(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.mul_df(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.div_df(&f).unwrap()));
+        print!("{}", golden_dump(&fnull.add_df(&other_null).unwrap()));
+        // isin: exact float needles, cross-type Int64 needles (0.0 matches
+        // Int64(0)), and a NaN needle that matches missing slots of fnull.
+        print!(
+            "{}",
+            golden_dump(
+                &f.isin(&[
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.5),
+                    Scalar::Float64(100.0)
+                ])
+                .unwrap()
+            )
+        );
+        print!(
+            "{}",
+            golden_dump(&f.isin(&[Scalar::Int64(0), Scalar::Int64(250)]).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.isin(&[Scalar::Float64(f64::NAN)]).unwrap())
+        );
+        // quantile: several q over all-valid and nullable (nulls filtered) frames.
+        for q in [0.0, 0.25, 0.5, 0.9, 1.0] {
+            print!(
+                "{}",
+                golden_dump(&f.quantile(q).unwrap().to_frame(Some("q")).unwrap())
+            );
+            print!(
+                "{}",
+                golden_dump(&fnull.quantile(q).unwrap().to_frame(Some("q")).unwrap())
+            );
+        }
+        // nunique: distinct counts (all-valid + nullable), and dropna=false which
+        // counts the missing bucket as one extra distinct value.
+        print!(
+            "{}",
+            golden_dump(&f.nunique().unwrap().to_frame(Some("nu")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.nunique().unwrap().to_frame(Some("nu")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(
+                &fnull
+                    .nunique_with_dropna(false)
+                    .unwrap()
+                    .to_frame(Some("nu"))
+                    .unwrap()
+            )
+        );
+        // describe: count/mean/std/min/25%/50%/75%/max over all-valid + nullable.
+        print!("{}", golden_dump(&f.describe().unwrap()));
+        print!("{}", golden_dump(&fnull.describe().unwrap()));
+        // skew / kurtosis: two/four-moment reductions via numeric_values.
+        print!(
+            "{}",
+            golden_dump(&f.skew().unwrap().to_frame(Some("sk")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.skew().unwrap().to_frame(Some("sk")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap())
+        );
+        // sem / var / std / median / prod: the rest of the per-column reduction
+        // family (all route through reduce_numeric, the column-parallel helper);
+        // f is 5000x4 (>=16384 values) so the parallel reduce path is exercised.
+        print!(
+            "{}",
+            golden_dump(&f.sem().unwrap().to_frame(Some("se")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.sem().unwrap().to_frame(Some("se")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.var().unwrap().to_frame(Some("va")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.std().unwrap().to_frame(Some("sd")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.median().unwrap().to_frame(Some("me")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.prod().unwrap().to_frame(Some("pr")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.var().unwrap().to_frame(Some("va")).unwrap())
+        );
+        // mode: repeated-value frame (period-9973 dups at n=20000 -> real modes)
+        // all-valid and nullable; plus an all-distinct frame (every value a mode).
+        print!("{}", golden_dump(&dup.mode().unwrap()));
+        print!("{}", golden_dump(&dupn.mode().unwrap()));
+        print!("{}", golden_dump(&f.mode().unwrap()));
+        // sort_index over a shuffled Int64 index: radix argsort + the
+        // (column-parallel) per-column row gather in reorder_rows_by_positions.
+        // 5000x4 (>=16384 values) exercises the parallel gather path bit-for-bit.
+        let shuf = shuffled_index_frame(5000, 4);
+        print!("{}", golden_dump(&shuf.sort_index(true).unwrap()));
+        print!("{}", golden_dump(&shuf.sort_index(false).unwrap()));
+        // DataFrame.take by positions: the (column-parallel) per-column gather in
+        // take_rows_by_positions. Reversed + repeated indices over a 5000x4 frame
+        // (>=16384 values) exercise the parallel gather path bit-for-bit.
+        let take_idx: Vec<i64> = (0..5000).rev().chain(0..2500).collect();
+        print!("{}", golden_dump(&shuf.take(&take_idx, 0).unwrap()));
+        // Int64 frame comparison (compared as f64, matching the Scalar path).
+        let fi = int_frame(5000, 4);
+        let fi2 = int_frame(5000, 4);
+        print!("{}", golden_dump(&fi.gt(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.lt(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.eq(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.ge(&fi).unwrap()));
+        // Int64 diff -> Float64 output (a as f64 - b as f64), in/out-of-range.
+        print!("{}", golden_dump(&fi.diff(1).unwrap()));
+        print!("{}", golden_dump(&fi.diff(3).unwrap()));
+        print!("{}", golden_dump(&fi.diff(-2).unwrap()));
+        // Int64 clip: integer bounds (preserves Int64), fractional bound (-> Float64),
+        // reversed-bound swap (GH2747), one-sided.
+        print!(
+            "{}",
+            golden_dump(&fi.clip(Some(-1000.0), Some(1000.0)).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.clip(Some(-1000.5), Some(1000.0)).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.clip(Some(500.0), Some(-500.0)).unwrap())
+        );
+        print!("{}", golden_dump(&fi.clip(None, Some(800.0)).unwrap()));
+        // Int64 nunique: dense direct-address distinct count (bounded all-valid).
+        print!(
+            "{}",
+            golden_dump(&fi.nunique().unwrap().to_frame(Some("nu")).unwrap())
+        );
+        // Int64 frame arithmetic -> Float64 output (incl div-by-zero NaN via fi/fi).
+        print!("{}", golden_dump(&fi.add_df(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.sub_df(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.mul_df(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.div_df(&fi).unwrap()));
+        // Int64 fillna: all-valid -> no-op copy (Int64 output preserved).
+        print!("{}", golden_dump(&fi.fillna(&Scalar::Int64(0)).unwrap()));
+        // Int64 where / mask (br-frankenpandas-eydcr): all-valid Int64 self,
+        // all-valid Bool cond (deterministic true/false pattern), Int64 fill.
+        // Output is pure all-valid Int64 (keep self vs fill), bit-identical
+        // across the typed and Scalar select paths.
+        let cond_b = {
+            let labels: Vec<IndexLabel> = (0..5000).map(|i| IndexLabel::Int64(i as i64)).collect();
+            let mut columns = std::collections::BTreeMap::new();
+            let mut order = Vec::new();
+            for c in 0..4 {
+                let name = format!("c{c}");
+                let v: Vec<bool> = (0..5000).map(|i| (i + c) % 3 == 0).collect();
+                columns.insert(name.clone(), Column::from_bool_values(v));
+                order.push(name);
+            }
+            DataFrame::new_with_column_order(Index::new(labels), columns, order).unwrap()
+        };
+        print!(
+            "{}",
+            golden_dump(&fi.where_cond(&cond_b, Some(&Scalar::Int64(0))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.where_cond(&cond_b, Some(&Scalar::Int64(-7))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.mask(&cond_b, Some(&Scalar::Int64(0))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.mask(&cond_b, Some(&Scalar::Int64(99))).unwrap())
+        );
+        return;
+    }
+    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200_000);
+    let cols = 8;
+    println!("gap_hunt n={n} cols={cols}");
+
+    let f = numeric_frame(n, cols, false);
+    let fnull = numeric_frame(n, cols, true);
+    let other = numeric_frame(n, cols, true);
+    let shuf = shuffled_index_frame(n, cols);
+
+    time_it("drop_duplicates(all cols)", 1, 10, || {
+        let _ = f
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .unwrap();
+    });
+    time_it("duplicated(all cols)", 1, 10, || {
+        let _ = f.duplicated(None, DuplicateKeep::First).unwrap();
+    });
+    // Random (cache-unfriendly) gather positions — a scatter read, the case the
+    // per-column take parallelizes (a sequential take is already bandwidth-bound).
+    let take_idx: Vec<i64> = (0..n)
+        .map(|i| {
+            let mixed = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(17)
+                ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            (mixed % n as u64) as i64
+        })
+        .collect();
+    time_it("df_take", 1, 20, || {
+        let _ = f.take(&take_idx, 0).unwrap();
+    });
+    time_it("sort_index(shuffled)", 1, 10, || {
+        let _ = shuf.sort_index(true).unwrap();
+    });
+    time_it("combine_first", 1, 10, || {
+        let _ = fnull.combine_first(&other).unwrap();
+    });
+    time_it("cumsum", 1, 20, || {
+        let _ = f.cumsum().unwrap();
+    });
+    time_it("diff(1)", 1, 20, || {
+        let _ = f.diff(1).unwrap();
+    });
+    time_it("pct_change(1)", 1, 20, || {
+        let _ = f.pct_change(1).unwrap();
+    });
+    time_it("df.append", 1, 20, || {
+        let _ = f.append(&f).unwrap();
+    });
+    time_it("df.to_records", 1, 20, || {
+        let _ = f.to_records();
+    });
+    time_it("df.nunique_axis1", 1, 10, || {
+        let _ = f.nunique_axis(1).unwrap();
+    });
+    time_it("df.corr", 1, 20, || {
+        let _ = f.corr().unwrap();
+    });
+    time_it("df.cov", 1, 20, || {
+        let _ = f.cov().unwrap();
+    });
+    time_it("corrwith", 1, 20, || {
+        let _ = f.corrwith(&other).unwrap();
+    });
+    time_it("ffill(nulls)", 1, 20, || {
+        let _ = fnull.ffill(None).unwrap();
+    });
+    time_it("bfill(nulls)", 1, 20, || {
+        let _ = fnull.bfill(None).unwrap();
+    });
+    time_it("fillna(nulls)", 1, 20, || {
+        let _ = fnull.fillna(&Scalar::Float64(0.0)).unwrap();
+    });
+    time_it("interpolate(nulls)", 1, 20, || {
+        let _ = fnull.interpolate().unwrap();
+    });
+    // Second-wave probes: more un-benched elementwise / scan ops.
+    time_it("clip(0,1000)", 1, 20, || {
+        let _ = f.clip(Some(0.0), Some(1000.0)).unwrap();
+    });
+    time_it("round(2)", 1, 20, || {
+        let _ = f.round(2).unwrap();
+    });
+    time_it("abs", 1, 20, || {
+        let _ = f.abs().unwrap();
+    });
+    time_it("cummax", 1, 20, || {
+        let _ = f.cummax().unwrap();
+    });
+    time_it("cummin", 1, 20, || {
+        let _ = f.cummin().unwrap();
+    });
+    time_it("cumprod", 1, 20, || {
+        let _ = f.cumprod().unwrap();
+    });
+    time_it("rank(average)", 1, 10, || {
+        let _ = f.rank("average", true, "keep").unwrap();
+    });
+    // Third-wave probes: comparison / where / mask / isin / scalar arithmetic.
+    let cond = f.gt(&other).unwrap();
+    time_it("gt(frame)", 1, 20, || {
+        let _ = f.gt(&other).unwrap();
+    });
+    time_it("where_cond", 1, 20, || {
+        let _ = f.where_cond(&cond, Some(&Scalar::Float64(0.0))).unwrap();
+    });
+    time_it("mask", 1, 20, || {
+        let _ = f.mask(&cond, Some(&Scalar::Float64(0.0))).unwrap();
+    });
+    time_it("isin", 1, 20, || {
+        let _ = f
+            .isin(&[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.5),
+                Scalar::Float64(100.0),
+            ])
+            .unwrap();
+    });
+    time_it("add_scalar(1)", 1, 20, || {
+        let _ = f.add_scalar(1.0).unwrap();
+    });
+    time_it("mul_scalar(2)", 1, 20, || {
+        let _ = f.mul_scalar(2.0).unwrap();
+    });
+    // Fourth-wave probes: frame-vs-frame arithmetic (same shape, align skipped
+    // already, but still a per-element Scalar to_f64 loop).
+    time_it("add_df(frame)", 1, 20, || {
+        let _ = f.add_df(&other).unwrap();
+    });
+    time_it("sub_df(frame)", 1, 20, || {
+        let _ = f.sub_df(&other).unwrap();
+    });
+    time_it("mul_df(frame)", 1, 20, || {
+        let _ = f.mul_df(&other).unwrap();
+    });
+    time_it("div_df(frame)", 1, 20, || {
+        let _ = f.div_df(&other).unwrap();
+    });
+    // Fifth-wave probes: DataFrame column reductions (each -> a per-column Series).
+    time_it("var", 1, 20, || {
+        let _ = f.var().unwrap();
+    });
+    time_it("mode", 1, 10, || {
+        let _ = f.mode().unwrap();
+    });
+    let fi = int_frame(n, 8);
+    time_it("i64.clip", 1, 20, || {
+        let _ = fi.clip(Some(-1000.0), Some(1000.0)).unwrap();
+    });
+    time_it("i64.abs", 1, 20, || {
+        let _ = fi.abs().unwrap();
+    });
+    time_it("i64.diff", 1, 20, || {
+        let _ = fi.diff(1).unwrap();
+    });
+    time_it("i64.cumsum", 1, 20, || {
+        let _ = fi.cumsum().unwrap();
+    });
+    time_it("i64.nunique", 1, 10, || {
+        let _ = fi.nunique().unwrap();
+    });
+    time_it("i64.gt", 1, 20, || {
+        let _ = fi.gt(&fi).unwrap();
+    });
+    let cond_i = fi.gt(&fi).unwrap();
+    time_it("i64.fillna", 1, 20, || {
+        let _ = fi.fillna(&Scalar::Int64(0)).unwrap();
+    });
+    time_it("i64.where", 1, 20, || {
+        let _ = fi.where_cond(&cond_i, Some(&Scalar::Int64(0))).unwrap();
+    });
+    time_it("i64.mask", 1, 20, || {
+        let _ = fi.mask(&cond_i, Some(&Scalar::Int64(0))).unwrap();
+    });
+    time_it("i64.add_df", 1, 20, || {
+        let _ = fi.add_df(&fi).unwrap();
+    });
+    time_it("i64.quantile", 1, 20, || {
+        let _ = fi.quantile(0.5).unwrap();
+    });
+    time_it("i64.mode", 1, 10, || {
+        let _ = fi.mode().unwrap();
+    });
+    time_it("sem", 1, 20, || {
+        let _ = f.sem_agg().unwrap();
+    });
+    time_it("prod", 1, 20, || {
+        let _ = f.prod().unwrap();
+    });
+    time_it("std", 1, 20, || {
+        let _ = f.std().unwrap();
+    });
+    time_it("median", 1, 20, || {
+        let _ = f.median().unwrap();
+    });
+    time_it("skew", 1, 20, || {
+        let _ = f.skew().unwrap();
+    });
+    time_it("quantile(0.5)", 1, 20, || {
+        let _ = f.quantile(0.5).unwrap();
+    });
+    time_it("nunique", 1, 10, || {
+        let _ = f.nunique().unwrap();
+    });
+    time_it("describe", 1, 10, || {
+        let _ = f.describe().unwrap();
+    });
+
+    // Groupby probes (fresh subsystem): ~n/100 groups (moderate cardinality),
+    // 6 Float64 value columns keyed by a scattered Int64. Build the groupby once
+    // per op so each timing isolates the aggregation (not the group-build).
+    let gkeyed = keyed_frame(n, 6, (n / 100).max(2));
+    time_it("gb.sum", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().sum().unwrap();
+    });
+    time_it("gb.mean", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().mean().unwrap();
+    });
+    time_it("gb.std", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().std().unwrap();
+    });
+    time_it("gb.var", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().var().unwrap();
+    });
+    time_it("gb.median", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().median().unwrap();
+    });
+    time_it("gb.min", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().min().unwrap();
+    });
+    time_it("gb.max", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().max().unwrap();
+    });
+    time_it("gb.prod", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().prod().unwrap();
+    });
+    time_it("gb.count", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().count().unwrap();
+    });
+    time_it("gb.cumsum", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cumsum().unwrap();
+    });
+    time_it("gb.rolling_mean", 1, 10, || {
+        let _ = gkeyed
+            .groupby(&["key"])
+            .unwrap()
+            .rolling(10)
+            .mean()
+            .unwrap();
+    });
+    time_it("gb.rolling_sum", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().rolling(10).sum().unwrap();
+    });
+    time_it("gb.expanding_mean", 1, 10, || {
+        let _ = gkeyed
+            .groupby(&["key"])
+            .unwrap()
+            .expanding(Some(1))
+            .mean()
+            .unwrap();
+    });
+    time_it("gb.ewm_mean", 1, 10, || {
+        let _ = gkeyed
+            .groupby(&["key"])
+            .unwrap()
+            .ewm(Some(10.0), None)
+            .mean()
+            .unwrap();
+    });
+    time_it("gb.cumprod", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cumprod().unwrap();
+    });
+    time_it("gb.cummax", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cummax().unwrap();
+    });
+    time_it("gb.cummin", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cummin().unwrap();
+    });
+    time_it("gb.diff", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().diff(1).unwrap();
+    });
+    time_it("gb.shift", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().shift(1).unwrap();
+    });
+    time_it("gb.pct_change", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().pct_change(1).unwrap();
+    });
+    time_it("gb.rank", 1, 10, || {
+        let _ = gkeyed
+            .groupby(&["key"])
+            .unwrap()
+            .rank("average", true, "keep")
+            .unwrap();
+    });
+    time_it("gb.first", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().first().unwrap();
+    });
+    time_it("gb.last", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().last().unwrap();
+    });
+    time_it("gb.nth", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().nth(0).unwrap();
+    });
+    time_it("gb.cumcount", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cumcount().unwrap();
+    });
+    time_it("gb.value_counts", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().value_counts().unwrap();
+    });
+    // Realistic value_counts: a LOW-cardinality Int64 first value column (20
+    // distinct) — the common case, where output-building doesn't dominate.
+    {
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let mut cols = std::collections::BTreeMap::new();
+        let mut order = Vec::new();
+        let groups = (n / 100).max(2);
+        let keys: Vec<i64> = (0..n)
+            .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % groups as u64) as i64)
+            .collect();
+        cols.insert("key".to_string(), Column::from_i64_values(keys));
+        order.push("key".to_string());
+        let v0: Vec<i64> = (0..n).map(|i| (i % 20) as i64).collect();
+        cols.insert("v0".to_string(), Column::from_i64_values(v0));
+        order.push("v0".to_string());
+        let gvc = DataFrame::new_with_column_order(Index::new(labels), cols, order)
+            .expect("locard vc frame");
+        time_it("gb.value_counts_locard", 1, 10, || {
+            let _ = gvc.groupby(&["key"]).unwrap().value_counts().unwrap();
+        });
+    }
+
+    // Merge probe: 1:1 inner join of two n-row frames on a unique Int64 key, 6
+    // f64 value columns each side (overlapping names → suffixed). Right rows are
+    // key-reversed (a bijection of 0..n) so the per-column output gather is a
+    // non-identity scatter, not an identity short-circuit.
+    {
+        let make = |reverse: bool| {
+            let key_at = |i: usize| -> usize {
+                if reverse { n - 1 - i } else { i }
+            };
+            let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+            let mut cols = std::collections::BTreeMap::new();
+            let mut order = Vec::new();
+            let keys: Vec<i64> = (0..n).map(|i| key_at(i) as i64).collect();
+            cols.insert("key".to_string(), Column::from_i64_values(keys));
+            order.push("key".to_string());
+            for c in 0..6 {
+                let name = format!("v{c}");
+                let v: Vec<f64> = (0..n)
+                    .map(|i| ((key_at(i) * (c + 1)) % 9973) as f64 * 0.25)
+                    .collect();
+                cols.insert(name.clone(), Column::from_f64_values(v));
+                order.push(name);
+            }
+            DataFrame::new_with_column_order(Index::new(labels), cols, order).expect("merge frame")
+        };
+        let ml = make(false);
+        let mr = make(true);
+        time_it("merge_inner", 1, 10, || {
+            let _ = fp_join::merge_dataframes(&ml, &mr, "key", fp_join::JoinType::Inner).unwrap();
+        });
+    }
+
+    // Reshape probes: pivot_table (1000 index x 10 columns, f64 sum) + stack.
+    {
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let mut cols = std::collections::BTreeMap::new();
+        let mut order = Vec::new();
+        cols.insert(
+            "idx".to_string(),
+            Column::from_i64_values((0..n).map(|i| (i % 1000) as i64).collect()),
+        );
+        order.push("idx".to_string());
+        cols.insert(
+            "col".to_string(),
+            Column::from_i64_values((0..n).map(|i| (i % 10) as i64).collect()),
+        );
+        order.push("col".to_string());
+        cols.insert(
+            "val".to_string(),
+            Column::from_f64_values((0..n).map(|i| ((i % 9973) as f64) * 0.25).collect()),
+        );
+        order.push("val".to_string());
+        let pt = DataFrame::new_with_column_order(Index::new(labels), cols, order)
+            .expect("pivot frame");
+        time_it("pivot_table(sum)", 1, 10, || {
+            let _ = pt.pivot_table("val", "idx", "col", "sum").unwrap();
+        });
+    }
+    time_it("stack", 1, 10, || {
+        let _ = f.stack().unwrap();
+    });
+
+    // Integer-valued groupby transforms (dead-pattern check: try_cum/diff/shift_dense
+    // gate on as_f64_slice, so Int64 value columns may fall to generic Scalar path).
+    {
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let mut cols = std::collections::BTreeMap::new();
+        let mut order = Vec::new();
+        let groups = (n / 100).max(2);
+        cols.insert(
+            "key".to_string(),
+            Column::from_i64_values(
+                (0..n)
+                    .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % groups as u64) as i64)
+                    .collect(),
+            ),
+        );
+        order.push("key".to_string());
+        for c in 0..6 {
+            let name = format!("v{c}");
+            cols.insert(
+                name.clone(),
+                Column::from_i64_values((0..n).map(|i| ((i * (c + 1)) % 9973) as i64).collect()),
+            );
+            order.push(name);
+        }
+        let gi = DataFrame::new_with_column_order(Index::new(labels), cols, order)
+            .expect("int keyed frame");
+        time_it("gb.cumsum_i64", 1, 10, || {
+            let _ = gi.groupby(&["key"]).unwrap().cumsum().unwrap();
+        });
+        time_it("gb.diff_i64", 1, 10, || {
+            let _ = gi.groupby(&["key"]).unwrap().diff(1).unwrap();
+        });
+        time_it("gb.shift_i64", 1, 10, || {
+            let _ = gi.groupby(&["key"]).unwrap().shift(1).unwrap();
+        });
+        time_it("gb.pct_change_i64", 1, 10, || {
+            let _ = gi.groupby(&["key"]).unwrap().pct_change(1).unwrap();
+        });
+    }
+
+    // SeriesGroupBy cumsum on Int64 (parallel dead pattern: SeriesGroupBy's own
+    // try_cum_dense also gated on as_f64_slice).
+    {
+        let idx = Index::new((0..n).map(|i| IndexLabel::Int64(i as i64)).collect());
+        let groups = (n / 100).max(2);
+        let key = fp_frame::Series::new(
+            "key",
+            idx.clone(),
+            Column::from_i64_values(
+                (0..n)
+                    .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % groups as u64) as i64)
+                    .collect(),
+            ),
+        )
+        .expect("sgb key");
+        let val = fp_frame::Series::new(
+            "v",
+            idx,
+            Column::from_i64_values((0..n).map(|i| ((i * 7) % 9973) as i64).collect()),
+        )
+        .expect("sgb val");
+        time_it("sgb.cumsum_i64", 1, 10, || {
+            let _ = val.groupby(&key).unwrap().cumsum().unwrap();
+        });
+        time_it("sgb.pct_change_i64", 1, 10, || {
+            let _ = val.groupby(&key).unwrap().pct_change(1).unwrap();
+        });
+        time_it("sgb.rolling_mean", 1, 10, || {
+            let _ = val.groupby(&key).unwrap().rolling(10).mean().unwrap();
+        });
+        time_it("sgb.expanding_mean", 1, 10, || {
+            let _ = val
+                .groupby(&key)
+                .unwrap()
+                .expanding(Some(1))
+                .mean()
+                .unwrap();
+        });
+    }
+}

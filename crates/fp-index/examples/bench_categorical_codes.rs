@@ -6,26 +6,45 @@
 //! category index via a linear `categories.position()` scan — O(n·k). One
 //! precomputed category->index map makes them O(n+k).
 
-use fp_index::CategoricalIndex;
 use std::time::Instant;
+
+use fp_index::CategoricalIndex;
 
 fn golden() -> String {
     let mut out = String::new();
     // ordered categorical with an explicit (non-lexicographic) category order
-    let cats = vec!["m".to_string(), "z".to_string(), "a".to_string(), "q".to_string()];
+    let cats = vec![
+        "m".to_string(),
+        "z".to_string(),
+        "a".to_string(),
+        "q".to_string(),
+    ];
     let labels = vec![
-        "z".to_string(), "a".to_string(), "m".to_string(), "q".to_string(),
-        "a".to_string(), "z".to_string(), "m".to_string(),
+        "z".to_string(),
+        "a".to_string(),
+        "m".to_string(),
+        "q".to_string(),
+        "a".to_string(),
+        "z".to_string(),
+        "m".to_string(),
     ];
     let ci = CategoricalIndex::with_categories(labels.clone(), cats.clone(), true).unwrap();
     out.push_str(&format!("codes={:?}\n", ci.codes()));
-    out.push_str(&format!("argmax={:?} argmin={:?}\n", ci.argmax(), ci.argmin()));
+    out.push_str(&format!(
+        "argmax={:?} argmin={:?}\n",
+        ci.argmax(),
+        ci.argmin()
+    ));
     out.push_str(&format!("min={:?} max={:?}\n", ci.min(), ci.max()));
 
     // unordered (lexicographic) path unchanged
     let cu = CategoricalIndex::from_values(labels.clone(), false);
     out.push_str(&format!("u_codes={:?}\n", cu.codes()));
-    out.push_str(&format!("u_argmax={:?} u_argmin={:?}\n", cu.argmax(), cu.argmin()));
+    out.push_str(&format!(
+        "u_argmax={:?} u_argmin={:?}\n",
+        cu.argmax(),
+        cu.argmin()
+    ));
     out.push_str(&format!("u_min={:?} u_max={:?}\n", cu.min(), cu.max()));
     out
 }

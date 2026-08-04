@@ -7,10 +7,11 @@
 //! patterns share a long common prefix. One anchored literal-alternation regex
 //! (`\A(?:…)` / `(?:…)\z`) matches each string once: O(prefix) per element.
 
+use std::time::Instant;
+
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::Scalar;
-use std::time::Instant;
 
 fn s_from(strings: Vec<&str>) -> Series {
     let idx: Vec<IndexLabel> = (0..strings.len() as i64).map(IndexLabel::Int64).collect();
@@ -43,10 +44,16 @@ fn golden() -> String {
     let sn = Series::from_values(
         "s",
         vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-        vec![Scalar::Utf8("https://z".into()), Scalar::Null(fp_types::NullKind::NaN)],
+        vec![
+            Scalar::Utf8("https://z".into()),
+            Scalar::Null(fp_types::NullKind::NaN),
+        ],
     )
     .unwrap();
-    let rn = sn.str().startswith_any_with_na(&["https://"], Some(true)).unwrap();
+    let rn = sn
+        .str()
+        .startswith_any_with_na(&["https://"], Some(true))
+        .unwrap();
     out.push_str(&format!("na_fill={:?}\n", rn.values()));
     out
 }
@@ -56,7 +63,9 @@ fn main() {
     print!("GOLDEN_BEGIN\n{g}GOLDEN_END\n");
 
     // Worst case: many prefixes sharing a long common stem.
-    let pats_owned: Vec<String> = (0..200).map(|i| format!("https://cdn.example.com/path/{i:04}/")).collect();
+    let pats_owned: Vec<String> = (0..200)
+        .map(|i| format!("https://cdn.example.com/path/{i:04}/"))
+        .collect();
     let pats: Vec<&str> = pats_owned.iter().map(String::as_str).collect();
     let one = "https://cdn.example.com/path/9999/asset/file/deep/name.bin";
     let n = 40_000;

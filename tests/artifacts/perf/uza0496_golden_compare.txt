@@ -1,0 +1,11 @@
+
+Diff vs baseline hashes:
+--- tests/artifacts/perf/uza0496_baseline_golden_sha256.txt	2026-06-13 12:25:53.902340862 -0400
++++ tests/artifacts/perf/uza0496_candidate_golden_sha256.txt	2026-06-13 12:35:29.027835863 -0400
+@@ -1,5 +1,5 @@
+ baseline commit: 7bc36cba2ab86fa037d1a8ec64d32f4d5ce9106a
+-binary: /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile
++binary: /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-candidate/release-perf/examples/perf_profile
+ str_groupby_count 1000 77a2baa488f3b39462a15e4cc2223a884afb0d48e088b2ed14b0c2138f8a1894
+ str_groupby_count 200000 d5cea8c5844bb962c8958f0a94d53a9e7d6b452a55ccaa51c5addb6000c0c46e
+ str_groupby_sum 1000 a53b6ca20edea8eafabefe76ee5c12bd98d116d02d6372a93707fdc258f1c80d

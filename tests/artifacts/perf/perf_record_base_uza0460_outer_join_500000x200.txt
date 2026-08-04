@@ -1,0 +1,6 @@
+perf record command completed for the baseline `outer_join 500000 200` run.
+Raw profile data is stored in:
+tests/artifacts/perf/perf_base_uza0460_outer_join_500000x200.data
+
+Report:
+tests/artifacts/perf/perf_report_base_uza0460_outer_join_500000x200.txt

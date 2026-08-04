@@ -1,0 +1,947 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 236  of event 'cycles:P'
+# Event count (approx.): 520709636
+#
+# Overhead  Symbol                                      Shared Object     IPC   [IPC Coverage]
+# ........  ..........................................  ................  ....................
+#
+    24.69%  [.] __memmove_avx_unaligned_erms            libc.so.6         -      -            
+            |          
+            |--20.47%--__memmove_avx_unaligned_erms
+            |          
+            |--2.72%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |          
+            |--0.73%--0xffffffff8536b5d8
+            |          0xffffffff853ddbdb
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |          
+             --0.71%--0xffffffff84c00b90
+                       __memmove_avx_unaligned_erms
+
+    13.39%  [k] 0xffffffff8621b2b7                      [unknown]         -      -            
+            |          
+            |--8.99%--0xffffffff84c01199
+            |          |          
+            |          |--4.70%--__memmove_avx_unaligned_erms
+            |          |          
+            |           --4.30%--join_bench::build_ordered_utf8_frame
+            |                     |          
+            |                     |--2.70%--0x402a800000000000
+            |                     |          
+            |                      --1.60%--0x4022800000000000
+            |          
+            |--0.84%--0xffffffff85455498
+            |          0xffffffff853a5723
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          0x4022800000000000
+            |          
+            |--0.79%--0xffffffff85395f6b
+            |          0xffffffff853a3790
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |          
+            |--0.79%--0xffffffff86228120
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          0x402a800000000000
+            |          
+            |--0.70%--0xffffffff85452966
+            |          0xffffffff853414e8
+            |          0xffffffff85342072
+            |          0xffffffff853437ad
+            |          0xffffffff853438f4
+            |          0xffffffff853439e9
+            |          0xffffffff853442bf
+            |          0xffffffff853a3963
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |          
+            |--0.65%--0xffffffff85397500
+            |          0xffffffff853a3847
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |          
+             --0.61%--__memmove_avx_unaligned_erms
+
+     8.68%  [k] 0xffffffff84c01192                      [unknown]         -      -            
+            |          
+            |--3.18%--__memmove_avx_unaligned_erms
+            |          
+            |--1.50%--0xffffffff853a5546
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          0x402a800000000000
+            |          
+            |--1.41%--0xffffffff84fea97b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          0x402a800000000000
+            |          
+            |--0.92%--0xffffffff84c01585
+            |          __memmove_avx_unaligned_erms
+            |          
+            |--0.79%--0xffffffff853a557b
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          0x4022800000000000
+            |          
+             --0.78%--0xffffffff86223c8e
+                       __memmove_avx_unaligned_erms
+
+     4.54%  [.] <fp_columnar::Column>::from_f64_values  join-bench        -      -            
+     3.99%  [.] join_bench::build_ordered_utf8_frame    join-bench        -      -            
+            |          
+            |--1.19%--0xffffffff853a3439
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          0x402a800000000000
+            |          
+            |--0.92%--0xffffffff853d8db2
+            |          0xffffffff853d9102
+            |          0xffffffff853da487
+            |          0xffffffff853dc432
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          0x402a800000000000
+            |          
+            |--0.91%--0xffffffff853dd9d0
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          0x4022800000000000
+            |          
+             --0.86%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       join_bench::build_ordered_utf8_frame
+                       |          
+                        --0.75%--0x4022800000000000
+
+     1.58%  [k] 0xffffffff84d0410b                      [unknown]         -      -            
+            |          
+            |--0.81%--0xffffffff84d04104
+            |          0xffffffff853a3957
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          0x4022800000000000
+            |          
+             --0.77%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       join_bench::build_ordered_utf8_frame
+                       0x4022800000000000
+
+     1.51%  [k] 0xffffffff84c01248                      [unknown]         -      -            
+            |          
+            |--0.80%--__memmove_avx_unaligned_erms
+            |          
+             --0.71%--0xffffffff862280e5
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+
+     1.27%  [k] 0xffffffff853dda9e                      [unknown]         -      -            
+     1.19%  [k] 0xffffffff853d9102                      [unknown]         -      -            
+            |
+            ---0xffffffff85452e38
+               0xffffffff853b9650
+               0xffffffff853bb5d6
+               0xffffffff853a3957
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               0x4022800000000000
+
+     1.15%  [k] 0xffffffff854529f6                      [unknown]         -      -            
+            |
+            ---0xffffffff854552a7
+               0xffffffff85459378
+               0xffffffff853435d8
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae480
+               0xffffffff8539c2c1
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <fp_columnar::Column>::from_f64_values
+
+     1.11%  [k] 0xffffffff853a3876                      [unknown]         -      -            
+            |
+            ---0x402a800000000000
+
+     1.08%  [k] 0xffffffff853dad5e                      [unknown]         -      -            
+            |
+            ---0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae480
+               0xffffffff8539c2c1
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               core::ptr::drop_in_place::<fp_columnar::Column>
+
+     1.06%  [k] 0xffffffff85392deb                      [unknown]         -      -            
+            |
+            ---0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               0x402a800000000000
+
+     1.05%  [k] 0xffffffff84c00b90                      [unknown]         -      -            
+            |
+            ---0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               0x4022800000000000
+
+     1.03%  [k] 0xffffffff85452a65                      [unknown]         -      -            
+            |          
+             --1.03%--0xffffffff8539ba15
+                       0xffffffff8539c06e
+                       0xffffffff8539c594
+                       0xffffffff8539cb30
+                       0xffffffff8539cd76
+                       0xffffffff8539cea1
+                       0xffffffff853c9742
+                       0xffffffff853cb02c
+                       0xffffffff853cc7f5
+                       0xffffffff853cc961
+                       0xffffffff853ceac8
+                       0xffffffff853aa42b
+                       0xffffffff84f24dad
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __munmap
+                       core::ptr::drop_in_place::<fp_columnar::Column>
+
+     1.00%  [k] 0xffffffff853a3795                      [unknown]         -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+
+     0.99%  [k] 0xffffffff8508a305                      [unknown]         -      -            
+            |
+            ---0xffffffff8622fbbf
+               0xffffffff8539c129
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               core::ptr::drop_in_place::<fp_columnar::Column>
+
+     0.98%  [k] 0xffffffff853945a2                      [unknown]         -      -            
+            |
+            ---0xffffffff85458faf
+               0xffffffff853a33ec
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.91%  [k] 0xffffffff8544ecb2                      [unknown]         -      -            
+            |
+            ---0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae480
+               0xffffffff8539c2c1
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               core::ptr::drop_in_place::<fp_columnar::Column>
+
+     0.82%  [k] 0xffffffff85452cbe                      [unknown]         -      -            
+            |
+            ---0x4022800000000000
+
+     0.81%  [k] 0xffffffff85452cc6                      [unknown]         -      -            
+            |
+            ---0x4022800000000000
+
+     0.81%  [k] 0xffffffff84d04104                      [unknown]         -      -            
+            |
+            ---0xffffffff85455436
+               0xffffffff853414e8
+               0xffffffff85342072
+               0xffffffff853437ad
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               0x4022800000000000
+
+     0.80%  [k] 0xffffffff85341412                      [unknown]         -      -            
+            |
+            ---0x4022800000000000
+
+     0.80%  [k] 0xffffffff85452e3d                      [unknown]         -      -            
+            |
+            ---0x4022800000000000
+
+     0.80%  [k] 0xffffffff8534115b                      [unknown]         -      -            
+            |
+            ---0xffffffff853432f8
+               0xffffffff853436a3
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae480
+               0xffffffff8539c2c1
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <fp_columnar::Column>::from_f64_values
+
+     0.80%  [k] 0xffffffff853b8390                      [unknown]         -      -            
+            |
+            ---0xffffffff853a3790
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               0x402a800000000000
+
+     0.80%  [k] 0xffffffff853d90b1                      [unknown]         -      -            
+            |
+            ---0xffffffff853b9650
+               0xffffffff853bb5d6
+               0xffffffff853a3957
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               0x402a800000000000
+
+     0.80%  [k] 0xffffffff85452a61                      [unknown]         -      -            
+            |
+            ---0xffffffff853437ad
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.80%  [k] 0xffffffff853d43d1                      [unknown]         -      -            
+            |
+            ---0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae480
+               0xffffffff8539c2c1
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <fp_columnar::Column>::from_f64_values
+
+     0.80%  [k] 0xffffffff85452e38                      [unknown]         -      -            
+            |
+            ---0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <fp_columnar::Column>::from_f64_values
+
+     0.80%  [k] 0xffffffff8539ba1b                      [unknown]         -      -            
+            |
+            ---0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <fp_columnar::Column>::from_f64_values
+
+     0.79%  [k] 0xffffffff85392d37                      [unknown]         -      -            
+            |
+            ---0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.79%  [k] 0xffffffff861f65bd                      [unknown]         -      -            
+            |
+            ---0xffffffff85452e38
+               0xffffffff853b9650
+               0xffffffff853bb5d6
+               0xffffffff853a3957
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.79%  [k] 0xffffffff853a5723                      [unknown]         -      -            
+            |
+            ---join_bench::build_ordered_utf8_frame
+               0x4022800000000000
+
+     0.79%  [k] 0xffffffff853414f7                      [unknown]         -      -            
+            |
+            ---0xffffffff853437ad
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.78%  [k] 0xffffffff84feb950                      [unknown]         -      -            
+            |
+            ---0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.78%  [k] 0xffffffff85123fb4                      [unknown]         -      -            
+            |
+            ---0x4022800000000000
+
+     0.77%  [k] 0xffffffff8534141b                      [unknown]         -      -            
+            |
+            ---0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.77%  [k] 0xffffffff85452c7f                      [unknown]         -      -            
+     0.76%  [k] 0xffffffff85452a23                      [unknown]         -      -            
+            |
+            ---0xffffffff85455446
+               0xffffffff853414e8
+               0xffffffff85342072
+               0xffffffff853437ad
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.76%  [k] 0xffffffff853d7d79                      [unknown]         -      -            
+            |
+            ---0xffffffff853d8f99
+               0xffffffff853d9102
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.76%  [k] 0xffffffff8536a275                      [unknown]         -      -            
+            |
+            ---0xffffffff85342072
+               0xffffffff853437ad
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.75%  [k] 0xffffffff853a4e56                      [unknown]         -      -            
+            |
+            ---0xffffffff853a3872
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               0x4022800000000000
+
+     0.75%  [k] 0xffffffff854578da                      [unknown]         -      -            
+     0.75%  [k] 0xffffffff85392d13                      [unknown]         -      -            
+            |
+            ---0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.74%  [k] 0xffffffff853d2333                      [unknown]         -      -            
+            |
+            ---0xffffffff853d3d35
+               0xffffffff853d43b0
+               0xffffffff853db06b
+               0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae480
+               0xffffffff8539c2c1
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               core::ptr::drop_in_place::<fp_columnar::Column>
+
+     0.74%  [k] 0xffffffff853ddb37                      [unknown]         -      -            
+            |
+            ---0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.73%  [k] 0xffffffff85341530                      [unknown]         -      -            
+            |
+            ---0xffffffff85342072
+               0xffffffff853437ad
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               0x4022800000000000
+
+     0.71%  [k] 0xffffffff84feb938                      [unknown]         -      -            
+            |
+            ---0xffffffff85404a1a
+               0xffffffff853a3437
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.71%  [k] 0xffffffff85392d84                      [unknown]         -      -            
+            |
+            ---0xffffffff85458faf
+               0xffffffff853a33ec
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.70%  [k] 0xffffffff853a3437                      [unknown]         -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+
+     0.69%  [k] 0xffffffff8536b5ef                      [unknown]         -      -            
+            |
+            ---0xffffffff853a3790
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.68%  [k] 0xffffffff853d434d                      [unknown]         -      -            
+            |
+            ---0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae480
+               0xffffffff8539c2c1
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <fp_columnar::Column>::from_f64_values
+
+     0.58%  [k] 0xffffffff84c0156c                      [unknown]         -      -            
+            |
+            ---0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     0.56%  [k] 0xffffffff853fc70c                      [unknown]         -      -            
+            |
+            ---0xffffffff853432f8
+               0xffffffff853436a3
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae480
+               0xffffffff8539c2c1
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               core::ptr::drop_in_place::<fp_columnar::Column>
+
+     0.43%  [k] 0xffffffff84c00b99                      [unknown]         -      -            
+     0.33%  [k] 0xffffffff8510f1f0                      [unknown]         -      -            
+     0.23%  [k] 0xffffffff8507e72a                      [unknown]         -      -            
+     0.12%  [k] 0xffffffff85342003                      [unknown]         -      -            
+     0.09%  [k] 0xffffffff8539b908                      [unknown]         -      -            
+     0.09%  [k] 0xffffffff853db06b                      [unknown]         -      -            
+     0.08%  [k] 0xffffffff85452e2d                      [unknown]         -      -            
+     0.05%  [k] 0xffffffff853dda9c                      [unknown]         -      -            
+     0.03%  [k] 0xffffffff85455236                      [unknown]         -      -            
+     0.01%  [k] 0xffffffff8541df4e                      [unknown]         -      -            
+     0.01%  [k] 0xffffffff85452c97                      [unknown]         -      -            
+     0.01%  [k] 0xffffffff86223c8e                      [unknown]         -      -            
+     0.01%  [k] 0xffffffff854529fd                      [unknown]         -      -            
+     0.01%  [k] 0xffffffff8513cf83                      [unknown]         -      -            
+     0.01%  [k] 0xffffffff853b0694                      [unknown]         -      -            
+     0.01%  [k] 0xffffffff853bbcee                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff84fea96b                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff853a529c                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8621f93a                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff853fc56f                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8621c6a9                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff84c01884                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff862288cd                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff84f8cacc                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff84c0188e                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85314705                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85326526                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff84d04109                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8508a42f                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8506d54c                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85314684                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff853adf39                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8620a0fb                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85312e7b                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2c3                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85314676                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff86227da0                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff84c0185b                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d280                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2bc                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff84fdedcb                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d285                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff862251d0                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b66                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b80                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2cc                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff862252e4                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff84f32f8e                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85104b25                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b65                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b69                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b7c                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d286                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d28b                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2d4                      [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2db                      [unknown]         -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

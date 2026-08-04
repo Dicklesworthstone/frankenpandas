@@ -8,10 +8,11 @@
 //! Column::take_positions keeps the contiguous Int64/Float64 buffer. Output is
 //! bit-identical (values, dtype, negative/dup indices, group order).
 
+use std::time::Instant;
+
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::{NullKind, Scalar};
-use std::time::Instant;
 
 fn s_i64(vals: Vec<i64>) -> Series {
     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
@@ -38,17 +39,29 @@ fn golden() -> String {
         Scalar::Float64(f64::NAN),
         Scalar::Float64(-3.0),
     ]);
-    out.push_str(&format!("take_f64={:?}\n", f.take(&[2, 1, 0]).unwrap().values()));
+    out.push_str(&format!(
+        "take_f64={:?}\n",
+        f.take(&[2, 1, 0]).unwrap().values()
+    ));
     let ni = s_scalars(vec![
         Scalar::Int64(7),
         Scalar::Null(NullKind::NaN),
         Scalar::Int64(9),
     ]);
-    out.push_str(&format!("take_ni={:?}\n", ni.take(&[1, 2, 0]).unwrap().values()));
+    out.push_str(&format!(
+        "take_ni={:?}\n",
+        ni.take(&[1, 2, 0]).unwrap().values()
+    ));
     let u = s_scalars(
-        vec!["a", "b", "c"].into_iter().map(|x| Scalar::Utf8(x.into())).collect(),
+        vec!["a", "b", "c"]
+            .into_iter()
+            .map(|x| Scalar::Utf8(x.into()))
+            .collect(),
     );
-    out.push_str(&format!("take_utf8={:?}\n", u.take(&[2, -3]).unwrap().values()));
+    out.push_str(&format!(
+        "take_utf8={:?}\n",
+        u.take(&[2, -3]).unwrap().values()
+    ));
 
     // SeriesGroupBy gather paths (nlargest / head) route through take_positions.
     let data = s_i64(vec![5, 1, 9, 3, 7, 2, 8]);
@@ -76,7 +89,9 @@ fn main() {
     let mut x: u64 = 0xfeed_face;
     let idxs: Vec<i64> = (0..n)
         .map(|_| {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (x >> 16) as i64 % (n as i64)
         })
         .collect();

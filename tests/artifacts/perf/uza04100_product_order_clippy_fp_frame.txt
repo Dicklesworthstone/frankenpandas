@@ -1,0 +1,274 @@
+  [2m2026-06-13T17:56:02.011083Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1153651 at root@38.242.134.66 (1 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:02.647266Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenpandas-lavenderstone-uza0493-land (hash: 90219b46599d705a)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:02.647304Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:05.633897Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1153651...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:05.633964Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:08.847971Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3213ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:08.848047Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-columnar -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-columnar on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:11.131135Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2283ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:11.131216Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-conformance -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-conformance on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:14.361464Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3230ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:14.361529Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-expr -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-expr on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:17.988361Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3626ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:17.988437Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-frame -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-frame on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:20.157492Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2169ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:20.157565Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-frankentui -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-frankentui on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:22.227369Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2069ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:22.227449Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-groupby -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-groupby on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:24.249799Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2022ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:24.249899Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-index -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-index on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:26.320649Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2070ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:26.320727Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-io -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-io on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:28.401926Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2081ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:28.402076Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-join -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-join on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:30.601574Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2199ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:30.601652Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-python -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-python on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:32.997060Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2395ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:32.997141Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-runtime -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-runtime on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:35.157558Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2160ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:35.157650Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-types -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-types on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:37.217489Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2059ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:37.217569Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/frankenpandas -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/frankenpandas on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:39.262133Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2044ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:39.262181Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 7055 files, 305368 bytes in 33620ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:45.792440Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo clippy -p fp-frame --lib -- -D warnings[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:56:45.792482Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.scratch/cargo-target-lavenderstone-uza04100-clippy -> /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/.rch-target-vmi1153651-job-29884606035529048-1781373365633889869-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded autocfg v1.5.0
+  Downloaded regex v1.12.3
+  Downloaded cpufeatures v0.3.0
+  Downloaded phf_shared v0.12.1
+  Downloaded tinyvec_macros v0.1.1
+  Downloaded unicode-casefold v0.2.0
+  Downloaded cfg-if v1.0.4
+  Downloaded block-buffer v0.12.0
+  Downloaded rustc-hash v2.1.2
+  Downloaded itoa v1.0.18
+  Downloaded siphasher v1.0.2
+  Downloaded crypto-common v0.2.1
+  Downloaded equivalent v1.0.2
+  Downloaded thiserror-impl v2.0.18
+  Downloaded phf v0.12.1
+  Downloaded quote v1.0.45
+  Downloaded sha2 v0.11.0
+  Downloaded thiserror v2.0.18
+  Downloaded serde_derive v1.0.228
+  Downloaded zmij v1.0.21
+  Downloaded serde_core v1.0.228
+  Downloaded unicode-ident v1.0.24
+  Downloaded hybrid-array v0.4.10
+  Downloaded digest v0.11.2
+  Downloaded proc-macro2 v1.0.106
+  Downloaded num-traits v0.2.19
+  Downloaded tinyvec v1.11.0
+  Downloaded const-oid v0.10.2
+  Downloaded memchr v2.8.0
+  Downloaded indexmap v2.14.0
+  Downloaded serde v1.0.228
+  Downloaded typenum v1.20.0
+  Downloaded unicode-normalization v0.1.25
+  Downloaded serde_json v1.0.150
+  Downloaded aho-corasick v1.1.4
+  Downloaded hashbrown v0.17.0
+  Downloaded chrono v0.4.45
+  Downloaded syn v2.0.117
+  Downloaded regex-syntax v0.8.10
+  Downloaded ucd v0.1.1
+  Downloaded regex-automata v0.4.14
+  Downloaded chrono-tz v0.10.4
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling serde_core v1.0.228
+   Compiling thiserror v2.0.18
+   Compiling autocfg v1.5.0
+   Compiling serde v1.0.228
+    Checking typenum v1.20.0
+    Checking memchr v2.8.0
+   Compiling zmij v1.0.21
+    Checking hashbrown v0.17.0
+    Checking equivalent v1.0.2
+    Checking siphasher v1.0.2
+    Checking const-oid v0.10.2
+   Compiling serde_json v1.0.150
+    Checking rustc-hash v2.1.2
+   Compiling num-traits v0.2.19
+    Checking regex-syntax v0.8.10
+    Checking aho-corasick v1.1.4
+    Checking phf_shared v0.12.1
+    Checking tinyvec_macros v0.1.1
+   Compiling chrono-tz v0.10.4
+    Checking cpufeatures v0.3.0
+    Checking indexmap v2.14.0
+    Checking itoa v1.0.18
+    Checking cfg-if v1.0.4
+    Checking tinyvec v1.11.0
+    Checking phf v0.12.1
+    Checking unicode-casefold v0.2.0
+    Checking hybrid-array v0.4.10
+    Checking ucd v0.1.1
+   Compiling syn v2.0.117
+    Checking unicode-normalization v0.1.25
+    Checking chrono v0.4.45
+    Checking crypto-common v0.2.1
+    Checking block-buffer v0.12.0
+    Checking digest v0.11.2
+    Checking regex-automata v0.4.14
+    Checking sha2 v0.11.0
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+    Checking regex v1.12.3
+    Checking fp-types v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-types)
+    Checking fp-runtime v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-runtime)
+    Checking fp-index v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-index)
+    Checking fp-columnar v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-columnar)
+    Checking fp-frame v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-frame)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 39.55s
+  [2m2026-06-13T17:57:27.746328Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 41953ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:57:27.746627Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:57:27.746641Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:57:30.069727Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2323ms (1 files, 1356 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:57:30.069747Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1356 bytes in 2323ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:57:30.069840Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/.rch-target-vmi1153651-job-29884606035529048-1781373365633889869-0 on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:57:38.295244Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 8225ms (544 files, 8716 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T17:57:38.295268Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 544 files, 8716 bytes in 8225ms[0m
+    [2;3mat[0m rch/src/hook.rs:6582 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1153651 (96.3s)

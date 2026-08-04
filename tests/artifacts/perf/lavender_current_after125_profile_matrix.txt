@@ -1,0 +1,20 @@
+
+== series_add_align n=100000 iters=100 ==
+
+== csv_read n=100000 iters=10 ==
+
+== join_1to1 n=100000 iters=20 ==
+
+== filter_bool n=100000 iters=100 ==
+
+== df_dot n=100000 iters=6 ==
+
+== str_factorize n=500000 iters=10 ==
+
+== str_sort_chain n=100000 iters=10 ==
+
+== rank_avg n=100000 iters=20 ==
+
+== groupby_transform_std n=100000 iters=10 ==
+
+== drop_duplicates n=100000 iters=20 ==

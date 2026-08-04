@@ -1,0 +1,9 @@
+typed contiguous-Utf8 Index backing — str_groupby output index (nbspq)
+Golden bit-identical: str_groupby_sum 2691faae / var 18566650 / median 9ba09cb8 before==after.
+A/B min-of-5 @200k: str_groupby_median 76.2->47.5 = 1.60x; var 71.1->57.7 = 1.23x; sum 59.3->52.5 = 1.13x.
+Tests: fp-index 385 + fp-frame 2830 green.
+Lever: IndexLabels gains a lazy utf8_contiguous backing (Arc bytes+offsets); aggregate_str_dense
+builds the group-key output index by gathering sorted key spans into one buffer (Index::from_utf8_contiguous)
+instead of n IndexLabel::Utf8(String) (n heap allocs + n from_utf8). Materialization deferred to labels().
+Reusable for string sort_values / set-ops output. Remaining (follow-up): byte-radix for the order keys
+(drop the other from_utf8), consumer Utf8 fast-paths (position_map/get_indexer).

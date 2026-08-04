@@ -1,0 +1,950 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+#
+# Total Lost Samples: 0
+#
+# Samples: 166  of event 'cycles:P'
+# Event count (approx.): 1770140015
+#
+# Overhead  Command       Shared Object         Symbol                                                                                                                                                                                                                                                                         IPC   [IPC Coverage]
+# ........  ............  ....................  .............................................................................................................................................................................................................................................................................  ....................
+#
+    13.34%  perf_profile  libc.so.6             [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                        -      -            
+            |
+            ---__memcmp_avx2_movbe
+               fp_join::merge_single_key_inner_unsorted
+               eq<u8, u8> (inlined)
+               ordered_unique_utf8_inner_position_plan (inlined)
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     9.53%  perf_profile  [unknown]             [k] 0xffffffff84c00005                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff8545502f
+               0xffffffff854585df
+               0xffffffff853ec9ff
+               0xffffffff853edd72
+               0xffffffff854bee86
+               0xffffffff8556e287
+               0xffffffff85480cfd
+               0xffffffff85481670
+               0xffffffff8547768e
+               0xffffffff84f24b82
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___close (inlined)
+               <std::os::fd::owned::OwnedFd as core::ops::drop::Drop>::drop (inlined)
+               core::ptr::drop_in_place::<std::os::fd::owned::OwnedFd> (inlined)
+               core::ptr::drop_in_place::<std::sys::fd::unix::FileDesc> (inlined)
+               core::ptr::drop_in_place::<std::sys::fs::unix::File> (inlined)
+               core::ptr::drop_in_place::<std::fs::File> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     8.13%  perf_profile  [unknown]             [k] 0xffffffff85452de1                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff8539b7d0
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI_munmap (inlined)
+               _int_free_chunk
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               __rustc::__rdl_dealloc (inlined)
+               dealloc_nonnull (inlined)
+               deallocate_impl_runtime (inlined)
+               deallocate_impl (inlined)
+               deallocate (inlined)
+               deallocate<alloc::alloc::Global> (inlined)
+               deallocate<&alloc::alloc::Global> (inlined)
+               drop<u8, &alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::raw_vec::RawVec<u8, &alloc::alloc::Global>> (inlined)
+               drop_in_place<alloc::vec::Vec<u8, &alloc::alloc::Global>> (inlined)
+               from<u8, alloc::alloc::Global> (inlined)
+               lazy_contiguous_utf8 (inlined)
+               perf_profile::build_str_join_frame
+               build_str_join_frame (inlined)
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     8.01%  perf_profile  [unknown]             [k] 0xffffffff853414ec                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff85455447
+               0xffffffff853414e8
+               0xffffffff85342072
+               0xffffffff853437ad
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               perf_profile::build_str_join_frame
+               {closure#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>> (inlined)
+               {closure#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>>> (inlined)
+               {closure#0}<usize, f64, (), perf_profile::build_str_join_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>>>> (inlined)
+               fold<core::ops::range::Range<usize>, (), core::iter::adapters::map::map_fold::{closure_env#0}<usize, f64, (), perf_profile::build_str_join_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>>>>> (inlined)
+               fold<f64, core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<f64, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>>> (inlined)
+               extend_trusted<f64, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>> (inlined)
+               spec_extend<f64, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>, alloc::alloc::Global> (inlined)
+               from_iter<f64, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>> (inlined)
+               from_iter<f64, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>> (inlined)
+               from_iter<f64, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>> (inlined)
+               collect<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_str_join_frame::{closure_env#1}>, alloc::vec::Vec<f64, alloc::alloc::Global>> (inlined)
+               perf_profile::build_str_join_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     4.89%  perf_profile  [unknown]             [k] 0xffffffff86229e6b                                                                                                                                                                                                                                                         -      -            
+            |          
+            |--2.45%--0xffffffff85196609
+            |          0xffffffff851a2b20
+            |          0xffffffff85124d3c
+            |          0xffffffff862206af
+            |          0xffffffff84c0012b
+            |          __internal_syscall_cancel (inlined)
+            |          __syscall_cancel
+            |          __GI___libc_read (inlined)
+            |          <std::sys::fd::unix::FileDesc>::read (inlined)
+            |          <std::sys::fs::unix::File>::read (inlined)
+            |          <&std::fs::File as std::io::Read>::read (inlined)
+            |          std::io::default_read_to_end::small_probe_read::<&std::fs::File>
+            |          std::io::default_read_to_end::<&std::fs::File>
+            |          std::io::default_read_to_string::<&std::fs::File>::{closure#0} (inlined)
+            |          std::io::append_to_string::<std::io::default_read_to_string<&std::fs::File>::{closure#0}> (inlined)
+            |          std::io::default_read_to_string::<&std::fs::File> (inlined)
+            |          <&std::fs::File as std::io::Read>::read_to_string
+            |          <std::fs::File as std::io::Read>::read_to_string (inlined)
+            |          std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+            |          <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+            |          std::sys::thread::unix::cgroups::quota_v2 (inlined)
+            |          std::sys::thread::unix::cgroups::quota (inlined)
+            |          std::sys::thread::unix::available_parallelism (inlined)
+            |          std::thread::functions::available_parallelism
+            |          fp_join::build_single_key_inner_merge_output_with_selections
+            |          fp_join::merge_single_key_inner_unsorted
+            |          fp_join::merge_dataframes_on_with_options
+            |          perf_profile::main
+            |          merge_dataframes_on (inlined)
+            |          merge_dataframes (inlined)
+            |          perf_profile::main
+            |          
+             --2.44%--0xffffffff851a0548
+                       0xffffffff851a2b6a
+                       0xffffffff85124d3c
+                       0xffffffff862206af
+                       0xffffffff84c0012b
+                       __internal_syscall_cancel (inlined)
+                       __syscall_cancel
+                       __libc_open64 (inlined)
+                       <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+                       std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+                       <std::sys::fs::unix::File>::open_c
+                       0x21
+                       <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+                       std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+                       std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+                       std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+                       <std::sys::fs::unix::File>::open (inlined)
+                       <std::fs::OpenOptions>::_open (inlined)
+                       <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+                       <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+                       std::sys::thread::unix::cgroups::quota_v2 (inlined)
+                       std::sys::thread::unix::cgroups::quota (inlined)
+                       std::sys::thread::unix::available_parallelism (inlined)
+                       std::thread::functions::available_parallelism
+                       fp_join::build_single_key_inner_merge_output_with_selections
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+     2.72%  perf_profile  perf_profile          [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -            
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               chaining_ge<u8> (inlined)
+               __chaining_ge<u8> (inlined)
+               ge<u8> (inlined)
+               ge<[u8], [u8]> (inlined)
+               contiguous_utf8_offsets_are_strictly_increasing (inlined)
+               {closure#0} (inlined)
+               {closure#0}<bool, fp_columnar::{impl#17}::as_strictly_increasing_utf8_contiguous::{closure_env#0}> (inlined)
+               {closure#0}<bool, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<bool, fp_columnar::{impl#17}::as_strictly_increasing_utf8_contiguous::{closure_env#0}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<bool, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<bool, fp_columnar::{impl#17}::as_strictly_increasing_utf8_contiguous::{closure_env#0}>, !>> (inlined)
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               initialize<bool, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<bool, fp_columnar::{impl#17}::as_strictly_increasing_utf8_contiguous::{closure_env#0}>, !> (inlined)
+               <fp_columnar::Column>::as_strictly_increasing_utf8_contiguous
+               get_or_init<bool, fp_columnar::{impl#17}::as_strictly_increasing_utf8_contiguous::{closure_env#0}> (inlined)
+               as_strictly_increasing_utf8_contiguous (inlined)
+               fp_join::merge_single_key_inner_unsorted
+               ordered_unique_utf8_inner_position_plan (inlined)
+               merge_single_key_inner_unsorted (inlined)
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               __rust_begin_short_backtrace<fn(), ()> (inlined)
+               std::rt::lang_start::<()>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+
+     2.50%  perf_profile  perf_profile          [.] <std::path::Components>::parse_next_component_back                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff854807a5
+               0xffffffff8548110c
+               0xffffffff85498dc1
+               0xffffffff854990f4
+               0xffffffff8547a407
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+
+     2.47%  perf_profile  [unknown]             [k] 0xffffffff854b7d85                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff85569c9d
+               0xffffffff85490db1
+               0xffffffff85496941
+               0xffffffff85498e17
+               0xffffffff854990f4
+               0xffffffff8547a407
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __libc_open64 (inlined)
+               <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+               std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+               <std::sys::fs::unix::File>::open_c
+               0x33
+               <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+               <std::sys::fs::unix::File>::open (inlined)
+               <std::fs::OpenOptions>::_open (inlined)
+               <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+               <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.46%  perf_profile  [unknown]             [k] 0xffffffff85835fd1                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff8556e4bd
+               0xffffffff854c00ba
+               0xffffffff8556ece1
+               0xffffffff8547e990
+               0xffffffff8547f8b1
+               0xffffffff8547f959
+               0xffffffff84f252d5
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___libc_read (inlined)
+               <std::sys::fd::unix::FileDesc>::read_buf (inlined)
+               <std::sys::fs::unix::File>::read_buf (inlined)
+               <&std::fs::File as std::io::Read>::read_buf (inlined)
+               std::io::default_read_to_end::<&std::fs::File>
+               std::io::default_read_to_string::<&std::fs::File>::{closure#0} (inlined)
+               std::io::append_to_string::<std::io::default_read_to_string<&std::fs::File>::{closure#0}> (inlined)
+               std::io::default_read_to_string::<&std::fs::File> (inlined)
+               <&std::fs::File as std::io::Read>::read_to_string
+               <std::fs::File as std::io::Read>::read_to_string (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.45%  perf_profile  [unknown]             [k] 0xffffffff8545851a                                                                                                                                                                                                                                                         -      -            
+            |
+            ---__syscall_cancel
+               __libc_open64 (inlined)
+               <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+               std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+               <std::sys::fs::unix::File>::open_c
+               0x6
+               <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+               <std::sys::fs::unix::File>::open (inlined)
+               <std::fs::OpenOptions>::_open (inlined)
+               <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+               <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.45%  perf_profile  [unknown]             [k] 0xffffffff854585f5                                                                                                                                                                                                                                                         -      -            
+            |
+            ---std::path::iter_after::<std::path::Components, std::path::Components> (inlined)
+               <std::path::Path>::_starts_with
+               <std::path::Path>::starts_with::<&str> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.45%  perf_profile  [unknown]             [k] 0xffffffff85557adb                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff854c1101
+               0xffffffff85699a08
+               0xffffffff8519f6d4
+               0xffffffff851a2f82
+               0xffffffff85492b44
+               0xffffffff85498e93
+               0xffffffff854990f4
+               0xffffffff8547a407
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __libc_open64 (inlined)
+               <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+               std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+               <std::sys::fs::unix::File>::open_c
+
+     2.45%  perf_profile  [unknown]             [k] 0xffffffff85193496                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff851a0548
+               0xffffffff851a2b6a
+               0xffffffff85124d3c
+               0xffffffff862206af
+               0xffffffff84c0012b
+               __lseek64 (inlined)
+               <std::sys::fs::unix::File>::seek (inlined)
+               <std::sys::fs::unix::File>::tell (inlined)
+               <&std::fs::File as std::io::Seek>::stream_position (inlined)
+               std::fs::buffer_capacity_required
+               <&std::fs::File as std::io::Read>::read_to_end (inlined)
+               <std::fs::File as std::io::Read>::read_to_end (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.45%  perf_profile  perf_profile          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8546faa7
+               0xffffffff8546fe41
+               0xffffffff8592b67f
+               0xffffffff854912b9
+               0xffffffff8549809c
+               0xffffffff8547a3dc
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+
+     2.45%  perf_profile  [unknown]             [k] 0xffffffff8519660e                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff854c0455
+               0xffffffff8547f8b1
+               0xffffffff8547f959
+               0xffffffff84f252d5
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___libc_read (inlined)
+               <std::sys::fd::unix::FileDesc>::read_buf (inlined)
+               <std::sys::fs::unix::File>::read_buf (inlined)
+               <&std::fs::File as std::io::Read>::read_buf (inlined)
+               std::io::default_read_to_end::<&std::fs::File>
+               <&std::fs::File as std::io::Read>::read_to_end (inlined)
+               <std::fs::File as std::io::Read>::read_to_end (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.45%  perf_profile  [unknown]             [k] 0xffffffff84d0410b                                                                                                                                                                                                                                                         -      -            
+            |          
+             --2.45%--0xffffffff854b19c4
+                       0xffffffff8548906c
+                       0xffffffff84f253a7
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       statx
+                       std::sys::fs::unix::try_statx::statx (inlined)
+                       std::sys::fs::unix::try_statx
+                       <std::sys::fs::unix::File>::file_attr (inlined)
+                       <std::fs::File>::metadata (inlined)
+                       std::fs::buffer_capacity_required
+                       <&std::fs::File as std::io::Read>::read_to_end (inlined)
+                       <std::fs::File as std::io::Read>::read_to_end (inlined)
+                       std::sys::thread::unix::cgroups::quota (inlined)
+                       std::sys::thread::unix::available_parallelism (inlined)
+                       std::thread::functions::available_parallelism
+                       fp_join::build_single_key_inner_merge_output_with_selections
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+     2.44%  perf_profile  [unknown]             [k] 0xffffffff8546fcfe                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff85496acb
+               0xffffffff85498e17
+               0xffffffff854990f4
+               0xffffffff8547a407
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __libc_open64 (inlined)
+               <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+               std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+               <std::sys::fs::unix::File>::open_c
+               0x11
+               <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+               <std::sys::fs::unix::File>::open (inlined)
+               <std::fs::OpenOptions>::_open (inlined)
+               <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+               <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.44%  perf_profile  [unknown]             [k] 0xffffffff8584181c                                                                                                                                                                                                                                                         -      -            
+            |
+            ---<core::ptr::non_null::NonNull<u8> as core::cmp::PartialEq>::eq (inlined)
+               <core::slice::iter::Iter<u8> as core::iter::traits::double_ended::DoubleEndedIterator>::next_back (inlined)
+               <core::slice::iter::Iter<u8> as core::iter::traits::iterator::Iterator>::rposition::<<std::path::Components>::parse_next_component_back::{closure#0}> (inlined)
+               <std::path::Components>::parse_next_component_back
+               <std::path::Components>::trim_right (inlined)
+               <std::path::Components>::as_path
+               <std::path::Path>::parent::{closure#0} (inlined)
+               <core::option::Option<std::path::Component>>::and_then::<&std::path::Path, <std::path::Path>::parent::{closure#0}> (inlined)
+               <std::path::Path>::parent (inlined)
+               <std::path::PathBuf>::pop
+               0x2
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.44%  perf_profile  [unknown]             [k] 0xffffffff853f07f7                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff8582faa3
+               0xffffffff85492449
+               0xffffffff85496ad0
+               0xffffffff8549798a
+               0xffffffff854984c3
+               0xffffffff85487e79
+               0xffffffff85488ce7
+               0xffffffff8548907e
+               0xffffffff84f253a7
+               0xffffffff86220551
+               0xffffffff84c0012b
+               statx
+               std::sys::fs::unix::try_statx::statx (inlined)
+               std::sys::fs::unix::try_statx
+               std::sys::fs::unix::stat (inlined)
+               <std::sys::fs::unix::stat as core::ops::function::Fn<(&core::ffi::c_str::CStr,)>>::call (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::FileAttr> (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::FileAttr> (inlined)
+               std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::FileAttr> (inlined)
+               std::sys::fs::metadata
+               std::fs::metadata::<&std::path::Path> (inlined)
+               std::sys::fs::common::exists (inlined)
+               std::sys::fs::exists (inlined)
+               std::fs::exists::<&std::path::PathBuf> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.44%  perf_profile  [unknown]             [k] 0xffffffff8571786e                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff84d0410b
+               0xffffffff854c00e0
+               0xffffffff8556ece1
+               0xffffffff8547e990
+               0xffffffff8547f8b1
+               0xffffffff8547f959
+               0xffffffff84f252d5
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___libc_read (inlined)
+               <std::sys::fd::unix::FileDesc>::read (inlined)
+               <std::sys::fs::unix::File>::read (inlined)
+               <&std::fs::File as std::io::Read>::read (inlined)
+               std::io::default_read_to_end::small_probe_read::<&std::fs::File>
+               std::io::default_read_to_end::<&std::fs::File>
+               std::io::default_read_to_string::<&std::fs::File>::{closure#0} (inlined)
+               std::io::append_to_string::<std::io::default_read_to_string<&std::fs::File>::{closure#0}> (inlined)
+               std::io::default_read_to_string::<&std::fs::File> (inlined)
+               <&std::fs::File as std::io::Read>::read_to_string
+               <std::fs::File as std::io::Read>::read_to_string (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.44%  perf_profile  [unknown]             [k] 0xffffffff84d04109                                                                                                                                                                                                                                                         -      -            
+            |          
+             --2.44%--0xffffffff854a7d0b
+                       0xffffffff8549255c
+                       0xffffffff85496736
+                       0xffffffff85496a0f
+                       0xffffffff85498e17
+                       0xffffffff854990f4
+                       0xffffffff8547a407
+                       0xffffffff8547a93f
+                       0xffffffff84f25032
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __internal_syscall_cancel (inlined)
+                       __syscall_cancel
+                       __libc_open64 (inlined)
+                       <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+                       std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+                       <std::sys::fs::unix::File>::open_c
+                       0x21
+                       <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+                       std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+                       std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+                       std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+                       <std::sys::fs::unix::File>::open (inlined)
+                       <std::fs::OpenOptions>::_open (inlined)
+                       <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+                       <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+                       std::sys::thread::unix::cgroups::quota_v2 (inlined)
+                       std::sys::thread::unix::cgroups::quota (inlined)
+                       std::sys::thread::unix::available_parallelism (inlined)
+                       std::thread::functions::available_parallelism
+                       fp_join::build_single_key_inner_merge_output_with_selections
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+     2.44%  perf_profile  [unknown]             [k] 0xffffffff851934a7                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff862311f5
+               0xffffffff8547b8e0
+               0xffffffff8547b988
+               0xffffffff84f2561d
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __lseek64 (inlined)
+               <std::sys::fs::unix::File>::seek (inlined)
+               <std::sys::fs::unix::File>::tell (inlined)
+               <&std::fs::File as std::io::Seek>::stream_position (inlined)
+               std::fs::buffer_capacity_required
+               <&std::fs::File as std::io::Read>::read_to_string
+               <std::fs::File as std::io::Read>::read_to_string (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.44%  perf_profile  perf_profile          [.] <std::path::PathBuf>::pop                                                                                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff851a09fb
+               0xffffffff851a2c6e
+               0xffffffff8549131b
+               0xffffffff8549809c
+               0xffffffff8547a3dc
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+
+     2.44%  perf_profile  perf_profile          [.] <fp_columnar::Column>::take_contiguous_range                                                                                                                                                                                                                               -      -            
+            |
+            ---<fp_columnar::Column>::take_contiguous_range
+               inner<[usize], alloc::alloc::Global> (inlined)
+               deref<[usize], alloc::alloc::Global> (inlined)
+               len (inlined)
+               len (inlined)
+               take_contiguous_range (inlined)
+               __libc_malloc2
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::alloc (inlined)
+               __rustc::__rdl_alloc (inlined)
+               alloc (inlined)
+               alloc_impl_runtime (inlined)
+               alloc_impl (inlined)
+               allocate (inlined)
+               try_new_uninit_in<alloc::collections::btree::node::LeafNode<alloc::string::String, fp_columnar::Column>, alloc::alloc::Global> (inlined)
+               new_uninit_in<alloc::collections::btree::node::LeafNode<alloc::string::String, fp_columnar::Column>, alloc::alloc::Global> (inlined)
+               new<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               new_leaf<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               insert_entry<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               insert<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               insert<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               insert_merged_output_column (inlined)
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.44%  perf_profile  [unknown]             [k] 0xffffffff84f233a4                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff851a220d
+               0xffffffff851a2b34
+               0xffffffff85124d3c
+               0xffffffff862206af
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___libc_read (inlined)
+               <std::sys::fd::unix::FileDesc>::read_buf (inlined)
+               <std::sys::fs::unix::File>::read_buf (inlined)
+               <&std::fs::File as std::io::Read>::read_buf (inlined)
+               std::io::default_read_to_end::<&std::fs::File>
+               std::io::default_read_to_string::<&std::fs::File>::{closure#0} (inlined)
+               std::io::append_to_string::<std::io::default_read_to_string<&std::fs::File>::{closure#0}> (inlined)
+               std::io::default_read_to_string::<&std::fs::File> (inlined)
+               <&std::fs::File as std::io::Read>::read_to_string
+               <std::fs::File as std::io::Read>::read_to_string (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.44%  perf_profile  [unknown]             [k] 0xffffffff8622058e                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff85104b2d
+               0xffffffff851a2b34
+               0xffffffff85124d3c
+               0xffffffff862206af
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___libc_read (inlined)
+               <std::sys::fd::unix::FileDesc>::read_buf (inlined)
+               <std::sys::fs::unix::File>::read_buf (inlined)
+               <&std::fs::File as std::io::Read>::read_buf (inlined)
+               std::io::default_read_to_end::<&std::fs::File>
+               std::io::default_read_to_string::<&std::fs::File>::{closure#0} (inlined)
+               std::io::append_to_string::<std::io::default_read_to_string<&std::fs::File>::{closure#0}> (inlined)
+               std::io::default_read_to_string::<&std::fs::File> (inlined)
+               <&std::fs::File as std::io::Read>::read_to_string
+               <std::fs::File as std::io::Read>::read_to_string (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     2.44%  perf_profile  [unknown]             [k] 0xffffffff8569f879                                                                                                                                                                                                                                                         -      -            
+            |
+            ---0xffffffff862204ea
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___close (inlined)
+               <std::os::fd::owned::OwnedFd as core::ops::drop::Drop>::drop (inlined)
+               core::ptr::drop_in_place::<std::os::fd::owned::OwnedFd> (inlined)
+               core::ptr::drop_in_place::<std::sys::fd::unix::FileDesc> (inlined)
+               core::ptr::drop_in_place::<std::sys::fs::unix::File> (inlined)
+               core::ptr::drop_in_place::<std::fs::File> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               perf_profile::main
+
+     0.15%  perf_profile  [unknown]             [k] 0xffffffff854a65cf                                                                                                                                                                                                                                                         -      -            
+     0.13%  perf_profile  [unknown]             [k] 0xffffffff85494a00                                                                                                                                                                                                                                                         -      -            
+     0.13%  perf_profile  perf_profile          [.] <alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>::drop_slow                                                                                                                                                                                                       -      -            
+     0.13%  perf_profile  [unknown]             [k] 0xffffffff8556ece1                                                                                                                                                                                                                                                         -      -            
+     0.12%  perf_profile  [unknown]             [k] 0xffffffff85454e87                                                                                                                                                                                                                                                         -      -            
+     0.12%  perf_profile  [unknown]             [k] 0xffffffff8519f66e                                                                                                                                                                                                                                                         -      -            
+     0.11%  perf_profile  [unknown]             [k] 0xffffffff853f1925                                                                                                                                                                                                                                                         -      -            
+     0.11%  perf_profile  [unknown]             [k] 0xffffffff85454e56                                                                                                                                                                                                                                                         -      -            
+     0.11%  perf_profile  [unknown]             [k] 0xffffffff84c01192                                                                                                                                                                                                                                                         -      -            
+     0.11%  perf_profile  [unknown]             [k] 0xffffffff8621b2b7                                                                                                                                                                                                                                                         -      -            
+     0.10%  perf_profile  [unknown]             [k] 0xffffffff8519f772                                                                                                                                                                                                                                                         -      -            
+     0.10%  perf_profile  [unknown]             [k] 0xffffffff84c001bd                                                                                                                                                                                                                                                         -      -            
+     0.10%  perf_profile  ld-linux-x86-64.so.2  [.] do_lookup_x                                                                                                                                                                                                                                                                -      -            
+     0.09%  perf_profile  [unknown]             [k] 0xffffffff853bbd0b                                                                                                                                                                                                                                                         -      -            
+     0.09%  perf_profile  [unknown]             [k] 0xffffffff854f207d                                                                                                                                                                                                                                                         -      -            
+     0.08%  perf_profile  [unknown]             [k] 0xffffffff8582f979                                                                                                                                                                                                                                                         -      -            
+     0.08%  perf_profile  [unknown]             [k] 0xffffffff854b7ac6                                                                                                                                                                                                                                                         -      -            
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff85492569                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f8c9d1                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff851a3005                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85377d72                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff851a298f                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff854552a7                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853a3439                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85490d33                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  perf_profile          [.] <std::sys::fs::unix::File>::open_c                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85715e50                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85496365                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530b142                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  perf_profile          [.] <core::str::pattern::CharSearcher as core::str::pattern::Searcher>::next_match                                                                                                                                                                                             -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8556dcc3                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84d04104                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  perf_profile          [.] std::sys::fs::unix::try_statx                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853ddbdb                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8556b124                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85078fb8                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8534112f                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d280                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d285                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2bc                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2c3                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228550                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850c2910                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d286                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2cc                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcb                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b65                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b66                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b80                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228551                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d280                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d285                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2bc                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b25                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b2d                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b41                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b45                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d289                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d28b                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2af                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2d7                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2db                                                                                                                                                                                                                                                         -      -            
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862251d0                                                                                                                                                                                                                                                         -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

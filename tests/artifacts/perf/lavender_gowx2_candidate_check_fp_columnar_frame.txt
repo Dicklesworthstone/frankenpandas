@@ -1,0 +1,182 @@
+[RCH] CARGO_TARGET_DIR forwarding detected from environment
+[RCH] Cargo target sync active; forcing worker CARGO_TARGET_DIR to an isolated remote target and syncing back to /data/projects/.scratch/cargo-target-lavender-gowx2-check
+[RCH] local (no admissible workers: insufficient_slots=1,hard_preflight=9)
+warning: /data/projects/frankenpandas/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling serde_core v1.0.228
+   Compiling thiserror v2.0.18
+   Compiling autocfg v1.5.0
+    Checking typenum v1.20.0
+   Compiling serde v1.0.228
+    Checking memchr v2.8.0
+   Compiling zmij v1.0.21
+    Checking hashbrown v0.17.0
+    Checking rustc-hash v2.1.2
+    Checking equivalent v1.0.2
+    Checking const-oid v0.10.2
+    Checking siphasher v1.0.2
+   Compiling serde_json v1.0.150
+    Checking cfg-if v1.0.4
+   Compiling chrono-tz v0.10.4
+    Checking regex-syntax v0.8.10
+    Checking itoa v1.0.18
+    Checking cpufeatures v0.3.0
+    Checking tinyvec_macros v0.1.1
+    Checking unicode-casefold v0.2.0
+    Checking ucd v0.1.1
+    Checking tinyvec v1.11.0
+    Checking phf_shared v0.12.1
+    Checking phf v0.12.1
+   Compiling num-traits v0.2.19
+    Checking aho-corasick v1.1.4
+    Checking unicode-normalization v0.1.25
+    Checking indexmap v2.14.0
+   Compiling syn v2.0.117
+    Checking hybrid-array v0.4.10
+    Checking chrono v0.4.45
+    Checking crypto-common v0.2.1
+    Checking block-buffer v0.12.0
+    Checking regex-automata v0.4.14
+    Checking digest v0.11.2
+    Checking sha2 v0.11.0
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+    Checking regex v1.12.3
+    Checking fp-types v0.1.0 (/data/projects/frankenpandas/crates/fp-types)
+    Checking fp-runtime v0.1.0 (/data/projects/frankenpandas/crates/fp-runtime)
+    Checking fp-columnar v0.1.0 (/data/projects/frankenpandas/crates/fp-columnar)
+    Checking fp-index v0.1.0 (/data/projects/frankenpandas/crates/fp-index)
+    Checking fp-frame v0.1.0 (/data/projects/frankenpandas/crates/fp-frame)
+error[E0425]: cannot find type `PairwiseFloat64Stat` in this scope
+     --> crates/fp-frame/src/lib.rs:43357:15
+      |
+43357 |         stat: PairwiseFloat64Stat,
+      |               ^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `PairwiseFloat64Stat` in this scope
+     --> crates/fp-frame/src/lib.rs:43394:24
+      |
+43394 |             if stat == PairwiseFloat64Stat::Corr {
+      |                        ^^^^^^^^^^^^^^^^^^^ use of undeclared type `PairwiseFloat64Stat`
+
+error[E0433]: cannot find type `PairwiseFloat64Stat` in this scope
+     --> crates/fp-frame/src/lib.rs:43404:20
+      |
+43404 |         if stat == PairwiseFloat64Stat::Corr && min_corr_var < f64::EPSILON {
+      |                    ^^^^^^^^^^^^^^^^^^^ use of undeclared type `PairwiseFloat64Stat`
+
+error[E0599]: no associated function or constant named `from_f64_all_valid_pairwise_stat_matrix_columns` found for struct `Column` in the current scope
+     --> crates/fp-frame/src/lib.rs:43408:31
+      |
+43408 |         let columns = Column::from_f64_all_valid_pairwise_stat_matrix_columns(
+      |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `Column`
+      |
+note: if you're trying to build a new `Column` consider using one of the following associated functions:
+      Column::new
+      Column::from_values
+      Column::from_i64_values
+      Column::from_datetime64_values
+      and 40 others
+     --> crates/fp-columnar/src/lib.rs:5018:5
+      |
+ 5018 |     pub fn new(dtype: DType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 5084 |     pub fn from_values(values: Vec<Scalar>) -> Result<Self, ColumnError> {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 5110 |     pub fn from_i64_values(data: Vec<i64>) -> Self {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 5127 |     pub fn from_datetime64_values(data: Vec<i64>) -> Self {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `from_f64_all_valid_chunks` with a similar name
+     --> crates/fp-columnar/src/lib.rs:5686:5
+      |
+ 5686 |     pub fn from_f64_all_valid_chunks(chunks: Vec<(Arc<[f64]>, usize, usize)>, len: usize) -> Self {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find type `PairwiseFloat64Stat` in this scope
+     --> crates/fp-frame/src/lib.rs:43845:28
+      |
+43845 |             "corr" => Some(PairwiseFloat64Stat::Corr),
+      |                            ^^^^^^^^^^^^^^^^^^^ use of undeclared type `PairwiseFloat64Stat`
+
+error[E0433]: cannot find type `PairwiseFloat64Stat` in this scope
+     --> crates/fp-frame/src/lib.rs:43846:27
+      |
+43846 |             "cov" => Some(PairwiseFloat64Stat::Cov),
+      |                           ^^^^^^^^^^^^^^^^^^^ use of undeclared type `PairwiseFloat64Stat`
+
+error[E0433]: cannot find type `PairwiseFloat64Stat` in this scope
+     --> crates/fp-frame/src/lib.rs:43909:28
+      |
+43909 |             "corr" => Some(PairwiseFloat64Stat::Corr),
+      |                            ^^^^^^^^^^^^^^^^^^^ use of undeclared type `PairwiseFloat64Stat`
+
+error[E0433]: cannot find type `PairwiseFloat64Stat` in this scope
+     --> crates/fp-frame/src/lib.rs:43910:27
+      |
+43910 |             "cov" => Some(PairwiseFloat64Stat::Cov),
+      |                           ^^^^^^^^^^^^^^^^^^^ use of undeclared type `PairwiseFloat64Stat`
+
+Some errors have detailed explanations: E0425, E0433, E0599.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `fp-frame` (lib) due to 8 previous errors

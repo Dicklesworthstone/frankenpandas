@@ -1,0 +1,45 @@
+br-frankenpandas-c7rfx — Typed Float64 fast path for Series/DataFrame.pct_change
+================================================================================
+
+Part of the eydcr Scalar-bound-elementwise-ops family (sister to igxsj diff).
+pct_change materialized Vec<Scalar> + per-element to_f64 dispatch + Column::new
+revalidation even for typed Float64 columns, ignoring the as_f64_slice backing.
+
+LEVER (one):
+  1. pct_change_core typed Float64 fast path: an as_f64_slice column is all-valid
+     no-NaN Float64, so no missing inputs and no Timedelta64 branch — compute
+     (data[i]-prev)/prev into a typed f64 buffer + validity, emit via
+     from_f64_values_with_validity.
+  2. pct_change_with_fill all-valid short-circuit: ffill/bfill on an all-valid
+     column is the identity, so skip it (after validating fill_method) and run
+     the core directly on the original typed column — otherwise the default
+     pad-fill re-materializes Scalars and defeats the fast path.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter):
+  DataFrame.pct_change(1):  107.457  ->  2.818  = 38.1x
+
+SCORE: 38.1x >> 2.0 PASS.
+
+ISOMORPHISM (division can produce inf/NaN from finite inputs — handled exactly):
+  - In-range row: Float64((data[i]-prev)/prev), the identical f64 division the
+    Scalar path computes via to_f64.
+  - First `periods` rows: cleared validity bit + 0.0 datum -> Null(NullKind::NaN),
+    matching the Scalar path's explicit Null(NaN).
+  - NaN ratio (e.g. 0.0/0.0): validity bit CLEARED — Column::from_values marks a
+    Float64(NaN) Scalar missing (Scalar::is_missing), and LazyNullableFloat64's
+    materialization still yields Float64(NaN) for a cleared-but-NaN slot
+    (`validity.get(idx) || value.is_nan()`), so BOTH the value AND the validity
+    bit match the Scalar path. (Bench frame has data[0]=0, exercising +inf.)
+  - Non-NaN ratio incl. +/-inf: present Float64 (inf is not missing) — matches.
+  - All-valid short-circuit is the ffill/bfill identity on a no-missing column;
+    invalid fill_method still errors (validated before the short-circuit).
+  - Index + name preserved.
+  - Golden sha256 (gap_hunt golden: diff family + pct_change(1) typed & nullable,
+    n=5000 x4) UNCHANGED before/after:
+      1b3c99729b974309bed453d9b83439e4ae6d9b6d4c18467da6931f2d82b24d61
+
+GATES (rch, crate-scoped):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

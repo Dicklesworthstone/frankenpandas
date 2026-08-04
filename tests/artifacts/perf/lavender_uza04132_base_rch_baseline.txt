@@ -1,0 +1,91 @@
+binary=/data/projects/frankenpandas/.rch-target-lavenderstone-uza04132-base/release-perf/examples/perf_profile
+## build log tail
+   Compiling fp-runtime v0.1.0 (/data/projects/frankenpandas/crates/fp-runtime)
+   Compiling calamine v0.35.0
+   Compiling serde-pickle v1.2.0
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling tinytemplate v1.2.1
+   Compiling raptorq v2.0.1
+   Compiling futures v0.3.32
+   Compiling fp-columnar v0.1.0 (/data/projects/frankenpandas/crates/fp-columnar)
+   Compiling fp-index v0.1.0 (/data/projects/frankenpandas/crates/fp-index)
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling arrow-buffer v58.3.0
+   Compiling ciborium-ll v0.2.2
+   Compiling proptest v1.11.0
+   Compiling ciborium v0.2.2
+   Compiling fp-frame v0.1.0 (/data/projects/frankenpandas/crates/fp-frame)
+   Compiling criterion v0.8.2
+   Compiling arrow-data v58.3.0
+   Compiling arrow-array v58.3.0
+   Compiling arrow-select v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling arrow-row v58.3.0
+   Compiling arrow-ord v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling zstd v0.13.3
+   Compiling arrow-ipc v58.3.0
+   Compiling parquet v58.3.0
+   Compiling arrow-cast v58.3.0
+   Compiling arrow-csv v58.3.0
+   Compiling arrow-json v58.3.0
+   Compiling arrow v58.3.0
+   Compiling orc-rust v0.8.0
+   Compiling fp-expr v0.1.0 (/data/projects/frankenpandas/crates/fp-expr)
+   Compiling fp-groupby v0.1.0 (/data/projects/frankenpandas/crates/fp-groupby)
+   Compiling fp-join v0.1.0 (/data/projects/frankenpandas/crates/fp-join)
+   Compiling rusqlite v0.40.1
+   Compiling fp-io v0.1.0 (/data/projects/frankenpandas/crates/fp-io)
+   Compiling fp-conformance v0.1.0 (/data/projects/frankenpandas/crates/fp-conformance)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 2m 18s
+## golden csv_parse_dates_dt_year 1000
+1442f9e26ae81e28ccfb59d5019f76af6c0306db9be04a084b339fb91fb6b90e  /tmp/lavender_uza04132_base_golden_csv_parse_dates_dt_year_1000.txt
+## golden csv_parse_dates_dt_year 100000
+cb6f4f743000dff6f84ca63c1c0f0e749c4be0c500dd9034402dcdb5321c7bdd  /tmp/lavender_uza04132_base_golden_csv_parse_dates_dt_year_100000.txt
+## internal baseline
+## hyperfine baseline
+Benchmark 1: /data/projects/frankenpandas/.rch-target-lavenderstone-uza04132-base/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 5
+  Time (mean ± σ):      1.272 s ±  0.222 s    [User: 1.203 s, System: 0.064 s]
+  Range (min … max):    1.055 s …  1.566 s    10 runs
+ 
+## hyperfine json
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenpandas/.rch-target-lavenderstone-uza04132-base/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 5",
+      "mean": 1.27232018366,
+      "stddev": 0.22233026662797034,
+      "median": 1.12826288286,
+      "user": 1.20348764,
+      "system": 0.06413598000000001,
+      "min": 1.05514863236,
+      "max": 1.56581186036,
+      "times": [
+        1.09593585636,
+        1.09113859136,
+        1.05514863236,
+        1.11681680436,
+        1.1094152983599999,
+        1.13970896136,
+        1.49834709636,
+        1.51816500036,
+        1.53271373536,
+        1.56581186036
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

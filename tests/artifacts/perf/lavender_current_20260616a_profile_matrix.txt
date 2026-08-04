@@ -1,0 +1,70 @@
+2026-06-16T15:54:08-04:00
+cfcf9868c91b3e6cc37c8f4cde9c6d02df254de4
+
+## df_dot 100000 3
+perf_profile: scenario=df_dot n=100000 iters=3
+perf_profile: done 3 iters in 0.281s (93.605 ms/iter), sink=300000
+
+## csv_parse_dates_dt_year 100000 5
+perf_profile: scenario=csv_parse_dates_dt_year n=100000 iters=5
+perf_profile: done 5 iters in 0.380s (76.002 ms/iter), sink=500000
+
+## str_outer_join 100000 5
+perf_profile: scenario=str_outer_join n=100000 iters=5
+perf_profile: done 5 iters in 0.180s (35.982 ms/iter), sink=750000
+
+## str_left_join 100000 5
+perf_profile: scenario=str_left_join n=100000 iters=5
+perf_profile: done 5 iters in 0.201s (40.255 ms/iter), sink=500000
+
+## df_corr 100000 1
+perf_profile: scenario=df_corr n=100000 iters=1
+perf_profile: done 1 iters in 0.111s (111.224 ms/iter), sink=64
+
+## df_cov 100000 1
+perf_profile: scenario=df_cov n=100000 iters=1
+perf_profile: done 1 iters in 0.103s (102.812 ms/iter), sink=64
+
+## str_sort_chain 100000 3
+perf_profile: scenario=str_sort_chain n=100000 iters=3
+perf_profile: done 3 iters in 0.059s (19.833 ms/iter), sink=300000
+
+## str_duplicated 500000 50
+perf_profile: scenario=str_duplicated n=500000 iters=50
+perf_profile: done 50 iters in 0.268s (5.351 ms/iter), sink=25000000
+
+## str_factorize 500000 50
+perf_profile: scenario=str_factorize n=500000 iters=50
+perf_profile: done 50 iters in 0.070s (1.390 ms/iter), sink=25021200
+
+## str_value_counts 500000 50
+perf_profile: scenario=str_value_counts n=500000 iters=50
+perf_profile: done 50 iters in 0.335s (6.702 ms/iter), sink=50000
+
+## groupby_transform_median 100000 5
+perf_profile: scenario=groupby_transform_median n=100000 iters=5
+perf_profile: done 5 iters in 0.025s (5.009 ms/iter), sink=500000
+
+## groupby_transform_std 100000 5
+perf_profile: scenario=groupby_transform_std n=100000 iters=5
+perf_profile: done 5 iters in 0.028s (5.501 ms/iter), sink=500000
+
+## groupby_agg_multi 100000 5
+perf_profile: scenario=groupby_agg_multi n=100000 iters=5
+perf_profile: done 5 iters in 0.006s (1.262 ms/iter), sink=500
+
+## series_add_align 100000 10
+perf_profile: scenario=series_add_align n=100000 iters=10
+perf_profile: done 10 iters in 0.025s (2.496 ms/iter), sink=1000010
+
+## csv_read 100000 5
+perf_profile: scenario=csv_read n=100000 iters=5
+perf_profile: done 5 iters in 0.063s (12.612 ms/iter), sink=500000
+
+## csv_read_options 100000 5
+perf_profile: scenario=csv_read_options n=100000 iters=5
+perf_profile: done 5 iters in 0.068s (13.664 ms/iter), sink=500000
+
+## filter_bool 100000 50
+perf_profile: scenario=filter_bool n=100000 iters=50
+perf_profile: done 50 iters in 0.014s (0.286 ms/iter), sink=2500000

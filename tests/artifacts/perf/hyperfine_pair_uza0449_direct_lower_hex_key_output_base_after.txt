@@ -1,0 +1,14 @@
+  [2m2026-06-09T16:18:38.183954Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 2 --runs 20 --export-json tests/artifacts/perf/hyperfine_pair_uza0449_direct_lower_hex_key_output_base_after.json '/data/projects/.scratch/cargo-target-orangepeak-uza0449-base/release-perf/join-bench --str-ordered --rows 5000000 --right-rows 5000000 --iters 200 --warmup 20' '/data/projects/.scratch/cargo-target-orangepeak-uza0449-after/release-perf/join-bench --str-ordered --rows 5000000 --right-rows 5000000 --iters 200 --warmup 20'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza0449-base/release-perf/join-bench --str-ordered --rows 5000000 --right-rows 5000000 --iters 200 --warmup 20
+  Time (mean ± σ):      1.715 s ±  0.078 s    [User: 0.740 s, System: 0.974 s]
+  Range (min … max):    1.569 s …  1.878 s    20 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-uza0449-after/release-perf/join-bench --str-ordered --rows 5000000 --right-rows 5000000 --iters 200 --warmup 20
+  Time (mean ± σ):     296.4 ms ±   6.1 ms    [User: 216.8 ms, System: 80.6 ms]
+  Range (min … max):   288.1 ms … 311.5 ms    20 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-uza0449-after/release-perf/join-bench --str-ordered --rows 5000000 --right-rows 5000000 --iters 200 --warmup 20 ran
+    5.79 ± 0.29 times faster than /data/projects/.scratch/cargo-target-orangepeak-uza0449-base/release-perf/join-bench --str-ordered --rows 5000000 --right-rows 5000000 --iters 200 --warmup 20

@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza04-42-before/release-perf/examples/perf_profile filter_bool 100000 20
+  Time (mean ± σ):      46.8 ms ±   2.2 ms    [User: 23.1 ms, System: 23.3 ms]
+  Range (min … max):    42.6 ms …  51.2 ms    10 runs
+ 

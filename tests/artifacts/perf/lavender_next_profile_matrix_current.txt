@@ -1,0 +1,35 @@
+2026-06-14T01:16:55-04:00
+commit 0f2e89991a44633e19718a7da3952e23e411a1c5
+=== df_dot 100000 5 ===
+perf_profile: scenario=df_dot 100000 5 n=100000 iters=200
+unknown scenario: df_dot 100000 5
+=== csv_read 100000 5 ===
+perf_profile: scenario=csv_read 100000 5 n=100000 iters=200
+unknown scenario: csv_read 100000 5
+=== csv_read_options 100000 5 ===
+perf_profile: scenario=csv_read_options 100000 5 n=100000 iters=200
+unknown scenario: csv_read_options 100000 5
+=== csv_read_no_na_filter 100000 5 ===
+perf_profile: scenario=csv_read_no_na_filter 100000 5 n=100000 iters=200
+unknown scenario: csv_read_no_na_filter 100000 5
+=== series_add_align 100000 50 ===
+perf_profile: scenario=series_add_align 100000 50 n=100000 iters=200
+unknown scenario: series_add_align 100000 50
+=== series_add_same 100000 100 ===
+perf_profile: scenario=series_add_same 100000 100 n=100000 iters=200
+unknown scenario: series_add_same 100000 100
+=== left_join 500000 5 ===
+perf_profile: scenario=left_join 500000 5 n=100000 iters=200
+unknown scenario: left_join 500000 5
+=== outer_join 500000 5 ===
+perf_profile: scenario=outer_join 500000 5 n=100000 iters=200
+unknown scenario: outer_join 500000 5
+=== str_value_counts 500000 50 ===
+perf_profile: scenario=str_value_counts 500000 50 n=100000 iters=200
+unknown scenario: str_value_counts 500000 50
+=== str_factorize 500000 50 ===
+perf_profile: scenario=str_factorize 500000 50 n=100000 iters=200
+unknown scenario: str_factorize 500000 50
+=== str_duplicated 500000 50 ===
+perf_profile: scenario=str_duplicated 500000 50 n=100000 iters=200
+unknown scenario: str_duplicated 500000 50

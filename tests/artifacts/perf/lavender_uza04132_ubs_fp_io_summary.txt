@@ -1,0 +1,23 @@
+Command: ubs crates/fp-io/src/lib.rs
+Exit code: 0
+Started: 2026-06-14 19:13:55
+Completed: 2026-06-14 19:15:47
+
+UBS scanned one Rust source file: crates/fp-io/src/lib.rs.
+
+Summary:
+- Files scanned: 1
+- Critical issues reported: 27
+- Warning issues reported: 5797
+- Info items reported: 716
+- Formatter section: OK, formatting is clean
+- Clippy section: OK, no clippy warnings/errors
+- Build health section: OK, cargo check clean and tests build clean
+- Dependency hygiene: OK for cargo-audit and cargo-deny
+
+Notes:
+- The scanner returned exit 0, which is the project-defined commit gate.
+- Reported critical/warning items are broad file-wide inventory in existing
+  fp-io code, not helper-specific compiler or clippy failures.
+- Full raw log remains in the local worktree as
+  tests/artifacts/perf/lavender_uza04132_ubs_fp_io.txt.

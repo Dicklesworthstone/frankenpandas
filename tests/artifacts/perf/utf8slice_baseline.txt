@@ -1,0 +1,6 @@
+
+    Finished `release` profile [optimized] target(s) in 50.64s
+=== GOLDEN ===
+55882afccf750e1be9319b42140b784d42be7ca9d581a0f070cc256271d3b49c  -
+=== TIMING ===
+perf_profile: done 1000 iters in 0.907s (0.907 ms/iter), sink=100000000

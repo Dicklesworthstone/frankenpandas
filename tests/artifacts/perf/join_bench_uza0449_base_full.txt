@@ -1,0 +1,1 @@
+join_bench join_type=inner rows=5000000 right_rows=5000000 key_cardinality=1024 ordered_unique=false str_ordered=true wide_sparse=false stride=1048576 force_generic=false warmup=20 iters=200 output_rows=500000 mean_ms=6.402 p50_ms=5.974 p95_ms=11.498 p99_ms=12.901 checksum=250025945150.000

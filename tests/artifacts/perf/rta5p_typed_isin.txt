@@ -1,0 +1,45 @@
+br-frankenpandas-rta5p — Typed Float64 + Fx-hashed membership for DataFrame.isin
+================================================================================
+
+eydcr fourth-wave op. isin_apply_column already had an Int64 dense-bitset path
+(f7201) but a Float64 column fell to the generic `col.values()` Vec<Scalar>
+materialization + per-element idx.contains loop.
+
+LEVER (one cohesive typed-membership probe):
+  1. Typed Float64 branch: read the f64 + validity slices and probe membership
+     directly. A present slot (validity set AND datum not NaN) is probed by the
+     EXACT same idx.contains over a stack Scalar::Float64 — no Vec<Scalar>
+     materialization; every other slot's membership is idx.contains's missing arm,
+     missing_kinds.contains(NaN), precomputed once.
+  2. IsinIndex sets HashSet -> FxHashSet: contains() is a hot per-element probe and
+     the residual after removing materialization was SipHash over the u64 float
+     bits. FxHash gives identical membership with a much cheaper hash.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-6; loaded):
+  DataFrame.isin:  53  ->  15.1  = 3.51x
+  (typed slice alone was 2.02x; the FxHashSet swap took it to 3.51x.)
+
+SCORE: 3.51x >= 2.0 PASS.
+
+ISOMORPHISM:
+  - Present slot (validity set AND datum not NaN -> materialized Scalar is
+    Float64(finite)): idx.contains(&Scalar::Float64(data[i])) is the identical call
+    the general loop makes, so every exact / cross-type (integer-valued float ->
+    Int64 needle, 0.0|1.0 -> Bool needle) match is preserved.
+  - Every other slot materializes a missing Scalar (Null(NaN) / Float64(NaN)), whose
+    membership is idx.contains's missing arm = missing_kinds.contains(NaN); equal
+    for all missing flavours, so it is precomputed once.
+  - isin's output is always all-valid Bool (membership is never missing), so
+    from_bool_values matches the general from_values of the [Bool,..] vector.
+  - FxHashSet membership == HashSet membership (same keys, deterministic), so
+    contains() is byte-for-byte unchanged; the Int64 bitset path is untouched.
+  - Golden sha256 (gap_hunt golden: full elementwise family + isin with exact float
+    needles, a cross-type Int64 needle (0.0 matches Int64(0)), and a NaN needle
+    matching missing slots, n=5000 x4) UNCHANGED before/after:
+      c55094b4e7ec90cba68466f0847e57a8e86bf79d34547bf5a8f23aa0c3dcc911
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 0 failures

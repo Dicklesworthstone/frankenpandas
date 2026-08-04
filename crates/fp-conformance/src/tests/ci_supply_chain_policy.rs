@@ -93,6 +93,23 @@ fn deny_toml_locks_license_and_source_policy() {
 }
 
 #[test]
+fn cargo_lock_excludes_tokio_runtime_family() {
+    let root = repo_root();
+    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
+    for forbidden in [
+        "name = \"tokio\"",
+        "name = \"tokio-macros\"",
+        "name = \"tokio-postgres\"",
+        "name = \"tokio-util\"",
+    ] {
+        assert!(
+            !lock.contains(forbidden),
+            "workspace no-Tokio policy violation: Cargo.lock contains {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn fuzz_targets_have_committed_regression_corpus_and_artifact_dirs() {
     let root = repo_root();
     let targets = fuzz_target_names(&root);

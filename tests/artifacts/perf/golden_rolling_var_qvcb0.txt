@@ -1,0 +1,15 @@
+br-frankenpandas-qvcb0 — typed all-valid f64 fast path for apply_rolling
+Golden battery: 3 datasets x {2,3,5} windows x {None,1,window} min_periods
+  x {trailing,center} x {var,std,skew,kurt,sem,prod} = 324 cases (FNV-1a 64 over
+  the full-precision f64 bits of every output cell).
+
+GOLDEN_FNV1A64 = 59b14a1dab95aceb  (len=39597)
+  baseline (origin/main naive apply_rolling) == after (typed-slice fast path)
+  => bit-identical across all var/std/skew/kurt/sem/prod cases.
+Cross-check (var/std vs verbatim per-window two-pass reference): 3000/0.
+
+Same-command A/B, n=200000 window=250 all-valid f64:
+  var  582.274 -> 86.541 ms  (6.73x)
+  std  518.268 -> 83.997 ms  (6.17x)
+  skew 595.692 -> 119.337 ms (4.99x)
+  sem  597.354 -> 79.938 ms  (7.47x)

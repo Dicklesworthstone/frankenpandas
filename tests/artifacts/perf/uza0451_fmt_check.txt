@@ -1,0 +1,11 @@
+Diff in /data/projects/.scratch/frankenpandas-lavenderstone-uza0493-land/crates/fp-frame/src/lib.rs:41731:
+                 } else {
+                     let vals = col.values();
+                     std::borrow::Cow::Owned(
+-                        (0..m).map(|i| vals[i].to_f64().unwrap_or(f64::NAN)).collect(),
++                        (0..m)
++                            .map(|i| vals[i].to_f64().unwrap_or(f64::NAN))
++                            .collect(),
+                     )
+                 }
+             })

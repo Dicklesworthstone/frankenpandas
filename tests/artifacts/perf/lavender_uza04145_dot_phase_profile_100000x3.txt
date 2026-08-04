@@ -1,0 +1,20 @@
+perf_profile: scenario=df_dot n=100000 iters=3
+FP_DOT_PROFILE extract_a=29.877µs
+FP_DOT_PROFILE copy_b=40.667µs
+FP_DOT_PROFILE pack_b=58.831µs
+FP_DOT_PROFILE compute_bands=70.888285ms
+FP_DOT_PROFILE build_columns=3.352479ms
+FP_DOT_PROFILE assemble_map=99.368µs total=74.531765ms
+FP_DOT_PROFILE extract_a=45.557µs
+FP_DOT_PROFILE copy_b=111.772µs
+FP_DOT_PROFILE pack_b=162.117µs
+FP_DOT_PROFILE compute_bands=57.787195ms
+FP_DOT_PROFILE build_columns=2.817165ms
+FP_DOT_PROFILE assemble_map=97.073µs total=61.067517ms
+FP_DOT_PROFILE extract_a=49.905µs
+FP_DOT_PROFILE copy_b=141.528µs
+FP_DOT_PROFILE pack_b=142.119µs
+FP_DOT_PROFILE compute_bands=60.258455ms
+FP_DOT_PROFILE build_columns=3.129266ms
+FP_DOT_PROFILE assemble_map=84.971µs total=63.859284ms
+perf_profile: done 3 iters in 0.469s (156.330 ms/iter), sink=300000

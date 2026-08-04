@@ -1,0 +1,19 @@
+$ perf record -F 999 -g --call-graph fp -o tests/artifacts/perf/uza0474_pass1_20260611T010909Z_perf_filter_bool_100000x20000.data -- /data/projects/.scratch/cargo-target-orangepeak-uza0474-base/release-perf/examples/perf_profile filter_bool 100000 20000
+WARNING: Kernel address maps (/proc/{kallsyms,modules}) are restricted,
+check /proc/sys/kernel/kptr_restrict and /proc/sys/kernel/perf_event_paranoid.
+
+Samples in kernel functions may not be resolved if a suitable vmlinux
+file is not found in the buildid cache or in the vmlinux path.
+
+Samples in kernel modules won't be resolved at all.
+
+If some relocation was applied (e.g. kexec) symbols may be misresolved
+even with a suitable vmlinux or kallsyms file.
+
+Couldn't record kernel reference relocation symbol
+Symbol resolution may be skewed if relocation was used (e.g. kexec).
+Check /proc/kallsyms permission or run as root.
+perf_profile: scenario=filter_bool n=100000 iters=20000
+perf_profile: done 20000 iters in 2.256s (0.113 ms/iter), sink=1000000000
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 0.334 MB tests/artifacts/perf/uza0474_pass1_20260611T010909Z_perf_filter_bool_100000x20000.data (2510 samples) ]

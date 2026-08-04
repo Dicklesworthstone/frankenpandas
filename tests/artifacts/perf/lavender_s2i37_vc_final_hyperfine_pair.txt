@@ -1,0 +1,13 @@
+Benchmark 1: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-base-20260616T022251Z/target/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 1M --dtype float64_nan50 --json >/tmp/lavender_s2i37_vc_hf_base.json
+  Time (mean ± σ):      2.633 s ±  0.023 s    [User: 1.589 s, System: 1.186 s]
+  Range (min … max):    2.594 s …  2.651 s    5 runs
+
+Benchmark 2: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/target/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 1M --dtype float64_nan50 --json >/tmp/lavender_s2i37_vc_hf_candidate.json
+  Time (mean ± σ):      2.140 s ±  0.077 s    [User: 1.539 s, System: 0.751 s]
+  Range (min … max):    2.007 s …  2.187 s    5 runs
+
+  Warning: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+Summary
+  /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/target/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 1M --dtype float64_nan50 --json >/tmp/lavender_s2i37_vc_hf_candidate.json ran
+    1.23 ± 0.05 times faster than /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-base-20260616T022251Z/target/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 1M --dtype float64_nan50 --json >/tmp/lavender_s2i37_vc_hf_base.json

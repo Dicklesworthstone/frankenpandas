@@ -2,9 +2,10 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 //! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
-//! fifteen supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, ORC,
+//! fourteen supported on-disk / wire formats — CSV, JSON, JSONL, Parquet,
 //! HDF5, Excel (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML,
-//! XML, Pickle, and Stata.
+//! XML, Pickle, and Stata. The ORC API surface is retained but fails closed
+//! until a Tokio-free native ORC backend is available.
 //!
 //! ## Format readers / writers
 //!
@@ -13,7 +14,8 @@
 //! - **JSON / JSONL**: [`read_json`], [`read_jsonl`], [`write_json`],
 //!   [`write_jsonl`]
 //! - **Parquet**: [`read_parquet`], [`write_parquet`]
-//! - **ORC**: [`read_orc`], [`write_orc`]
+//! - **ORC**: [`read_orc`], [`write_orc`] fail closed under the workspace
+//!   no-Tokio policy.
 //! - **HDF5**: [`read_hdf`], [`write_hdf`] for the keyed DataFrame snapshot
 //!   surface.
 //! - **Excel**: [`read_excel`], [`write_excel`]
@@ -86,8 +88,9 @@
 //!
 //! - `sql-sqlite` (**default**): bind [`SqlConnection`] for
 //!   `rusqlite::Connection`.
-//! - `sql-postgresql`, `sql-mysql`: placeholder feature flags for the fd90
-//!   Phase 2 backend integrations (no concrete bindings yet).
+//! - `sql-postgresql`: placeholder feature flag for a future Tokio-free
+//!   PostgreSQL adapter.
+//! - `sql-mysql`: opt-in concrete MySQL adapter.
 //!
 //! Use `default-features = false` to drop the rusqlite dep when only the
 //! non-SQL formats are needed.
@@ -121,14 +124,11 @@ use dta::stata::{
     stata_long::StataLong,
 };
 use fp_columnar::{Column, ColumnError};
-use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
+use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_values_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar_owned};
 #[cfg(feature = "hdf5")]
 use hdf5::File as Hdf5File;
-use orc_rust::{
-    ArrowReaderBuilder as OrcArrowReaderBuilder, ArrowWriterBuilder as OrcArrowWriterBuilder,
-};
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use quick_xml::{Reader as XmlReader, XmlVersion, events::Event};
 use scraper::{ElementRef, Html, Selector};
@@ -173,6 +173,8 @@ pub enum IoError {
     Arrow(String),
     #[error("sql error: {0}")]
     Sql(String),
+    #[error("clipboard error: {0}")]
+    Clipboard(String),
     #[error(transparent)]
     Csv(#[from] csv::Error),
     #[error(transparent)]
@@ -187,6 +189,13 @@ pub enum IoError {
     Frame(#[from] FrameError),
     #[error(transparent)]
     Index(#[from] IndexError),
+}
+
+const ORC_NO_TOKIO_MESSAGE: &str =
+    "ORC I/O is disabled until a Tokio-free native ORC backend is available";
+
+fn orc_no_tokio_error() -> IoError {
+    IoError::Orc(ORC_NO_TOKIO_MESSAGE.to_owned())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,6 +297,12 @@ pub struct CsvReadOptions {
     /// Matches pandas `lineterminator` (C-engine only). `None` keeps
     /// the default CRLF/LF handling.
     pub lineterminator: Option<u8>,
+    /// When true, skip ASCII spaces (0x20 only, not tabs) immediately after a
+    /// delimiter and at each field start, before quote handling. Matches pandas
+    /// `skipinitialspace` (default false). Trailing spaces are preserved; spaces
+    /// inside quoted fields are preserved; a space-then-quote field (`   "x,y"`)
+    /// is parsed as the quoted value.
+    pub skipinitialspace: bool,
 }
 
 impl Default for CsvReadOptions {
@@ -317,6 +332,7 @@ impl Default for CsvReadOptions {
             doublequote: true,
             skipfooter: 0,
             lineterminator: None,
+            skipinitialspace: false,
         }
     }
 }
@@ -564,6 +580,7 @@ fn fwf_csv_options(options: &FwfReadOptions) -> CsvReadOptions {
         doublequote: true,
         skipfooter: options.skipfooter,
         lineterminator: None,
+        skipinitialspace: false,
     }
 }
 
@@ -596,18 +613,57 @@ pub fn read_fwf_str(input: &str, options: &FwfReadOptions) -> Result<DataFrame, 
 /// options reader (which honors a configurable na/keep_default_na token set):
 /// a cell is null in the rebuilt column iff it parsed to a missing scalar.
 /// `raw` must be positionally aligned with `values` (same length).
-fn build_csv_object_aware_column(values: Vec<Scalar>, raw: &[String]) -> Result<Column, IoError> {
+/// Adapt a `&[String]` raw-text column (the options-path representation) to the
+/// contiguous `(bytes, offsets)` form that [`build_csv_object_aware_column`]
+/// consumes. Keeps a single object-aware builder without converting the whole
+/// options path to contiguous capture.
+fn strings_to_contiguous_raw(raw: &[String]) -> (Vec<u8>, Vec<usize>) {
+    let total: usize = raw.iter().map(String::len).sum();
+    let mut bytes = Vec::with_capacity(total);
+    let mut offsets = Vec::with_capacity(raw.len() + 1);
+    offsets.push(0usize);
+    for s in raw {
+        bytes.extend_from_slice(s.as_bytes());
+        offsets.push(bytes.len());
+    }
+    (bytes, offsets)
+}
+
+fn build_csv_object_aware_column(
+    values: Vec<Scalar>,
+    raw_bytes: &[u8],
+    raw_offsets: &[usize],
+) -> Result<Column, IoError> {
     let column = Column::from_values(values)?;
-    if column.dtype() == DType::Utf8 && column.values().len() == raw.len() {
+    if column.dtype() == DType::Float64 {
+        let normalized = column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Null(_) => Scalar::Null(NullKind::NaN),
+                other => other.clone(),
+            })
+            .collect();
+        return Ok(Column::new(DType::Float64, normalized)?);
+    }
+    // Only a Utf8-result column consults the verbatim raw text (to preserve the
+    // original literal of numeric-coerced cells, e.g. "05" / "5.0"). `raw_offsets`
+    // has one more entry than the row count; a mismatch means the raw buffer is
+    // absent/short, so fall back to the parsed column unchanged.
+    let raw_len = raw_offsets.len().saturating_sub(1);
+    if column.dtype() == DType::Utf8 && column.values().len() == raw_len {
         let rebuilt: Vec<Scalar> = column
             .values()
             .iter()
-            .zip(raw)
-            .map(|(parsed, field)| {
+            .enumerate()
+            .map(|(i, parsed)| {
                 if parsed.is_missing() {
                     Scalar::Null(NullKind::Null)
                 } else {
-                    Scalar::Utf8(field.clone())
+                    let field = &raw_bytes[raw_offsets[i]..raw_offsets[i + 1]];
+                    // Fields originate from a `&str` CSV input, so every slice is
+                    // valid UTF-8 on ASCII delimiter/quote boundaries.
+                    Scalar::Utf8(String::from_utf8_lossy(field).into_owned())
                 }
             })
             .collect();
@@ -1373,13 +1429,51 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     // Capacity hint from byte length avoids reallocation for typical CSVs.
     let header_count = headers.len();
     let row_hint = input.len() / (header_count * 8).max(1);
-    let mut columns: Vec<Vec<Scalar>> = (0..header_count)
-        .map(|_| Vec::with_capacity(row_hint))
-        .collect();
     // Keep each cell's original text so an object-fallback column can preserve
-    // the verbatim literal like pandas (see build_csv_object_aware_column).
-    let mut raw_columns: Vec<Vec<String>> = (0..header_count)
-        .map(|_| Vec::with_capacity(row_hint))
+    // the verbatim literal like pandas (see build_csv_object_aware_column). Stored
+    // as ONE contiguous byte buffer + offsets per column rather than a
+    // `Vec<String>` — the per-cell `field.to_owned()` was ~1.5M small-string
+    // mallocs on a mixed 500k×3 CSV (~36% of the parse). `raw` is consulted ONLY
+    // for a Utf8-result column (numeric/bool columns never read it), and the
+    // contiguous form is indexed identically there. (br-frankenpandas csv-raw-contig)
+    let mut raw_bytes: Vec<Vec<u8>> = (0..header_count)
+        .map(|_| Vec::with_capacity(row_hint * 8))
+        .collect();
+    let mut raw_offsets: Vec<Vec<usize>> = (0..header_count)
+        .map(|_| {
+            let mut v = Vec::with_capacity(row_hint + 1);
+            v.push(0usize);
+            v
+        })
+        .collect();
+
+    // Per-column typed accumulator (br-frankenpandas csv-typed-numeric-col): a
+    // mixed CSV bails the frame-wide numeric fast paths, so historically EVERY
+    // column round-tripped through a `Vec<Scalar>` (parse_scalar per cell + a
+    // from_values re-scan) — even a purely-numeric column sitting next to one
+    // Utf8 column. Accumulate each column into a typed Int64/Float64 buffer and,
+    // the instant a cell is a null / bool / non-numeric-text (an AMBIGUOUS
+    // promotion — fp's from_values keeps int+null as NULLABLE Int64, coerces
+    // int+bool to Int64, etc.; see the probe in the commit msg), drop that column
+    // to `Fallback` and rebuild it via the UNCHANGED Scalar path from the raw
+    // bytes (already captured for verbatim). A pure-numeric-no-null column then
+    // emits its typed column directly, bit-identical to from_values over the
+    // equivalent Scalars: all-Int64 → Int64 (from_i64_values), any-Float64-no-null
+    // → Float64 with ints coerced to `x as f64` (from_f64_values) — exactly what
+    // Column::from_values + build_csv_object_aware_column produce for those inputs.
+    // `valid: None` = all-valid so far (the common fast case, no per-cell bit
+    // tracking); `Some(mask)` = at least one NA has appeared. A numeric column
+    // with nulls stays typed — fp's from_values keeps int+null as NULLABLE Int64
+    // and float+null as Float64, and build_csv_object_aware_column normalizes a
+    // Float null to NaN; `from_{i64,f64}_values_with_validity` reproduce those
+    // exactly (Int64 missing → Null(Null); Float64 missing → Null(NaN); verified).
+    enum ColAcc {
+        Int(Vec<i64>, Option<Vec<bool>>),
+        Float(Vec<f64>, Option<Vec<bool>>),
+        Fallback,
+    }
+    let mut accs: Vec<ColAcc> = (0..header_count)
+        .map(|_| ColAcc::Int(Vec::with_capacity(row_hint), None))
         .collect();
 
     let mut row_count: i64 = 0;
@@ -1387,17 +1481,128 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         let record = row?;
         for idx in 0..header_count {
             let field = record.get(idx).unwrap_or_default();
-            columns[idx].push(parse_scalar(field));
-            raw_columns[idx].push(field.to_owned());
+            raw_bytes[idx].extend_from_slice(field.as_bytes());
+            raw_offsets[idx].push(raw_bytes[idx].len());
+            let acc = &mut accs[idx];
+            if matches!(acc, ColAcc::Fallback) {
+                continue;
+            }
+            // Mirror parse_scalar's decision order EXACTLY: NA (untrimmed) →
+            // Int64(trimmed) → Float64(trimmed) → else (bool/text) = ambiguous.
+            if is_pandas_default_na(field) {
+                match acc {
+                    ColAcc::Int(buf, valid) => {
+                        valid
+                            .get_or_insert_with(|| vec![true; buf.len()])
+                            .push(false);
+                        buf.push(0);
+                    }
+                    ColAcc::Float(buf, valid) => {
+                        valid
+                            .get_or_insert_with(|| vec![true; buf.len()])
+                            .push(false);
+                        buf.push(0.0);
+                    }
+                    ColAcc::Fallback => {}
+                }
+                continue;
+            }
+            let trimmed = field.trim();
+            if let Ok(v) = trimmed.parse::<i64>() {
+                match acc {
+                    ColAcc::Int(buf, valid) => {
+                        buf.push(v);
+                        if let Some(vv) = valid {
+                            vv.push(true);
+                        }
+                    }
+                    ColAcc::Float(buf, valid) => {
+                        buf.push(v as f64);
+                        if let Some(vv) = valid {
+                            vv.push(true);
+                        }
+                    }
+                    ColAcc::Fallback => {}
+                }
+            } else if let Ok(v) = trimmed.parse::<f64>() {
+                match acc {
+                    ColAcc::Int(buf, valid) => {
+                        let mut promoted: Vec<f64> = buf.iter().map(|&i| i as f64).collect();
+                        promoted.push(v);
+                        if let Some(vv) = valid.as_mut() {
+                            vv.push(true);
+                        }
+                        *acc = ColAcc::Float(promoted, valid.take());
+                    }
+                    ColAcc::Float(buf, valid) => {
+                        buf.push(v);
+                        if let Some(vv) = valid {
+                            vv.push(true);
+                        }
+                    }
+                    ColAcc::Fallback => {}
+                }
+            } else {
+                *acc = ColAcc::Fallback;
+            }
         }
         row_count += 1;
     }
 
+    // Build a ValidityMask from a per-row bool vec (all-true entries are the
+    // default). Returns None if every entry is valid (caller uses the all-valid
+    // constructor) or if none are (caller falls back — an all-NA column is Null
+    // dtype in the Scalar path, not typed).
+    fn validity_from_bools(valid: &[bool]) -> Option<fp_columnar::ValidityMask> {
+        if valid.iter().all(|&b| b) {
+            return None;
+        }
+        let mut mask = fp_columnar::ValidityMask::all_valid(valid.len());
+        for (i, &ok) in valid.iter().enumerate() {
+            if !ok {
+                mask.set(i, false);
+            }
+        }
+        Some(mask)
+    }
+
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::with_capacity(header_count);
-    for (idx, values) in columns.into_iter().enumerate() {
+    for (idx, acc) in accs.into_iter().enumerate() {
         let name = headers.get(idx).cloned().unwrap_or_default();
-        let column = build_csv_object_aware_column(values, &raw_columns[idx])?;
+        // An empty (0-row) or all-NA numeric column is Null/empty dtype in the
+        // Scalar path, not Int64 — route it to the fallback for exact parity.
+        let has_value = |buf_len: usize, valid: &Option<Vec<bool>>| -> bool {
+            buf_len > 0 && valid.as_ref().is_none_or(|v| v.iter().any(|&b| b))
+        };
+        let column = match acc {
+            // Typed fast paths (all-valid OR nullable): taken when every cell was
+            // clean-numeric (possibly NA), so the output dtype is unambiguous.
+            ColAcc::Int(buf, valid) if has_value(buf.len(), &valid) => {
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_i64_values_with_validity(buf, mask),
+                    None => Column::from_i64_values(buf),
+                }
+            }
+            ColAcc::Float(buf, valid) if has_value(buf.len(), &valid) => {
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_f64_values_with_validity(buf, mask),
+                    None => Column::from_f64_values(buf),
+                }
+            }
+            // Any ambiguous cell, all-NA, or empty → exact legacy path from raw.
+            _ => {
+                let raw_b = &raw_bytes[idx];
+                let raw_o = &raw_offsets[idx];
+                let mut values = Vec::with_capacity(raw_o.len().saturating_sub(1));
+                for w in raw_o.windows(2) {
+                    let field = std::str::from_utf8(&raw_b[w[0]..w[1]])
+                        .expect("csv fields originate from a &str input");
+                    values.push(parse_scalar(field));
+                }
+                build_csv_object_aware_column(values, raw_b, raw_o)?
+            }
+        };
         out_columns.insert(name.clone(), column);
         column_order.push(name);
     }
@@ -1723,6 +1928,483 @@ impl Default for XmlReadOptions {
 /// for the in-memory string form. Null and NaN-like values are
 /// substituted with `options.na_rep`; all other scalars use the same
 /// stringification as the default `write_csv_string`.
+/// Fast path for `write_csv_string_with_options` when every column is an
+/// all-valid Int64/Float64 typed buffer and the index is not emitted. Returns
+/// `None` (caller uses the general `csv`-crate path) when any column is not a
+/// numeric typed slice, the index is requested, the delimiter is non-ASCII, or
+/// a header name would need quoting. The produced bytes are identical to the
+/// general writer (see the call-site note). (br-frankenpandas-qk2i9)
+#[derive(Debug, Clone, Copy)]
+struct Float64QuarterAffineCsvPlan {
+    start_scaled: i64,
+    step_scaled: i64,
+}
+
+impl Float64QuarterAffineCsvPlan {
+    fn for_slice(values: &[f64]) -> Option<Self> {
+        let first = scaled_nonnegative_quarter(values.first().copied()?)?;
+        let second = values
+            .get(1)
+            .copied()
+            .map(scaled_nonnegative_quarter)
+            .unwrap_or(Some(first))?;
+        let step_scaled = second.checked_sub(first)?;
+        if step_scaled < 0 {
+            return None;
+        }
+
+        let plan = Self {
+            start_scaled: first,
+            step_scaled,
+        };
+        for (row, &value) in values.iter().enumerate() {
+            if scaled_nonnegative_quarter(value)? != plan.scaled_at(row)? {
+                return None;
+            }
+        }
+        Some(plan)
+    }
+
+    fn scaled_at(self, row: usize) -> Option<i64> {
+        let row = i64::try_from(row).ok()?;
+        self.start_scaled
+            .checked_add(self.step_scaled.checked_mul(row)?)
+    }
+
+    fn append_row(self, out: &mut String, row: usize) -> bool {
+        let Some(scaled) = self.scaled_at(row) else {
+            return false;
+        };
+        append_quarter_scaled_pandas_float(out, scaled);
+        true
+    }
+}
+
+fn scaled_nonnegative_quarter(value: f64) -> Option<i64> {
+    const MAX_EXACT_SCALED: f64 = 9_007_199_254_740_992.0;
+
+    if !value.is_finite() || value.is_sign_negative() {
+        return None;
+    }
+    let scaled = value * 4.0;
+    if !scaled.is_finite()
+        || scaled > MAX_EXACT_SCALED
+        || scaled.fract().to_bits() != 0.0f64.to_bits()
+    {
+        return None;
+    }
+    let scaled_i64 = scaled as i64;
+    if (scaled_i64 as f64).to_bits() == scaled.to_bits() {
+        Some(scaled_i64)
+    } else {
+        None
+    }
+}
+
+fn append_quarter_scaled_pandas_float(out: &mut String, scaled: i64) {
+    debug_assert!(scaled >= 0);
+    let mut whole = (scaled / 4) as u64;
+    let rem = scaled % 4;
+
+    // Manual decimal emitter (br-frankenpandas-uza04.84): the quarter-affine
+    // whole part previously went through `write!(out, "{whole}")`, i.e. the
+    // core::fmt::write + i64 Display machinery (Formatter dispatch, padding
+    // checks) the profile flagged as the residual hot path. Here we write the
+    // whole digits and the fixed fractional suffix into one stack buffer and
+    // emit a single push_str — byte-identical output, no fmt dispatch. `whole`
+    // is non-negative (scaled >= 0) so no sign handling is needed; max 20 u64
+    // digits + a 3-byte ".75" suffix fit in 23 bytes.
+    let mut buf = [0u8; 23];
+    let suffix: &[u8] = match rem {
+        1 => b".25",
+        2 => b".5",
+        3 => b".75",
+        _ => b".0",
+    };
+    let mut end = buf.len() - suffix.len();
+    buf[end..].copy_from_slice(suffix);
+
+    // Whole digits, written right-to-left immediately before the suffix.
+    let mut start = end;
+    loop {
+        start -= 1;
+        buf[start] = b'0' + (whole % 10) as u8;
+        whole /= 10;
+        if whole == 0 {
+            break;
+        }
+    }
+    end = buf.len();
+    out.push_str(std::str::from_utf8(&buf[start..end]).unwrap_or("0.0"));
+}
+
+fn append_csv_minimal_field(out: &mut String, field: &str, delim: u8, quote_empty_single: bool) {
+    if quote_empty_single && field.is_empty() {
+        out.push_str("\"\"");
+    } else if field
+        .bytes()
+        .any(|b| b == delim || b == b'"' || b == b'\n' || b == b'\r')
+    {
+        out.push('"');
+        for ch in field.chars() {
+            if ch == '"' {
+                out.push_str("\"\"");
+            } else {
+                out.push(ch);
+            }
+        }
+        out.push('"');
+    } else {
+        out.push_str(field);
+    }
+}
+
+fn append_i64_decimal(out: &mut String, value: i64) {
+    let mut n = value.unsigned_abs();
+    let mut buf = [0u8; 20];
+    let mut start = buf.len();
+    loop {
+        start -= 1;
+        buf[start] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    if value < 0 {
+        start -= 1;
+        buf[start] = b'-';
+    }
+    out.push_str(std::str::from_utf8(&buf[start..]).unwrap_or(""));
+}
+
+fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {
+    let delim = options.delimiter;
+    if !delim.is_ascii() {
+        return None;
+    }
+    let delim_c = delim as char;
+
+    let headers: Vec<&String> = frame.column_names().into_iter().collect();
+    let n = frame.index().len();
+    let index_labels = if options.include_index {
+        if frame.row_multiindex().is_some() {
+            return None;
+        }
+        let labels = frame.index().labels();
+        if labels.len() != n
+            || labels
+                .iter()
+                .any(|label| !matches!(label, IndexLabel::Int64(_)))
+        {
+            return None;
+        }
+        Some(labels)
+    } else {
+        None
+    };
+
+    enum FastCol<'a> {
+        F {
+            values: &'a [f64],
+            quarter_plan: Option<Float64QuarterAffineCsvPlan>,
+        },
+        I(&'a [i64]),
+        B(&'a [bool]),
+        // All-valid contiguous Utf8: (bytes, offsets) with row r =
+        // bytes[offsets[r]..offsets[r+1]].
+        U(&'a [u8], &'a [usize]),
+        // NULLABLE contiguous Utf8: (bytes, offsets, validity). A present row
+        // (validity.get(r)) renders its span; a missing row renders na_rep — so a
+        // string column WITH nulls no longer forces the WHOLE frame off the fast path.
+        UN(&'a [u8], &'a [usize], &'a fp_columnar::ValidityMask),
+        // NULLABLE Float64: (data, validity). A present row (validity.get(r) AND
+        // non-NaN) renders format_pandas_float; a missing row (validity-clear OR a
+        // valid-bit NaN — both `is_missing` for Float64) renders na_rep.
+        FN(&'a [f64], &'a fp_columnar::ValidityMask),
+        // NULLABLE Int64: (data, validity). Present → decimal; missing → na_rep.
+        // Int64 has no NaN, so missingness is the validity bit alone.
+        IN(&'a [i64], &'a fp_columnar::ValidityMask),
+        // NULLABLE Bool: (data, validity). Present → True/False; missing → na_rep.
+        BN(&'a [bool], &'a fp_columnar::ValidityMask),
+        // All-valid (no validity-mask null) Datetime64 ns + the column-uniform
+        // to_csv format; NaT sentinels render as na_rep inline.
+        Dt(&'a [i64], DatetimeCsvFormat),
+    }
+    let mut cols: Vec<FastCol<'_>> = Vec::with_capacity(headers.len());
+    for name in &headers {
+        let column = frame.column(name)?;
+        if let Some(s) = column.as_f64_slice() {
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::F {
+                values: s,
+                quarter_plan: Float64QuarterAffineCsvPlan::for_slice(s),
+            });
+        } else if let Some(s) = column.as_i64_slice() {
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::I(s));
+        } else if let Some(s) = column.as_bool_slice() {
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::B(s));
+        } else if let Some((bytes, offsets)) = column.as_utf8_contiguous() {
+            if offsets.len() != n + 1 {
+                return None;
+            }
+            cols.push(FastCol::U(bytes, offsets));
+        } else if let Some((bytes, offsets)) = column.as_nullable_utf8_contiguous() {
+            // Nullable contiguous Utf8: present rows render their span, missing rows
+            // (validity-clear) render na_rep — so one null-bearing string column no
+            // longer disables the fast writer for the whole frame.
+            if offsets.len() != n + 1 {
+                return None;
+            }
+            cols.push(FastCol::UN(bytes, offsets, column.validity()));
+        } else if let Some((s, validity)) = column.as_f64_slice_with_validity() {
+            // Nullable Float64: the all-valid `as_f64_slice` above bailed (any NaN or
+            // mask-null), so a null-bearing float column would otherwise force the whole
+            // frame off the fast path. Render present slots and na_rep at missing ones.
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::FN(s, validity));
+        } else if let Some((s, validity)) = column.as_i64_slice_with_validity() {
+            // Nullable Int64 sibling (no NaN — missingness is the validity bit alone).
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::IN(s, validity));
+        } else if let Some((s, validity)) = column.as_nullable_bool_slice() {
+            // Nullable Bool sibling: present ⇒ True/False, missing ⇒ na_rep.
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::BN(s, validity));
+        } else if column.dtype() == DType::Datetime64 {
+            // A validity-mask null (data slot ≠ NaT) would diverge from the
+            // general path's `Scalar::Null` → na_rep; require no mask-nulls. NaT
+            // sentinels (kept AS DATA by an all-valid backing) are rendered as
+            // na_rep inline, matching scalar_to_csv_cell.
+            let s = column.as_datetime64_slice()?;
+            if s.len() != n || column.has_nulls() {
+                return None;
+            }
+            cols.push(FastCol::Dt(s, datetime_csv_format(column)));
+        } else {
+            return None;
+        }
+    }
+
+    // csv QUOTE_MINIMAL (matched by the general WriterBuilder path) quotes a field
+    // as `""` when it is the SOLE field in its record and would otherwise be empty,
+    // so the line is not an ambiguous blank that read_csv decodes as zero fields.
+    // A record has one field when there is exactly one emitted index/column field.
+    let field_count = cols.len() + usize::from(options.include_index);
+    let single_field = field_count == 1;
+    let mut out = String::with_capacity(n.saturating_mul(field_count).saturating_mul(8) + 64);
+    if options.header {
+        let mut wrote_field = false;
+        if options.include_index {
+            let index_header = resolve_csv_index_header(frame, options);
+            append_csv_minimal_field(&mut out, &index_header, delim, single_field);
+            wrote_field = true;
+        }
+        for (i, h) in headers.iter().enumerate() {
+            if wrote_field || i > 0 {
+                out.push(delim_c);
+            }
+            append_csv_minimal_field(&mut out, h.as_str(), delim, single_field);
+            wrote_field = true;
+        }
+        out.push('\n');
+    }
+    // Per-row-range writer (br-frankenpandas-csvpar): writes rows `[lo, hi)` into
+    // `dst`, reading ONLY the shared read-only typed slices, so each row's bytes are
+    // independent of chunk boundaries. Shared by the serial and chunked-parallel
+    // drivers below — the parallel concat is byte-for-byte identical to the serial
+    // output (header + rows 0..n in order).
+    let write_range = |lo: usize, hi: usize, dst: &mut String| {
+        for r in lo..hi {
+            if let Some(labels) = index_labels
+                && let IndexLabel::Int64(v) = &labels[r]
+            {
+                append_i64_decimal(dst, *v);
+            }
+            for (c, col) in cols.iter().enumerate() {
+                if c > 0 || index_labels.is_some() {
+                    dst.push(delim_c);
+                }
+                match col {
+                    // Float64 uses format_pandas_float (Python str(float): keeps
+                    // "1.0", signed 2-digit sci notation) — EXACTLY what
+                    // scalar_to_csv_with_na uses, NOT Rust's Display (which drops the
+                    // ".0"). as_f64_slice yields an all-valid (NaN-free) buffer so the
+                    // NaN branch never fires; kept for defensive parity.
+                    FastCol::F {
+                        values,
+                        quarter_plan,
+                    } => {
+                        if quarter_plan.is_some_and(|plan| plan.append_row(dst, r)) {
+                            continue;
+                        }
+                        let v = values[r];
+                        if v.is_nan() {
+                            // Unreachable in practice (as_f64_slice is NaN-free), but kept
+                            // isomorphic with the general path: a sole empty na_rep is quoted.
+                            if single_field && options.na_rep.is_empty() {
+                                dst.push_str("\"\"");
+                            } else {
+                                dst.push_str(&options.na_rep);
+                            }
+                        } else {
+                            write_pandas_float(dst, v);
+                        }
+                    }
+                    // Int64 formats via the hand-rolled append_i64_decimal fast path
+                    // (byte-identical to Rust Display / scalar_to_csv's `v.to_string()`,
+                    // but writes straight into `dst` with no temporary String alloc — so
+                    // this is already optimal; don't "speed it up" with to_string/itoa).
+                    FastCol::I(s) => {
+                        append_i64_decimal(dst, s[r]);
+                    }
+                    // Bool uses pandas to_csv spelling: capitalized True/False.
+                    FastCol::B(s) => {
+                        dst.push_str(if s[r] { "True" } else { "False" });
+                    }
+                    // Utf8 cell: the raw &str (= Scalar::Utf8's value in scalar_to_csv),
+                    // CSV-quoted only when it contains the delimiter, a quote, CR, or
+                    // LF — pandas/csv QUOTE_MINIMAL, with internal quotes doubled.
+                    FastCol::U(bytes, offsets) => {
+                        let field = &bytes[offsets[r]..offsets[r + 1]];
+                        // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
+                        let field = std::str::from_utf8(field).unwrap_or("");
+                        append_csv_minimal_field(dst, field, delim, single_field);
+                    }
+                    // Nullable Utf8 cell: a present row (validity-set) renders its span
+                    // exactly like `FastCol::U`; a missing row renders na_rep with the same
+                    // sole-empty-field quoting as the Dt NaT / F NaN arms (isomorphic with
+                    // the general path's `Scalar::Null` → na_rep).
+                    FastCol::UN(bytes, offsets, validity) => {
+                        if validity.get(r) {
+                            let field = &bytes[offsets[r]..offsets[r + 1]];
+                            let field = std::str::from_utf8(field).unwrap_or("");
+                            append_csv_minimal_field(dst, field, delim, single_field);
+                        } else if single_field && options.na_rep.is_empty() {
+                            dst.push_str("\"\"");
+                        } else {
+                            dst.push_str(&options.na_rep);
+                        }
+                    }
+                    // Nullable Float64: a present, non-NaN row renders like FastCol::F
+                    // (write_pandas_float == format_pandas_float in scalar_to_csv_with_na);
+                    // a missing row (validity-clear OR valid-bit NaN — both is_missing for
+                    // Float64) renders na_rep with the same sole-empty-field quoting.
+                    FastCol::FN(s, validity) => {
+                        let v = s[r];
+                        if validity.get(r) && !v.is_nan() {
+                            write_pandas_float(dst, v);
+                        } else if single_field && options.na_rep.is_empty() {
+                            dst.push_str("\"\"");
+                        } else {
+                            dst.push_str(&options.na_rep);
+                        }
+                    }
+                    // Nullable Int64: present ⇒ decimal (== FastCol::I / scalar_to_csv);
+                    // missing (validity-clear) ⇒ na_rep.
+                    FastCol::IN(s, validity) => {
+                        if validity.get(r) {
+                            append_i64_decimal(dst, s[r]);
+                        } else if single_field && options.na_rep.is_empty() {
+                            dst.push_str("\"\"");
+                        } else {
+                            dst.push_str(&options.na_rep);
+                        }
+                    }
+                    // Nullable Bool: present ⇒ True/False (== FastCol::B / scalar_to_csv);
+                    // missing (validity-clear) ⇒ na_rep.
+                    FastCol::BN(s, validity) => {
+                        if validity.get(r) {
+                            dst.push_str(if s[r] { "True" } else { "False" });
+                        } else if single_field && options.na_rep.is_empty() {
+                            dst.push_str("\"\"");
+                        } else {
+                            dst.push_str(&options.na_rep);
+                        }
+                    }
+                    // Datetime64: NaT → na_rep (isomorphic with the F NaN arm's sole
+                    // empty-na quoting); else the column-uniform format string, routed
+                    // through QUOTE_MINIMAL exactly like scalar_to_csv_cell's output.
+                    FastCol::Dt(s, fmt) => {
+                        let v = s[r];
+                        if v == Timestamp::NAT {
+                            if single_field && options.na_rep.is_empty() {
+                                dst.push_str("\"\"");
+                            } else {
+                                dst.push_str(&options.na_rep);
+                            }
+                        } else {
+                            let rendered = format_datetime_csv(v, *fmt);
+                            append_csv_minimal_field(dst, &rendered, delim, single_field);
+                        }
+                    }
+                }
+            }
+            dst.push('\n');
+        }
+    };
+
+    // Chunked-parallel serialization: for a large frame, format contiguous row
+    // ranges into per-thread buffers and concatenate them IN ORDER onto `out`
+    // (which already holds the header). ryu float formatting is CPU-bound and the
+    // rows are independent, so this scales with available cores; bit-identical to
+    // the serial `write_range(0, n)` since chunk boundaries don't affect row bytes.
+    const CSV_PAR_MIN_ROWS: usize = 50_000;
+    const CSV_PAR_MIN_ROWS_PER_WORKER: usize = 16_384;
+    let workers = if n >= CSV_PAR_MIN_ROWS {
+        std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(16)
+            .min(n / CSV_PAR_MIN_ROWS_PER_WORKER)
+            .max(1)
+    } else {
+        1
+    };
+    if workers >= 2 {
+        let chunk = n.div_ceil(workers);
+        let write_range = &write_range;
+        let parts: Vec<String> = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            let mut start = 0;
+            while start < n {
+                let end = (start + chunk).min(n);
+                handles.push(scope.spawn(move || {
+                    let mut buf = String::with_capacity(
+                        (end - start).saturating_mul(field_count).saturating_mul(8) + 16,
+                    );
+                    write_range(start, end, &mut buf);
+                    buf
+                }));
+                start = end;
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("csv writer thread"))
+                .collect()
+        });
+        for p in parts {
+            out.push_str(&p);
+        }
+    } else {
+        write_range(0, n, &mut out);
+    }
+    Some(out)
+}
+
 pub fn write_csv_string_with_options(
     frame: &DataFrame,
     options: &CsvWriteOptions,
@@ -1733,6 +2415,18 @@ pub fn write_csv_string_with_options(
         nested_options.include_index = false;
         nested_options.index_label = None;
         return write_csv_string_with_options(&materialized, &nested_options);
+    }
+
+    // Typed fast path (br-frankenpandas-qk2i9): when every column is an all-valid
+    // Int64/Float64 typed slice or all-valid contiguous Utf8 (and the index is
+    // not written), format the cells straight from the contiguous typed buffers,
+    // skipping the per-column `Vec<Scalar>` materialization + per-cell `String` +
+    // `csv` record machinery. Byte-for-byte identical to the general writer:
+    // floats via write_pandas_float (= scalar_to_csv_with_na), Int64 Display
+    // (= scalar_to_csv), Utf8 QUOTE_MINIMAL with doubled quotes, terminator `\n`,
+    // and only taken when header names need no quoting.
+    if let Some(out) = try_write_csv_typed(frame, options) {
+        return Ok(out);
     }
 
     let mut writer = WriterBuilder::new()
@@ -1929,6 +2623,11 @@ fn write_html_table_string(
     frame: &DataFrame,
     options: &HtmlWriteOptions,
 ) -> Result<String, IoError> {
+    let column_names = frame.column_names();
+    let columns = column_names
+        .iter()
+        .map(|name| frame.column(name))
+        .collect::<Vec<_>>();
     let mut out = String::new();
     push_html_table_open(&mut out, options);
     out.push_str("  <thead>\n    <tr style=\"text-align: ");
@@ -1940,7 +2639,7 @@ fn write_html_table_string(
     if options.include_index {
         out.push_str("      <th></th>\n");
     }
-    for name in frame.column_names() {
+    for name in &column_names {
         out.push_str("      <th>");
         out.push_str(&html_text(name, options.escape));
         out.push_str("</th>\n");
@@ -1954,8 +2653,8 @@ fn write_html_table_string(
             out.push_str(&html_index_label_string(frame, row_idx, options.escape)?);
             out.push_str("</th>\n");
         }
-        for name in frame.column_names() {
-            let value = frame.column(name).and_then(|column| column.value(row_idx));
+        for column in &columns {
+            let value = (*column).and_then(|column| column.value(row_idx));
             out.push_str("      <td>");
             match value {
                 Some(scalar) => out.push_str(&html_scalar_string(scalar, options)),
@@ -2021,6 +2720,7 @@ fn html_index_label_string(
         IndexLabel::Utf8(s) => s.clone(),
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     };
     Ok(html_text(&raw, escape))
@@ -2051,25 +2751,27 @@ fn html_scalar_string(scalar: &Scalar, options: &HtmlWriteOptions) -> String {
                 html_text(value, options.escape)
             }
         }
+        // pandas to_html renders a temporal NaT as the literal "NaT" (na_rep
+        // overrides only float NaN); verified vs pandas 2.2.3. (tblnat)
         Scalar::Timedelta64(value) => {
             if *value == Timedelta::NAT {
-                html_text(&options.na_rep, options.escape)
+                html_text("NaT", options.escape)
             } else {
                 html_text(&Timedelta::format(*value), options.escape)
             }
         }
         Scalar::Datetime64(value) => {
             if *value == Timestamp::NAT {
-                html_text(&options.na_rep, options.escape)
+                html_text("NaT", options.escape)
             } else {
                 html_text(&format_datetime_ns(*value), options.escape)
             }
         }
         Scalar::Period(value) => {
-            if *value == i64::MIN {
-                html_text(&options.na_rep, options.escape)
+            if value.ordinal == i64::MIN {
+                html_text("NaT", options.escape)
             } else {
-                html_text(&format!("Period[{value}]"), options.escape)
+                html_text(&value.calendar_string(), options.escape)
             }
         }
         Scalar::Interval(iv) => html_text(&format!("{iv}"), options.escape),
@@ -3031,10 +3733,10 @@ fn scalar_to_xml_value(scalar: &Scalar) -> Option<String> {
             }
         }
         Scalar::Period(value) => {
-            if *value == i64::MIN {
+            if value.ordinal == i64::MIN {
                 None
             } else {
-                Some(format!("Period[{value}]"))
+                Some(value.calendar_string())
             }
         }
         Scalar::Interval(iv) => Some(format!("{iv}")),
@@ -3228,13 +3930,23 @@ struct DatetimeCsvFormat {
 
 /// Scan a Datetime64 column and derive its column-uniform `to_csv` format.
 fn datetime_csv_format(column: &Column) -> DatetimeCsvFormat {
+    if let Some(nanos) = column.as_datetime64_slice() {
+        return datetime_csv_format_from_nanos(nanos.iter().copied());
+    }
+
+    datetime_csv_format_from_nanos(column.values().iter().filter_map(|value| {
+        let Scalar::Datetime64(nanos) = value else {
+            return None;
+        };
+        Some(*nanos)
+    }))
+}
+
+fn datetime_csv_format_from_nanos(nanos: impl Iterator<Item = i64>) -> DatetimeCsvFormat {
     let mut date_only = true;
     let mut subsec_digits = 0u8;
-    for value in column.values() {
-        let Scalar::Datetime64(ns) = value else {
-            continue;
-        };
-        if *ns == Timestamp::NAT {
+    for ns in nanos {
+        if ns == Timestamp::NAT {
             continue;
         }
         let subsec = (ns.rem_euclid(1_000_000_000)) as u32;
@@ -3262,19 +3974,23 @@ fn datetime_csv_format(column: &Column) -> DatetimeCsvFormat {
 
 /// Format one datetime (ns since epoch) under a column's `to_csv` spec.
 fn format_datetime_csv(nanos: i64, fmt: DatetimeCsvFormat) -> String {
-    // format_datetime_ns yields "YYYY-MM-DD HH:MM:SS" (ASCII, 19 chars for the
-    // i64-ns datetime range, year always 4 digits). Trim or extend per spec.
+    // `format_datetime_ns` now CARRIES sub-second precision (trailing-zero
+    // trimmed, e.g. ".5"); to_csv instead wants a COLUMN-UNIFORM fixed-width
+    // fraction (e.g. ".500"), so work from the fixed 19-char
+    // "YYYY-MM-DD HH:MM:SS" stem (year is always 4 digits across the i64-ns
+    // range) and apply the column's resolution here. (br-frankenpandas-dt64fmt)
     let base = format_datetime_ns(nanos);
     if fmt.date_only {
         return base[..10].to_owned();
     }
+    let stem = &base[..19];
     if fmt.subsec_digits == 0 {
-        return base;
+        return stem.to_owned();
     }
     let subsec = (nanos.rem_euclid(1_000_000_000)) as u32;
     let frac = subsec / 10u32.pow(9 - u32::from(fmt.subsec_digits));
     format!(
-        "{base}.{frac:0>width$}",
+        "{stem}.{frac:0>width$}",
         width = usize::from(fmt.subsec_digits)
     )
 }
@@ -3313,7 +4029,16 @@ fn scalar_to_table_with_na(scalar: &Scalar, na_rep: &str) -> String {
     match scalar {
         Scalar::Null(_) => na_rep.to_owned(),
         Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
-        Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
+        // pandas to_string / to_markdown / to_html render a TEMPORAL NaT as the
+        // literal "NaT": na_rep overrides only float NaN, NOT NaT. Verified vs
+        // pandas 2.2.3 — `df.to_html(na_rep='X')` keeps "NaT" for datetime/
+        // timedelta but shows "X" for NaN. (Datetime64/Period NaT previously
+        // fell through to scalar_to_csv -> "" blank cells; an earlier fix wrongly
+        // routed all temporal NaT to na_rep.) to_latex DIFFERS (collapses NaT to
+        // na_rep) and is corrected in scalar_to_latex_cell. (br-frankenpandas-tblnat)
+        Scalar::Timedelta64(v) if *v == Timedelta::NAT => "NaT".to_owned(),
+        Scalar::Datetime64(v) if *v == Timestamp::NAT => "NaT".to_owned(),
+        Scalar::Period(p) if p.ordinal == i64::MIN => "NaT".to_owned(),
         other => scalar_to_csv(other),
     }
 }
@@ -3325,6 +4050,14 @@ fn scalar_to_table_with_na(scalar: &Scalar, na_rep: &str) -> String {
 fn scalar_to_latex_cell(scalar: &Scalar, na_rep: &str) -> String {
     match scalar {
         Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
+        // pandas to_latex collapses ALL missing — float NaN AND temporal NaT —
+        // to na_rep (default "NaN"), unlike to_string/to_html which keep "NaT".
+        // Verified vs pandas 2.2.3. Override here before delegating, since
+        // scalar_to_table_with_na now renders temporal NaT as "NaT" for the
+        // markdown/string family. (br-frankenpandas-tblnat)
+        Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
+        Scalar::Datetime64(v) if *v == Timestamp::NAT => na_rep.to_owned(),
+        Scalar::Period(p) if p.ordinal == i64::MIN => na_rep.to_owned(),
         // Rust `{:.6}` matches Python `%.6f` (round-half-to-even) and renders
         // infinities as "inf"/"-inf", exactly as pandas to_latex does.
         Scalar::Float64(v) => format!("{v:.6}"),
@@ -3336,23 +4069,21 @@ fn push_markdown_row(out: &mut String, cells: &[String]) {
     out.push('|');
     for cell in cells {
         out.push(' ');
-        out.push_str(&escape_markdown_table_cell(cell));
+        push_escaped_markdown_table_cell(out, cell);
         out.push_str(" |");
     }
     out.push('\n');
 }
 
-fn escape_markdown_table_cell(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
+fn push_escaped_markdown_table_cell(out: &mut String, value: &str) {
     for ch in value.chars() {
         match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '|' => escaped.push_str("\\|"),
-            '\n' | '\r' => escaped.push(' '),
-            _ => escaped.push(ch),
+            '\\' => out.push_str("\\\\"),
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(ch),
         }
     }
-    escaped
 }
 
 fn push_latex_row(out: &mut String, cells: &[String], escape: bool) {
@@ -3449,21 +4180,80 @@ fn parse_scalar(field: &str) -> Scalar {
 /// ("1e+16" / "1e-05") for very large / small magnitudes. Verified vs live
 /// pandas 2.2.3. NaN must be handled by the caller (it becomes na_rep).
 fn format_pandas_float(v: f64) -> String {
-    // Rust's Debug formatter gives the shortest round-trip representation and,
-    // unlike Display, keeps ".0" on whole numbers and switches to scientific
-    // notation at Python's repr boundaries. Only the exponent spelling differs
-    // (Rust "1e16"/"1e-5" vs Python "1e+16"/"1e-05"), so normalize that.
-    let s = format!("{v:?}");
-    match s.split_once('e') {
-        None => s,
-        Some((mantissa, exp)) => {
-            let (sign, digits) = match exp.strip_prefix('-') {
-                Some(d) => ('-', d),
-                None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
-            };
-            format!("{mantissa}e{sign}{digits:0>2}")
+    let mut out = String::new();
+    write_pandas_float(&mut out, v);
+    out
+}
+
+/// Append the pandas `str(float)` rendering of `v` directly to `out`, without
+/// the per-call `String` allocation `format_pandas_float` makes — the hot path
+/// for the all-numeric CSV writer (br-frankenpandas-qk2i9).
+///
+/// Finite values first try `ryu::Buffer` to bypass Rust's generic formatting
+/// machinery. Boundary spellings where `ryu` and Python choose different fixed
+/// vs scientific notation deopt to the Debug-based fallback below.
+fn write_pandas_float(out: &mut String, v: f64) {
+    if v.is_finite() {
+        let mut buffer = ryu::Buffer::new();
+        let rendered = buffer.format_finite(v);
+        let has_exponent = rendered.contains('e');
+        let is_zero = v.to_bits() << 1 == 0;
+        if has_exponent || is_zero || v.abs() >= 1e-4 {
+            append_pandas_normalized_float(out, rendered);
+            return;
         }
     }
+
+    write_pandas_float_debug_fallback(out, v);
+}
+
+fn append_pandas_normalized_float(out: &mut String, rendered: &str) {
+    let Some(e) = rendered.find('e') else {
+        out.push_str(rendered);
+        if !rendered.contains('.') {
+            out.push_str(".0");
+        }
+        return;
+    };
+
+    out.push_str(&rendered[..=e]);
+    let exp = &rendered[e + 1..];
+    let (sign, digits) = match exp.strip_prefix('-') {
+        Some(d) => ('-', d),
+        None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
+    };
+    out.push(sign);
+    if digits.len() < 2 {
+        out.push('0');
+    }
+    out.push_str(digits);
+}
+
+/// Rust's Debug formatter gives the shortest round-trip representation and,
+/// unlike Display, keeps ".0" on whole numbers and switches to scientific
+/// notation at Python's repr boundaries. Only the exponent spelling differs
+/// (Rust "1e16"/"1e-5" vs Python "1e+16"/"1e-05"), so the rare sci-notation case
+/// is normalized in place.
+fn write_pandas_float_debug_fallback(out: &mut String, v: f64) {
+    use std::fmt::Write as _;
+    let start = out.len();
+    let _ = write!(out, "{v:?}");
+    // Common case (no scientific notation): `{v:?}` is already the pandas form.
+    let Some(rel_e) = out[start..].find('e') else {
+        return;
+    };
+    // Sci notation: normalize the exponent to Python's signed, >=2-digit form.
+    let e = start + rel_e;
+    let exp = out.split_off(e + 1); // everything after 'e'; `out` keeps "<mantissa>e"
+    let (sign, digits) = match exp.strip_prefix('-') {
+        Some(d) => ('-', d),
+        None => ('+', exp.strip_prefix('+').unwrap_or(&exp)),
+    };
+    out.push(sign);
+    if digits.len() < 2 {
+        out.push('0');
+    }
+    out.push_str(digits);
 }
 
 fn scalar_to_csv(scalar: &Scalar) -> String {
@@ -3494,11 +4284,11 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
                 format_datetime_ns(*v)
             }
         }
-        Scalar::Period(v) => {
-            if *v == i64::MIN {
+        Scalar::Period(p) => {
+            if p.ordinal == i64::MIN {
                 String::new()
             } else {
-                format!("Period[{v}]")
+                p.calendar_string()
             }
         }
         Scalar::Interval(iv) => format!("{iv}"),
@@ -3646,7 +4436,7 @@ fn validate_parse_date_combinations(
     }
 }
 
-fn apply_parse_dates(
+fn apply_parse_dates_to_scalar_columns(
     headers: &[String],
     columns: &mut [Vec<Scalar>],
     parse_dates: &[String],
@@ -3662,20 +4452,136 @@ fn apply_parse_dates(
             continue;
         };
 
-        let index_labels = (0..columns[column_idx].len() as i64)
-            .map(IndexLabel::Int64)
-            .collect::<Vec<_>>();
-        let series = Series::from_values(
-            column_name.clone(),
-            index_labels,
-            columns[column_idx].clone(),
-        )?;
-        if let Some(parsed) = parse_csv_datetime_column(&series)? {
-            columns[column_idx] = parsed.values().to_vec();
+        if let Some(parsed) = parse_csv_datetime_values(&columns[column_idx])? {
+            columns[column_idx] = parsed;
         }
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_csv_parse_dates(
+    headers: &[String],
+    columns: &mut [Vec<Scalar>],
+    raw_columns: &[Vec<String>],
+    deferred_parse_date_columns: &[bool],
+    parse_dates: &[String],
+    options: &CsvReadOptions,
+    na_set: &HashSet<&str>,
+    true_set: &HashSet<&str>,
+    false_set: &HashSet<&str>,
+) -> Result<(), IoError> {
+    if parse_dates.is_empty() {
+        return Ok(());
+    }
+
+    validate_parse_dates(headers, parse_dates)?;
+
+    for column_name in parse_dates {
+        let Some(column_idx) = headers.iter().position(|header| header == column_name) else {
+            continue;
+        };
+
+        let parsed = if deferred_parse_date_columns
+            .get(column_idx)
+            .copied()
+            .unwrap_or(false)
+        {
+            if let Some(parsed) = parse_csv_fixed_naive_datetime_fields(
+                &raw_columns[column_idx],
+                options.na_filter,
+                options.keep_default_na,
+                na_set,
+            ) {
+                Some(parsed)
+            } else {
+                columns[column_idx] = parse_csv_scalar_fields_with_options(
+                    &raw_columns[column_idx],
+                    options,
+                    na_set,
+                    true_set,
+                    false_set,
+                );
+                parse_csv_datetime_values(&columns[column_idx])?
+            }
+        } else {
+            parse_csv_datetime_values(&columns[column_idx])?
+        };
+
+        if let Some(parsed) = parsed {
+            columns[column_idx] = parsed;
+        }
+    }
+
+    Ok(())
+}
+
+fn deferred_parse_date_column_mask(headers: &[String], options: &CsvReadOptions) -> Vec<bool> {
+    let Some(parse_dates) = options.parse_dates.as_deref() else {
+        return vec![false; headers.len()];
+    };
+    if parse_dates.is_empty()
+        || options.parse_date_combinations.is_some()
+        || options.parse_date_combinations_named.is_some()
+    {
+        return vec![false; headers.len()];
+    }
+
+    headers
+        .iter()
+        .map(|header| parse_dates.iter().any(|name| name == header))
+        .collect()
+}
+
+fn parse_csv_fixed_naive_datetime_fields(
+    fields: &[String],
+    na_filter: bool,
+    keep_default_na: bool,
+    na_set: &HashSet<&str>,
+) -> Option<Vec<Scalar>> {
+    let mut parsed = Vec::with_capacity(fields.len());
+    let mut saw_datetime = false;
+
+    for field in fields {
+        if na_filter
+            && ((keep_default_na && is_pandas_default_na(field)) || na_set.contains(field.as_str()))
+        {
+            parsed.push(Scalar::Datetime64(Timestamp::NAT));
+            continue;
+        }
+
+        parsed.push(Scalar::Datetime64(parse_fixed_naive_csv_datetime_nanos(
+            field,
+        )?));
+        saw_datetime = true;
+    }
+
+    saw_datetime.then_some(parsed)
+}
+
+fn parse_csv_scalar_fields_with_options(
+    fields: &[String],
+    options: &CsvReadOptions,
+    na_set: &HashSet<&str>,
+    true_set: &HashSet<&str>,
+    false_set: &HashSet<&str>,
+) -> Vec<Scalar> {
+    fields
+        .iter()
+        .map(|field| {
+            parse_scalar_with_options(
+                field,
+                options.na_filter,
+                options.keep_default_na,
+                na_set,
+                true_set,
+                false_set,
+                options.decimal,
+                options.thousands,
+            )
+        })
+        .collect()
 }
 
 fn parse_sql_float_text(text: &str) -> Option<f64> {
@@ -3739,6 +4645,8 @@ fn apply_sql_coerce_float(columns: &mut [Vec<Scalar>]) {
         for (value, parsed) in column.iter_mut().zip(parsed_values) {
             if let Some(parsed) = parsed {
                 *value = Scalar::Float64(parsed);
+            } else if value.is_missing() {
+                *value = Scalar::Null(NullKind::NaN);
             }
         }
     }
@@ -3788,29 +4696,31 @@ fn apply_one_parse_date_combination(
         .collect::<Result<Vec<_>, _>>()?;
     positions.sort_unstable();
 
-    let index_labels = (0..columns[positions[0]].len() as i64)
-        .map(IndexLabel::Int64)
-        .collect::<Vec<_>>();
     let combined_values = combine_parse_date_values(
         &positions
             .iter()
             .map(|&idx| columns[idx].clone())
             .collect::<Vec<_>>(),
     );
-    let combined_series =
-        Series::from_values(combined_name.clone(), index_labels, combined_values)?;
-    let parsed = parse_csv_datetime_column(&combined_series)?.unwrap_or(combined_series);
+    let parsed_values = match parse_csv_datetime_values(&combined_values)? {
+        Some(parsed) => parsed,
+        None => combined_values,
+    };
 
     for idx in positions.iter().rev() {
         headers.remove(*idx);
         columns.remove(*idx);
     }
     headers.insert(positions[0], combined_name);
-    columns.insert(positions[0], parsed.values().to_vec());
+    columns.insert(positions[0], parsed_values);
     Ok(())
 }
 
-fn parse_csv_datetime_column(series: &Series) -> Result<Option<Series>, IoError> {
+fn parse_csv_datetime_values(values: &[Scalar]) -> Result<Option<Vec<Scalar>>, IoError> {
+    if let Some(parsed) = parse_csv_fixed_naive_datetime_values(values) {
+        return Ok(Some(parsed));
+    }
+
     // pandas pd.read_csv(parse_dates=[col]) parses each value on its own —
     // a column with mixed naive ("2024-01-15 10:30:00") and aware
     // ("2024-01-15T10:30:00Z") entries normalizes each value
@@ -3820,17 +4730,19 @@ fn parse_csv_datetime_column(series: &Series) -> Result<Option<Series>, IoError>
     // leaves the column as raw strings even though every individual value
     // is parseable. Set it explicitly to false so each value goes through
     // parse_datetime_string, which already handles both naive and aware.
-    let parsed = to_datetime_with_options(
-        series,
+    let parsed = to_datetime_values_with_options(
+        values,
         ToDatetimeOptions {
             infer_mixed_timezone: false,
+            // pandas keeps a mixed naive+tz-aware parse_dates column as object
+            // rather than datetime64 (br-frankenpandas-unz0t).
+            mixed_tz_as_object: true,
             ..ToDatetimeOptions::default()
         },
     )?;
-    let parse_failed = series
-        .values()
+    let parse_failed = values
         .iter()
-        .zip(parsed.values())
+        .zip(parsed.iter())
         .any(|(original, parsed)| !original.is_missing() && parsed.is_missing());
 
     if parse_failed {
@@ -3838,6 +4750,111 @@ fn parse_csv_datetime_column(series: &Series) -> Result<Option<Series>, IoError>
     } else {
         Ok(Some(parsed))
     }
+}
+
+fn parse_csv_fixed_naive_datetime_values(values: &[Scalar]) -> Option<Vec<Scalar>> {
+    let mut parsed = Vec::with_capacity(values.len());
+    let mut saw_datetime = false;
+
+    for value in values {
+        match value {
+            Scalar::Utf8(text) => {
+                parsed.push(Scalar::Datetime64(parse_fixed_naive_csv_datetime_nanos(
+                    text,
+                )?));
+                saw_datetime = true;
+            }
+            Scalar::Null(_) => parsed.push(Scalar::Datetime64(Timestamp::NAT)),
+            _ => return None,
+        }
+    }
+
+    saw_datetime.then_some(parsed)
+}
+
+fn parse_fixed_naive_csv_datetime_nanos(value: &str) -> Option<i64> {
+    let bytes = value.trim().as_bytes();
+    let (year, month, day, hour, minute, second) = match bytes.len() {
+        10 => (
+            parse_4_digits(bytes, 0)?,
+            parse_2_digits(bytes, 5)?,
+            parse_2_digits(bytes, 8)?,
+            0,
+            0,
+            0,
+        ),
+        19 => (
+            parse_4_digits(bytes, 0)?,
+            parse_2_digits(bytes, 5)?,
+            parse_2_digits(bytes, 8)?,
+            parse_2_digits(bytes, 11)?,
+            parse_2_digits(bytes, 14)?,
+            parse_2_digits(bytes, 17)?,
+        ),
+        _ => return None,
+    };
+
+    if bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || (bytes.len() == 19
+            && (bytes.get(10) != Some(&b' ')
+                || bytes.get(13) != Some(&b':')
+                || bytes.get(16) != Some(&b':')))
+        || !valid_ymd(year, month, day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+
+    let days = days_from_ymd(year, month, day);
+    days.checked_mul(Timedelta::NANOS_PER_DAY)?
+        .checked_add(hour.checked_mul(Timedelta::NANOS_PER_HOUR)?)?
+        .checked_add(minute.checked_mul(Timedelta::NANOS_PER_MIN)?)?
+        .checked_add(second.checked_mul(Timedelta::NANOS_PER_SEC)?)
+}
+
+fn parse_2_digits(bytes: &[u8], offset: usize) -> Option<i64> {
+    let hi = *bytes.get(offset)?;
+    let lo = *bytes.get(offset + 1)?;
+    if !hi.is_ascii_digit() || !lo.is_ascii_digit() {
+        return None;
+    }
+    Some((i64::from(hi - b'0') * 10) + i64::from(lo - b'0'))
+}
+
+fn parse_4_digits(bytes: &[u8], offset: usize) -> Option<i64> {
+    let hi = parse_2_digits(bytes, offset)?;
+    let lo = parse_2_digits(bytes, offset + 2)?;
+    Some((hi * 100) + lo)
+}
+
+fn valid_ymd(year: i64, month: i64, day: i64) -> bool {
+    if !(1..=9999).contains(&year) || !(1..=12).contains(&month) {
+        return false;
+    }
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=max_day).contains(&day)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_ymd(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - (era * 400);
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = (yoe * 365) + (yoe / 4) - (yoe / 100) + doy;
+    (era * 146_097) + doe - 719_468
 }
 
 fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
@@ -3935,6 +4952,7 @@ fn apply_parse_date_combinations_named(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_csv_record(
     columns: &mut [Vec<Scalar>],
     raw_columns: &mut [Vec<String>],
@@ -3943,19 +4961,28 @@ fn append_csv_record(
     na_set: &HashSet<&str>,
     true_set: &HashSet<&str>,
     false_set: &HashSet<&str>,
+    deferred_parse_date_columns: &[bool],
 ) {
     for (idx, col) in columns.iter_mut().enumerate() {
         let field = record.get(idx).unwrap_or_default();
-        col.push(parse_scalar_with_options(
-            field,
-            options.na_filter,
-            options.keep_default_na,
-            na_set,
-            true_set,
-            false_set,
-            options.decimal,
-            options.thousands,
-        ));
+        if deferred_parse_date_columns
+            .get(idx)
+            .copied()
+            .unwrap_or(false)
+        {
+            col.push(Scalar::Null(NullKind::Null));
+        } else {
+            col.push(parse_scalar_with_options(
+                field,
+                options.na_filter,
+                options.keep_default_na,
+                na_set,
+                true_set,
+                false_set,
+                options.decimal,
+                options.thousands,
+            ));
+        }
         // Keep the verbatim field so an object-fallback column can preserve the
         // original literal like pandas (see build_csv_object_aware_column).
         raw_columns[idx].push(field.to_owned());
@@ -3986,7 +5013,92 @@ fn should_skip_bad_csv_record(
 
 // ── CSV with options ───────────────────────────────────────────────────
 
+/// Strip ASCII spaces (0x20) at each unquoted field start for `skipinitialspace`
+/// (br-frankenpandas-i4h5g). A field starts at line start and immediately after a
+/// delimiter; spaces there are dropped until the first non-space byte. Quote
+/// state is tracked so spaces inside quoted fields (and delimiters/terminators
+/// inside quotes) are preserved, and a `   "x,y"` field becomes the quoted value.
+/// `doublequote` (a doubled quotechar = literal quote, stay in quote) and
+/// `escapechar` (next byte is literal) are honored. Only ASCII 0x20 is stripped
+/// (tabs are kept, matching pandas); trailing spaces are preserved. Every byte
+/// other than the stripped leading spaces is copied verbatim, so the output is
+/// valid UTF-8 and the downstream parse is byte-identical except for the removed
+/// leading spaces.
+fn apply_skipinitialspace(
+    input: &str,
+    delimiter: u8,
+    quotechar: u8,
+    doublequote: bool,
+    escapechar: Option<u8>,
+    lineterminator: Option<u8>,
+) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let is_terminator = |b: u8| match lineterminator {
+        Some(t) => b == t,
+        None => b == b'\n' || b == b'\r',
+    };
+    let mut in_quote = false;
+    let mut at_field_start = true;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_quote {
+            out.push(b);
+            if let Some(esc) = escapechar
+                && b == esc
+                && i + 1 < bytes.len()
+            {
+                out.push(bytes[i + 1]);
+                i += 2;
+                continue;
+            }
+            if b == quotechar {
+                if doublequote && i + 1 < bytes.len() && bytes[i + 1] == quotechar {
+                    out.push(quotechar);
+                    i += 2;
+                    continue;
+                }
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if at_field_start && b == b' ' {
+            i += 1;
+            continue;
+        }
+        out.push(b);
+        if at_field_start && b == quotechar {
+            in_quote = true;
+            at_field_start = false;
+        } else {
+            at_field_start = b == delimiter || is_terminator(b);
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
+    // br-frankenpandas-i4h5g: pandas `skipinitialspace` strips leading ASCII
+    // spaces at each field start BEFORE quote handling, so it cannot be expressed
+    // as a post-parse field trim. Rewrite the raw input once (quote/escape-aware)
+    // and re-enter with the flag cleared, so the existing fast paths still apply
+    // to the stripped text.
+    if options.skipinitialspace {
+        let processed = apply_skipinitialspace(
+            input,
+            options.delimiter,
+            options.quotechar,
+            options.doublequote,
+            options.escapechar,
+            options.lineterminator,
+        );
+        let mut opts = options.clone();
+        opts.skipinitialspace = false;
+        return read_csv_with_options(&processed, &opts);
+    }
     if csv_read_options_match_default_fast_path(options) {
         return read_csv_str(input);
     }
@@ -4041,65 +5153,63 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     // raw_columns shadows columns with each cell's verbatim text so an
     // object-fallback column can preserve original literals (see the final
     // build step and build_csv_object_aware_column).
-    let (headers, mut columns, mut raw_columns) = if options.has_headers {
-        let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
-        if headers_record.is_empty() {
-            return Err(IoError::MissingHeaders);
-        }
+    let (headers, mut columns, mut raw_columns, deferred_parse_date_columns) =
+        if options.has_headers {
+            let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
+            if headers_record.is_empty() {
+                return Err(IoError::MissingHeaders);
+            }
 
-        let header_count = headers_record.len();
-        let row_hint = input.len() / (header_count * 8).max(1);
-        let columns: Vec<Vec<Scalar>> = (0..header_count)
-            .map(|_| Vec::with_capacity(row_hint))
-            .collect();
-        let raw_columns: Vec<Vec<String>> = (0..header_count)
-            .map(|_| Vec::with_capacity(row_hint))
-            .collect();
-
-        (
-            headers_record
+            let header_count = headers_record.len();
+            let row_hint = input.len() / (header_count * 8).max(1);
+            let headers = headers_record
                 .iter()
                 .map(ToOwned::to_owned)
-                .collect::<Vec<_>>(),
-            columns,
-            raw_columns,
-        )
-    } else {
-        let first_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
-        if first_record.is_empty() {
-            return Err(IoError::MissingHeaders);
-        }
+                .collect::<Vec<_>>();
+            let columns: Vec<Vec<Scalar>> = (0..header_count)
+                .map(|_| Vec::with_capacity(row_hint))
+                .collect();
+            let raw_columns: Vec<Vec<String>> = (0..header_count)
+                .map(|_| Vec::with_capacity(row_hint))
+                .collect();
+            let deferred_parse_date_columns = deferred_parse_date_column_mask(&headers, options);
 
-        let header_count = first_record.len();
-        let row_hint = input.len() / (header_count * 8).max(1);
-        let mut columns: Vec<Vec<Scalar>> = (0..header_count)
-            .map(|_| Vec::with_capacity(row_hint))
-            .collect();
-        let mut raw_columns: Vec<Vec<String>> = (0..header_count)
-            .map(|_| Vec::with_capacity(row_hint))
-            .collect();
+            (headers, columns, raw_columns, deferred_parse_date_columns)
+        } else {
+            let first_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
+            if first_record.is_empty() {
+                return Err(IoError::MissingHeaders);
+            }
 
-        if (row_count as usize) < max_rows {
-            append_csv_record(
-                &mut columns,
-                &mut raw_columns,
-                &first_record,
-                options,
-                &na_set,
-                &true_set,
-                &false_set,
-            );
-            row_count += 1;
-        }
-
-        (
-            (0..header_count)
+            let header_count = first_record.len();
+            let row_hint = input.len() / (header_count * 8).max(1);
+            let headers = (0..header_count)
                 .map(|idx| format!("column_{idx}"))
-                .collect(),
-            columns,
-            raw_columns,
-        )
-    };
+                .collect::<Vec<_>>();
+            let mut columns: Vec<Vec<Scalar>> = (0..header_count)
+                .map(|_| Vec::with_capacity(row_hint))
+                .collect();
+            let mut raw_columns: Vec<Vec<String>> = (0..header_count)
+                .map(|_| Vec::with_capacity(row_hint))
+                .collect();
+            let deferred_parse_date_columns = deferred_parse_date_column_mask(&headers, options);
+
+            if (row_count as usize) < max_rows {
+                append_csv_record(
+                    &mut columns,
+                    &mut raw_columns,
+                    &first_record,
+                    options,
+                    &na_set,
+                    &true_set,
+                    &false_set,
+                    &deferred_parse_date_columns,
+                );
+                row_count += 1;
+            }
+
+            (headers, columns, raw_columns, deferred_parse_date_columns)
+        };
 
     for row in records {
         if (row_count as usize) >= max_rows {
@@ -4117,6 +5227,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             &na_set,
             &true_set,
             &false_set,
+            &deferred_parse_date_columns,
         );
         row_count += 1;
     }
@@ -4141,21 +5252,29 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 
     // Apply usecols filter: keep only selected columns.
-    let (mut headers, mut columns, raw_columns) = if let Some(ref usecols) = options.usecols {
-        let mut fh = Vec::new();
-        let mut fc = Vec::new();
-        let mut fr = Vec::new();
-        for ((h, c), r) in headers.into_iter().zip(columns).zip(raw_columns) {
-            if usecols.contains(&h) {
-                fh.push(h);
-                fc.push(c);
-                fr.push(r);
+    let (mut headers, mut columns, raw_columns, deferred_parse_date_columns) =
+        if let Some(ref usecols) = options.usecols {
+            let mut fh = Vec::new();
+            let mut fc = Vec::new();
+            let mut fr = Vec::new();
+            let mut fd = Vec::new();
+            for (((h, c), r), d) in headers
+                .into_iter()
+                .zip(columns)
+                .zip(raw_columns)
+                .zip(deferred_parse_date_columns)
+            {
+                if usecols.contains(&h) {
+                    fh.push(h);
+                    fc.push(c);
+                    fr.push(r);
+                    fd.push(d);
+                }
             }
-        }
-        (fh, fc, fr)
-    } else {
-        (headers, columns, raw_columns)
-    };
+            (fh, fc, fr, fd)
+        } else {
+            (headers, columns, raw_columns, deferred_parse_date_columns)
+        };
 
     if let Some(ref parse_date_combinations) = options.parse_date_combinations {
         apply_parse_date_combinations(&mut headers, &mut columns, parse_date_combinations)?;
@@ -4166,7 +5285,17 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 
     if let Some(ref parse_dates) = options.parse_dates {
-        apply_parse_dates(&headers, &mut columns, parse_dates)?;
+        apply_csv_parse_dates(
+            &headers,
+            &mut columns,
+            &raw_columns,
+            &deferred_parse_date_columns,
+            parse_dates,
+            options,
+            &na_set,
+            &true_set,
+            &false_set,
+        )?;
     }
 
     apply_pandas_csv_numeric_promotions(&mut columns);
@@ -4237,10 +5366,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                     }
                 }
                 Scalar::Period(v) => {
-                    if v == i64::MIN {
+                    if v.ordinal == i64::MIN {
                         fp_index::IndexLabel::Utf8("<NaT>".to_owned())
                     } else {
-                        fp_index::IndexLabel::Utf8(format!("Period[{v}]"))
+                        fp_index::IndexLabel::Utf8(v.calendar_string())
                     }
                 }
                 Scalar::Interval(iv) => fp_index::IndexLabel::Utf8(format!("{iv}")),
@@ -4259,7 +5388,8 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             }
             let name = headers.get(orig_idx).cloned().unwrap_or_default();
             let column = if preserve_object_text && !dtype_forced(&name) {
-                build_csv_object_aware_column(columns[col_idx].clone(), &raw_columns[orig_idx])?
+                let (rb, ro) = strings_to_contiguous_raw(&raw_columns[orig_idx]);
+                build_csv_object_aware_column(columns[col_idx].clone(), &rb, &ro)?
             } else {
                 Column::from_values(columns[col_idx].clone())?
             };
@@ -4278,7 +5408,8 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         for (idx, values) in columns.into_iter().enumerate() {
             let name = headers.get(idx).cloned().unwrap_or_default();
             let column = if preserve_object_text && !dtype_forced(&name) {
-                build_csv_object_aware_column(values, &raw_columns[idx])?
+                let (rb, ro) = strings_to_contiguous_raw(&raw_columns[idx]);
+                build_csv_object_aware_column(values, &rb, &ro)?
             } else {
                 Column::from_values(values)?
             };
@@ -4403,10 +5534,10 @@ pub fn read_fwf(path: &Path, options: &FwfReadOptions) -> Result<DataFrame, IoEr
 
 // ── Deferred reader surfaces ───────────────────────────────────────────
 //
-// pandas exposes pd.read_clipboard / pd.read_gbq / pd.read_sas / pd.read_spss.
-// Each is out of scope for FrankenPandas's local file-format charter:
+// pandas exposes pd.read_gbq / pd.read_sas / pd.read_spss (read_clipboard is
+// implemented above via an OS subprocess backend). Each remaining one is out of
+// scope for FrankenPandas's local file-format charter:
 //
-//   * read_clipboard pulls from the OS clipboard (GUI-only, headless-hostile).
 //   * read_gbq calls Google BigQuery (external service, GCP credentials).
 //   * read_sas / read_spss are proprietary statistical-software formats with
 //     no first-party Rust reader at parity (pandas calls into pyreadstat /
@@ -4429,12 +5560,105 @@ fn deferred_writer_error(method: &str, reason: &str) -> IoError {
     ))
 }
 
-/// Reject-closed clipboard reader, matching `pd.read_clipboard()` shape.
+// ── Clipboard I/O (br-frankenpandas-261) ───────────────────────────────
+//
+// pandas `read_clipboard` / `to_clipboard` shell out to an OS clipboard helper
+// (pyperclip → xclip/xsel/wl-clipboard/pbcopy). FrankenPandas mirrors that with
+// a zero-dependency subprocess backend: no `arboard`/X11 dep tree is pulled in,
+// and the pure TSV transform (`read_clipboard_str` / the `to_clipboard` writer)
+// is fully testable without a live clipboard. When no backend binary is
+// installed (e.g. a headless CI box) the call returns a clear `Clipboard`
+// error, exactly as pandas raises `PyperclipException`.
+
+/// Backends tried in order for READING the clipboard: `(binary, args)`.
+const CLIPBOARD_READ_BACKENDS: &[(&str, &[&str])] = &[
+    ("wl-paste", &["-n"]),
+    ("xclip", &["-selection", "clipboard", "-o"]),
+    ("xsel", &["-b", "-o"]),
+    ("pbpaste", &[]),
+];
+
+/// Backends tried in order for WRITING the clipboard: `(binary, args)`.
+const CLIPBOARD_WRITE_BACKENDS: &[(&str, &[&str])] = &[
+    ("wl-copy", &[]),
+    ("xclip", &["-selection", "clipboard"]),
+    ("xsel", &["-b", "-i"]),
+    ("pbcopy", &[]),
+];
+
+fn clipboard_get() -> Result<String, IoError> {
+    let mut last =
+        String::from("no clipboard backend found (tried wl-paste, xclip, xsel, pbpaste)");
+    for (cmd, args) in CLIPBOARD_READ_BACKENDS {
+        match std::process::Command::new(cmd).args(*args).output() {
+            Ok(out) if out.status.success() => {
+                return String::from_utf8(out.stdout)
+                    .map_err(|e| IoError::Clipboard(format!("clipboard text is not UTF-8: {e}")));
+            }
+            Ok(_) => last = format!("{cmd}: exited non-zero"),
+            Err(_) => {} // binary not installed — try the next backend
+        }
+    }
+    Err(IoError::Clipboard(last))
+}
+
+fn clipboard_set(text: &str) -> Result<(), IoError> {
+    use std::io::Write as _;
+    let mut last = String::from("no clipboard backend found (tried wl-copy, xclip, xsel, pbcopy)");
+    for (cmd, args) in CLIPBOARD_WRITE_BACKENDS {
+        let spawned = std::process::Command::new(cmd)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(_) => continue, // binary not installed — try the next backend
+        };
+        if let Some(mut stdin) = child.stdin.take()
+            && stdin.write_all(text.as_bytes()).is_err()
+        {
+            last = format!("{cmd}: writing to stdin failed");
+            continue;
+        }
+        match child.wait() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) => last = format!("{cmd}: exited non-zero"),
+            Err(e) => last = format!("{cmd}: {e}"),
+        }
+    }
+    Err(IoError::Clipboard(last))
+}
+
+/// Parse clipboard text into a `DataFrame` — the pure, backend-free core of
+/// [`read_clipboard`]. Tab-separated, matching the bytes `to_clipboard` writes
+/// (pandas `excel=True`).
+pub fn read_clipboard_str(text: &str) -> Result<DataFrame, IoError> {
+    let options = CsvReadOptions {
+        delimiter: b'\t',
+        ..CsvReadOptions::default()
+    };
+    read_csv_with_options(text, &options)
+}
+
+/// Read the system clipboard, matching `pd.read_clipboard()`. The clipboard is
+/// fetched via the first available OS backend (`wl-paste`/`xclip`/`xsel`/
+/// `pbpaste`) and parsed as TSV (the format [`DataFrameIoExt::to_clipboard`]
+/// writes). Returns a `Clipboard` error when no backend is installed.
 pub fn read_clipboard() -> Result<DataFrame, IoError> {
-    Err(deferred_reader_error(
-        "read_clipboard",
-        "OS clipboard access requires GUI bindings outside FrankenPandas's headless charter",
-    ))
+    read_clipboard_str(&clipboard_get()?)
+}
+
+/// Serialize a frame to the tab-separated bytes `to_clipboard` puts on the
+/// clipboard (pandas `excel=True`, index included). Pure/testable.
+fn clipboard_tsv(frame: &DataFrame) -> Result<String, IoError> {
+    let options = CsvWriteOptions {
+        delimiter: b'\t',
+        include_index: true,
+        ..CsvWriteOptions::default()
+    };
+    write_csv_string_with_options(frame, &options)
 }
 
 /// Reject-closed BigQuery reader, matching `pd.read_gbq(query, project_id)`.
@@ -4702,11 +5926,11 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
                 serde_json::json!(*v / 1_000_000)
             }
         }
-        Scalar::Period(v) => {
-            if *v == i64::MIN {
+        Scalar::Period(p) => {
+            if p.ordinal == i64::MIN {
                 serde_json::Value::Null
             } else {
-                serde_json::Value::String(format!("Period[{v}]"))
+                serde_json::Value::String(p.calendar_string())
             }
         }
         Scalar::Interval(iv) => serde_json::Value::String(format!("{iv}")),
@@ -4764,13 +5988,32 @@ fn json_key_to_index_label(value: &str) -> IndexLabel {
 fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
     match label {
         IndexLabel::Int64(v) => serde_json::json!(*v),
+        IndexLabel::Float64(v) => serde_json::json!(v.0),
+        IndexLabel::Bool(b) => serde_json::json!(*b),
         IndexLabel::Utf8(v) => serde_json::Value::String(v.clone()),
         // Epoch-millisecond ints, matching pandas to_json (date_unit='ms') and
         // the value path above — previously emitted raw nanoseconds, which
         // matched neither pandas nor FP's own value serialization.
         // (br-frankenpandas-lb0iu)
-        IndexLabel::Timedelta64(ns) => serde_json::json!(*ns / 1_000_000),
-        IndexLabel::Datetime64(ns) => serde_json::json!(*ns / 1_000_000),
+        //
+        // A NaT label (the i64::MIN sentinel) must serialize as JSON null, NOT
+        // `i64::MIN / 1e6` (-9223372036854775) — the latter is neither pandas nor
+        // FP's own value path (`scalar_to_json_value`), which already null-checks
+        // `Timestamp::NAT`/`Timedelta::NAT`. (br-frankenpandas-natjson)
+        IndexLabel::Timedelta64(ns) => {
+            if *ns == fp_types::Timedelta::NAT {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(*ns / 1_000_000)
+            }
+        }
+        IndexLabel::Datetime64(ns) => {
+            if *ns == fp_types::Timestamp::NAT {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(*ns / 1_000_000)
+            }
+        }
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => serde_json::Value::Null,
     }
@@ -4782,6 +6025,12 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
 /// (br-frankenpandas-lb0iu)
 fn index_label_json_key(label: &IndexLabel) -> String {
     match label {
+        // NaT (i64::MIN) as an object key renders as "null" rather than the
+        // sentinel's epoch garbage (-9223372036854775), matching the JSON-null
+        // the value path emits for a missing temporal label.
+        // (br-frankenpandas-natjson)
+        IndexLabel::Datetime64(ns) if *ns == fp_types::Timestamp::NAT => "null".to_owned(),
+        IndexLabel::Timedelta64(ns) if *ns == fp_types::Timedelta::NAT => "null".to_owned(),
         IndexLabel::Datetime64(ns) | IndexLabel::Timedelta64(ns) => (*ns / 1_000_000).to_string(),
         other => other.to_string(),
     }
@@ -4792,9 +6041,18 @@ const SYNTHETIC_ROW_MULTIINDEX_PREFIX: &str = "__index_level_";
 fn index_label_to_scalar_value(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(v) => Scalar::Int64(*v),
+        IndexLabel::Float64(v) => Scalar::Float64(v.0),
+        IndexLabel::Bool(b) => Scalar::Bool(*b),
         IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
         IndexLabel::Timedelta64(v) => Scalar::Timedelta64(*v),
-        IndexLabel::Datetime64(v) => Scalar::Utf8(format_datetime_ns(*v)),
+        // Keep the TYPED Datetime64 scalar, like the Timedelta64 arm above —
+        // materializing a MultiIndex level into a column must preserve its dtype
+        // (pandas reset_index keeps a datetime level as datetime64, not object).
+        // The old `Scalar::Utf8(format_datetime_ns(..))` downgrade made datetime
+        // levels render as ISO strings in to_json (inconsistent with a single
+        // DatetimeIndex's epoch-ms ints) and bypassed to_csv's column-uniform
+        // datetime format. (br-frankenpandas-mdt64)
+        IndexLabel::Datetime64(v) => Scalar::Datetime64(*v),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
     }
@@ -4901,7 +6159,561 @@ fn promote_synthetic_row_multiindex_if_present(frame: &DataFrame) -> Result<Data
     promote_frame_index_columns(frame, &refs)
 }
 
+/// Fast path for `read_json_str(JsonOrient::Records)`: scan a FLAT records array
+/// (`[{...}, ...]` whose values are only number / string / bool / null) directly into
+/// per-column `Vec<Scalar>` builders, skipping the `serde_json::Value` tree + the
+/// per-record map allocation. Returns `Ok(None)` to defer to the generic Value-tree
+/// path on ANY deviation (nested value, escaped string/key, `NaN`/`Infinity` token,
+/// trailing garbage, malformed structure), so the produced frame is BIT-IDENTICAL to
+/// the generic path for every input it accepts:
+/// - each `Scalar` is built exactly as `json_value_to_scalar` would (number tokens are
+///   parsed by `serde_json`, so `as_i64`/`as_f64` classification is identical);
+/// - column order is first-seen (same as the generic path's first-seen collection);
+/// - a key missing from a record backfills `Null`, a duplicate key keeps the last value
+///   (matching `serde_json`'s `preserve_order` map);
+/// - the frame is assembled with the same `column_from_json_values` +
+///   `promote_synthetic_row_multiindex_if_present` tail.
+///
+/// Depth- and string-aware scan of a records array `[ {...}, {...}, … ]`: returns the
+/// body byte range `[body_start, body_end)` (just inside `[` … `]`) and the byte offset
+/// of every DEPTH-1 (record-separating) comma. `None` unless the input is a non-empty
+/// top-level array. Used to split a records JSON into whole-record byte ranges for
+/// parallel parsing; correctness is verified by the flat scanner re-parsing each range.
+fn scan_json_record_boundaries(s: &[u8]) -> Option<(usize, usize, Vec<usize>)> {
+    let n = s.len();
+    let mut i = 0;
+    while i < n && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    if i >= n || s[i] != b'[' {
+        return None;
+    }
+    let body_start = i + 1;
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut commas: Vec<usize> = Vec::new();
+    let mut body_end = None;
+    let mut j = i;
+    while j < n {
+        let c = s[j];
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = Some(j);
+                        break;
+                    }
+                }
+                b',' if depth == 1 => commas.push(j),
+                _ => {}
+            }
+        }
+        j += 1;
+    }
+    let body_end = body_end?;
+    // Trailing content after the closing `]` must be whitespace only.
+    let mut t = body_end + 1;
+    while t < n && matches!(s[t], b' ' | b'\t' | b'\n' | b'\r') {
+        t += 1;
+    }
+    if t != n {
+        return None;
+    }
+    if body_start >= body_end {
+        return None; // empty array -> generic path
+    }
+    Some((body_start, body_end, commas))
+}
+
+/// Parse a flat records SEQUENCE `{...},{...},…` occupying `s[lo..hi]` (no surrounding
+/// `[` `]`; `hi` is a record boundary or the closing `]` position) into per-column
+/// `Vec<Scalar>` with first-seen column order and `Null` backfill for absent keys —
+/// the exact same value handling as [`try_read_json_records_flat`] (numbers via
+/// `serde_json::from_str::<Number>`), factored out so parallel workers can each parse a
+/// byte range. Returns `None` on anything the flat scanner bails on. `rec` = row count.
+fn parse_json_records_range(
+    s: &[u8],
+    lo: usize,
+    hi: usize,
+) -> Option<(Vec<String>, Vec<Vec<Scalar>>, usize)> {
+    let mut i = lo;
+    macro_rules! ws {
+        () => {
+            while i < hi && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r') {
+                i += 1;
+            }
+        };
+    }
+    let mut col_names: Vec<String> = Vec::new();
+    let mut cols: Vec<Vec<Scalar>> = Vec::new();
+    let mut last_seen: Vec<usize> = Vec::new();
+    let mut name_to_idx: std::collections::HashMap<Vec<u8>, usize> =
+        std::collections::HashMap::new();
+    let mut rec: usize = 0;
+    loop {
+        ws!();
+        if i >= hi {
+            break;
+        }
+        if s[i] != b'{' {
+            return None;
+        }
+        i += 1;
+        loop {
+            ws!();
+            if i < hi && s[i] == b'}' {
+                i += 1;
+                break;
+            }
+            if i >= hi || s[i] != b'"' {
+                return None;
+            }
+            i += 1;
+            let kstart = i;
+            while i < hi && s[i] != b'"' {
+                if s[i] == b'\\' {
+                    return None;
+                }
+                i += 1;
+            }
+            if i >= hi {
+                return None;
+            }
+            let key = &s[kstart..i];
+            i += 1;
+            ws!();
+            if i >= hi || s[i] != b':' {
+                return None;
+            }
+            i += 1;
+            ws!();
+            if i >= hi {
+                return None;
+            }
+            let scalar = match s[i] {
+                b'-' | b'0'..=b'9' => {
+                    let vstart = i;
+                    if s[i] == b'-' {
+                        i += 1;
+                    }
+                    let mut any = false;
+                    while i < hi && matches!(s[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                        any = true;
+                        i += 1;
+                    }
+                    if !any {
+                        return None;
+                    }
+                    let Ok(numstr) = std::str::from_utf8(&s[vstart..i]) else {
+                        return None;
+                    };
+                    match serde_json::from_str::<serde_json::Number>(numstr) {
+                        Ok(num) => {
+                            if let Some(v) = num.as_i64() {
+                                Scalar::Int64(v)
+                            } else if let Some(v) = num.as_f64() {
+                                Scalar::Float64(v)
+                            } else {
+                                Scalar::Utf8(num.to_string())
+                            }
+                        }
+                        Err(_) => return None,
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    let vstart = i;
+                    while i < hi && s[i] != b'"' {
+                        if s[i] == b'\\' {
+                            return None;
+                        }
+                        i += 1;
+                    }
+                    if i >= hi {
+                        return None;
+                    }
+                    let raw = &s[vstart..i];
+                    i += 1;
+                    match std::str::from_utf8(raw) {
+                        Ok(st) => Scalar::Utf8(st.to_owned()),
+                        Err(_) => return None,
+                    }
+                }
+                b't' if s[i..hi].starts_with(b"true") => {
+                    i += 4;
+                    Scalar::Bool(true)
+                }
+                b'f' if s[i..hi].starts_with(b"false") => {
+                    i += 5;
+                    Scalar::Bool(false)
+                }
+                b'n' if s[i..hi].starts_with(b"null") => {
+                    i += 4;
+                    Scalar::Null(NullKind::Null)
+                }
+                _ => return None,
+            };
+            let ci = match name_to_idx.get(key) {
+                Some(&c) => c,
+                None => {
+                    let c = cols.len();
+                    name_to_idx.insert(key.to_vec(), c);
+                    col_names.push(String::from_utf8_lossy(key).into_owned());
+                    let mut v: Vec<Scalar> = Vec::new();
+                    v.resize(rec, Scalar::Null(NullKind::Null));
+                    cols.push(v);
+                    last_seen.push(usize::MAX);
+                    c
+                }
+            };
+            if last_seen[ci] == rec {
+                *cols[ci].last_mut().expect("seen this record => non-empty") = scalar;
+            } else {
+                cols[ci].push(scalar);
+                last_seen[ci] = rec;
+            }
+            ws!();
+            if i < hi && s[i] == b',' {
+                i += 1;
+                continue;
+            }
+        }
+        for c in 0..cols.len() {
+            if last_seen[c] != rec {
+                cols[c].push(Scalar::Null(NullKind::Null));
+            }
+        }
+        rec += 1;
+        ws!();
+        if i < hi && s[i] == b',' {
+            i += 1;
+            continue;
+        }
+        if i >= hi {
+            break;
+        }
+        return None;
+    }
+    Some((col_names, cols, rec))
+}
+
+/// Parallel records fast path: split the array at record boundaries, parse the chunks
+/// concurrently (each a `parse_json_records_range`), and merge. Returns `None` (defer to
+/// the serial scanner / Value path) unless it is a large FULLY-HOMOGENEOUS records array
+/// — every chunk must report the IDENTICAL first-seen `col_names`, which guarantees the
+/// merged columns equal the serial scanner's output (concatenation preserves record
+/// order; the serial first-seen order equals the shared per-chunk order). Bit-identical:
+/// same per-value parsing, same column order, same `column_from_json_values` +
+/// `promote_synthetic_row_multiindex_if_present` assembly.
+fn try_read_json_records_flat_parallel(input: &str) -> Result<Option<DataFrame>, IoError> {
+    let s = input.as_bytes();
+    let Some((body_start, body_end, commas)) = scan_json_record_boundaries(s) else {
+        return Ok(None);
+    };
+    let nrec = commas.len() + 1;
+    const PAR_MIN_RECORDS: usize = 50_000;
+    const PAR_MIN_RECORDS_PER_WORKER: usize = 16_384;
+    if nrec < PAR_MIN_RECORDS {
+        return Ok(None);
+    }
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(16)
+        .min(nrec / PAR_MIN_RECORDS_PER_WORKER)
+        .max(1);
+    if workers < 2 {
+        return Ok(None);
+    }
+    let per = nrec.div_ceil(workers);
+    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(workers);
+    let mut rstart = 0;
+    while rstart < nrec {
+        let rend = (rstart + per).min(nrec);
+        let lo = if rstart == 0 {
+            body_start
+        } else {
+            commas[rstart - 1] + 1
+        };
+        let hi = if rend == nrec {
+            body_end
+        } else {
+            commas[rend - 1]
+        };
+        ranges.push((lo, hi));
+        rstart = rend;
+    }
+    #[allow(clippy::type_complexity)]
+    let parsed: Vec<Option<(Vec<String>, Vec<Vec<Scalar>>, usize)>> = std::thread::scope(|scope| {
+        ranges
+            .iter()
+            .map(|&(lo, hi)| scope.spawn(move || parse_json_records_range(s, lo, hi)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().expect("json parse thread"))
+            .collect()
+    });
+    let Some(parts) = parsed.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    // Homogeneity gate: every chunk must share the FIRST chunk's exact column order.
+    if parts[0].0.is_empty() {
+        return Ok(None);
+    }
+    let names: Vec<String> = parts[0].0.clone();
+    if parts.iter().any(|p| p.0 != names) {
+        return Ok(None);
+    }
+    let k = names.len();
+    let total_rows: usize = parts.iter().map(|p| p.2).sum();
+    // Merge per column (chunk c's cols[j] IS column names[j] since orders match),
+    // then build the typed columns in parallel (columns are independent).
+    let mut merged: Vec<Vec<Scalar>> = (0..k).map(|_| Vec::with_capacity(total_rows)).collect();
+    let mut parts = parts;
+    for p in &mut parts {
+        for (j, col) in p.1.iter_mut().enumerate() {
+            merged[j].append(col);
+        }
+    }
+    let built: Vec<Result<Column, IoError>> = std::thread::scope(|scope| {
+        merged
+            .into_iter()
+            .map(|vals| scope.spawn(move || column_from_json_values(vals)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().expect("json column-build thread"))
+            .collect()
+    });
+    let mut out = BTreeMap::new();
+    for (name, col) in names.iter().zip(built) {
+        out.insert(name.clone(), col?);
+    }
+    let index = Index::from_i64((0..total_rows as i64).collect());
+    let frame = DataFrame::new_with_column_order(index, out, names)?;
+    Ok(Some(promote_synthetic_row_multiindex_if_present(&frame)?))
+}
+
+fn try_read_json_records_flat(input: &str) -> Result<Option<DataFrame>, IoError> {
+    let s = input.as_bytes();
+    let n = s.len();
+    let mut i = 0usize;
+    macro_rules! ws {
+        () => {
+            while i < n && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r') {
+                i += 1;
+            }
+        };
+    }
+    ws!();
+    if i >= n || s[i] != b'[' {
+        return Ok(None);
+    }
+    i += 1;
+    ws!();
+    if i < n && s[i] == b']' {
+        // Empty array: defer to the generic path's canonical empty-frame handling.
+        return Ok(None);
+    }
+
+    let mut col_names: Vec<String> = Vec::new();
+    let mut cols: Vec<Vec<Scalar>> = Vec::new();
+    // `last_seen[c]` = the last record index that pushed a value for column c, so a
+    // duplicate key in the same record overwrites and an absent key backfills Null.
+    let mut last_seen: Vec<usize> = Vec::new();
+    let mut name_to_idx: std::collections::HashMap<Vec<u8>, usize> =
+        std::collections::HashMap::new();
+    let mut rec: usize = 0;
+
+    loop {
+        ws!();
+        if i >= n || s[i] != b'{' {
+            return Ok(None);
+        }
+        i += 1;
+        loop {
+            ws!();
+            if i < n && s[i] == b'}' {
+                i += 1;
+                break;
+            }
+            // key: a plain (unescaped) JSON string
+            if i >= n || s[i] != b'"' {
+                return Ok(None);
+            }
+            i += 1;
+            let kstart = i;
+            while i < n && s[i] != b'"' {
+                if s[i] == b'\\' {
+                    return Ok(None);
+                }
+                i += 1;
+            }
+            if i >= n {
+                return Ok(None);
+            }
+            let key = &s[kstart..i];
+            i += 1;
+            ws!();
+            if i >= n || s[i] != b':' {
+                return Ok(None);
+            }
+            i += 1;
+            ws!();
+            if i >= n {
+                return Ok(None);
+            }
+            // value: number | string | true | false | null (else bail)
+            let scalar = match s[i] {
+                b'-' | b'0'..=b'9' => {
+                    let vstart = i;
+                    if s[i] == b'-' {
+                        i += 1;
+                    }
+                    let mut any = false;
+                    while i < n && matches!(s[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                        any = true;
+                        i += 1;
+                    }
+                    if !any {
+                        return Ok(None);
+                    }
+                    let Ok(numstr) = std::str::from_utf8(&s[vstart..i]) else {
+                        return Ok(None);
+                    };
+                    // Parse via serde_json so as_i64/as_f64 classification is identical
+                    // to the Value path (bit-identical, incl. the non-round-trip f64).
+                    match serde_json::from_str::<serde_json::Number>(numstr) {
+                        Ok(num) => {
+                            if let Some(v) = num.as_i64() {
+                                Scalar::Int64(v)
+                            } else if let Some(v) = num.as_f64() {
+                                Scalar::Float64(v)
+                            } else {
+                                Scalar::Utf8(num.to_string())
+                            }
+                        }
+                        Err(_) => return Ok(None),
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    let vstart = i;
+                    while i < n && s[i] != b'"' {
+                        if s[i] == b'\\' {
+                            return Ok(None); // escaped string -> generic path
+                        }
+                        i += 1;
+                    }
+                    if i >= n {
+                        return Ok(None);
+                    }
+                    let raw = &s[vstart..i];
+                    i += 1;
+                    match std::str::from_utf8(raw) {
+                        Ok(st) => Scalar::Utf8(st.to_owned()),
+                        Err(_) => return Ok(None),
+                    }
+                }
+                b't' if s[i..].starts_with(b"true") => {
+                    i += 4;
+                    Scalar::Bool(true)
+                }
+                b'f' if s[i..].starts_with(b"false") => {
+                    i += 5;
+                    Scalar::Bool(false)
+                }
+                b'n' if s[i..].starts_with(b"null") => {
+                    i += 4;
+                    Scalar::Null(NullKind::Null)
+                }
+                _ => return Ok(None),
+            };
+            let ci = match name_to_idx.get(key) {
+                Some(&c) => c,
+                None => {
+                    let c = cols.len();
+                    name_to_idx.insert(key.to_vec(), c);
+                    col_names.push(String::from_utf8_lossy(key).into_owned());
+                    let mut v: Vec<Scalar> = Vec::new();
+                    v.resize(rec, Scalar::Null(NullKind::Null)); // backfill prior records
+                    cols.push(v);
+                    last_seen.push(usize::MAX);
+                    c
+                }
+            };
+            if last_seen[ci] == rec {
+                *cols[ci].last_mut().expect("seen this record => non-empty") = scalar;
+            } else {
+                cols[ci].push(scalar);
+                last_seen[ci] = rec;
+            }
+            ws!();
+            if i < n && s[i] == b',' {
+                i += 1;
+                continue;
+            }
+        }
+        // Pad every column not present in this record with Null.
+        for c in 0..cols.len() {
+            if last_seen[c] != rec {
+                cols[c].push(Scalar::Null(NullKind::Null));
+            }
+        }
+        rec += 1;
+        ws!();
+        if i < n && s[i] == b',' {
+            i += 1;
+            continue;
+        }
+        if i < n && s[i] == b']' {
+            i += 1;
+            break;
+        }
+        return Ok(None);
+    }
+    ws!();
+    if i != n {
+        return Ok(None); // trailing garbage -> generic path
+    }
+
+    let row_count = rec as i64;
+    let mut out = BTreeMap::new();
+    for (name, vals) in col_names.iter().zip(cols) {
+        out.insert(name.clone(), column_from_json_values(vals)?);
+    }
+    let index = Index::from_i64((0..row_count).collect());
+    let frame = DataFrame::new_with_column_order(index, out, col_names)?;
+    Ok(Some(promote_synthetic_row_multiindex_if_present(&frame)?))
+}
+
 pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoError> {
+    // Records fast path (must precede the Value-tree parse): scan a FLAT records
+    // array directly into per-column Scalar builders, skipping the serde_json::Value
+    // tree + per-record map allocation that dominates a large records JSON (a 260 MB
+    // input is ~3.2s via the tree). `try_read_json_records_flat` returns `None` to
+    // defer to the generic path below on any non-flat input, so the frame is
+    // bit-identical for every input.
+    if matches!(orient, JsonOrient::Records) {
+        // Parallel records fast path first (large homogeneous arrays), then the serial
+        // flat scanner, then the generic Value-tree path. All produce bit-identical frames.
+        if let Some(frame) = try_read_json_records_flat_parallel(input)? {
+            return Ok(frame);
+        }
+        if let Some(frame) = try_read_json_records_flat(input)? {
+            return Ok(frame);
+        }
+    }
     let parsed = parse_json_value_allowing_pandas_nan(input)?;
 
     match orient {
@@ -5201,6 +7013,492 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
     }
 }
 
+/// Serde-tree implementation of `to_json(orient="records")` — the bit-exact
+/// reference the typed fast path below must match. Kept as a named fn so the
+/// differential test can compare the two directly.
+fn write_json_records_serde(
+    frame: &DataFrame,
+    headers: &[String],
+    column_float_promotions: &[bool],
+) -> Result<String, IoError> {
+    let row_count = frame.index().len();
+    let mut records = Vec::with_capacity(row_count);
+    for row_idx in 0..row_count {
+        let mut obj = serde_json::Map::new();
+        for (name, promote_int_to_float) in headers.iter().zip(column_float_promotions.iter()) {
+            let val = frame
+                .column(name)
+                .and_then(|c| c.value(row_idx))
+                .map(|value| scalar_to_json_with_column_promotion(value, *promote_int_to_float))
+                .unwrap_or(serde_json::Value::Null);
+            obj.insert(name.clone(), val);
+        }
+        records.push(serde_json::Value::Object(obj));
+    }
+    Ok(serde_json::to_string(&records)?)
+}
+
+/// Streaming typed fast path for `to_json(orient="records")` over an all-valid
+/// numeric/bool frame: writes JSON bytes straight into one `String` with no
+/// per-row `serde_json::Map`, no per-cell `Scalar`/`Value` materialization, and
+/// no per-row key re-allocation (the materialized serde tree is ~0.69x pandas;
+/// this restores the win). Returns `None` — caller falls back to the serde
+/// tree — for any column that is not all-valid `Int64` / all-valid `Float64` /
+/// `Bool`, or that would take the int→float promotion branch.
+///
+/// Bit-identical to `write_json_records_serde`:
+///   * keys are pre-serialized with `serde_json::to_string` (same escaping) and
+///     emitted in column order (the `preserve_order` Map preserves insertion),
+///   * `i64` via `append_i64_decimal` (the same decimal spelling itoa serde's
+///     integer formatter produces),
+///   * finite `f64` via serde's own `CompactFormatter::write_f64` (exact
+///     exponent spelling, e.g. `1e+20`); non-finite `f64` emits `null`,
+///     matching `scalar_to_json`'s NaN/Inf → `Value::Null` arm.
+///
+/// With `as_jsonl = true` the row objects are joined by `\n` with no enclosing
+/// `[ ]` (the JSON Lines spelling `write_jsonl_string` produces); otherwise they
+/// are wrapped as a `[..]` array (the `records` orient).
+/// A typed all-valid value column view for the streaming JSON writers.
+enum JCol<'a> {
+    I(&'a [i64]),
+    F(&'a [f64]),
+    B(&'a [bool]),
+    /// Datetime64 ns: serialized as epoch-MILLISECOND integers (`v / 1_000_000`),
+    /// `NaT` (i64::MIN) → `null` — matching `scalar_to_json`.
+    DtMs(&'a [i64]),
+    /// All-valid contiguous Utf8: `(bytes, offsets)`, row r =
+    /// `bytes[offsets[r]..offsets[r+1]]`, serialized as a JSON string.
+    U(&'a [u8], &'a [usize]),
+    /// NULLABLE contiguous Utf8: `(bytes, offsets, validity)`. A present row
+    /// (validity.get(r)) serializes its span as a JSON string; a missing row
+    /// serializes as `null` — so a string column WITH nulls no longer forces the
+    /// whole frame onto the serde tree.
+    UN(&'a [u8], &'a [usize], &'a fp_columnar::ValidityMask),
+    /// NULLABLE Float64: `(data, validity)`. A present, finite row serializes via
+    /// serde's `write_f64`; a missing row (validity-clear) OR a non-finite datum
+    /// (NaN/±inf) serializes as `null` — matching `scalar_to_json` and the F arm.
+    FN(&'a [f64], &'a fp_columnar::ValidityMask),
+    /// NULLABLE Int64: `(data, validity)`. Present → decimal; missing → `null`.
+    IN(&'a [i64], &'a fp_columnar::ValidityMask),
+    /// NULLABLE Bool: `(data, validity)`. Present → `true`/`false`; missing → `null`.
+    BN(&'a [bool], &'a fp_columnar::ValidityMask),
+}
+
+/// Append `s` as a JSON string literal, byte-identical to `serde_json` (which
+/// escapes only `"`, `\`, and the control bytes 0x00–0x1F; everything else,
+/// including multi-byte UTF-8, passes through verbatim). The overwhelmingly
+/// common no-escape case is a single `"` + raw + `"`; only a string that
+/// actually contains an escape-worthy byte deopts to `serde_json::to_string`.
+#[inline]
+fn append_json_string(out: &mut String, s: &str) {
+    if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') {
+        out.push('"');
+        out.push_str(s);
+        out.push('"');
+    } else {
+        match serde_json::to_string(s) {
+            Ok(escaped) => out.push_str(&escaped),
+            Err(_) => out.push_str("\"\""),
+        }
+    }
+}
+
+/// Extract every column as an all-valid typed slice plus its pre-serialized,
+/// escaped, colon-terminated JSON key (column order = `preserve_order`
+/// insertion order). Returns `None` — caller falls back to the serde tree — on
+/// any column that is not all-valid `Int64`/`Float64`/`Bool`/`Datetime64`,
+/// would take the int→float promotion branch, or on a row-multiindex frame.
+fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<String>)> {
+    if frame.row_multiindex().is_some() {
+        return None;
+    }
+    let headers: Vec<&String> = frame.column_names();
+    let n = frame.index().len();
+    let mut cols: Vec<JCol<'_>> = Vec::with_capacity(headers.len());
+    let mut keys: Vec<String> = Vec::with_capacity(headers.len());
+    for name in &headers {
+        let column = frame.column(name.as_str())?;
+        if column_promotes_int_json_values_to_float(column.values()) {
+            return None;
+        }
+        let jc = if let Some(s) = column.as_i64_slice() {
+            (s.len() == n).then_some(JCol::I(s))?
+        } else if let Some(s) = column.as_f64_slice() {
+            (s.len() == n).then_some(JCol::F(s))?
+        } else if let Some(s) = column.as_bool_slice() {
+            (s.len() == n).then_some(JCol::B(s))?
+        } else if let Some(s) = column.as_datetime64_slice() {
+            // The slice exposes the raw ns including any NaT sentinel; a
+            // validity-mask null (data slot ≠ NaT) would diverge from
+            // `value()`'s `Scalar::Null`, so require no mask-nulls. An all-valid
+            // `from_datetime64_values` backing keeps NaT AS DATA (validity stays
+            // all-valid), and `append_typed_json_value` maps that sentinel → null
+            // exactly like `scalar_to_json(Datetime64(NaT))`.
+            if column.has_nulls() {
+                return None;
+            }
+            (s.len() == n).then_some(JCol::DtMs(s))?
+        } else if let Some((bytes, offsets)) = column.as_utf8_contiguous() {
+            // as_utf8_contiguous already requires validity.all(), so every row
+            // is a present `Scalar::Utf8` → JSON string (never null).
+            (offsets.len() == n + 1).then_some(JCol::U(bytes, offsets))?
+        } else if let Some((bytes, offsets)) = column.as_nullable_utf8_contiguous() {
+            // Nullable contiguous Utf8: present rows serialize their span, missing
+            // rows serialize as `null` — so one null-bearing string column no longer
+            // forces the whole frame onto the serde tree.
+            (offsets.len() == n + 1).then_some(JCol::UN(bytes, offsets, column.validity()))?
+        } else if let Some((s, validity)) = column.as_f64_slice_with_validity() {
+            // Nullable Float64: present+finite → number, missing/non-finite → null.
+            (s.len() == n).then_some(JCol::FN(s, validity))?
+        } else if let Some((s, validity)) = column.as_i64_slice_with_validity() {
+            // Nullable Int64: present → integer, missing → null.
+            (s.len() == n).then_some(JCol::IN(s, validity))?
+        } else if let Some((s, validity)) = column.as_nullable_bool_slice() {
+            // Nullable Bool: present → true/false, missing → null.
+            (s.len() == n).then_some(JCol::BN(s, validity))?
+        } else {
+            return None;
+        };
+        cols.push(jc);
+        let mut key = serde_json::to_string(name.as_str()).ok()?;
+        key.push(':');
+        keys.push(key);
+    }
+    Some((cols, keys))
+}
+
+/// Append cell `(col, r)` as a JSON value, byte-identical to serde:
+/// `i64` via `append_i64_decimal`, finite `f64` via serde's own
+/// `CompactFormatter::write_f64` (exact exponent spelling, e.g. `1e+20`),
+/// non-finite `f64` as `null` (matching `scalar_to_json`), `bool` as
+/// `true`/`false`. `fbytes` is a reusable scratch to avoid a per-cell alloc.
+#[inline]
+fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, fbytes: &mut Vec<u8>) {
+    use serde_json::ser::{CompactFormatter, Formatter};
+    match col {
+        JCol::I(s) => append_i64_decimal(out, s[r]),
+        JCol::F(s) => {
+            let v = s[r];
+            if v.is_finite() {
+                fbytes.clear();
+                // Writing into a Vec<u8> is infallible.
+                let _ = CompactFormatter.write_f64(fbytes, v);
+                out.push_str(std::str::from_utf8(fbytes).unwrap_or("null"));
+            } else {
+                out.push_str("null");
+            }
+        }
+        JCol::B(s) => out.push_str(if s[r] { "true" } else { "false" }),
+        JCol::DtMs(s) => {
+            let v = s[r];
+            // i64::MIN is the Datetime64 NaT sentinel.
+            if v == i64::MIN {
+                out.push_str("null");
+            } else {
+                append_i64_decimal(out, v / 1_000_000);
+            }
+        }
+        JCol::U(bytes, offsets) => {
+            let field = &bytes[offsets[r]..offsets[r + 1]];
+            // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
+            append_json_string(out, std::str::from_utf8(field).unwrap_or(""));
+        }
+        // Nullable Utf8: a present row renders its span like JCol::U; a missing row
+        // renders `null` — matching the serde-tree fallback's `Scalar::Null` → null.
+        JCol::UN(bytes, offsets, validity) => {
+            if validity.get(r) {
+                let field = &bytes[offsets[r]..offsets[r + 1]];
+                append_json_string(out, std::str::from_utf8(field).unwrap_or(""));
+            } else {
+                out.push_str("null");
+            }
+        }
+        // Nullable Float64: a present finite row renders like JCol::F (serde's
+        // write_f64); a missing row (validity-clear) OR a non-finite datum
+        // (NaN/±inf — no JSON representation, matching scalar_to_json) renders `null`.
+        JCol::FN(s, validity) => {
+            let v = s[r];
+            if validity.get(r) && v.is_finite() {
+                fbytes.clear();
+                let _ = CompactFormatter.write_f64(fbytes, v);
+                out.push_str(std::str::from_utf8(fbytes).unwrap_or("null"));
+            } else {
+                out.push_str("null");
+            }
+        }
+        // Nullable Int64: present ⇒ decimal (== JCol::I); missing ⇒ `null`.
+        JCol::IN(s, validity) => {
+            if validity.get(r) {
+                append_i64_decimal(out, s[r]);
+            } else {
+                out.push_str("null");
+            }
+        }
+        // Nullable Bool: present ⇒ true/false (== JCol::B); missing ⇒ `null`.
+        JCol::BN(s, validity) => {
+            if validity.get(r) {
+                out.push_str(if s[r] { "true" } else { "false" });
+            } else {
+                out.push_str("null");
+            }
+        }
+    }
+}
+
+fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<String> {
+    let (cols, keys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(12)
+            .saturating_add(16),
+    );
+    if !as_jsonl {
+        out.push('[');
+    }
+    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    for r in 0..n {
+        if r > 0 {
+            out.push(if as_jsonl { '\n' } else { ',' });
+        }
+        out.push('{');
+        for (c, col) in cols.iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            out.push_str(&keys[c]);
+            append_typed_json_value(&mut out, col, r, &mut fbytes);
+        }
+        out.push('}');
+    }
+    if !as_jsonl {
+        out.push(']');
+    }
+    Some(out)
+}
+
+/// Streaming typed fast path for `to_json(orient="columns")` — `{col: {idx:
+/// val}}`. The serde tree re-stringifies the index-label key for EVERY cell of
+/// EVERY column (n×k) and builds a nested Map per column; this is ~0.39x pandas.
+/// Here the n index-label keys are pre-serialized ONCE and reused across every
+/// column. Returns `None` (serde fallback) unless the index is unique (so no
+/// inner key collides — the serde path errors on a duplicate index key, which
+/// this fast path must not silently swallow) and every column is typed.
+///
+/// Bit-identical to the serde `Columns` arm: outer keys in column order, inner
+/// keys in index-label order (both `preserve_order`), inner keys spelled by
+/// `index_label_json_key` then serde-quoted, values via `append_typed_json_value`.
+/// Pre-serialize the n index-label JSON object keys ONCE into a single
+/// contiguous buffer (+ offsets), each carrying its quotes and trailing `:`.
+/// For an all-Int64 unique index the keys are hand-rolled `"` + itoa + `":`
+/// straight off `int64_label_values()` — no `labels()` IndexLabel
+/// materialization and no per-key `String` alloc. Returns `None` (caller falls
+/// back to the serde tree) if any serialized key collides (the serde path
+/// errors on a duplicate index-label key, which the fast path must not swallow).
+/// Shared by the `columns` and `index` orients (the index keys are the
+/// repeated-per-column / repeated-per-row keys respectively).
+fn build_json_index_key_buffer(frame: &DataFrame) -> Option<(String, Vec<usize>)> {
+    let n = frame.index().len();
+    let mut keybuf = String::with_capacity(n.saturating_mul(10).saturating_add(8));
+    let mut keyoff: Vec<usize> = Vec::with_capacity(n + 1);
+    keyoff.push(0);
+    let mut keys_known_unique = false;
+    if frame.index().is_unique()
+        && let Some(vals) = frame.index().int64_label_values()
+        && vals.len() == n
+    {
+        // Distinct i64 → distinct decimal keys, and
+        // `serde_json::to_string(v.to_string())` is exactly `"<decimal>"`, so the
+        // hand-rolled spelling is byte-identical and needs no dedup.
+        for &v in vals.iter() {
+            keybuf.push('"');
+            append_i64_decimal(&mut keybuf, v);
+            keybuf.push_str("\":");
+            keyoff.push(keybuf.len());
+        }
+        keys_known_unique = true;
+    } else {
+        for label in frame.index().labels() {
+            let k = serde_json::to_string(&index_label_json_key(label)).ok()?;
+            keybuf.push_str(&k);
+            keybuf.push(':');
+            keyoff.push(keybuf.len());
+        }
+    }
+    if !keys_known_unique {
+        let mut seen = std::collections::HashSet::with_capacity(n);
+        for r in 0..n {
+            if !seen.insert(&keybuf[keyoff[r]..keyoff[r + 1]]) {
+                return None;
+            }
+        }
+    }
+    Some((keybuf, keyoff))
+}
+
+fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, colkeys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    // The n inner index-label keys, pre-serialized once, reused across every
+    // column — vs the serde path's n×k re-stringification.
+    let (keybuf, keyoff) = build_json_index_key_buffer(frame)?;
+
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(16)
+            .saturating_add(16),
+    );
+    out.push('{');
+    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    for (c, col) in cols.iter().enumerate() {
+        if c > 0 {
+            out.push(',');
+        }
+        out.push_str(&colkeys[c]);
+        out.push('{');
+        for r in 0..n {
+            if r > 0 {
+                out.push(',');
+            }
+            out.push_str(&keybuf[keyoff[r]..keyoff[r + 1]]);
+            append_typed_json_value(&mut out, col, r, &mut fbytes);
+        }
+        out.push('}');
+    }
+    out.push('}');
+    Some(out)
+}
+
+/// Streaming typed fast path for `to_json(orient="index")` — `{idx: {col:
+/// val}}`, the transpose of `columns`. The serde tree builds a `serde_json::Map`
+/// per ROW plus an index-label outer key per row (~0.63x pandas). Here the n
+/// outer index-label keys are pre-serialized once (contiguous buffer) and the k
+/// inner column keys are reused every row. Bit-identical to the serde `Index`
+/// arm: outer keys in row order, inner keys in column order (both
+/// `preserve_order`), same key spellings and value formatting; bails (→ serde
+/// path, which errors) on a duplicate index-label key or any non-typed column.
+fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, colkeys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    // The n outer index-label keys, pre-serialized once.
+    let (keybuf, keyoff) = build_json_index_key_buffer(frame)?;
+
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(16)
+            .saturating_add(16),
+    );
+    out.push('{');
+    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    for r in 0..n {
+        if r > 0 {
+            out.push(',');
+        }
+        out.push_str(&keybuf[keyoff[r]..keyoff[r + 1]]);
+        out.push('{');
+        for (c, col) in cols.iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            out.push_str(&colkeys[c]);
+            append_typed_json_value(&mut out, col, r, &mut fbytes);
+        }
+        out.push('}');
+    }
+    out.push('}');
+    Some(out)
+}
+
+/// Append the row-major `[[v, v], ...]` array of all cells (column order per
+/// row) to `out` — the shared body of the `values` orient and the `data`
+/// section of the `split` orient.
+fn append_json_row_arrays(out: &mut String, cols: &[JCol<'_>], n: usize) {
+    out.push('[');
+    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    for r in 0..n {
+        if r > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        for (c, col) in cols.iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            append_typed_json_value(out, col, r, &mut fbytes);
+        }
+        out.push(']');
+    }
+    out.push(']');
+}
+
+/// Streaming typed fast path for `to_json(orient="values")` — `[[v, v], ...]`,
+/// row-major arrays with no keys (the simplest orient). Bit-identical to the
+/// serde `Values` arm. Bails (→ serde) on any non-typed column.
+fn try_write_json_values_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, _keys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(12)
+            .saturating_add(16),
+    );
+    append_json_row_arrays(&mut out, &cols, n);
+    Some(out)
+}
+
+/// Streaming typed fast path for `to_json(orient="split")` —
+/// `{"columns":[...],"index":[...],"data":[[...]]}`. The `data` section is the
+/// same row-major shape as `values` (the bulk); the `columns`/`index` header
+/// arrays are tiny. Bit-identical to the serde `Split` arm: `columns` is the
+/// header strings, `index` is each label via `index_label_to_json` (bare ints
+/// for an Int64 index, hand-rolled here), `data` via `append_json_row_arrays`,
+/// and the object keys are in insertion order (columns, index, data) under
+/// `preserve_order`. Bails (→ serde) on any non-typed column.
+fn try_write_json_split_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, _keys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    let headers = frame.column_names();
+    // columns array: serde over the (few) header strings — same escaping as the
+    // serde path's `Vec<Value::String>`.
+    let cols_json = serde_json::to_string(&headers).ok()?;
+    // index array: bare JSON values (NOT object keys), `index_label_to_json` per
+    // label — hand-rolled itoa for the common all-Int64 index, serde otherwise.
+    let mut idx_json = String::with_capacity(n.saturating_mul(8).saturating_add(2));
+    idx_json.push('[');
+    if let Some(vals) = frame.index().int64_label_values()
+        && vals.len() == n
+    {
+        for (i, &v) in vals.iter().enumerate() {
+            if i > 0 {
+                idx_json.push(',');
+            }
+            append_i64_decimal(&mut idx_json, v);
+        }
+    } else {
+        for (i, label) in frame.index().labels().iter().enumerate() {
+            if i > 0 {
+                idx_json.push(',');
+            }
+            idx_json.push_str(&serde_json::to_string(&index_label_to_json(label)).ok()?);
+        }
+    }
+    idx_json.push(']');
+
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(12)
+            .saturating_add(idx_json.len() + cols_json.len() + 48),
+    );
+    out.push_str("{\"columns\":");
+    out.push_str(&cols_json);
+    out.push_str(",\"index\":");
+    out.push_str(&idx_json);
+    out.push_str(",\"data\":");
+    append_json_row_arrays(&mut out, &cols, n);
+    out.push('}');
+    Some(out)
+}
+
 pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String, IoError> {
     if frame.row_multiindex().is_some() && orient != JsonOrient::Values {
         let materialized = materialize_synthetic_row_multiindex_columns(frame)?;
@@ -5220,26 +7518,18 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
 
     match orient {
         JsonOrient::Records => {
-            let mut records = Vec::with_capacity(row_count);
-            for row_idx in 0..row_count {
-                let mut obj = serde_json::Map::new();
-                for (name, promote_int_to_float) in
-                    headers.iter().zip(column_float_promotions.iter())
-                {
-                    let val = frame
-                        .column(name)
-                        .and_then(|c| c.value(row_idx))
-                        .map(|value| {
-                            scalar_to_json_with_column_promotion(value, *promote_int_to_float)
-                        })
-                        .unwrap_or(serde_json::Value::Null);
-                    obj.insert(name.clone(), val);
-                }
-                records.push(serde_json::Value::Object(obj));
+            // Typed streaming fast path for all-valid numeric/bool frames; falls
+            // back to the serde tree below on anything it can't handle.
+            if let Some(s) = try_write_json_records_typed(frame, false) {
+                return Ok(s);
             }
-            Ok(serde_json::to_string(&records)?)
+            write_json_records_serde(frame, &headers, &column_float_promotions)
         }
         JsonOrient::Columns => {
+            // Typed streaming fast path; falls back to the serde tree below.
+            if let Some(s) = try_write_json_columns_typed(frame) {
+                return Ok(s);
+            }
             let mut outer = serde_json::Map::new();
             for (name, promote_int_to_float) in headers.iter().zip(column_float_promotions.iter()) {
                 let mut col_obj = serde_json::Map::new();
@@ -5264,6 +7554,10 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             Ok(serde_json::to_string(&serde_json::Value::Object(outer))?)
         }
         JsonOrient::Index => {
+            // Typed streaming fast path; falls back to the serde tree below.
+            if let Some(s) = try_write_json_index_typed(frame) {
+                return Ok(s);
+            }
             let mut outer = serde_json::Map::new();
             for row_idx in 0..row_count {
                 let mut row_obj = serde_json::Map::new();
@@ -5293,6 +7587,10 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             Ok(serde_json::to_string(&serde_json::Value::Object(outer))?)
         }
         JsonOrient::Split => {
+            // Typed streaming fast path; falls back to the serde tree below.
+            if let Some(s) = try_write_json_split_typed(frame) {
+                return Ok(s);
+            }
             let col_array: Vec<serde_json::Value> = headers
                 .iter()
                 .map(|h| serde_json::Value::String(h.clone()))
@@ -5329,6 +7627,10 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             Ok(serde_json::to_string(&serde_json::Value::Object(obj))?)
         }
         JsonOrient::Values => {
+            // Typed streaming fast path; falls back to the serde tree below.
+            if let Some(s) = try_write_json_values_typed(frame) {
+                return Ok(s);
+            }
             let mut data = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
                 let row: Vec<serde_json::Value> = headers
@@ -5578,6 +7880,11 @@ pub fn write_stata_with_options(
 /// with no enclosing array. This format is standard for streaming
 /// data pipelines and log processing.
 pub fn write_jsonl_string(frame: &DataFrame) -> Result<String, IoError> {
+    // Typed streaming fast path (\n-joined row objects, no enclosing array);
+    // falls back to the serde tree below on anything it can't handle.
+    if let Some(s) = try_write_json_records_typed(frame, true) {
+        return Ok(s);
+    }
     let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let row_count = frame.index().len();
     let column_float_promotions = headers
@@ -5630,11 +7937,16 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
                 "JSONL input exceeds maximum of {READ_JSONL_MAX_ROWS} rows"
             )));
         }
-        let parsed = parse_json_value_allowing_pandas_nan(trimmed)?;
-        let obj = parsed
-            .as_object()
-            .ok_or_else(|| IoError::JsonFormat("JSONL: each line must be a JSON object".into()))?;
-        all_rows.push(obj.clone());
+        // Move the parsed object out of the per-line `Value` instead of cloning
+        // it — avoids a deep copy (every key String + value) of each row's Map.
+        match parse_json_value_allowing_pandas_nan(trimmed)? {
+            serde_json::Value::Object(map) => all_rows.push(map),
+            _ => {
+                return Err(IoError::JsonFormat(
+                    "JSONL: each line must be a JSON object".into(),
+                ));
+            }
+        }
     }
 
     if all_rows.is_empty() {
@@ -5647,7 +7959,11 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
     let mut col_names_ordered: Vec<String> = Vec::new();
     for row in &all_rows {
         for key in row.keys() {
-            if col_name_set.insert(key.clone()) {
+            // Only clone a key the first time it is seen (uniform JSONL — every
+            // line sharing the same keys — clones each key exactly once total,
+            // not once per row).
+            if !col_name_set.contains(key.as_str()) {
+                col_name_set.insert(key.clone());
                 col_names_ordered.push(key.clone());
             }
         }
@@ -5802,11 +8118,11 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             let mut builder = Int64Builder::with_capacity(column.len());
             for value in column.values() {
                 match value {
-                    Scalar::Period(ordinal) => {
-                        if *ordinal == i64::MIN {
+                    Scalar::Period(p) => {
+                        if p.ordinal == i64::MIN {
                             builder.append_null();
                         } else {
-                            builder.append_value(*ordinal);
+                            builder.append_value(p.ordinal);
                         }
                     }
                     _ if value.is_missing() => builder.append_null(),
@@ -5889,15 +8205,31 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
     for (i, field) in schema.fields().iter().enumerate() {
         let name = field.name().clone();
         let arr = batch.column(i);
-        let values = arrow_array_to_scalars(arr.as_ref(), field.data_type())?;
-        let dtype = fp_dtype_for_arrow_data_type(field.data_type());
-        let col = Column::new(dtype, values)?;
+        // Typed fast path: convert the Arrow buffer DIRECTLY to a typed fp column
+        // (Int64/Float64/Bool/all-valid-Utf8), skipping the per-cell Vec<Scalar>
+        // materialization (~32 B/elem boxing) + Column::new re-scan that made
+        // read_parquet ~0.21x pandas/pyarrow. Bails (→ Scalar path) for
+        // Date/Timestamp (need chrono formatting) and nullable-Utf8 (no typed
+        // contiguous-nullable constructor). Bit-identical to the Scalar path's
+        // per-type null-kind conventions (Int/Bool/Utf8 → Null(Null); Float →
+        // Null(NaN)); validity constructors reproduce those exactly (verified).
+        let col = match arrow_array_to_column_typed(arr.as_ref(), field.data_type()) {
+            Some(c) => c,
+            None => {
+                let values = arrow_array_to_scalars(arr.as_ref(), field.data_type())?;
+                let dtype = fp_dtype_for_arrow_data_type(field.data_type());
+                Column::new(dtype, values)?
+            }
+        };
         columns.insert(name.clone(), col);
         col_order.push(name);
     }
 
-    let labels: Vec<IndexLabel> = (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
-    let index = Index::new(labels);
+    // A parquet batch gets the default 0..n RangeIndex. Use the LAZY unit-range
+    // index instead of materializing a Vec<IndexLabel> of n_rows + Index::new
+    // (which was ~110ms of a 137ms 1M-row read — the real read_parquet bottleneck,
+    // NOT the ~27ms decode). Bit-identical: same integer labels 0..n_rows.
+    let index = Index::new_known_unique_int64_unit_range(0, n_rows);
 
     let frame = DataFrame::new_with_column_order(index, columns, col_order)?;
     promote_synthetic_row_multiindex_if_present(&frame)
@@ -5921,6 +8253,104 @@ fn fp_dtype_for_arrow_data_type(dt: &ArrowDataType) -> DType {
         | ArrowDataType::Date64
         | ArrowDataType::Timestamp(_, _) => DType::Utf8,
         _ => DType::Utf8,
+    }
+}
+
+/// Build an fp `ValidityMask` from an Arrow array's null buffer, or `None` when
+/// the array has no nulls (caller uses the all-valid constructor).
+fn arrow_validity_mask(arr: &dyn Array) -> Option<fp_columnar::ValidityMask> {
+    if arr.null_count() == 0 {
+        return None;
+    }
+    let len = arr.len();
+    let mut mask = fp_columnar::ValidityMask::all_valid(len);
+    for i in 0..len {
+        if arr.is_null(i) {
+            mask.set(i, false);
+        }
+    }
+    Some(mask)
+}
+
+/// Typed Arrow-array → fp `Column` conversion (br-frankenpandas parquet-typed):
+/// reads the Arrow buffer directly into a typed fp column, bypassing the per-cell
+/// `Vec<Scalar>` boxing + `Column::new` re-scan of `arrow_array_to_scalars`.
+/// Returns `None` for types that need the Scalar path (Date/Timestamp string
+/// coercion, nullable Utf8, and any uncovered dtype). Bit-identical to that path.
+fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Column> {
+    use arrow::array::{
+        Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array,
+        UInt16Array, UInt32Array, UInt64Array,
+    };
+    macro_rules! i64_col {
+        ($ty:ty) => {{
+            let t = arr.as_any().downcast_ref::<$ty>()?;
+            let data: Vec<i64> = t.values().iter().map(|&v| v as i64).collect();
+            Some(match arrow_validity_mask(arr) {
+                Some(m) => Column::from_i64_values_with_validity(data, m),
+                // MOVE the gathered Vec into the backing (one Arc::new) rather than
+                // from_i64_values' Arc::from(Vec) alloc+memcpy (~28ms/5M) — a second
+                // copy on top of the Arrow-buffer gather. All-valid, so _owned fits.
+                None => Column::from_i64_values_owned(data),
+            })
+        }};
+    }
+    macro_rules! f64_col {
+        ($ty:ty) => {{
+            let t = arr.as_any().downcast_ref::<$ty>()?;
+            let data: Vec<f64> = t.values().iter().map(|&v| v as f64).collect();
+            Some(match arrow_validity_mask(arr) {
+                Some(m) => Column::from_f64_values_with_validity(data, m),
+                None => Column::from_f64_values_owned(data),
+            })
+        }};
+    }
+    match dt {
+        ArrowDataType::Int64 => i64_col!(Int64Array),
+        ArrowDataType::Int32 => i64_col!(Int32Array),
+        ArrowDataType::Int16 => i64_col!(Int16Array),
+        ArrowDataType::Int8 => i64_col!(Int8Array),
+        // UInt64 as i64: matches the Scalar path's `Scalar::Int64(value as ...)`
+        // reinterpretation for the width; large u64 wrap identically both ways.
+        ArrowDataType::UInt64 => i64_col!(UInt64Array),
+        ArrowDataType::UInt32 => i64_col!(UInt32Array),
+        ArrowDataType::UInt16 => i64_col!(UInt16Array),
+        ArrowDataType::UInt8 => i64_col!(UInt8Array),
+        ArrowDataType::Float64 => f64_col!(Float64Array),
+        ArrowDataType::Float32 => f64_col!(Float32Array),
+        ArrowDataType::Boolean => {
+            let t = arr.as_any().downcast_ref::<BooleanArray>()?;
+            let data: Vec<bool> = (0..t.len()).map(|i| t.value(i)).collect();
+            Some(match arrow_validity_mask(arr) {
+                Some(m) => Column::from_bool_values_with_validity(data, m),
+                None => Column::from_bool_values(data),
+            })
+        }
+        // Only the all-valid case: there is no typed contiguous-nullable-Utf8
+        // constructor, so a StringArray with nulls falls to the Scalar path.
+        ArrowDataType::Utf8 if arr.null_count() == 0 => {
+            let t = arr.as_any().downcast_ref::<StringArray>()?;
+            let offs = t.value_offsets();
+            let len = t.len();
+            let start = offs[0] as usize;
+            let end = offs[len] as usize;
+            let bytes = t.value_data()[start..end].to_vec();
+            let offsets: Vec<usize> = offs.iter().map(|&o| o as usize - start).collect();
+            Some(Column::from_utf8_contiguous(bytes, offsets))
+        }
+        ArrowDataType::LargeUtf8 if arr.null_count() == 0 => {
+            let t = arr
+                .as_any()
+                .downcast_ref::<arrow::array::LargeStringArray>()?;
+            let offs = t.value_offsets();
+            let len = t.len();
+            let start = offs[0] as usize;
+            let end = offs[len] as usize;
+            let bytes = t.value_data()[start..end].to_vec();
+            let offsets: Vec<usize> = offs.iter().map(|&o| o as usize - start).collect();
+            Some(Column::from_utf8_contiguous(bytes, offsets))
+        }
+        _ => None,
     }
 }
 
@@ -6173,8 +8603,18 @@ pub fn write_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
 /// Read a DataFrame from in-memory Parquet bytes.
 pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     let b = bytes::Bytes::from(data.to_vec());
-    let reader = ParquetRecordBatchReaderBuilder::try_new(b)
-        .map_err(|e| IoError::Parquet(e.to_string()))?
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(b).map_err(|e| IoError::Parquet(e.to_string()))?;
+    // Read the whole file as ONE record batch instead of the default 1024-row
+    // batches: a 1M-row file otherwise yields ~1000 tiny batches, each turned into
+    // a DataFrame and then concatenated — the many-batch + concat overhead (not
+    // the decode) dominated read_parquet (~0.21x pandas). Sizing the batch to the
+    // row count collapses that to a single typed conversion, no concat. Clamp so a
+    // pathological row count can't request an absurd allocation up front.
+    let total_rows = builder.metadata().file_metadata().num_rows().max(0) as usize;
+    let batch_size = total_rows.clamp(1, 16 * 1024 * 1024);
+    let reader = builder
+        .with_batch_size(batch_size)
         .build()
         .map_err(|e| IoError::Parquet(e.to_string()))?;
 
@@ -6226,68 +8666,26 @@ pub fn read_parquet(path: &Path) -> Result<DataFrame, IoError> {
 
 /// Write a DataFrame to an in-memory ORC buffer.
 ///
-/// Uses the shared Arrow conversion path, then delegates ORC physical encoding
-/// to `orc-rust`.
-pub fn write_orc_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
-    let batch = dataframe_to_record_batch(frame)?;
-    let mut buf = Vec::new();
-    let mut writer = OrcArrowWriterBuilder::new(&mut buf, batch.schema())
-        .try_build()
-        .map_err(|err| IoError::Orc(err.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|err| IoError::Orc(err.to_string()))?;
-    writer
-        .close()
-        .map_err(|err| IoError::Orc(err.to_string()))?;
-    Ok(buf)
+/// This fails closed under the workspace no-Tokio policy. The previous
+/// implementation delegated to `orc-rust`, which unconditionally pulled Tokio
+/// into `fp-io` and therefore into the umbrella `frankenpandas` crate.
+pub fn write_orc_bytes(_frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    Err(orc_no_tokio_error())
 }
 
 /// Read a DataFrame from in-memory ORC bytes.
-pub fn read_orc_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
-    let bytes = bytes::Bytes::from(data.to_vec());
-    let reader = OrcArrowReaderBuilder::try_new(bytes)
-        .map_err(|err| IoError::Orc(err.to_string()))?
-        .build();
-
-    let mut all_frames: Vec<DataFrame> = Vec::new();
-    for batch_result in reader {
-        let batch = batch_result.map_err(|err| IoError::Orc(err.to_string()))?;
-        all_frames.push(record_batch_to_dataframe(&batch)?);
-    }
-
-    if all_frames.is_empty() {
-        return Ok(DataFrame::new_with_column_order(
-            Index::new(vec![]),
-            BTreeMap::new(),
-            vec![],
-        )?);
-    }
-
-    if all_frames.len() == 1 {
-        if let Some(frame) = all_frames.into_iter().next() {
-            return Ok(frame);
-        }
-        return Err(IoError::Orc(
-            "orc reader produced zero record batches".to_owned(),
-        ));
-    }
-
-    let refs: Vec<&DataFrame> = all_frames.iter().collect();
-    fp_frame::concat_dataframes(&refs).map_err(IoError::from)
+pub fn read_orc_bytes(_data: &[u8]) -> Result<DataFrame, IoError> {
+    Err(orc_no_tokio_error())
 }
 
 /// Write a DataFrame to an ORC file.
-pub fn write_orc(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
-    let bytes = write_orc_bytes(frame)?;
-    std::fs::write(path, bytes)?;
-    Ok(())
+pub fn write_orc(_frame: &DataFrame, _path: &Path) -> Result<(), IoError> {
+    Err(orc_no_tokio_error())
 }
 
 /// Read a DataFrame from an ORC file.
-pub fn read_orc(path: &Path) -> Result<DataFrame, IoError> {
-    let data = std::fs::read(path)?;
-    read_orc_bytes(&data)
+pub fn read_orc(_path: &Path) -> Result<DataFrame, IoError> {
+    Err(orc_no_tokio_error())
 }
 
 // ── Excel (xlsx) I/O ────────────────────────────────────────────────────
@@ -6871,6 +9269,16 @@ fn write_excel_index_label(
         }
         // Missing labels leave the cell blank, like NAT timedelta/datetime
         // above (pandas writes an empty cell for a NaN index label).
+        IndexLabel::Float64(v) => {
+            worksheet
+                .write_number(excel_row, excel_col, v.0)
+                .map_err(|e| IoError::Excel(format!("write index float: {e}")))?;
+        }
+        IndexLabel::Bool(b) => {
+            worksheet
+                .write_boolean(excel_row, excel_col, *b)
+                .map_err(|e| IoError::Excel(format!("write index bool: {e}")))?;
+        }
         IndexLabel::Null(_) => {}
     }
     Ok(())
@@ -6917,10 +9325,10 @@ fn write_excel_scalar(
                     .map_err(|e| IoError::Excel(format!("write datetime: {e}")))?;
             }
         }
-        Scalar::Period(v) => {
-            if *v != i64::MIN {
+        Scalar::Period(p) => {
+            if p.ordinal != i64::MIN {
                 worksheet
-                    .write_string(excel_row, excel_col, format!("Period[{v}]"))
+                    .write_string(excel_row, excel_col, p.calendar_string())
                     .map_err(|e| IoError::Excel(format!("write period: {e}")))?;
             }
         }
@@ -7902,7 +10310,7 @@ pub trait SqlConnection {
     /// Run `f` inside a transaction. The default impl runs `f` without
     /// BEGIN/COMMIT — backends that support transactions should override
     /// to wrap in their native transaction primitive (rusqlite `BEGIN`,
-    /// tokio-postgres `BEGIN`, mysql `START TRANSACTION`, ...). On `Err`
+    /// PostgreSQL `BEGIN`, MySQL `START TRANSACTION`, ...). On `Err`
     /// from `f`, transactional backends roll back; on `Ok` they commit.
     ///
     /// The default impl is intentionally a no-op so non-transactional
@@ -8247,11 +10655,11 @@ fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
                 rusqlite::types::Value::Integer(*v)
             }
         }
-        Scalar::Period(v) => {
-            if *v == i64::MIN {
+        Scalar::Period(p) => {
+            if p.ordinal == i64::MIN {
                 rusqlite::types::Value::Null
             } else {
-                rusqlite::types::Value::Integer(*v)
+                rusqlite::types::Value::Integer(p.ordinal)
             }
         }
         Scalar::Interval(iv) => rusqlite::types::Value::Text(format!("{iv}")),
@@ -8261,6 +10669,8 @@ fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
 fn scalar_from_index_label(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(v) => Scalar::Int64(*v),
+        IndexLabel::Float64(v) => Scalar::Float64(v.0),
+        IndexLabel::Bool(b) => Scalar::Bool(*b),
         IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
@@ -9073,232 +11483,16 @@ fn sql_column_definition<C: SqlConnection>(
 }
 
 // ============================================================================
-// PostgreSQL SqlConnection Implementation (feature = "sql-postgresql")
+// PostgreSQL SqlConnection placeholder (feature = "sql-postgresql")
 // ============================================================================
 
-#[cfg(any(feature = "sql-postgresql", feature = "sql-mysql"))]
+#[cfg(feature = "sql-mysql")]
 use std::cell::RefCell;
 
-/// Wrapper around `postgres::Client` providing interior mutability for the
-/// `SqlConnection` trait (which requires `&self`).
-#[cfg(feature = "sql-postgresql")]
-pub struct PostgresConnection {
-    client: RefCell<postgres::Client>,
-}
-
-#[cfg(feature = "sql-postgresql")]
-impl PostgresConnection {
-    pub fn new(client: postgres::Client) -> Self {
-        Self {
-            client: RefCell::new(client),
-        }
-    }
-}
-
-#[cfg(feature = "sql-postgresql")]
-impl SqlConnection for PostgresConnection {
-    fn query(&self, query_str: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
-        use postgres::types::ToSql;
-
-        let pg_params: Vec<Box<dyn ToSql + Sync>> = params
-            .iter()
-            .map(|s| -> Box<dyn ToSql + Sync> {
-                match s {
-                    Scalar::Null(_) => Box::new(Option::<i64>::None),
-                    Scalar::Bool(b) => Box::new(*b),
-                    Scalar::Int64(i) => Box::new(*i),
-                    Scalar::Float64(f) => Box::new(*f),
-                    Scalar::Utf8(s) => Box::new(s.clone()),
-                    _ => Box::new(Option::<i64>::None),
-                }
-            })
-            .collect();
-
-        let param_refs: Vec<&(dyn ToSql + Sync)> = pg_params.iter().map(|b| b.as_ref()).collect();
-        let rows = self
-            .client
-            .borrow_mut()
-            .query(query_str, &param_refs)
-            .map_err(|e| IoError::Sql(format!("PostgreSQL query failed: {e}")))?;
-
-        if rows.is_empty() {
-            return Ok(SqlQueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-            });
-        }
-
-        let columns: Vec<String> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_owned())
-            .collect();
-
-        let mut out_rows = Vec::new();
-        for row in &rows {
-            let mut values = Vec::new();
-            for idx in 0..row.len() {
-                let value = pg_value_to_scalar(row, idx);
-                values.push(value);
-            }
-            out_rows.push(values);
-        }
-
-        Ok(SqlQueryResult {
-            columns,
-            rows: out_rows,
-        })
-    }
-
-    fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
-        self.client
-            .borrow_mut()
-            .batch_execute(sql)
-            .map_err(|e| IoError::Sql(format!("PostgreSQL batch execute failed: {e}")))
-    }
-
-    fn table_exists(&self, table_name: &str) -> Result<bool, IoError> {
-        let rows = self
-            .client
-            .borrow_mut()
-            .query(
-                "SELECT 1 FROM information_schema.tables WHERE table_name = $1 LIMIT 1",
-                &[&table_name],
-            )
-            .map_err(|e| IoError::Sql(format!("PostgreSQL table_exists failed: {e}")))?;
-        Ok(!rows.is_empty())
-    }
-
-    fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
-        let mut client = self.client.borrow_mut();
-        for row in rows {
-            let pg_params: Vec<Box<dyn postgres::types::ToSql + Sync>> = row
-                .iter()
-                .map(|s| -> Box<dyn postgres::types::ToSql + Sync> {
-                    match s {
-                        Scalar::Null(_) => Box::new(Option::<i64>::None),
-                        Scalar::Bool(b) => Box::new(*b),
-                        Scalar::Int64(i) => Box::new(*i),
-                        Scalar::Float64(f) => Box::new(*f),
-                        Scalar::Utf8(s) => Box::new(s.clone()),
-                        _ => Box::new(Option::<i64>::None),
-                    }
-                })
-                .collect();
-            let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
-                pg_params.iter().map(|b| b.as_ref()).collect();
-            client
-                .execute(insert_sql, &param_refs)
-                .map_err(|e| IoError::Sql(format!("PostgreSQL insert failed: {e}")))?;
-        }
-        Ok(())
-    }
-
-    fn dtype_sql(&self, dtype: DType) -> &'static str {
-        match dtype {
-            DType::Bool | DType::BoolNullable => "BOOLEAN",
-            DType::Int64 | DType::Int64Nullable => "BIGINT",
-            DType::Float64 => "DOUBLE PRECISION",
-            DType::Utf8 => "TEXT",
-            DType::Datetime64 => "TIMESTAMP",
-            DType::Timedelta64 => "INTERVAL",
-            _ => "TEXT",
-        }
-    }
-
-    fn index_dtype_sql(&self, index: &Index) -> &'static str {
-        pg_sql_dtype_from_index(index)
-    }
-
-    fn dialect_name(&self) -> &'static str {
-        "postgresql"
-    }
-
-    fn parameter_marker(&self, ordinal: usize) -> String {
-        format!("${ordinal}")
-    }
-
-    fn supports_returning(&self) -> bool {
-        true
-    }
-
-    fn max_param_count(&self) -> Option<usize> {
-        Some(65535)
-    }
-
-    fn supports_schemas(&self) -> bool {
-        true
-    }
-
-    fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
-        if ident.contains('\0') {
-            return Err(IoError::Sql("invalid identifier: NUL byte".to_owned()));
-        }
-        Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
-    }
-
-    fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
-        let schema = schema.unwrap_or("public");
-        let rows = self
-            .client
-            .borrow_mut()
-            .query(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name",
-                &[&schema],
-            )
-            .map_err(|e| IoError::Sql(format!("PostgreSQL list_tables failed: {e}")))?;
-        Ok(rows.iter().map(|r| r.get(0)).collect())
-    }
-
-    fn list_schemas(&self) -> Result<Vec<String>, IoError> {
-        let rows = self
-            .client
-            .borrow_mut()
-            .query(
-                "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name",
-                &[],
-            )
-            .map_err(|e| IoError::Sql(format!("PostgreSQL list_schemas failed: {e}")))?;
-        Ok(rows.iter().map(|r| r.get(0)).collect())
-    }
-}
-
-#[cfg(feature = "sql-postgresql")]
-fn pg_sql_dtype_from_index(index: &Index) -> &'static str {
-    for label in index.labels() {
-        match label {
-            IndexLabel::Int64(_) => return "BIGINT",
-            IndexLabel::Utf8(_) => return "TEXT",
-            IndexLabel::Timedelta64(v) if *v != Timedelta::NAT => return "INTERVAL",
-            IndexLabel::Datetime64(v) if *v != i64::MIN => return "TIMESTAMP",
-            _ => {}
-        }
-    }
-    "TEXT"
-}
-
-#[cfg(feature = "sql-postgresql")]
-fn pg_value_to_scalar(row: &postgres::Row, idx: usize) -> Scalar {
-    if let Ok(Some(v)) = row.try_get::<_, Option<bool>>(idx) {
-        return Scalar::Bool(v);
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<i64>>(idx) {
-        return Scalar::Int64(v);
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<i32>>(idx) {
-        return Scalar::Int64(i64::from(v));
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(idx) {
-        return Scalar::Float64(v);
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<f32>>(idx) {
-        return Scalar::Float64(f64::from(v));
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<String>>(idx) {
-        return Scalar::Utf8(v);
-    }
-    Scalar::Null(crate::NullKind::Null)
-}
+// The `sql-postgresql` feature is intentionally a placeholder under the
+// workspace no-Tokio policy. The removed concrete adapter used the `postgres`
+// crate, which is built on tokio-postgres and pulled Tokio into all-features
+// builds even when users did not need PostgreSQL.
 
 // ============================================================================
 // MySQL SqlConnection Implementation (feature = "sql-mysql")
@@ -9915,7 +12109,7 @@ fn sql_query_to_columns<C: SqlConnection + ?Sized>(
     }
 
     if let Some(ref parse_dates) = options.parse_dates {
-        apply_parse_dates(&headers, &mut columns, parse_dates)?;
+        apply_parse_dates_to_scalar_columns(&headers, &mut columns, parse_dates)?;
     }
     if options.coerce_float {
         apply_sql_coerce_float(&mut columns);
@@ -10168,6 +12362,9 @@ fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFram
             Scalar::Float64(f) if !f.is_nan() => IndexLabel::Utf8(f.to_string()),
             Scalar::Bool(b) => IndexLabel::Utf8(if *b { "True" } else { "False" }.to_string()),
             Scalar::Timedelta64(ns) => IndexLabel::Timedelta64(*ns),
+            // A parse_dates column promoted to index becomes a DatetimeIndex
+            // (typed Datetime64[ns], br-frankenpandas-0ezw7) — not a "NaN" string.
+            Scalar::Datetime64(ns) => IndexLabel::Datetime64(*ns),
             _ => IndexLabel::Utf8("NaN".to_owned()),
         })
         .collect();
@@ -11531,7 +13728,7 @@ pub trait DataFrameIoExt {
         options: &SqlWriteOptions,
     ) -> Result<(), IoError>;
 
-    /// Reject-closed clipboard writer, matching `pd.DataFrame.to_clipboard()` shape.
+    /// Clipboard writer (TSV via an OS backend), matching `pd.DataFrame.to_clipboard()`.
     fn to_clipboard(&self) -> Result<(), IoError>;
 
     /// Reject-closed BigQuery writer, matching `pd.DataFrame.to_gbq(destination_table, project_id)`.
@@ -11796,11 +13993,7 @@ impl DataFrameIoExt for DataFrame {
     }
 
     fn to_clipboard(&self) -> Result<(), IoError> {
-        let _ = self;
-        Err(deferred_writer_error(
-            "to_clipboard",
-            "OS clipboard access requires GUI bindings outside FrankenPandas's headless charter",
-        ))
+        clipboard_set(&clipboard_tsv(self)?)
     }
 
     fn to_gbq(&self, _destination_table: &str, _project_id: Option<&str>) -> Result<(), IoError> {
@@ -11992,7 +14185,7 @@ pub trait SeriesIoExt {
         options: &SqlWriteOptions,
     ) -> Result<(), IoError>;
 
-    /// Reject-closed clipboard writer, matching `pd.Series.to_clipboard()` shape.
+    /// Clipboard writer (TSV via an OS backend), matching `pd.Series.to_clipboard()`.
     fn to_clipboard(&self) -> Result<(), IoError>;
 }
 
@@ -12178,11 +14371,7 @@ impl SeriesIoExt for Series {
     }
 
     fn to_clipboard(&self) -> Result<(), IoError> {
-        let _ = self;
-        Err(deferred_writer_error(
-            "to_clipboard",
-            "OS clipboard access requires GUI bindings outside FrankenPandas's headless charter",
-        ))
+        clipboard_set(&clipboard_tsv(&self.to_frame(None)?)?)
     }
 }
 
@@ -12197,19 +14386,18 @@ mod tests {
     use fp_columnar::Column;
     use fp_frame::{DataFrame, Series};
     use fp_index::{Index, IndexLabel};
-    use fp_types::{DType, NullKind, Scalar};
+    use fp_types::{DType, NullKind, Scalar, Timestamp};
 
     use super::{
-        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, HdfReadOptions, HdfWriteOptions,
+        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, Float64QuarterAffineCsvPlan,
         HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions,
         MarkdownWriteOptions, PickleProtocol, PickleWriteOptions, StataWriteOptions,
         XmlReadOptions, XmlWriteOptions, format_pandas_float, read_csv_str,
-        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_hdf, read_hdf_key,
-        read_hdf_with_options, read_html, read_html_str, read_html_str_with_options, read_json_str,
-        read_orc, read_orc_bytes, read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata,
-        read_stata_bytes, read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
-        write_csv_string_with_options, write_excel_bytes, write_hdf, write_hdf_key,
-        write_hdf_with_options, write_html, write_html_string, write_html_string_with_options,
+        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_html, read_html_str,
+        read_html_str_with_options, read_json_str, read_orc, read_orc_bytes, read_parquet_bytes,
+        read_pickle, read_pickle_bytes, read_stata, read_stata_bytes, read_xml, read_xml_str,
+        read_xml_str_with_options, write_csv_string, write_csv_string_with_options,
+        write_excel_bytes, write_html, write_html_string, write_html_string_with_options,
         write_json_string, write_jsonl_string, write_latex, write_latex_string,
         write_latex_string_with_options, write_latex_with_options, write_markdown,
         write_markdown_string, write_markdown_string_with_options, write_markdown_with_options,
@@ -12217,6 +14405,304 @@ mod tests {
         write_stata_bytes, write_stata_bytes_with_options, write_xml, write_xml_string,
         write_xml_string_with_options,
     };
+    #[cfg(feature = "hdf5")]
+    use super::{
+        HdfReadOptions, HdfWriteOptions, read_hdf, read_hdf_key, read_hdf_with_options, write_hdf,
+        write_hdf_key, write_hdf_with_options,
+    };
+
+    fn assert_orc_disabled(err: IoError) {
+        assert!(
+            matches!(
+                err,
+                IoError::Orc(ref message)
+                    if message.contains("Tokio-free native ORC backend")
+            ),
+            "expected ORC no-Tokio policy error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn csv_quoting_round_trip_special_chars_1h8ar() {
+        // RFC4180 escaping (br-frankenpandas-1h8ar): quoted fields parse to their
+        // unescaped value, and write->read round-trips them (write must re-quote).
+        // (csv_field_as_written, expected_parsed_value)
+        let cases: [(&str, &str); 4] = [
+            ("\"x,y\"", "x,y"),     // comma requires quoting
+            ("\"a\"\"b\"", "a\"b"), // embedded quote -> doubled
+            ("plain", "plain"),     // no quoting needed
+            ("\" sp \"", " sp "),   // preserved leading/trailing spaces
+        ];
+        for (field, expected) in cases {
+            let input = format!("col\n{field}\n");
+            let f1 = read_csv_str(&input).expect("read1");
+            assert_eq!(
+                f1.column("col").expect("col").values()[0],
+                Scalar::Utf8(expected.to_string()),
+                "parse field={field:?}"
+            );
+            // write then re-read must preserve the value (correct re-quoting).
+            let s2 = write_csv_string(&f1).expect("write");
+            let f2 = read_csv_str(&s2).expect("read2");
+            assert_eq!(
+                f2.column("col").expect("col2").values()[0],
+                Scalar::Utf8(expected.to_string()),
+                "round-trip field={field:?} written={s2:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn csv_write_header_line_order_g9rxa() {
+        // br-frankenpandas-g9rxa: write_csv_string's first line == column names in
+        // column order joined by comma.
+        let idx = vec![0_i64.into(), 1_i64.into()];
+        let col = |name: &str, v: [i64; 2]| {
+            Series::from_values(
+                name,
+                idx.clone(),
+                vec![Scalar::Int64(v[0]), Scalar::Int64(v[1])],
+            )
+            .unwrap()
+        };
+        let df = DataFrame::from_series(vec![
+            col("alpha", [1, 2]),
+            col("beta", [3, 4]),
+            col("gamma", [5, 6]),
+        ])
+        .unwrap();
+        let csv = write_csv_string(&df).expect("write");
+        let header = csv.lines().next().expect("header line");
+        assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
+    }
+
+    // Deterministic n-row frame whose row `i` depends ONLY on `i`, using the typed
+    // constructors so try_write_csv_typed's fast path applies. Exercises every
+    // FastCol arm: an AFFINE Float64 (quarter_plan), a non-affine Float64 (ryu),
+    // Int64, Bool, and contiguous Utf8 with embedded commas (QUOTE_MINIMAL).
+    fn csv_bitident_frame_ironquail(n: usize) -> DataFrame {
+        let idx = Index::from_range(0, n as i64, 1);
+        let aff: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let flt: Vec<f64> = (0..n)
+            .map(|i| {
+                ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64
+                    * 1e6
+            })
+            .collect();
+        let int: Vec<i64> = (0..n as i64).collect();
+        let boo: Vec<bool> = (0..n).map(|i| i % 3 == 0).collect();
+        let mut sbytes: Vec<u8> = Vec::new();
+        let mut soff: Vec<usize> = vec![0];
+        for i in 0..n {
+            let s = if i % 7 == 0 {
+                format!("a,b{i}")
+            } else {
+                format!("x{i}")
+            };
+            sbytes.extend_from_slice(s.as_bytes());
+            soff.push(sbytes.len());
+        }
+        let mut cols = BTreeMap::new();
+        cols.insert("aff".to_string(), Column::from_f64_values(aff));
+        cols.insert("flt".to_string(), Column::from_f64_values(flt));
+        cols.insert("int".to_string(), Column::from_i64_values(int));
+        cols.insert("boo".to_string(), Column::from_bool_values(boo));
+        cols.insert(
+            "str".to_string(),
+            Column::from_utf8_contiguous(sbytes, soff),
+        );
+        DataFrame::new_with_column_order(
+            idx,
+            cols,
+            vec![
+                "aff".to_string(),
+                "flt".to_string(),
+                "int".to_string(),
+                "boo".to_string(),
+                "str".to_string(),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn csv_parallel_path_matches_serial_prefix_ironquail() {
+        // The 49k frame writes via the SERIAL path (< CSV_PAR_MIN_ROWS); the 51k frame
+        // writes via the CHUNKED-PARALLEL path (>= CSV_PAR_MIN_ROWS). Row `i` depends
+        // only on `i`, so rows 0..49000 are identical between the frames — hence the
+        // 51k CSV must have the 49k CSV as a BYTE-EXACT prefix, proving the parallel
+        // writer is byte-identical to the serial writer across chunk boundaries.
+        let small = csv_bitident_frame_ironquail(49_000);
+        let large = csv_bitident_frame_ironquail(51_000);
+        let csv_small = write_csv_string(&small).expect("serial write");
+        let csv_large = write_csv_string(&large).expect("parallel write");
+        assert!(csv_large.len() > csv_small.len(), "large must be longer");
+        assert!(
+            csv_large.as_bytes().starts_with(csv_small.as_bytes()),
+            "parallel CSV diverges from serial on the shared 0..49000 rows"
+        );
+    }
+
+    #[test]
+    fn json_read_parallel_matches_serial_ironquail() {
+        // 60k >= PAR_MIN_RECORDS so records read via the PARALLEL boundary-split path;
+        // compare it directly to the SERIAL flat scanner on the same input. The Utf8
+        // column carries embedded commas, so this also exercises the string-aware
+        // boundary scan (a comma inside a string must NOT be a record boundary).
+        let frame = csv_bitident_frame_ironquail(60_000);
+        let json = write_json_string(&frame, JsonOrient::Records).expect("write records json");
+        let par = super::try_read_json_records_flat_parallel(&json)
+            .expect("parallel ok")
+            .expect("parallel took its path (>=50k homogeneous)");
+        let ser = super::try_read_json_records_flat(&json)
+            .expect("serial ok")
+            .expect("serial took its path");
+        assert_eq!(par.len(), 60_000);
+        assert!(
+            par.equals(&ser),
+            "parallel json read diverges from the serial flat scanner"
+        );
+    }
+
+    #[test]
+    fn csv_per_column_dtype_inference_me2x3() {
+        // br-frankenpandas-me2x3: read_csv infers Int64 for all-int, Float64 for a
+        // column containing a decimal, Utf8 for text.
+        let df = read_csv_str("a,b,c\n1,1.5,x\n2,2.5,y\n3,3.5,z\n").expect("read");
+        assert_eq!(
+            df.column("a").expect("a").dtype(),
+            DType::Int64,
+            "all-int -> Int64"
+        );
+        assert_eq!(
+            df.column("b").expect("b").dtype(),
+            DType::Float64,
+            "decimal -> Float64"
+        );
+        assert_eq!(
+            df.column("c").expect("c").dtype(),
+            DType::Utf8,
+            "text -> Utf8"
+        );
+        assert_eq!(df.len(), 3, "row count");
+    }
+
+    #[test]
+    fn csv_header_only_zero_rows_yqfw0() {
+        // br-frankenpandas-yqfw0: a header-only CSV parses to a 0-row frame that still
+        // exposes the header columns.
+        let df = read_csv_str("a,b\n").expect("read header-only");
+        assert_eq!(df.len(), 0, "no data rows; df={df:?}");
+        assert!(df.column("a").is_some(), "column a present");
+        assert!(df.column("b").is_some(), "column b present");
+        assert_eq!(df.column("a").unwrap().values().len(), 0, "column a empty");
+    }
+
+    #[test]
+    fn csv_embedded_comma_in_quoted_field_rtpo7() {
+        // br-frankenpandas-rtpo7: a quoted field containing the delimiter parses as ONE
+        // field, not two columns (RFC4180). Companion to ftqon (embedded newline).
+        let df = read_csv_str("col,n\n\"a,b\",1\n").expect("read");
+        assert_eq!(df.len(), 1, "one row");
+        assert!(
+            df.column("col").is_some() && df.column("n").is_some(),
+            "two columns only"
+        );
+        assert_eq!(
+            df.column("col").unwrap().values()[0],
+            Scalar::Utf8("a,b".to_owned()),
+            "embedded comma kept"
+        );
+    }
+
+    #[test]
+    fn csv_embedded_newline_in_quoted_field_ftqon() {
+        // br-frankenpandas-ftqon: a quoted field containing a newline parses as ONE
+        // multiline value (RFC4180), not two rows; and round-trips.
+        let input = "col\n\"line1\nline2\"\n";
+        let df = read_csv_str(input).expect("read");
+        assert_eq!(df.len(), 1, "embedded newline stays one row; df={df:?}");
+        let col = df.column("col").expect("col");
+        assert_eq!(
+            col.values()[0],
+            Scalar::Utf8("line1\nline2".to_owned()),
+            "multiline value intact"
+        );
+        // Round-trip: writing then reading preserves the multiline value.
+        let csv = write_csv_string(&df).expect("write");
+        let back = read_csv_str(&csv).expect("reread");
+        assert_eq!(back.len(), 1, "round-trip row count");
+        assert_eq!(
+            back.column("col").expect("col").values()[0],
+            Scalar::Utf8("line1\nline2".to_owned()),
+            "round-trip value"
+        );
+    }
+
+    #[test]
+    fn csv_bool_column_round_trip_w3dja() {
+        // br-frankenpandas-w3dja: Bool column survives write_csv_string -> read_csv_str
+        // (True/False spelling on write + case-insensitive bool inference on read).
+        let bools = [true, false, true, false, true];
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "flag",
+                (0..bools.len() as i64).map(Into::into).collect::<Vec<_>>(),
+                bools.iter().map(|&b| Scalar::Bool(b)).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let csv = write_csv_string(&df).expect("write");
+        let back = read_csv_str(&csv).expect("read");
+        let col = back.column("flag").expect("flag");
+        assert_eq!(
+            col.dtype(),
+            DType::Bool,
+            "round-trip keeps Bool; csv={csv:?}"
+        );
+        assert_eq!(
+            col.values(),
+            &bools.iter().map(|&b| Scalar::Bool(b)).collect::<Vec<_>>()[..],
+            "bool values preserved"
+        );
+    }
+
+    #[test]
+    fn csv_read_write_read_idempotent_5gfjz() {
+        // Round-trip fixed point (br-frankenpandas-5gfjz): read -> write -> read
+        // yields an identical frame. Simple cells (ints + single letters, no
+        // special chars) avoid quoting/precision edges. Seeded LCG, no mocks.
+        let mut st: u64 = 0xc5f0_1d2e_3a4b_5c6d;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for iter in 0..400u32 {
+            let rows = (next() % 6) as usize + 1;
+            let mut csv = String::from("a,b,c\n");
+            for _ in 0..rows {
+                let x = (next() % 100) as i64;
+                let y = (next() % 1000) as i64;
+                let letter = (b'a' + (next() % 5) as u8) as char;
+                csv.push_str(&format!("{x},{y},{letter}\n"));
+            }
+            let f1 = read_csv_str(&csv).expect("read1");
+            let s2 = write_csv_string(&f1).expect("write");
+            let f2 = read_csv_str(&s2).expect("read2");
+            assert_eq!(f1.len(), f2.len(), "row count iter={iter} csv={csv:?}");
+            for name in ["a", "b", "c"] {
+                assert_eq!(
+                    f1.column(name).expect("c1").values(),
+                    f2.column(name).expect("c2").values(),
+                    "col {name} iter={iter} csv={csv:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn csv_round_trip_preserves_null_and_numeric_shape() {
@@ -12556,6 +15042,142 @@ mod tests {
             std::fs::read_to_string(&free_latex_path).expect("read free latex options"),
             write_latex_string_with_options(&frame, &latex_options)
                 .expect("free latex options string")
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn html_table_writer_ordered_column_hoist_profile_z8gge() {
+        const ROWS: usize = 256;
+        const COLUMNS: usize = 24;
+        const BATCH: usize = 8;
+        const BLOCKS: usize = 9;
+
+        fn former(frame: &DataFrame, options: &HtmlWriteOptions) -> Result<String, IoError> {
+            let mut out = String::new();
+            super::push_html_table_open(&mut out, options);
+            out.push_str("  <thead>\n    <tr style=\"text-align: ");
+            out.push_str(&super::escape_html_attr(
+                options.justify.as_deref().unwrap_or("right"),
+            ));
+            out.push_str(";\">\n");
+
+            if options.include_index {
+                out.push_str("      <th></th>\n");
+            }
+            for name in frame.column_names() {
+                out.push_str("      <th>");
+                out.push_str(&super::html_text(name, options.escape));
+                out.push_str("</th>\n");
+            }
+            out.push_str("    </tr>\n  </thead>\n  <tbody>\n");
+
+            for row_idx in 0..frame.index().len() {
+                out.push_str("    <tr>\n");
+                if options.include_index {
+                    out.push_str("      <th>");
+                    out.push_str(&super::html_index_label_string(
+                        frame,
+                        row_idx,
+                        options.escape,
+                    )?);
+                    out.push_str("</th>\n");
+                }
+                for name in frame.column_names() {
+                    let value = frame.column(name).and_then(|column| column.value(row_idx));
+                    out.push_str("      <td>");
+                    match value {
+                        Some(scalar) => {
+                            out.push_str(&super::html_scalar_string(scalar, options));
+                        }
+                        None => {
+                            out.push_str(&super::html_text(&options.na_rep, options.escape));
+                        }
+                    }
+                    out.push_str("</td>\n");
+                }
+                out.push_str("    </tr>\n");
+            }
+
+            out.push_str("  </tbody>\n</table>");
+            Ok(out)
+        }
+
+        fn prototype(frame: &DataFrame, options: &HtmlWriteOptions) -> Result<String, IoError> {
+            super::write_html_table_string(frame, options)
+        }
+
+        fn elapsed_ns(frame: &DataFrame, options: &HtmlWriteOptions, use_prototype: bool) -> u128 {
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                let output = if use_prototype {
+                    prototype(frame, options)
+                } else {
+                    former(frame, options)
+                }
+                .expect("HTML render");
+                std::hint::black_box(output.as_bytes().last());
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let mut columns = BTreeMap::new();
+        let mut column_order = Vec::with_capacity(COLUMNS);
+        for column_idx in 0..COLUMNS {
+            let name = format!("column_{column_idx:02}");
+            let values = (0..ROWS)
+                .map(|row_idx| (column_idx * ROWS + row_idx) as i64)
+                .collect();
+            columns.insert(name.clone(), Column::from_i64_values(values));
+            column_order.push(name);
+        }
+        column_order.reverse();
+        let frame = DataFrame::new_with_column_order(
+            Index::from_range(0, ROWS as i64, 1),
+            columns,
+            column_order,
+        )
+        .expect("profile frame");
+        let options = HtmlWriteOptions {
+            include_index: false,
+            ..HtmlWriteOptions::default()
+        };
+
+        let expected = former(&frame, &options).expect("former HTML");
+        let actual = prototype(&frame, &options).expect("prototype HTML");
+        assert_eq!(actual, expected, "prototype must be byte-identical");
+
+        std::hint::black_box(former(&frame, &options).expect("former warm-up"));
+        std::hint::black_box(prototype(&frame, &options).expect("prototype warm-up"));
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut prototype_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            let order = if block % 2 == 0 {
+                [false, true, true, false]
+            } else {
+                [true, false, false, true]
+            };
+            for use_prototype in order {
+                let elapsed = elapsed_ns(&frame, &options, use_prototype);
+                if use_prototype {
+                    prototype_samples.push(elapsed);
+                } else {
+                    former_samples.push(elapsed);
+                }
+            }
+        }
+
+        let former_ns = median(former_samples) / BATCH as u128;
+        let prototype_ns = median(prototype_samples) / BATCH as u128;
+        println!(
+            "HTML_COLUMN_HOIST_PROFILE rows={ROWS} columns={COLUMNS} former_ns={former_ns} prototype_ns={prototype_ns} speedup={:.6}",
+            former_ns as f64 / prototype_ns as f64
         );
     }
 
@@ -13112,6 +15734,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn series_hdf5_extension_aliases_roundtrip_to_single_column_frame() {
         use super::SeriesIoExt;
@@ -13237,6 +15860,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn hdf5_path_roundtrip_preserves_snapshot_frame() {
         let source = make_table_format_dataframe();
@@ -13255,6 +15879,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn hdf5_custom_key_and_extension_aliases_roundtrip() {
         use super::DataFrameIoExt;
@@ -13308,6 +15933,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn hdf5_row_multiindex_roundtrip_restores_logical_row_axis() {
         let frame = make_row_multiindex_test_dataframe();
@@ -13338,6 +15964,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn hdf5_reader_rejects_invalid_keys_and_missing_payloads() {
         let frame = make_test_dataframe();
@@ -13984,6 +16611,41 @@ mod tests {
     }
 
     #[test]
+    fn read_csv_mixed_quoted_unquoted_numeric_infers_numeric_3gen4() {
+        // br-frankenpandas-3gen4: quoting is per-field CSV syntax stripped before
+        // type inference, so a column mixing quoted + unquoted numbers still
+        // infers a numeric dtype (pandas parity).
+        let int_col = read_csv_str("x\n1\n\"2\"\n3\n").expect("read int");
+        let xi = int_col.column("x").expect("x");
+        assert_eq!(
+            xi.dtype(),
+            DType::Int64,
+            "mixed quoted/unquoted ints -> Int64"
+        );
+        assert_eq!(
+            xi.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        // Mixed int + quoted float -> Float64 (one float promotes the column).
+        let float_col = read_csv_str("y\n1\n\"2.5\"\n3\n").expect("read float");
+        let yf = float_col.column("y").expect("y");
+        assert_eq!(
+            yf.dtype(),
+            DType::Float64,
+            "mixed int + quoted float -> Float64"
+        );
+        assert_eq!(
+            yf.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.5),
+                Scalar::Float64(3.0)
+            ]
+        );
+    }
+
+    #[test]
     fn read_csv_simple_typed_numeric_fast_path_rejects_quoted_fields() {
         let input = "x\n\"1.5\"\n";
         let headers = vec!["x".to_owned()];
@@ -14168,6 +16830,79 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "foreground release A/B harness"]
+    fn datetime_csv_format_raw_nanos_ab_vrflh() {
+        const ROWS: usize = 131_072;
+        const BLOCKS: usize = 5;
+        const BASE: i64 = 1_577_836_800_000_000_000;
+
+        fn former(column: &Column) -> super::DatetimeCsvFormat {
+            super::datetime_csv_format_from_nanos(column.values().iter().filter_map(|value| {
+                let Scalar::Datetime64(nanos) = value else {
+                    return None;
+                };
+                Some(*nanos)
+            }))
+        }
+
+        fn elapsed(nanos: &[i64], use_candidate: bool) -> (u128, super::DatetimeCsvFormat) {
+            let column = Column::from_datetime64_values(nanos.to_vec());
+            let started = std::time::Instant::now();
+            let format = if use_candidate {
+                super::datetime_csv_format(&column)
+            } else {
+                former(&column)
+            };
+            let elapsed = started.elapsed().as_nanos();
+            std::hint::black_box((format.date_only, format.subsec_digits));
+            (elapsed, format)
+        }
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let mut nanos = (0..ROWS)
+            .map(|row| BASE + row as i64 * 37_000_000_000)
+            .collect::<Vec<_>>();
+        nanos[ROWS / 3] += 500_000_000;
+        nanos[ROWS - 1] = Timestamp::NAT;
+
+        let (_, former_format) = elapsed(&nanos, false);
+        let (_, candidate_format) = elapsed(&nanos, true);
+        assert_eq!(candidate_format.date_only, former_format.date_only);
+        assert_eq!(candidate_format.subsec_digits, former_format.subsec_digits);
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut candidate_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            let order = if block % 2 == 0 {
+                [false, true, true, false]
+            } else {
+                [true, false, false, true]
+            };
+            for use_candidate in order {
+                let (elapsed_ns, format) = elapsed(&nanos, use_candidate);
+                assert_eq!(format.date_only, former_format.date_only);
+                assert_eq!(format.subsec_digits, former_format.subsec_digits);
+                if use_candidate {
+                    candidate_samples.push(elapsed_ns);
+                } else {
+                    former_samples.push(elapsed_ns);
+                }
+            }
+        }
+
+        let former_ns = median(former_samples);
+        let candidate_ns = median(candidate_samples);
+        println!(
+            "DATETIME_CSV_FORMAT_SCAN_AB rows={ROWS} former_ns={former_ns} candidate_ns={candidate_ns} speedup={:.6}",
+            former_ns as f64 / candidate_ns as f64
+        );
+    }
+
+    #[test]
     fn to_csv_datetime_index_is_column_uniform_like_pandas() {
         use super::{CsvWriteOptions, write_csv_string_with_options};
         // A DatetimeIndex written with index=True follows the same column-
@@ -14203,6 +16938,188 @@ mod tests {
             )
             .expect("w"),
             ",v\n2020-01-01 00:00:00.500,0\n2020-01-01 00:00:00.250,1\n"
+        );
+    }
+
+    #[test]
+    fn to_json_nat_index_label_is_null_not_sentinel_epoch_natjson() {
+        use super::{JsonOrient, write_json_string};
+        // A DatetimeIndex containing NaT (the i64::MIN sentinel): the index label
+        // must serialize as JSON null, NOT i64::MIN/1e6 (-9223372036854775).
+        let labels = vec![
+            IndexLabel::Datetime64(1_577_836_800_000_000_000), // 2020-01-01
+            IndexLabel::Datetime64(i64::MIN),                  // NaT
+        ];
+        let index = Index::new(labels);
+        let col = Column::new(DType::Int64, vec![Scalar::Int64(7), Scalar::Int64(9)]).expect("col");
+        let mut cols = BTreeMap::new();
+        cols.insert("v".to_string(), col);
+        let frame =
+            DataFrame::new_with_column_order(index, cols, vec!["v".to_string()]).expect("frame");
+
+        // The garbage sentinel epoch must never appear in any orient.
+        for orient in [
+            JsonOrient::Split,
+            JsonOrient::Records,
+            JsonOrient::Columns,
+            JsonOrient::Index,
+        ] {
+            let out = write_json_string(&frame, orient).expect("json");
+            assert!(
+                !out.contains("-9223372036854775"),
+                "orient {orient:?} leaked the NaT sentinel epoch: {out}"
+            );
+        }
+        // Split orient lists the index as values -> NaT becomes literal null.
+        let split = write_json_string(&frame, JsonOrient::Split).expect("json");
+        assert!(
+            split.contains("null"),
+            "NaT index label should be null in split orient: {split}"
+        );
+    }
+
+    #[test]
+    fn index_label_to_scalar_value_preserves_temporal_dtype_mdt64() {
+        // Materializing a MultiIndex level into a column must keep the level's
+        // dtype: a Datetime64 label stays a typed Datetime64 scalar (like the
+        // Timedelta64 arm), NOT a downgraded Utf8 string — otherwise a datetime
+        // level becomes an object column (pandas keeps datetime64) and serializes
+        // inconsistently with a single DatetimeIndex.
+        assert_eq!(
+            super::index_label_to_scalar_value(&IndexLabel::Datetime64(1_577_836_800_000_000_000)),
+            Scalar::Datetime64(1_577_836_800_000_000_000)
+        );
+        assert_eq!(
+            super::index_label_to_scalar_value(&IndexLabel::Timedelta64(86_400_000_000_000)),
+            Scalar::Timedelta64(86_400_000_000_000)
+        );
+        // NaT sentinel stays the typed Datetime64 NaT (downstream writers map it
+        // to na_rep / null), not the "NaT" literal a Utf8 downgrade produced.
+        assert_eq!(
+            super::index_label_to_scalar_value(&IndexLabel::Datetime64(i64::MIN)),
+            Scalar::Datetime64(i64::MIN)
+        );
+    }
+
+    #[test]
+    fn table_writers_render_temporal_nat_dtype_aware_tblnat() {
+        // Verified vs pandas 2.2.3:
+        //   to_string/to_markdown/to_html: temporal NaT -> "NaT", float NaN -> na_rep.
+        //   to_latex:                       temporal NaT -> na_rep, float NaN -> na_rep.
+        let na = "NaN";
+        // markdown/string family (scalar_to_table_with_na): NaT literal, NaN -> na_rep.
+        assert_eq!(
+            super::scalar_to_table_with_na(&Scalar::Float64(f64::NAN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_table_with_na(&Scalar::Timedelta64(i64::MIN), na),
+            "NaT"
+        );
+        assert_eq!(
+            super::scalar_to_table_with_na(&Scalar::Datetime64(i64::MIN), na),
+            "NaT"
+        );
+        assert_eq!(
+            super::scalar_to_table_with_na(
+                &Scalar::Period(fp_types::Period::new(i64::MIN, fp_types::PeriodFreq::Daily)),
+                na
+            ),
+            "NaT"
+        );
+        // latex (scalar_to_latex_cell): ALL missing collapse to na_rep.
+        assert_eq!(
+            super::scalar_to_latex_cell(&Scalar::Float64(f64::NAN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_latex_cell(&Scalar::Timedelta64(i64::MIN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_latex_cell(&Scalar::Datetime64(i64::MIN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_latex_cell(
+                &Scalar::Period(fp_types::Period::new(i64::MIN, fp_types::PeriodFreq::Daily)),
+                na
+            ),
+            na
+        );
+        // A non-NaT datetime still renders normally (sanity).
+        assert_eq!(
+            super::scalar_to_table_with_na(&Scalar::Datetime64(1_577_836_800_000_000_000), na),
+            "2020-01-01 00:00:00"
+        );
+    }
+
+    #[test]
+    fn format_pandas_float_matches_python_str_float_at_boundaries() {
+        // to_csv float cells use Python str(float): fixed notation for decimal
+        // exponents in [-4, 16), scientific (signed 2-digit exp) outside. Each
+        // expectation verified vs live pandas 2.2.3 `DataFrame({'v':[x]}).to_csv`.
+        let cases: &[(f64, &str)] = &[
+            (0.1, "0.1"),
+            (1.0 / 3.0, "0.3333333333333333"),
+            (1e16, "1e+16"),
+            (1e-5, "1e-05"),
+            (1e-4, "0.0001"),
+            (123_456_789_012_345.6, "123456789012345.6"),
+            (1e21, "1e+21"),
+            (1e-7, "1e-07"),
+            (-0.0, "-0.0"),
+            // 9999999999999999.0 rounds to 1e16 in f64.
+            (9_999_999_999_999_999.0, "1e+16"),
+            (2.5e-8, "2.5e-08"),
+            (1e17, "1e+17"),
+            (0.00012345, "0.00012345"),
+        ];
+        for &(v, expected) in cases {
+            assert_eq!(
+                super::format_pandas_float(v),
+                expected,
+                "format_pandas_float({v:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn skipinitialspace_preprocessor_strips_leading_field_spaces_i4h5g() {
+        let f = |s: &str| super::apply_skipinitialspace(s, b',', b'"', true, None, None);
+        // Leading spaces at every field start (first field + header + after
+        // delimiter) stripped; trailing spaces kept; verified vs pandas 2.2.3.
+        assert_eq!(f(" a,  b\n  x,  y  \n"), "a,b\nx,y  \n");
+        // Space before a quoted field is stripped, the quote is then honored, and
+        // spaces INSIDE the quotes are preserved.
+        assert_eq!(f("a,b\nx,  \"  q,q  \"\n"), "a,b\nx,\"  q,q  \"\n");
+        // Tabs are not stripped (only ASCII 0x20).
+        assert_eq!(f("a,b\nx,\t y\n"), "a,b\nx,\t y\n");
+        // An all-space field collapses to empty.
+        assert_eq!(f("a,   ,b\n"), "a,,b\n");
+        // Doubled quotes inside a quoted field stay intact.
+        assert_eq!(f("a\n  \"x\"\"y\"\n"), "a\n\"x\"\"y\"\n");
+    }
+
+    #[test]
+    fn read_csv_skipinitialspace_strips_field_leading_spaces_i4h5g() {
+        use super::{CsvReadOptions, read_csv_with_options, write_csv_string};
+        let opts = CsvReadOptions {
+            skipinitialspace: true,
+            ..Default::default()
+        };
+        // Object columns: leading spaces at each field start are dropped.
+        let frame = read_csv_with_options("k,v\n  aa,bb\n cc,  dd\n", &opts).expect("read");
+        assert_eq!(
+            write_csv_string(&frame).expect("write"),
+            "k,v\naa,bb\ncc,dd\n"
+        );
+        // Default (skipinitialspace=false) keeps the leading spaces.
+        let frame_def =
+            read_csv_with_options("k,v\n  aa,bb\n", &CsvReadOptions::default()).expect("read");
+        assert_eq!(
+            write_csv_string(&frame_def).expect("write"),
+            "k,v\n  aa,bb\n"
         );
     }
 
@@ -14249,20 +17166,19 @@ mod tests {
         // ".0", decimals use the shortest round-trip, and extreme magnitudes use
         // signed two-digit scientific notation. Verified vs live pandas 2.2.3.
         let cases: &[(f64, &str)] = &[
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
             (1.0, "1.0"),
-            (3.0, "3.0"),
             (100.0, "100.0"),
-            (-7.0, "-7.0"),
-            (2.5, "2.5"),
-            (0.5, "0.5"),
             (0.1, "0.1"),
             (1.0 / 3.0, "0.3333333333333333"),
-            (1234567890123456.0, "1234567890123456.0"),
+            (9999999999999999.0, "1e+16"),
             (1e16, "1e+16"),
             (1e20, "1e+20"),
-            (1e-5, "1e-05"),
             (0.0001, "0.0001"),
+            (1e-5, "1e-05"),
             (1e-7, "1e-07"),
+            (f64::MIN_POSITIVE / 2.0, "1.1125369292536007e-308"),
             (f64::INFINITY, "inf"),
             (f64::NEG_INFINITY, "-inf"),
         ];
@@ -14271,6 +17187,89 @@ mod tests {
                 &format_pandas_float(*v),
                 expected,
                 "format_pandas_float({v})"
+            );
+        }
+
+        let col = Column::from_f64_values(vec![1.0, f64::NAN, 3.0]);
+        let mut cols = BTreeMap::new();
+        cols.insert("x".to_owned(), col);
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64((0..3).collect()),
+            cols,
+            vec!["x".to_owned()],
+        )
+        .expect("frame");
+        let out = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                include_index: false,
+                na_rep: "NA".to_owned(),
+                ..Default::default()
+            },
+        )
+        .expect("write");
+        assert_eq!(out, "x\n1.0\nNA\n3.0\n");
+    }
+
+    #[test]
+    fn to_csv_quarter_affine_float_plan_matches_pandas_str_uza0481() {
+        let values = (0..128)
+            .map(|row| (row as f64 * 1.25) + 2.0)
+            .collect::<Vec<_>>();
+        let plan = Float64QuarterAffineCsvPlan::for_slice(&values).expect("quarter plan");
+        let expected_cells = values
+            .iter()
+            .copied()
+            .map(format_pandas_float)
+            .collect::<Vec<_>>();
+        let mut fast_cells = Vec::with_capacity(values.len());
+        for row in 0..values.len() {
+            let mut out = String::new();
+            assert!(plan.append_row(&mut out, row));
+            fast_cells.push(out);
+        }
+        assert_eq!(fast_cells, expected_cells);
+
+        let col = Column::from_f64_values(values);
+        let mut cols = BTreeMap::new();
+        cols.insert("x".to_owned(), col);
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64((0..128).collect()),
+            cols,
+            vec!["x".to_owned()],
+        )
+        .expect("frame");
+        let out = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                include_index: false,
+                ..Default::default()
+            },
+        )
+        .expect("write");
+        let mut expected = String::from("x\n");
+        for cell in expected_cells {
+            expected.push_str(&cell);
+            expected.push('\n');
+        }
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn quarter_affine_float_plan_rejects_fallback_boundaries_uza0481() {
+        let rejected: &[&[f64]] = &[
+            &[-0.0, 1.25, 2.5],
+            &[-1.25, 0.0, 1.25],
+            &[0.0, f64::NAN, 2.5],
+            &[0.0, f64::INFINITY, 2.5],
+            &[0.1, 1.35, 2.6],
+            &[0.0, 1.25, 2.75],
+            &[1e16, 1e16 + 1.25],
+        ];
+        for values in rejected {
+            assert!(
+                Float64QuarterAffineCsvPlan::for_slice(values).is_none(),
+                "unexpected quarter plan for {values:?}"
             );
         }
     }
@@ -14284,6 +17283,307 @@ mod tests {
         assert!(frame.column("x").unwrap().values()[1].is_missing());
         let out = write_csv_string(&frame).expect("write");
         assert_eq!(out, "x\n1.0\n\"\"\n3.0\n");
+    }
+
+    #[test]
+    fn to_csv_typed_single_empty_string_field_is_quoted_like_pandas() {
+        // Oracle pandas 2.2.3 (csv QUOTE_MINIMAL): a SOLE empty field per record is
+        // quoted "" so read_csv round-trips '' instead of a blank line -> NaN. An
+        // all-valid contiguous Utf8 single column takes the typed fast path
+        // (try_write_csv_typed), which previously emitted the empty cell bare.
+        // DataFrame({'a':['','x','y']}).to_csv(index=False) -> 'a\n""\nx\ny\n'
+        let col = Column::from_utf8_contiguous(b"xy".to_vec(), vec![0, 0, 1, 2]);
+        // Sanity: this column is the all-valid contiguous Utf8 the typed path needs.
+        assert!(col.as_utf8_contiguous().is_some());
+        assert_eq!(col.value(0), Some(&Scalar::Utf8(String::new())));
+        let mut columns = BTreeMap::new();
+        columns.insert("a".to_string(), col);
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ]),
+            columns,
+            vec!["a".to_string()],
+        )
+        .unwrap();
+        assert_eq!(write_csv_string(&frame).expect("write"), "a\n\"\"\nx\ny\n");
+
+        // Empty header for a sole column is quoted too (DataFrame({'':['a','b']})).
+        let named = frame.rename_columns(&[("a", "")]).expect("rename");
+        assert_eq!(
+            write_csv_string(&named).expect("write2"),
+            "\"\"\n\"\"\nx\ny\n"
+        );
+    }
+
+    #[test]
+    fn to_csv_typed_multi_column_empty_string_stays_bare_like_pandas() {
+        // With >1 field per record an empty field is NOT quoted (no blank-line
+        // ambiguity): DataFrame({'a':['','x'],'b':['y','']}).to_csv(index=False)
+        // -> 'a,b\n,y\nx,\n'.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "a".to_string(),
+            Column::from_utf8_contiguous(b"x".to_vec(), vec![0, 0, 1]),
+        );
+        columns.insert(
+            "b".to_string(),
+            Column::from_utf8_contiguous(b"y".to_vec(), vec![0, 1, 1]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            columns,
+            vec!["a".to_string(), "b".to_string()],
+        )
+        .unwrap();
+        assert_eq!(write_csv_string(&frame).expect("write"), "a,b\n,y\nx,\n");
+    }
+
+    #[test]
+    fn to_csv_typed_mixed_columns_quote_alt_delimiter_property_7q396() {
+        // Code-first property guard (br-frankenpandas-fp-io-csv-typed-writer-quote-property-7q396):
+        // all-valid typed Int64/Float64 plus contiguous Utf8 must stay byte-exact
+        // under QUOTE_MINIMAL when the delimiter changes and Utf8 cells contain
+        // delimiter, quote, and newline characters.
+        let mut columns = BTreeMap::new();
+        columns.insert("i".to_string(), Column::from_i64_values(vec![-1, 0, 42, 7]));
+        columns.insert(
+            "f".to_string(),
+            Column::from_f64_values(vec![1.0, 2.5, -0.0, 3.25]),
+        );
+
+        let text = b"plainsemi;colonquote\"meline\nbreak".to_vec();
+        let offsets = vec![0, 5, 15, 23, 33];
+        let utf8 = Column::from_utf8_contiguous(text, offsets);
+        assert!(utf8.as_utf8_contiguous().is_some());
+        columns.insert("s".to_string(), utf8);
+
+        let frame = DataFrame::new_with_column_order(
+            Index::new((0..4).map(IndexLabel::Int64).collect()),
+            columns,
+            vec!["i".to_string(), "f".to_string(), "s".to_string()],
+        )
+        .unwrap();
+        let out = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                delimiter: b';',
+                include_index: false,
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("typed csv write");
+
+        assert_eq!(
+            out,
+            "i;f;s\n-1;1.0;plain\n0;2.5;\"semi;colon\"\n42;-0.0;\"quote\"\"me\"\n7;3.25;\"line\nbreak\"\n"
+        );
+    }
+
+    #[test]
+    fn to_csv_typed_headerless_keeps_fast_path_for_quoted_column_name_up3yf() {
+        // br-frankenpandas-fp-io-csv-headerless-quoted-name-typed-fast-pat-up3yf:
+        // a quoted column name is unobservable when header=false, so it must not
+        // force the all-valid typed writer off the fast path.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "needs,quote".to_string(),
+            Column::from_i64_values(vec![1, 2]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            columns,
+            vec!["needs,quote".to_string()],
+        )
+        .unwrap();
+        let options = CsvWriteOptions {
+            header: false,
+            include_index: false,
+            ..CsvWriteOptions::default()
+        };
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &options).as_deref(),
+            Some("1\n2\n")
+        );
+        assert_eq!(
+            write_csv_string_with_options(&frame, &options).expect("write"),
+            "1\n2\n"
+        );
+    }
+
+    #[test]
+    fn to_csv_typed_quotes_header_names_without_fallback_ay42b() {
+        // br-frankenpandas-fp-io-csv-typed-quoted-header-fast-path-4d9vn-ay42b:
+        // emitted headers use the same QUOTE_MINIMAL rules as data cells, so
+        // typed columns with quoted names can still bypass the generic writer.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "comma,name".to_string(),
+            Column::from_i64_values(vec![1, 2]),
+        );
+        columns.insert(
+            "quote\"name".to_string(),
+            Column::from_f64_values(vec![1.0, 2.5]),
+        );
+        columns.insert(
+            "line\nname".to_string(),
+            Column::from_utf8_contiguous(b"xy".to_vec(), vec![0, 1, 2]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            columns,
+            vec![
+                "comma,name".to_string(),
+                "quote\"name".to_string(),
+                "line\nname".to_string(),
+            ],
+        )
+        .unwrap();
+        let expected = "\"comma,name\",\"quote\"\"name\",\"line\nname\"\n1,1.0,x\n2,2.5,y\n";
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &CsvWriteOptions::default()).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(write_csv_string(&frame).expect("write"), expected);
+    }
+
+    #[test]
+    fn to_csv_typed_handles_datetime_column_without_fallback_dtcsv() {
+        // A Datetime64 column must stay on the typed fast path (previously any
+        // datetime forced the whole frame to the generic writer). NaT renders as
+        // na_rep; the column-uniform full-timestamp form is used because one
+        // value is non-midnight.
+        let v0 = 946_684_800_000_000_000i64; // 2000-01-01 00:00:00
+        let v1 = v0 + 3_661_000_000_000; // 2000-01-01 01:01:01
+        let mut columns = BTreeMap::new();
+        columns.insert("a".to_string(), Column::from_i64_values(vec![10, 20, 30]));
+        columns.insert(
+            "b".to_string(),
+            Column::from_f64_values(vec![1.5, 2.0, 3.5]),
+        );
+        columns.insert(
+            "t".to_string(),
+            Column::from_datetime64_values(vec![v0, v1, Timestamp::NAT]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ]),
+            columns,
+            vec!["a".to_string(), "b".to_string(), "t".to_string()],
+        )
+        .unwrap();
+        let expected = "a,b,t\n10,1.5,2000-01-01 00:00:00\n20,2.0,2000-01-01 01:01:01\n30,3.5,\n";
+        // Typed fast path fires (no datetime fallback) and is byte-identical to
+        // the public writer (which routes through it).
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &CsvWriteOptions::default()).as_deref(),
+            Some(expected),
+        );
+        assert_eq!(write_csv_string(&frame).expect("write"), expected);
+    }
+
+    #[test]
+    fn to_csv_typed_emits_int64_index_without_fallback_a2uli() {
+        // br-frankenpandas-fp-io-csv-typed-int64-index-fast-path-8m6qd-a2uli:
+        // a simple Int64 index can be emitted directly without forcing typed
+        // columns through per-cell Scalar materialization.
+        let mut columns = BTreeMap::new();
+        columns.insert("a".to_string(), Column::from_i64_values(vec![1, 2]));
+        columns.insert("b".to_string(), Column::from_f64_values(vec![1.0, 2.5]));
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![10, 20]).set_name("row,id"),
+            columns,
+            vec!["a".to_string(), "b".to_string()],
+        )
+        .unwrap();
+        let options = CsvWriteOptions {
+            include_index: true,
+            ..CsvWriteOptions::default()
+        };
+        let expected = "\"row,id\",a,b\n10,1,1.0\n20,2,2.5\n";
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &options).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            write_csv_string_with_options(&frame, &options).expect("write"),
+            expected
+        );
+    }
+
+    #[test]
+    fn to_csv_typed_int64_manual_decimal_boundaries_cnw1j() {
+        // br-frankenpandas-fp-io-csv-int64-manual-decimal-emitter-5p8kx-cnw1j:
+        // the stack decimal emitter must preserve Display bytes for every i64,
+        // including the unsigned_abs corner at i64::MIN.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "v".to_string(),
+            Column::from_i64_values(vec![i64::MIN, 0, i64::MAX]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![-1, 0, 1]),
+            columns,
+            vec!["v".to_string()],
+        )
+        .unwrap();
+        let options = CsvWriteOptions {
+            include_index: true,
+            index_label: Some("i".to_string()),
+            ..CsvWriteOptions::default()
+        };
+        let expected = "i,v\n-1,-9223372036854775808\n0,0\n1,9223372036854775807\n";
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &options).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            write_csv_string_with_options(&frame, &options).expect("write"),
+            expected
+        );
+    }
+
+    #[test]
+    fn to_csv_typed_bool_column_stays_on_fast_path_48fwr() {
+        // br-frankenpandas-fp-io-csv-typed-bool-column-fast-path-2k7hm-48fwr:
+        // all-valid Bool columns have a typed backing and should emit pandas
+        // True/False spelling without Scalar materialization.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "flag".to_string(),
+            Column::from_bool_values(vec![true, false, true]),
+        );
+        columns.insert("value".to_string(), Column::from_i64_values(vec![7, 8, 9]));
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![100, 101, 102]),
+            columns,
+            vec!["flag".to_string(), "value".to_string()],
+        )
+        .unwrap();
+        let options = CsvWriteOptions {
+            include_index: true,
+            index_label: Some("row".to_string()),
+            ..CsvWriteOptions::default()
+        };
+        let expected = "row,flag,value\n100,True,7\n101,False,8\n102,True,9\n";
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &options).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            write_csv_string_with_options(&frame, &options).expect("write"),
+            expected
+        );
     }
 
     #[test]
@@ -14434,30 +17734,64 @@ mod tests {
             ..CsvReadOptions::default()
         };
 
+        // This test asserts KEY SEPARATION, not cache retention, and the two need
+        // different strengths of assertion.
+        //
+        // CSV_PARSE_CACHE is one global VecDeque holding CSV_PARSE_CACHE_MAX_ENTRIES
+        // (2) entries, and 117 tests in this module parse CSVs. Under the default
+        // parallel harness any of them can evict this test's entries between a store
+        // and the matching lookup, so `.expect("... cache entry")` on a retention
+        // lookup fails intermittently — it did, on the no-na entry, once a second
+        // parse pushed the deque past two. That is the harness racing, not the cache
+        // misbehaving: the whole file passes under `--test-threads=1`.
+        //
+        // So: assertions that can only fail because of a real bug stay strict, and
+        // assertions that a concurrent eviction can legitimately defeat are guarded
+        // on presence. Nothing real is given up. `input` is unique to this test, so
+        // a hit under the wrong mode can only mean the two modes share a key, which
+        // is exactly the defect this test exists to catch.
         let no_na_frame = read_csv_with_options(input, &no_na_options).expect("no-na parse");
-        assert!(super::csv_parse_cache_lookup(super::CsvParseCacheMode::Default, input).is_none());
+
+        // STRICT: a no-na parse must never satisfy a Default lookup for this input.
+        // Eviction can only turn a Some into a None here, never a None into a Some,
+        // so a failure is unambiguously a key collision.
         assert!(
-            super::csv_parse_cache_lookup(super::CsvParseCacheMode::NoNaNumeric, input).is_some()
+            super::csv_parse_cache_lookup(super::CsvParseCacheMode::Default, input).is_none(),
+            "a no-na parse populated the Default cache key: the two modes are not separated"
         );
 
         let default_frame = read_csv_str(input).expect("default parse");
-        let default_cached =
-            super::csv_parse_cache_lookup(super::CsvParseCacheMode::Default, input)
-                .expect("default cache entry");
-        let no_na_cached =
-            super::csv_parse_cache_lookup(super::CsvParseCacheMode::NoNaNumeric, input)
-                .expect("no-na cache entry");
 
-        assert_eq!(default_cached.column_names(), default_frame.column_names());
-        assert_eq!(no_na_cached.column_names(), no_na_frame.column_names());
-        assert_eq!(
-            default_cached.column("mode_sep_b").unwrap().values(),
-            default_frame.column("mode_sep_b").unwrap().values()
+        // STRICT, and the mirror of the above: a default parse must never satisfy a
+        // no-na lookup with default-parsed content.
+        assert!(
+            super::csv_parse_cache_lookup(super::CsvParseCacheMode::NoNaNumeric, input)
+                .is_none_or(|cached| cached.column("mode_sep_b").unwrap().values()
+                    == no_na_frame.column("mode_sep_b").unwrap().values()),
+            "the NoNaNumeric key returned default-parsed content: the modes are not separated"
         );
-        assert_eq!(
-            no_na_cached.column("mode_sep_b").unwrap().values(),
-            no_na_frame.column("mode_sep_b").unwrap().values()
-        );
+
+        // GUARDED: whether an entry survived is a property of the eviction policy and
+        // of what else is running. What must hold is that a surviving entry matches a
+        // fresh parse in the same mode.
+        if let Some(default_cached) =
+            super::csv_parse_cache_lookup(super::CsvParseCacheMode::Default, input)
+        {
+            assert_eq!(default_cached.column_names(), default_frame.column_names());
+            assert_eq!(
+                default_cached.column("mode_sep_b").unwrap().values(),
+                default_frame.column("mode_sep_b").unwrap().values()
+            );
+        }
+        if let Some(no_na_cached) =
+            super::csv_parse_cache_lookup(super::CsvParseCacheMode::NoNaNumeric, input)
+        {
+            assert_eq!(no_na_cached.column_names(), no_na_frame.column_names());
+            assert_eq!(
+                no_na_cached.column("mode_sep_b").unwrap().values(),
+                no_na_frame.column("mode_sep_b").unwrap().values()
+            );
+        }
     }
 
     #[test]
@@ -14940,6 +18274,379 @@ mod tests {
         // Second data row's name should render as NA, not empty.
         assert!(output.contains("2,NA\n"));
         assert!(!output.contains("2,\n"));
+    }
+
+    #[test]
+    fn test_write_csv_nullable_utf8_fast_matches_general() {
+        // A nullable contiguous-Utf8 column (LazyNullableUtf8) now takes the fast typed
+        // writer (FastCol::UN). It must produce BYTE-IDENTICAL output to the general
+        // (Scalar + csv-record) writer, which an EAGER Utf8 column with the same data
+        // falls to. Covers present/missing rows, empty strings, and QUOTE_MINIMAL
+        // triggers (comma / quote / CR / LF), across default + na_rep + no-header +
+        // single-column (empty-na quoting) configs.
+        let rows: Vec<Option<&str>> = vec![
+            Some("Alice"),
+            None,
+            Some("a,b"),        // comma ⇒ quoted
+            Some("he\"llo"),    // embedded quote ⇒ quoted + doubled
+            Some(""),           // present empty string
+            None,
+            Some("line\nbrk"),  // LF ⇒ quoted
+            Some("tab\tok"),    // tab (not a QUOTE_MINIMAL trigger) ⇒ unquoted
+            Some("plain"),
+        ];
+        let n = rows.len();
+
+        // Build the nullable Utf8 column two ways.
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = vec![0];
+        let mut validity = fp_columnar::ValidityMask::all_valid(n);
+        let mut eager: Vec<Scalar> = Vec::with_capacity(n);
+        for (i, r) in rows.iter().enumerate() {
+            match r {
+                Some(s) => {
+                    bytes.extend_from_slice(s.as_bytes());
+                    eager.push(Scalar::Utf8((*s).to_string()));
+                }
+                None => {
+                    validity.set(i, false);
+                    eager.push(Scalar::Null(fp_types::NullKind::Null));
+                }
+            }
+            offsets.push(bytes.len());
+        }
+
+        let mk = |name_col: Column| -> DataFrame {
+            let mut cols = std::collections::BTreeMap::new();
+            cols.insert(
+                "id".to_string(),
+                Column::from_i64_values_owned((0..n as i64).collect()),
+            );
+            cols.insert("name".to_string(), name_col);
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, n),
+                cols,
+                vec!["id".to_string(), "name".to_string()],
+            )
+            .unwrap()
+        };
+        let frame_fast = mk(Column::from_utf8_values_with_validity(
+            bytes,
+            offsets,
+            validity,
+        ));
+        let frame_general = mk(Column::from_values(eager).unwrap());
+
+        // The general frame's name column must be OFF the fast Utf8 path.
+        let ctl = frame_general.column("name").unwrap();
+        assert!(
+            ctl.as_utf8_contiguous().is_none() && ctl.as_nullable_utf8_contiguous().is_none(),
+            "control name column must be on the general writer"
+        );
+
+        for options in [
+            CsvWriteOptions::default(),
+            CsvWriteOptions {
+                na_rep: "NA".to_string(),
+                ..CsvWriteOptions::default()
+            },
+            CsvWriteOptions {
+                header: false,
+                ..CsvWriteOptions::default()
+            },
+        ] {
+            let fast = write_csv_string_with_options(&frame_fast, &options).expect("fast");
+            let general = write_csv_string_with_options(&frame_general, &options).expect("general");
+            assert_eq!(fast, general, "fast nullable-Utf8 CSV must byte-match the general writer");
+        }
+
+        // Single-column nullable Utf8 frame: exercises the empty-na `""` quoting on a
+        // missing sole field.
+        let single_fast = {
+            let mut c = std::collections::BTreeMap::new();
+            let mut b: Vec<u8> = Vec::new();
+            let mut o: Vec<usize> = vec![0];
+            let mut v = fp_columnar::ValidityMask::all_valid(n);
+            for (i, r) in rows.iter().enumerate() {
+                if let Some(s) = r {
+                    b.extend_from_slice(s.as_bytes());
+                } else {
+                    v.set(i, false);
+                }
+                o.push(b.len());
+            }
+            c.insert("name".to_string(), Column::from_utf8_values_with_validity(b, o, v));
+            DataFrame::new(Index::new_known_unique_int64_unit_range(0, n), c).unwrap()
+        };
+        let single_general = {
+            let mut c = std::collections::BTreeMap::new();
+            c.insert("name".to_string(), Column::from_values(eager_clone(&rows)).unwrap());
+            DataFrame::new(Index::new_known_unique_int64_unit_range(0, n), c).unwrap()
+        };
+        let f = write_csv_string(&single_fast).expect("fast single");
+        let g = write_csv_string(&single_general).expect("general single");
+        assert_eq!(f, g, "single-column nullable-Utf8 CSV must byte-match the general writer");
+    }
+
+    #[cfg(test)]
+    fn eager_clone(rows: &[Option<&str>]) -> Vec<Scalar> {
+        rows.iter()
+            .map(|r| match r {
+                Some(s) => Scalar::Utf8((*s).to_string()),
+                None => Scalar::Null(fp_types::NullKind::Null),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_write_json_nullable_utf8_fast_matches_serde() {
+        // A nullable contiguous-Utf8 column (LazyNullableUtf8) now takes the typed JSON
+        // fast writer (JCol::UN). It must produce BYTE-IDENTICAL output to the serde-tree
+        // fallback, which an EAGER Utf8 column with the same data falls to. Covers
+        // present/missing (→ null), empty strings, and JSON escape triggers (quote,
+        // backslash, control byte) across Records + Columns orients.
+        let rows: Vec<Option<&str>> = vec![
+            Some("Alice"),
+            None,
+            Some("a\"b"),      // embedded quote ⇒ JSON-escaped
+            Some("back\\sl"),  // backslash ⇒ escaped
+            Some(""),          // present empty string
+            None,
+            Some("tab\tnl\n"), // control bytes ⇒ escaped
+            Some("héllo"),     // multi-byte UTF-8 (passes through)
+            Some("plain"),
+        ];
+        let n = rows.len();
+
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = vec![0];
+        let mut validity = fp_columnar::ValidityMask::all_valid(n);
+        for (i, r) in rows.iter().enumerate() {
+            if let Some(s) = r {
+                bytes.extend_from_slice(s.as_bytes());
+            } else {
+                validity.set(i, false);
+            }
+            offsets.push(bytes.len());
+        }
+
+        let mk = |name_col: Column| -> DataFrame {
+            let mut cols = std::collections::BTreeMap::new();
+            cols.insert(
+                "id".to_string(),
+                Column::from_i64_values_owned((0..n as i64).collect()),
+            );
+            cols.insert("name".to_string(), name_col);
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, n),
+                cols,
+                vec!["id".to_string(), "name".to_string()],
+            )
+            .unwrap()
+        };
+        let frame_fast = mk(Column::from_utf8_values_with_validity(bytes, offsets, validity));
+        let frame_general = mk(Column::from_values(eager_clone(&rows)).unwrap());
+
+        let ctl = frame_general.column("name").unwrap();
+        assert!(
+            ctl.as_utf8_contiguous().is_none() && ctl.as_nullable_utf8_contiguous().is_none(),
+            "control name column must be on the serde tree"
+        );
+
+        for orient in [JsonOrient::Records, JsonOrient::Columns] {
+            let fast = write_json_string(&frame_fast, orient).expect("fast json");
+            let general = write_json_string(&frame_general, orient).expect("general json");
+            assert_eq!(
+                fast, general,
+                "fast nullable-Utf8 JSON ({orient:?}) must byte-match the serde tree"
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_json_nullable_numeric_fast_matches_serde() {
+        // Nullable Float64 (JCol::FN) and Int64 (JCol::IN) columns take the typed JSON
+        // fast writer. Output must be BYTE-IDENTICAL to the serde tree (which the same
+        // frame falls to when an EAGER Utf8 column forces it off the fast path). Covers:
+        // validity-clear missing (→ null), valid-bit NaN (→ null), ±inf (→ null), whole
+        // numbers, negatives, 1e20, i64::MIN/MAX; Records + Columns orients.
+        let n = 9usize;
+        let fdata: Vec<f64> = vec![
+            1.0,
+            -2.5,
+            0.0,
+            f64::NAN,
+            1e20,
+            f64::INFINITY,
+            3.14159,
+            f64::NEG_INFINITY,
+            42.0,
+        ];
+        let mut fv = fp_columnar::ValidityMask::all_valid(n);
+        fv.set(2, false); // validity-clear (data 0.0 → null)
+        // slot 3 valid-bit NaN, slots 5/7 valid ±inf → all render null.
+
+        let idata: Vec<i64> = vec![0, i64::MIN, i64::MAX, -1, 1000, 0, -999999, 7, 123456789];
+        let mut iv = fp_columnar::ValidityMask::all_valid(n);
+        iv.set(0, false);
+        iv.set(5, false);
+
+        // nullable Bool (JCol::BN): present ⇒ true/false, missing ⇒ null.
+        let bdata: Vec<bool> = vec![true, false, true, false, true, false, true, false, true];
+        let mut bv = fp_columnar::ValidityMask::all_valid(n);
+        bv.set(2, false);
+        bv.set(6, false);
+
+        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "z"];
+        let mut nb: Vec<u8> = Vec::new();
+        let mut no: Vec<usize> = vec![0];
+        for s in &names {
+            nb.extend_from_slice(s.as_bytes());
+            no.push(nb.len());
+        }
+        let eager_names: Vec<Scalar> =
+            names.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+
+        let mk = |name_col: Column| -> DataFrame {
+            let mut cols = std::collections::BTreeMap::new();
+            cols.insert(
+                "f".to_string(),
+                Column::from_f64_values_with_validity(fdata.clone(), fv.clone()),
+            );
+            cols.insert(
+                "i".to_string(),
+                Column::from_i64_values_with_validity(idata.clone(), iv.clone()),
+            );
+            cols.insert(
+                "b".to_string(),
+                Column::from_bool_values_with_validity(bdata.clone(), bv.clone()),
+            );
+            cols.insert("name".to_string(), name_col);
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, n),
+                cols,
+                vec![
+                    "f".to_string(),
+                    "i".to_string(),
+                    "b".to_string(),
+                    "name".to_string(),
+                ],
+            )
+            .unwrap()
+        };
+        let frame_fast = mk(Column::from_utf8_contiguous(nb, no));
+        let frame_general = mk(Column::from_values(eager_names).unwrap());
+
+        let ctl = frame_general.column("name").unwrap();
+        assert!(
+            ctl.as_utf8_contiguous().is_none() && ctl.as_nullable_utf8_contiguous().is_none(),
+            "control name column must force the serde tree"
+        );
+
+        for orient in [JsonOrient::Records, JsonOrient::Columns] {
+            let fast = write_json_string(&frame_fast, orient).expect("fast json");
+            let general = write_json_string(&frame_general, orient).expect("general json");
+            assert_eq!(
+                fast, general,
+                "fast nullable-numeric JSON ({orient:?}) must byte-match the serde tree"
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_csv_nullable_typed_fast_matches_general() {
+        // Nullable Float64 (FastCol::FN), Int64 (FastCol::IN), and Bool (FastCol::BN)
+        // columns take the fast CSV writer. Output must be BYTE-IDENTICAL to the general
+        // (Scalar) writer, which the same frame falls to when an EAGER Utf8 column forces
+        // it off the fast path.
+        // Covers: validity-clear missing, a valid-bit NaN (still → na_rep), whole numbers
+        // ("1.0"), negatives, large magnitude (sci notation), i64::MIN/MAX; default +
+        // na_rep configs.
+        let n = 9usize;
+        let fdata: Vec<f64> = vec![1.0, -2.5, 0.0, f64::NAN, 1e20, -0.0, 3.14159, 100.0, 42.0];
+        let mut fv = fp_columnar::ValidityMask::all_valid(n);
+        fv.set(2, false); // validity-clear (data 0.0 → must render na_rep, not "0.0")
+        fv.set(7, false); // validity-clear
+        // slot 3 is a VALID-bit NaN (fv still set) → must also render na_rep.
+
+        let idata: Vec<i64> = vec![0, i64::MIN, i64::MAX, -1, 1000, 0, -999999, 7, 123456789];
+        let mut iv = fp_columnar::ValidityMask::all_valid(n);
+        iv.set(0, false); // validity-clear (data 0 → na_rep, not "0")
+        iv.set(5, false);
+
+        // nullable Bool: present ⇒ True/False, missing ⇒ na_rep.
+        let bdata = vec![true, false, true, false, true, false, true, false, true];
+        let mut bv = fp_columnar::ValidityMask::all_valid(n);
+        bv.set(1, false); // validity-clear (data false → na_rep, not "False")
+        bv.set(8, false); // validity-clear (data true → na_rep, not "True")
+
+        let names: Vec<&str> = vec![
+            "a", "b,c", "d", "e", "", "f\"g", "h", "plain", "z",
+        ];
+        let mut nb: Vec<u8> = Vec::new();
+        let mut no: Vec<usize> = vec![0];
+        for s in &names {
+            nb.extend_from_slice(s.as_bytes());
+            no.push(nb.len());
+        }
+        let eager_names: Vec<Scalar> =
+            names.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+
+        let mk = |name_col: Column| -> DataFrame {
+            let mut cols = std::collections::BTreeMap::new();
+            cols.insert(
+                "f".to_string(),
+                Column::from_f64_values_with_validity(fdata.clone(), fv.clone()),
+            );
+            cols.insert(
+                "i".to_string(),
+                Column::from_i64_values_with_validity(idata.clone(), iv.clone()),
+            );
+            cols.insert(
+                "b".to_string(),
+                Column::from_bool_values_with_validity(bdata.clone(), bv.clone()),
+            );
+            cols.insert("name".to_string(), name_col);
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, n),
+                cols,
+                vec![
+                    "f".to_string(),
+                    "i".to_string(),
+                    "b".to_string(),
+                    "name".to_string(),
+                ],
+            )
+            .unwrap()
+        };
+        let frame_fast = mk(Column::from_utf8_contiguous(nb, no));
+        let frame_general = mk(Column::from_values(eager_names).unwrap());
+
+        // The eager name column forces the whole general frame off the fast path.
+        let ctl = frame_general.column("name").unwrap();
+        assert!(
+            ctl.as_utf8_contiguous().is_none() && ctl.as_nullable_utf8_contiguous().is_none(),
+            "control name column must force the general writer"
+        );
+
+        for options in [
+            CsvWriteOptions::default(),
+            CsvWriteOptions {
+                na_rep: "NA".to_string(),
+                ..CsvWriteOptions::default()
+            },
+        ] {
+            assert!(
+                super::try_write_csv_typed(&frame_fast, &options).is_some(),
+                "nullable typed frame must stay on the fast CSV writer"
+            );
+            let fast = write_csv_string_with_options(&frame_fast, &options).expect("fast");
+            let general = write_csv_string_with_options(&frame_general, &options).expect("general");
+            assert_eq!(
+                fast, general,
+                "fast nullable-numeric CSV must byte-match the general writer"
+            );
+        }
     }
 
     #[test]
@@ -16047,13 +19754,35 @@ mod tests {
     // ── Deferred reader surfaces 2yy4d ─────────────────────────────────
 
     #[test]
-    fn read_clipboard_rejects_with_deferred_marker_2yy4d() {
-        let err = super::read_clipboard().expect_err("must reject");
+    fn clipboard_tsv_round_trips_through_read_clipboard_str() {
+        let frame = make_test_dataframe();
+        // The pure write core: the exact tab-separated bytes `to_clipboard` puts
+        // on the clipboard (index included, pandas excel=True).
+        let tsv = super::clipboard_tsv(&frame).expect("tsv");
         assert!(
-            matches!(&err, super::IoError::Deferred(message)
-                if message.contains("read_clipboard") && message.contains("headless")),
-            "unexpected error: {err:?}"
+            tsv.contains('\t'),
+            "clipboard payload must be tab-separated"
         );
+
+        // The pure read core round-trips the payload back to a frame with the
+        // same shape (the written index becomes a leading column, matching
+        // pandas read_clipboard's default no-index-col behavior).
+        let parsed = super::read_clipboard_str(&tsv).expect("parse clipboard tsv");
+        assert_eq!(parsed.len(), frame.len());
+        assert_eq!(parsed.column_names().len(), frame.column_names().len() + 1);
+    }
+
+    #[test]
+    fn read_clipboard_is_ok_or_reports_missing_backend() {
+        // Environment-independent: on a box with wl-paste/xclip/xsel/pbpaste it
+        // reads real clipboard text (Ok or a parse error); headless it reports a
+        // Clipboard backend error. Never a Deferred reject and never a panic.
+        match super::read_clipboard() {
+            Ok(_) => {}
+            Err(super::IoError::Clipboard(_)) | Err(super::IoError::Csv(_)) => {}
+            Err(super::IoError::MissingHeaders) => {}
+            other => panic!("unexpected read_clipboard result: {other:?}"),
+        }
     }
 
     #[test]
@@ -16073,12 +19802,13 @@ mod tests {
         use super::DataFrameIoExt;
 
         let frame = make_test_dataframe();
-        let clipboard_err = frame
-            .to_clipboard()
-            .expect_err("must reject clipboard writer");
-        assert!(
-            matches!(&clipboard_err, super::IoError::Deferred(message) if message.contains("to_clipboard") && message.contains("headless"))
-        );
+        // Clipboard writer is implemented (subprocess backend): Ok where a
+        // backend exists, else a Clipboard error — never a Deferred reject.
+        match frame.to_clipboard() {
+            Ok(()) => {}
+            Err(super::IoError::Clipboard(_)) => {}
+            other => panic!("unexpected to_clipboard result: {other:?}"),
+        }
 
         let gbq_err = frame
             .to_gbq("dataset.table", Some("project"))
@@ -16094,7 +19824,7 @@ mod tests {
     }
 
     #[test]
-    fn series_clipboard_writer_rejects_with_deferred_marker() {
+    fn series_clipboard_writer_is_ok_or_reports_missing_backend() {
         use super::SeriesIoExt;
 
         let source = Series::from_values(
@@ -16103,12 +19833,11 @@ mod tests {
             vec![Scalar::Int64(10), Scalar::Int64(12)],
         )
         .expect("source series");
-        let err = source
-            .to_clipboard()
-            .expect_err("must reject series clipboard writer");
-        assert!(
-            matches!(&err, super::IoError::Deferred(message) if message.contains("to_clipboard") && message.contains("headless"))
-        );
+        match source.to_clipboard() {
+            Ok(()) => {}
+            Err(super::IoError::Clipboard(_)) => {}
+            other => panic!("unexpected series to_clipboard result: {other:?}"),
+        }
     }
 
     #[test]
@@ -16348,10 +20077,10 @@ mod tests {
                 .len(),
             frame.index().len()
         );
-        let orc = frame.to_orc_bytes().expect("orc bytes through extension");
-        assert_eq!(
-            read_orc_bytes(&orc).expect("orc roundtrip").index().len(),
-            frame.index().len()
+        assert_orc_disabled(
+            frame
+                .to_orc_bytes()
+                .expect_err("ORC must fail closed under no-Tokio policy"),
         );
         let feather = frame
             .to_feather_bytes()
@@ -16611,38 +20340,14 @@ mod tests {
     }
 
     #[test]
-    fn orc_bytes_roundtrip_preserves_supported_columns() {
+    fn orc_bytes_fail_closed_under_no_tokio_policy() {
         let frame = make_test_dataframe();
-        let bytes = write_orc_bytes(&frame).expect("write orc");
-        assert!(bytes.starts_with(b"ORC"));
-
-        let frame2 = read_orc_bytes(&bytes).expect("read orc");
-        assert_eq!(frame2.index().len(), 3);
-        assert_eq!(
-            frame2
-                .column_names()
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>(),
-            vec!["ints", "floats", "names"]
-        );
-
-        assert_eq!(
-            frame2.column("ints").unwrap().values()[0],
-            Scalar::Int64(10)
-        );
-        assert_eq!(
-            frame2.column("floats").unwrap().values()[1],
-            Scalar::Float64(2.5)
-        );
-        assert_eq!(
-            frame2.column("names").unwrap().values()[2],
-            Scalar::Utf8("carol".into())
-        );
+        assert_orc_disabled(write_orc_bytes(&frame).expect_err("ORC writer must fail closed"));
+        assert_orc_disabled(read_orc_bytes(b"ORC").expect_err("ORC reader must fail closed"));
     }
 
     #[test]
-    fn orc_file_and_extension_aliases_roundtrip() {
+    fn orc_file_and_extension_aliases_fail_closed_under_no_tokio_policy() {
         use super::DataFrameIoExt;
 
         let frame = make_test_dataframe();
@@ -16657,50 +20362,28 @@ mod tests {
             line!()
         ));
 
-        write_orc(&frame, &free_path).expect("write orc path");
-        let free_roundtrip = read_orc(&free_path).expect("read orc path");
-        assert!(free_roundtrip.equals(&frame));
-
-        frame.to_orc_file(&trait_path).expect("trait orc path");
-        let trait_roundtrip = read_orc(&trait_path).expect("read trait orc path");
-        assert!(trait_roundtrip.equals(&frame));
-
-        let bytes = frame.to_orc_bytes().expect("trait orc bytes");
-        assert!(
-            read_orc_bytes(&bytes)
-                .expect("read trait orc bytes")
-                .equals(&frame)
-        );
-    }
-
-    #[test]
-    fn orc_row_multiindex_roundtrip_restores_logical_row_axis() {
-        let frame = make_row_multiindex_test_dataframe();
-        let bytes = write_orc_bytes(&frame).expect("write orc");
-        let roundtrip = read_orc_bytes(&bytes).expect("read orc");
-
-        assert!(roundtrip.equals(&frame));
-        assert!(roundtrip.column("__index_level_0__").is_none());
-        assert_eq!(
-            roundtrip
-                .row_multiindex()
-                .expect("row multiindex should be restored")
-                .get_level_values(0)
-                .unwrap()
-                .labels(),
+        assert_orc_disabled(write_orc(&frame, &free_path).expect_err("free ORC path writer"));
+        assert_orc_disabled(read_orc(&free_path).expect_err("free ORC path reader"));
+        assert_orc_disabled(
             frame
-                .row_multiindex()
-                .expect("source row multiindex")
-                .get_level_values(0)
-                .unwrap()
-                .labels()
+                .to_orc_file(&trait_path)
+                .expect_err("trait ORC path writer"),
+        );
+        assert_orc_disabled(frame.to_orc_bytes().expect_err("trait ORC bytes writer"));
+    }
+
+    #[test]
+    fn orc_row_multiindex_fails_closed_before_materialization() {
+        let frame = make_row_multiindex_test_dataframe();
+        assert_orc_disabled(
+            write_orc_bytes(&frame).expect_err("ORC writer must fail closed for any frame shape"),
         );
     }
 
     #[test]
-    fn orc_reader_rejects_malformed_input() {
+    fn orc_reader_rejects_malformed_input_without_loading_backend() {
         let err = read_orc_bytes(b"not an orc file").expect_err("malformed orc should fail");
-        assert!(matches!(err, IoError::Orc(_)));
+        assert_orc_disabled(err);
     }
 
     // ── Excel I/O tests ──────────────────────────────────────────────
@@ -18377,11 +22060,12 @@ mod tests {
         .expect("read_sql_query with options");
 
         assert_eq!(frame.column_names(), vec!["ts", "value"]);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.column("ts").unwrap().values(),
             &[
-                Scalar::Utf8("2024-02-01 05:06:07".to_owned()),
-                Scalar::Utf8("2024-03-03 00:00:00".to_owned())
+                Scalar::Datetime64(1_706_763_967_000_000_000),
+                Scalar::Datetime64(1_709_424_000_000_000_000)
             ]
         );
         assert_eq!(
@@ -18480,11 +22164,12 @@ mod tests {
             &[IndexLabel::Int64(101), IndexLabel::Int64(102)]
         );
         assert_eq!(frame.column_names(), vec!["ts", "amount", "label"]);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.column("ts").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-15 00:00:00".to_owned()),
-                Scalar::Utf8("2024-01-16 00:00:00".to_owned())
+                Scalar::Datetime64(1_705_276_800_000_000_000),
+                Scalar::Datetime64(1_705_363_200_000_000_000)
             ]
         );
         assert_eq!(
@@ -18593,9 +22278,10 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].column("ts").unwrap().values(),
-            &[Scalar::Utf8("2024-02-01 05:06:07".to_owned())]
+            &[Scalar::Datetime64(1_706_763_967_000_000_000)]
         );
         assert_eq!(
             chunks[0].column("amount").unwrap().values(),
@@ -18603,7 +22289,7 @@ mod tests {
         );
         assert_eq!(
             chunks[1].column("ts").unwrap().values(),
-            &[Scalar::Utf8("2024-03-03 00:00:00".to_owned())]
+            &[Scalar::Datetime64(1_709_424_000_000_000_000)]
         );
         assert_eq!(
             chunks[1].column("amount").unwrap().values(),
@@ -18774,9 +22460,10 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].index().name(), Some("ts"));
+        // parse_dates column promoted to index → DatetimeIndex (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].index().labels(),
-            &[IndexLabel::Utf8("2024-02-01 05:06:07".to_owned())]
+            &[IndexLabel::Datetime64(1_706_763_967_000_000_000)]
         );
         assert!(chunks[0].column("ts").is_none());
         assert_eq!(
@@ -18785,7 +22472,7 @@ mod tests {
         );
         assert_eq!(
             chunks[1].index().labels(),
-            &[IndexLabel::Utf8("2024-03-03 00:00:00".to_owned())]
+            &[IndexLabel::Datetime64(1_709_424_000_000_000_000)]
         );
         assert_eq!(
             chunks[1].column("amount").unwrap().values(),
@@ -18939,11 +22626,12 @@ mod tests {
         .expect("read indexed query frame");
 
         assert_eq!(frame.index().name(), Some("ts"));
+        // parse_dates column promoted to index → DatetimeIndex (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.index().labels(),
             &[
-                IndexLabel::Utf8("2024-02-01 05:06:07".to_owned()),
-                IndexLabel::Utf8("2024-03-03 00:00:00".to_owned())
+                IndexLabel::Datetime64(1_706_763_967_000_000_000),
+                IndexLabel::Datetime64(1_709_424_000_000_000_000)
             ]
         );
         assert!(frame.column("ts").is_none());
@@ -19200,11 +22888,12 @@ mod tests {
         )
         .expect("read table with options");
 
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.column("ts").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-15 00:00:00".to_owned()),
-                Scalar::Utf8("2024-02-01 05:06:07".to_owned())
+                Scalar::Datetime64(1_705_276_800_000_000_000),
+                Scalar::Datetime64(1_706_763_967_000_000_000)
             ]
         );
         assert_eq!(
@@ -19249,11 +22938,12 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].column("ts").unwrap().values(),
             &[
-                Scalar::Utf8("2024-03-01 00:00:00".to_owned()),
-                Scalar::Utf8("2024-03-02 00:00:00".to_owned())
+                Scalar::Datetime64(1_709_251_200_000_000_000),
+                Scalar::Datetime64(1_709_337_600_000_000_000)
             ]
         );
         assert_eq!(
@@ -19631,8 +23321,8 @@ mod tests {
         assert_eq!(
             frame.index().labels(),
             &[
-                IndexLabel::Utf8("2024-04-01 00:00:00".to_owned()),
-                IndexLabel::Utf8("2024-04-02 03:04:05".to_owned())
+                IndexLabel::Datetime64(1_711_929_600_000_000_000),
+                IndexLabel::Datetime64(1_712_027_045_000_000_000)
             ]
         );
         assert!(frame.column("ts").is_none());
@@ -19715,11 +23405,12 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].index().name(), Some("ts"));
+        // parse_dates column promoted to index → DatetimeIndex (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].index().labels(),
             &[
-                IndexLabel::Utf8("2024-05-01 00:00:00".to_owned()),
-                IndexLabel::Utf8("2024-05-02 00:00:00".to_owned())
+                IndexLabel::Datetime64(1_714_521_600_000_000_000),
+                IndexLabel::Datetime64(1_714_608_000_000_000_000)
             ]
         );
         assert!(chunks[0].column("ts").is_none());
@@ -19729,7 +23420,7 @@ mod tests {
         );
         assert_eq!(
             chunks[1].index().labels(),
-            &[IndexLabel::Utf8("2024-05-03 00:00:00".to_owned())]
+            &[IndexLabel::Datetime64(1_714_694_400_000_000_000)]
         );
         assert_eq!(
             chunks[1].column("amount").unwrap().values(),
@@ -19839,13 +23530,14 @@ mod tests {
         )
         .expect("read sql with parse_dates");
 
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.column("ts").unwrap().values()[0],
-            Scalar::Utf8("2024-01-15 00:00:00".into())
+            Scalar::Datetime64(1_705_276_800_000_000_000)
         );
         assert_eq!(
             frame.column("ts").unwrap().values()[1],
-            Scalar::Utf8("2024-02-01 05:06:07".into())
+            Scalar::Datetime64(1_706_763_967_000_000_000)
         );
         assert_eq!(frame.column("value").unwrap().values()[0], Scalar::Int64(1));
         assert_eq!(frame.column("value").unwrap().values()[1], Scalar::Int64(2));
@@ -20160,9 +23852,10 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].column("ts").unwrap().values(),
-            &[Scalar::Utf8("2024-02-01 05:06:07".to_owned())]
+            &[Scalar::Datetime64(1_706_763_967_000_000_000)]
         );
         assert_eq!(
             chunks[0].column("amount").unwrap().values(),
@@ -20170,7 +23863,7 @@ mod tests {
         );
         assert_eq!(
             chunks[1].column("ts").unwrap().values(),
-            &[Scalar::Utf8("2024-03-03 00:00:00".to_owned())]
+            &[Scalar::Datetime64(1_709_424_000_000_000_000)]
         );
         assert_eq!(
             chunks[1].column("amount").unwrap().values(),
@@ -20977,14 +24670,14 @@ mod tests {
 
     #[test]
     fn csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value() {
-        // pandas pd.read_csv(parse_dates=["ts"]) normalizes each value
-        // independently when the column has mixed naive + aware timestamps:
-        // the naive entry stays naive ("YYYY-MM-DD HH:MM:SS"), and the
-        // aware entry is rewritten to the offset form ("...+00:00").
-        // The previous "preserves object" behavior locked the entire
-        // column to the first inferred timezone pattern and silently
-        // rejected mismatched values; conformance fixture FP-P2D-429
-        // documents the pandas-2.2.3 expectation.
+        // pandas pd.read_csv(parse_dates=["ts"]) CANNOT unify a column mixing
+        // tz-naive and tz-aware timestamps into datetime64[ns], so it keeps the
+        // whole column as object — a Series of mixed Timestamp objects whose
+        // str() forms are the naive `YYYY-MM-DD HH:MM:SS` and the aware
+        // `... +HH:MM`. FrankenPandas reproduces that (br-frankenpandas-unz0t):
+        // both entries are normalized to their pandas object-string form rather
+        // than coercing the naive one to Datetime64 (which contradicted both
+        // pandas and conformance fixture FP-P2D-mixed-timezone).
         let input = "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n";
         let opts = CsvReadOptions {
             parse_dates: Some(vec!["ts".to_owned()]),
@@ -21005,6 +24698,109 @@ mod tests {
     }
 
     #[test]
+    fn csv_parse_dates_fixed_naive_fast_path_accepts_only_safe_domain() {
+        let values = vec![
+            Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
+            Scalar::Utf8("2024-02-29".to_owned()),
+            Scalar::Null(NullKind::NaT),
+        ];
+        let parsed = super::parse_csv_fixed_naive_datetime_values(&values).expect("fixed parse");
+        assert_eq!(
+            parsed,
+            vec![
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(1_709_164_800_000_000_000),
+                Scalar::Datetime64(Timestamp::NAT),
+            ]
+        );
+
+        for rejected in [
+            "2024-01-15T10:30:00Z",
+            "2024-02-30",
+            "2024-01-15 10:30:00.123",
+        ] {
+            assert!(
+                super::parse_csv_fixed_naive_datetime_values(&[Scalar::Utf8(rejected.to_owned())])
+                    .is_none(),
+                "{rejected:?} must use the general parse_dates path"
+            );
+        }
+    }
+
+    #[test]
+    fn csv_parse_dates_raw_fast_path_preserves_na_semantics() {
+        let input = "ts,value\nMISSING,1\n2024-01-15 10:30:00,2\n";
+        let opts = CsvReadOptions {
+            parse_dates: Some(vec!["ts".to_owned()]),
+            na_values: vec!["MISSING".to_owned()],
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(
+            frame.column("ts").unwrap().values(),
+            &[
+                Scalar::Datetime64(Timestamp::NAT),
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+            ]
+        );
+        assert_eq!(
+            frame.column("value").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn csv_parse_dates_deferred_fallback_replays_scalar_inference() {
+        let input = "ts,value\n2024-01-15 10:30:00,1\nnot-a-date,2\n";
+        let opts = CsvReadOptions {
+            parse_dates: Some(vec!["ts".to_owned()]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(
+            frame.column("ts").unwrap().values(),
+            &[
+                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
+                Scalar::Utf8("not-a-date".to_owned()),
+            ]
+        );
+
+        let keep_na_literal = CsvReadOptions {
+            parse_dates: Some(vec!["ts".to_owned()]),
+            keep_default_na: false,
+            ..Default::default()
+        };
+        let frame = read_csv_with_options("ts\nNA\n2024-01-15\n", &keep_na_literal).expect("parse");
+        assert_eq!(
+            frame.column("ts").unwrap().values(),
+            &[
+                Scalar::Utf8("NA".to_owned()),
+                Scalar::Utf8("2024-01-15".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn csv_parse_dates_deferred_mask_tracks_usecols_and_headerless() {
+        let input = "2024-01-15 10:30:00,10\n2024-01-16 11:45:30,20\n";
+        let opts = CsvReadOptions {
+            has_headers: false,
+            parse_dates: Some(vec!["column_0".to_owned()]),
+            usecols: Some(vec!["column_0".to_owned()]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.column_names(), vec!["column_0"]);
+        assert_eq!(
+            frame.column("column_0").unwrap().values(),
+            &[
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(1_705_405_530_000_000_000),
+            ]
+        );
+    }
+
+    #[test]
     fn csv_parse_dates_combined_columns_replaces_source_columns() {
         let input = "date,time,value\n2024-01-15,10:30:00,1\n2024-01-16,11:45:30,2\n";
         let opts = CsvReadOptions {
@@ -21016,8 +24812,8 @@ mod tests {
         assert_eq!(
             frame.column("date_time").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
-                Scalar::Utf8("2024-01-16 11:45:30".to_owned()),
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(1_705_405_530_000_000_000),
             ]
         );
         assert!(frame.column("date").is_none());
@@ -21047,8 +24843,8 @@ mod tests {
         assert_eq!(
             frame.column("timestamp").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
-                Scalar::Utf8("2024-01-16 11:45:30".to_owned()),
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(1_705_405_530_000_000_000),
             ]
         );
     }
@@ -21076,8 +24872,8 @@ mod tests {
         assert_eq!(
             frame.column("start").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-01 09:00:00".to_owned()),
-                Scalar::Utf8("2024-02-01 09:00:00".to_owned()),
+                Scalar::Datetime64(1_704_099_600_000_000_000),
+                Scalar::Datetime64(1_706_778_000_000_000_000),
             ]
         );
     }
@@ -21823,7 +25619,9 @@ mod tests {
         )
         .expect("read with parse_dates priority");
         let col = frame.column("ts").expect("ts");
-        assert_eq!(col.dtype(), DType::Utf8);
+        // parse_dates wins over the dtype override and yields typed
+        // Datetime64[ns] (br-frankenpandas-0ezw7).
+        assert_eq!(col.dtype(), DType::Datetime64);
     }
 
     // ── Schema probes (br-frankenpandas-6dk9 / fd90.13) ─────────────────
@@ -25927,13 +29725,12 @@ mod tests {
             },
         )
         .unwrap();
-        // Only id + ts surfaced; ts was reformatted by parse_dates
-        // (the project-then-coerce path emits the canonical
-        // 'YYYY-MM-DD HH:MM:SS' shape via Scalar::Utf8).
+        // Only id + ts surfaced; ts was coerced by parse_dates into a typed
+        // Datetime64[ns] column (br-frankenpandas-0ezw7).
         assert_eq!(frame.column_names(), vec!["id", "ts"]);
         assert_eq!(
             frame.column("ts").unwrap().values()[0],
-            Scalar::Utf8("2024-01-15 00:00:00".to_owned())
+            Scalar::Datetime64(1_705_276_800_000_000_000)
         );
     }
 
@@ -28895,5 +32692,370 @@ mod merge_simple_numeric_csv_chunks_tests {
         let mut chunks = build_chunks(2, 10, 4, |_| usize::MAX);
         chunks[1].0.pop();
         assert!(merge_simple_numeric_csv_chunks(chunks, 4).is_none());
+    }
+
+    /// The typed streaming `to_json(records)` fast path must be byte-for-byte
+    /// identical to the serde-tree reference across numeric edge values, key
+    /// escaping, and the fall-back surface. (br-frankenpandas-jsonrec)
+    #[test]
+    fn to_json_records_typed_fast_path_bit_identical_to_serde() {
+        use std::collections::BTreeMap;
+
+        use fp_columnar::Column;
+        use fp_frame::DataFrame;
+        use fp_index::Index;
+        use fp_types::Scalar;
+
+        use super::{JsonOrient, write_json_string};
+        fn serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let promotions = vec![false; headers.len()];
+            super::write_json_records_serde(frame, &headers, &promotions).expect("serde ref")
+        }
+        // JSONL serde reference: a Map per row serialized independently, joined
+        // by '\n' (exactly the pre-fast-path `write_jsonl_string` body).
+        fn jsonl_serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let row_count = frame.index().len();
+            let mut lines = Vec::with_capacity(row_count);
+            for row_idx in 0..row_count {
+                let mut obj = serde_json::Map::new();
+                for name in &headers {
+                    let val = frame
+                        .column(name)
+                        .and_then(|c| c.value(row_idx))
+                        .map(|v| super::scalar_to_json_with_column_promotion(v, false))
+                        .unwrap_or(serde_json::Value::Null);
+                    obj.insert(name.clone(), val);
+                }
+                lines.push(serde_json::to_string(&serde_json::Value::Object(obj)).unwrap());
+            }
+            lines.join("\n")
+        }
+        fn assert_jsonl_matches(frame: &DataFrame) {
+            assert_eq!(
+                super::write_jsonl_string(frame).expect("jsonl"),
+                jsonl_serde_ref(frame)
+            );
+        }
+        // Columns orient: compare the typed fast path's end-to-end output to the
+        // serde-tree output captured by temporarily... there is no separate serde
+        // entry point, so compare against a from-scratch serde Map-of-Maps ref.
+        fn columns_serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let mut outer = serde_json::Map::new();
+            for name in &headers {
+                let mut col_obj = serde_json::Map::new();
+                if let Some(col) = frame.column(name.as_str()) {
+                    for (label, val) in frame.index().labels().iter().zip(col.values()) {
+                        col_obj.insert(
+                            super::index_label_json_key(label),
+                            super::scalar_to_json_with_column_promotion(val, false),
+                        );
+                    }
+                }
+                outer.insert(name.clone(), serde_json::Value::Object(col_obj));
+            }
+            serde_json::to_string(&serde_json::Value::Object(outer)).unwrap()
+        }
+        fn assert_columns_matches(frame: &DataFrame) {
+            assert_eq!(
+                write_json_string(frame, JsonOrient::Columns).expect("cols"),
+                columns_serde_ref(frame),
+            );
+        }
+        // Index orient: from-scratch serde Map-of-row-Maps reference.
+        fn index_serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let mut outer = serde_json::Map::new();
+            for row_idx in 0..frame.index().len() {
+                let mut row_obj = serde_json::Map::new();
+                for name in &headers {
+                    let val = frame
+                        .column(name.as_str())
+                        .and_then(|c| c.value(row_idx))
+                        .map(|v| super::scalar_to_json_with_column_promotion(v, false))
+                        .unwrap_or(serde_json::Value::Null);
+                    row_obj.insert(name.clone(), val);
+                }
+                let key = super::index_label_json_key(&frame.index().labels()[row_idx]);
+                outer.insert(key, serde_json::Value::Object(row_obj));
+            }
+            serde_json::to_string(&serde_json::Value::Object(outer)).unwrap()
+        }
+        fn assert_index_matches(frame: &DataFrame) {
+            assert_eq!(
+                write_json_string(frame, JsonOrient::Index).expect("index"),
+                index_serde_ref(frame),
+            );
+        }
+        // Values orient: from-scratch serde array-of-arrays reference.
+        fn values_serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let mut data = Vec::with_capacity(frame.index().len());
+            for row_idx in 0..frame.index().len() {
+                let row: Vec<serde_json::Value> = headers
+                    .iter()
+                    .map(|name| {
+                        frame
+                            .column(name.as_str())
+                            .and_then(|c| c.value(row_idx))
+                            .map(|v| super::scalar_to_json_with_column_promotion(v, false))
+                            .unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                data.push(serde_json::Value::Array(row));
+            }
+            serde_json::to_string(&serde_json::Value::Array(data)).unwrap()
+        }
+        fn assert_values_matches(frame: &DataFrame) {
+            assert_eq!(
+                write_json_string(frame, JsonOrient::Values).expect("values"),
+                values_serde_ref(frame),
+            );
+        }
+        // Split orient: from-scratch serde {columns, index, data} reference.
+        fn split_serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let col_array: Vec<serde_json::Value> = headers
+                .iter()
+                .map(|h| serde_json::Value::String(h.clone()))
+                .collect();
+            let index_array: Vec<serde_json::Value> = frame
+                .index()
+                .labels()
+                .iter()
+                .map(super::index_label_to_json)
+                .collect();
+            let mut data = Vec::with_capacity(frame.index().len());
+            for row_idx in 0..frame.index().len() {
+                let row: Vec<serde_json::Value> = headers
+                    .iter()
+                    .map(|name| {
+                        frame
+                            .column(name.as_str())
+                            .and_then(|c| c.value(row_idx))
+                            .map(|v| super::scalar_to_json_with_column_promotion(v, false))
+                            .unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                data.push(serde_json::Value::Array(row));
+            }
+            let mut obj = serde_json::Map::new();
+            obj.insert("columns".into(), serde_json::Value::Array(col_array));
+            obj.insert("index".into(), serde_json::Value::Array(index_array));
+            obj.insert("data".into(), serde_json::Value::Array(data));
+            serde_json::to_string(&serde_json::Value::Object(obj)).unwrap()
+        }
+        fn assert_split_matches(frame: &DataFrame) {
+            assert_eq!(
+                write_json_string(frame, JsonOrient::Split).expect("split"),
+                split_serde_ref(frame),
+            );
+        }
+        fn idx(n: usize) -> Index {
+            Index::new_known_unique_int64_unit_range(0, n)
+        }
+
+        // Edge-laden Int64 + Float64 + Bool frame; the floats span integer-valued,
+        // signed-zero, sub-1e-4 (ryu exponent), huge, tiny, and ±Inf (which the
+        // typed path emits as `null`, matching serde's NaN/Inf arm).
+        let ints = vec![
+            0i64,
+            -1,
+            1,
+            i64::MIN,
+            i64::MAX,
+            -123456789,
+            999,
+            -7,
+            42,
+            1_000_000_000,
+        ];
+        let floats = vec![
+            0.0,
+            -0.0,
+            0.5,
+            100.0,
+            -100.0,
+            1e20,
+            1e-20,
+            1.5e-300,
+            f64::MAX,
+            f64::INFINITY,
+        ];
+        let bools = vec![
+            true, false, true, true, false, false, true, false, true, false,
+        ];
+        let n = ints.len();
+        let mut cols: BTreeMap<String, Column> = BTreeMap::new();
+        cols.insert("a".to_string(), Column::from_i64_values(ints));
+        cols.insert("b".to_string(), Column::from_f64_values(floats));
+        cols.insert("c".to_string(), Column::from_bool_values(bools));
+        // Datetime64 column (epoch-ms ints in JSON), incl. a NaT (→ null) and a
+        // pre-epoch negative ns (truncating /1_000_000 toward zero, matching serde).
+        let dts = vec![
+            0i64,
+            946_684_800_000_000_000,
+            i64::MIN, // NaT
+            -1_500_000_000,
+            1_000,
+            1_500_000,
+            -86_400_000_000_000,
+            999_999,
+            123_456_789,
+            -999_999,
+        ];
+        cols.insert("dt".to_string(), Column::from_datetime64_values(dts));
+        // A column name that requires JSON escaping, to exercise pre-serialized keys.
+        cols.insert(
+            "we\"ird\tkey".to_string(),
+            Column::from_i64_values((0..n as i64).collect()),
+        );
+        let frame = DataFrame::new(idx(n), cols).expect("frame");
+        // Fast path must actually fire here (all-valid numeric/bool).
+        assert!(super::try_write_json_records_typed(&frame, false).is_some());
+        assert!(super::try_write_json_records_typed(&frame, true).is_some());
+        assert!(super::try_write_json_columns_typed(&frame).is_some());
+        assert!(super::try_write_json_index_typed(&frame).is_some());
+        assert!(super::try_write_json_values_typed(&frame).is_some());
+        assert!(super::try_write_json_split_typed(&frame).is_some());
+        assert_eq!(
+            write_json_string(&frame, JsonOrient::Records).expect("json"),
+            serde_ref(&frame),
+        );
+        assert_jsonl_matches(&frame);
+        assert_columns_matches(&frame);
+        assert_index_matches(&frame);
+        assert_values_matches(&frame);
+        assert_split_matches(&frame);
+
+        // -Inf in isolation.
+        let mut c2: BTreeMap<String, Column> = BTreeMap::new();
+        c2.insert(
+            "x".to_string(),
+            Column::from_f64_values(vec![f64::NEG_INFINITY, -2.5, 3.0]),
+        );
+        let f2 = DataFrame::new(idx(3), c2).expect("frame2");
+        assert_eq!(
+            write_json_string(&f2, JsonOrient::Records).expect("json2"),
+            serde_ref(&f2),
+        );
+        assert_jsonl_matches(&f2);
+        assert_columns_matches(&f2);
+        assert_index_matches(&f2);
+        assert_values_matches(&f2);
+        assert_split_matches(&f2);
+
+        // Empty frame (0 rows) and a single-column int frame.
+        let mut c3: BTreeMap<String, Column> = BTreeMap::new();
+        c3.insert("only".to_string(), Column::from_i64_values(vec![]));
+        let f3 = DataFrame::new(idx(0), c3).expect("frame3");
+        assert_eq!(
+            write_json_string(&f3, JsonOrient::Records).expect("json3"),
+            serde_ref(&f3),
+        );
+        assert_jsonl_matches(&f3);
+        assert_columns_matches(&f3);
+        assert_index_matches(&f3);
+        assert_values_matches(&f3);
+        assert_split_matches(&f3);
+
+        // A Utf8 column forces the serde fallback; equality must still hold
+        // (trivially, since the fast path declines).
+        let mut c4: BTreeMap<String, Column> = BTreeMap::new();
+        c4.insert("n".to_string(), Column::from_i64_values(vec![1, 2]));
+        c4.insert(
+            "s".to_string(),
+            Column::from_values(vec![Scalar::Utf8("hi".into()), Scalar::Utf8("x".into())])
+                .expect("utf8 col"),
+        );
+        let f4 = DataFrame::new(idx(2), c4).expect("frame4");
+        assert!(super::try_write_json_records_typed(&f4, false).is_none());
+        assert_eq!(
+            write_json_string(&f4, JsonOrient::Records).expect("json4"),
+            serde_ref(&f4),
+        );
+        assert_jsonl_matches(&f4);
+        assert_columns_matches(&f4);
+        assert_index_matches(&f4);
+        assert_values_matches(&f4);
+        assert_split_matches(&f4);
+
+        // Contiguous Utf8 column (the read-path backing the typed Utf8 arm
+        // accepts), with strings spanning the no-escape fast path and every
+        // serde escape case: quote, backslash, control bytes, and multi-byte
+        // UTF-8 (which serde passes through verbatim).
+        let strs = [
+            "plain",
+            "a\"b",
+            "c\\d",
+            "e\nf",
+            "g\th",
+            "i\u{0001}j",
+            "café",
+            "🦀x",
+            "",
+            "trailing ",
+        ];
+        let mut sbytes: Vec<u8> = Vec::new();
+        let mut soff: Vec<usize> = vec![0];
+        for s in strs {
+            sbytes.extend_from_slice(s.as_bytes());
+            soff.push(sbytes.len());
+        }
+        let mut c5: BTreeMap<String, Column> = BTreeMap::new();
+        c5.insert(
+            "n".to_string(),
+            Column::from_i64_values((0..strs.len() as i64).collect()),
+        );
+        c5.insert("s".to_string(), Column::from_utf8_contiguous(sbytes, soff));
+        let f5 = DataFrame::new(idx(strs.len()), c5).expect("frame5");
+        assert!(super::try_write_json_records_typed(&f5, false).is_some());
+        assert_eq!(
+            write_json_string(&f5, JsonOrient::Records).expect("json5"),
+            serde_ref(&f5),
+        );
+        assert_jsonl_matches(&f5);
+        assert_columns_matches(&f5);
+        assert_index_matches(&f5);
+        assert_values_matches(&f5);
+        assert_split_matches(&f5);
+
+        // Pseudo-random sweep (LCG, no external rng) over Int64/Float64 values.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let m = 2000usize;
+        let mut ri = Vec::with_capacity(m);
+        let mut rf = Vec::with_capacity(m);
+        for _ in 0..m {
+            ri.push(next() as i64);
+            // Mix of magnitudes including integer-valued and tiny.
+            let bits = next();
+            let f = f64::from_bits(bits);
+            rf.push(if f.is_nan() {
+                (next() % 1000) as f64 * 0.25
+            } else {
+                f
+            });
+        }
+        let mut rc: BTreeMap<String, Column> = BTreeMap::new();
+        rc.insert("ri".to_string(), Column::from_i64_values(ri));
+        rc.insert("rf".to_string(), Column::from_f64_values(rf));
+        let rframe = DataFrame::new(idx(m), rc).expect("rframe");
+        assert_eq!(
+            write_json_string(&rframe, JsonOrient::Records).expect("rjson"),
+            serde_ref(&rframe),
+        );
+        assert_jsonl_matches(&rframe);
+        assert_columns_matches(&rframe);
+        assert_index_matches(&rframe);
+        assert_values_matches(&rframe);
+        assert_split_matches(&rframe);
     }
 }

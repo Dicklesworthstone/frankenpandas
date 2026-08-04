@@ -1,0 +1,2 @@
+tests/artifacts/perf/golden_uza04_46_pass1_filter_bool_1000.txt: OK
+tests/artifacts/perf/golden_uza04_46_pass1_filter_bool_100000.txt: OK

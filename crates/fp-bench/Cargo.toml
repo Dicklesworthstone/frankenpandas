@@ -1,0 +1,34 @@
+[package]
+name = "fp-bench"
+description = "Head-to-head vs-pandas timing harness binary. Driven by benches/vs_pandas_harness.py: `fp-bench --category C --workload W --size S --dtype D --json` prints {\"times_us\":[...]}. Restores the FrankenPandas side of the no-gaps measurement loop."
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "fp-bench"
+path = "src/main.rs"
+
+[dependencies]
+fp-columnar = { path = "../fp-columnar", version = "0.2.0" }
+fp-frame = { path = "../fp-frame", version = "0.2.0" }
+fp-index = { path = "../fp-index", version = "0.2.0" }
+fp-io = { path = "../fp-io", version = "0.2.0" }
+fp-join = { path = "../fp-join", version = "0.2.0" }
+fp-types = { path = "../fp-types", version = "0.2.0" }
+mimalloc = { workspace = true }
+sha2 = "0.11.0"
+
+[features]
+# lazy-transpose-view is DEFAULT (matching fp-frame's default since
+# 2026-07-22) so the df_transpose workload compiles the batched
+# metadata-boundary timer arm that matches the underlying lazy storage.
+default = ["lazy-transpose-view"]
+lazy-transpose-prototype = []
+lazy-transpose-view = ["fp-frame/lazy-transpose-view"]

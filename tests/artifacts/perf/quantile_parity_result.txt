@@ -1,0 +1,1 @@
+quantile_parity_check vs pandas 2.2.3: checked=30 (8 datasets subset {d0,d1,d5} x q{0.3,0.7} x 5 interpolation modes linear/lower/higher/nearest/midpoint), divergences=0. FP Series.quantile interpolation matches pandas exactly on interpolation-stressing q.

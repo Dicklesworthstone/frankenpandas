@@ -1,0 +1,10 @@
+groupby rank — per-group counting-sort histogram (was per-group comparison sort) (pd7ie)
+Golden bit-identical: groupby_rank sha256 80438464e219a2d5 before==after.
+A/B min-of-5: groupby_rank @200k 28.624 -> 8.785 ms/iter = 3.26x; @1M 28.100 -> 8.983 = 3.13x.
+Tests: fp-frame 2830 (incl 38 rank) green.
+Lever: SeriesGroupBy.rank_with_pct + DataFrameGroupBy.rank_with_pct route all-valid
+bounded-Int64 value columns through rank_i64_slice_histogram (extracted from the proven
+Series.rank_i64_histogram, adb65349) per group — O(g) vs O(g log g) sort, typed f64 output.
+Isomorphism: histogram == rank_numeric_positions on same i64 values (i64-exact counts,
+|v|<=2^53 gate => i64 as f64 collision-free, "first" ties in group order both paths).
+Non-i64/nullable columns keep the Scalar comparison path.

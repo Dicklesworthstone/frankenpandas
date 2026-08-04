@@ -1,0 +1,28 @@
+br-frankenpandas-5foyp — value-level oracle for fp-join inner join row matching
+===============================================================================
+
+Goes DEEPER than ya1po (which validated join ROW COUNTS): a join can have the
+correct cardinality yet pair the WRONG rows. This harness validates that the
+inner join pairs the CORRECT rows, via an independent per-key cross-product
+oracle.
+
+Harness (test fp-join: inner_join_value_multiset_matches_crossproduct_oracle_5foyp):
+deterministic seeded LCG (no rand crate, no mocks). For 1500 iterations it builds
+random left/right DataFrames with an Int64 key column "k" (range 0..3 =>
+many-to-many) and a distinct per-row payload column (= row index, so any
+mis-pairing is visible). It then asserts the MULTISET of output
+(key, left_payload, right_payload) triples equals the independently-computed
+cross product:
+    { (k, lp, rp) : k in left∩right, lp in left_rows[k], rp in right_rows[k] }
+Comparison is by sorted vector => ordering-independent.
+
+Result: PASS (1 passed; 1500 iterations). The dense/direct-address inner join
+fast path (d45a291c) pairs exactly the correct rows — every left row in a key
+group is matched with every right row in that group, and nothing else.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-join inner_join_value_multiset_matches_crossproduct_oracle_5foyp -> 1 passed
+  cargo test -p fp-join (full)   -> exit 0 (all passed)
+  ubs crates/fp-join/src/lib.rs  -> only the pre-existing cat-8 secret-comparison
+                                    false positives (UBS_TRIAGE.md); none reference
+                                    the new test lines.

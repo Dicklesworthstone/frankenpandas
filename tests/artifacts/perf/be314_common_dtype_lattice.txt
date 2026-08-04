@@ -1,0 +1,28 @@
+br-frankenpandas-be314 — property test for the common_dtype promotion lattice
+=============================================================================
+
+common_dtype (fp-types) is the dtype-promotion lattice that underpins EVERY
+binary op, index alignment, and concat — a crown-jewel correctness area
+(AGENTS.md: dtype coercion rules are sacred). Its implementation is a big match
+with explicit per-pair arms like `(Bool, Int64) | (Int64, Bool) => Int64`, which
+are easy to make asymmetric by omitting one ordering.
+
+Harness (test fp-types: common_dtype_lattice_axioms_be314): EXHAUSTIVE and
+deterministic (no rand, no mocks) — all 13 DType variants. It asserts:
+  - idempotence:   common_dtype(a, a) == Ok(a)
+  - Null identity: common_dtype(Null, a) == common_dtype(a, Null) == Ok(a)
+  - commutativity: common_dtype(a, b) == common_dtype(b, a) — same Ok value AND
+    same ok-ness (169 pairs). An asymmetric arm would make df1+df2 and df2+df1
+    disagree on output dtype.
+  - associativity (guarded, Ok-closed subset, 2197 triples):
+    common_dtype(common_dtype(a,b), c) == common_dtype(a, common_dtype(b,c)).
+
+Result: PASS (1 passed). The promotion lattice is commutative, idempotent, has
+Null as identity, and is associative wherever defined — promotion is
+order-independent. No asymmetric/non-associative arm.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-types common_dtype_lattice_axioms_be314 -> 1 passed
+  cargo test -p fp-types (full)  -> all passed, 0 failed
+  ubs crates/fp-types/src/lib.rs -> my test adds 0 criticals (pre-existing panic
+                                    FPs only).

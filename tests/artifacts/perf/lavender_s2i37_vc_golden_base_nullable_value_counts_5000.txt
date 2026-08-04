@@ -1,0 +1,3 @@
+len=18 dtype=Int64
+Float64(OrderedF64(-0.0))|Float64(OrderedF64(1.25))|Float64(OrderedF64(6.25))|Float64(OrderedF64(2.25))|Float64(OrderedF64(3.25))|Float64(OrderedF64(7.25))|Float64(OrderedF64(8.25))|Float64(OrderedF64(10.25))|Float64(OrderedF64(12.25))|Float64(OrderedF64(13.25))|Float64(OrderedF64(14.25))|Float64(OrderedF64(15.25))|Float64(OrderedF64(0.25))|Float64(OrderedF64(11.25))|Float64(OrderedF64(4.25))|Float64(OrderedF64(5.25))|Float64(OrderedF64(9.25))|Float64(OrderedF64(16.25))|
+Int64(364);Int64(215);Int64(215);Int64(214);Int64(214);Int64(214);Int64(214);Int64(214);Int64(214);Int64(214);Int64(214);Int64(214);Int64(214);Int64(214);Int64(213);Int64(213);Int64(213);Int64(213);

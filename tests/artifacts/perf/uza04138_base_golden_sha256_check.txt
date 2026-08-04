@@ -1,0 +1,4 @@
+tests/artifacts/perf/uza04138_base_golden_df_cov_2000.txt: OK
+tests/artifacts/perf/uza04138_base_golden_df_cov_5000.txt: OK
+tests/artifacts/perf/uza04138_base_golden_df_corr_2000.txt: OK
+tests/artifacts/perf/uza04138_base_golden_df_corr_5000.txt: OK

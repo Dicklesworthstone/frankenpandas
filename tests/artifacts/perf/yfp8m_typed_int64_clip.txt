@@ -1,0 +1,42 @@
+br-frankenpandas-yfp8m — Typed Int64 fast path for Series/DataFrame.clip
+========================================================================
+
+Int64 vein (after z0dze i64.gt 154x, drhsx i64.diff 49x). Series.clip's typed fast
+path (0zp9e) was Float64-only; an all-valid Int64 column with integer-valued bounds
+is the dtype-preserving (Int64-output) case, but it ran the per-element Scalar
+values() loop AND a separate has_nulls scan that materialized the whole Vec<Scalar>.
+
+LEVER (one): when the column is all-valid Int64 with integer-valued bounds, clamp
+each i64 to the effective bounds cast to i64 into a typed Int64 buffer
+(from_i64_values), and prove no-nulls via validity().all() instead of the
+materializing has_nulls scan.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-4; loaded):
+  DataFrame.clip(-1000, 1000) [Int64]:  50.1  ->  1.41  = 35x
+
+SCORE: 35x >> 2.0 PASS.
+
+ISOMORPHISM:
+  - Fires under exactly the preserve_int64 condition (dtype Int64 + both bounds
+    integer-valued via is_integer_bound + no nulls), so the output is Int64, as
+    before. The effective bounds (NaN-filtered, GH2747 swap-normalized — shared
+    code computed above) are cast `lo as i64` / `hi as i64` identically, and the
+    clamp applies `< lo` then `> hi` in the same order, yielding the same i64.
+  - validity().all() == "no missing" for a column, replacing the has_nulls
+    materialization; an all-valid Int64 column has every value present.
+  - A fractional bound makes is_integer_bound false -> the gate fails -> the Scalar
+    path runs (Float64 output), exactly as before; nullable Int64 -> validity not
+    all -> Scalar path. Float64 columns keep the 0zp9e f64 fast path.
+  - Golden sha256 (gap_hunt golden: full family + Int64 clip integer-bounds
+    (Int64 out), fractional-bound (Float64 out), reversed-bound swap, one-sided)
+    UNCHANGED:
+      3f53bca6ecd5f83c80f094114b9f31dcf0fafe21c68b69909db5a4951ff7d91b
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2831 passed
+  cargo test   -p fp-conformance: 0 failures
+
+Int64 vein wins: gt 154x (z0dze), diff 49x (drhsx), clip 35x (yfp8m). NEXT:
+i64.nunique 39ms; then sweep fillna/where/mask/arithmetic/pct_change Int64 siblings.

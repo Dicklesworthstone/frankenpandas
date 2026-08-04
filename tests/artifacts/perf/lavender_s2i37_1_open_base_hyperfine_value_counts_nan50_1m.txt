@@ -1,0 +1,3 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-s2i37-open-base/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 1M --dtype float64_nan50 --json
+  Time (mean ± σ):      2.100 s ±  0.059 s    [User: 1.488 s, System: 0.751 s]
+  Range (min … max):    2.027 s …  2.199 s    10 runs

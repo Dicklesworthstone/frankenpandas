@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-base-20260616T022251Z/target/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 1M --dtype float64_nan50 --json >/tmp/lavender_s2i37_vc_hf_base.json",
+      "mean": 2.63295980452,
+      "stddev": 0.023032381924633343,
+      "median": 2.63841144672,
+      "user": 1.58902032,
+      "system": 1.1857017600000002,
+      "min": 2.59442253472,
+      "max": 2.6513340747200003,
+      "times": [
+        2.64929588072,
+        2.6513340747200003,
+        2.63133508572,
+        2.59442253472,
+        2.63841144672
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/target/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 1M --dtype float64_nan50 --json >/tmp/lavender_s2i37_vc_hf_candidate.json",
+      "mean": 2.13990044192,
+      "stddev": 0.07650834693766134,
+      "median": 2.17639250172,
+      "user": 1.5385931200000003,
+      "system": 0.7507997599999999,
+      "min": 2.00696720572,
+      "max": 2.18689362972,
+      "times": [
+        2.00696720572,
+        2.18689362972,
+        2.18676355772,
+        2.14248531472,
+        2.17639250172
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

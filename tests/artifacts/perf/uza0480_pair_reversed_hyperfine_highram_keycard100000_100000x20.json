@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-uza0480-after/release-perf/high_ram_perf_baseline --profile uza0480-after-revpair --rows 100000 --iters 20 --warmup 3 --frame-cols 10 --key-cardinality 100000",
+      "mean": 3.6012718923399993,
+      "stddev": 0.152901898550669,
+      "median": 3.6085973720399998,
+      "user": 2.84635704,
+      "system": 0.7713015200000001,
+      "min": 3.32711504854,
+      "max": 3.80517930254,
+      "times": [
+        3.6661177075399998,
+        3.70715004754,
+        3.5883112115399998,
+        3.80517930254,
+        3.46368115654,
+        3.80502980754,
+        3.6288835325399997,
+        3.49574020654,
+        3.5255109025399998,
+        3.32711504854
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-uza0480-base/release-perf/high_ram_perf_baseline --profile uza0480-base-revpair --rows 100000 --iters 20 --warmup 3 --frame-cols 10 --key-cardinality 100000",
+      "mean": 3.8906604091399997,
+      "stddev": 0.11553571880311639,
+      "median": 3.92931714404,
+      "user": 3.1215613399999995,
+      "system": 0.7811434199999999,
+      "min": 3.72724970454,
+      "max": 4.06825003154,
+      "times": [
+        3.93223552254,
+        3.7797799895399997,
+        3.72724970454,
+        3.79187739354,
+        3.76786234654,
+        3.92639876554,
+        3.95634472554,
+        3.94604646054,
+        4.01055915154,
+        4.06825003154
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

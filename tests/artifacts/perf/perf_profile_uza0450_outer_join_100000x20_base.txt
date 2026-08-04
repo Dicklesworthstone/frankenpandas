@@ -1,0 +1,2 @@
+perf_profile: scenario=outer_join n=100000 iters=20
+perf_profile: done 20 iters in 0.084s (4.190 ms/iter), sink=197312000

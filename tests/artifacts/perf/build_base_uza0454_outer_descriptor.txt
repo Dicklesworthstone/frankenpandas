@@ -1,0 +1,300 @@
+[RCH] local (all workers failed preflight checks)
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling autocfg v1.5.0
+   Compiling libm v0.2.16
+   Compiling foldhash v0.2.0
+   Compiling siphasher v1.0.2
+   Compiling memchr v2.8.0
+   Compiling zerocopy v0.8.48
+   Compiling serde_core v1.0.228
+   Compiling getrandom v0.3.4
+   Compiling iana-time-zone v0.1.65
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling chrono-tz v0.10.4
+   Compiling serde v1.0.228
+   Compiling itoa v1.0.18
+   Compiling once_cell v1.21.4
+   Compiling bytes v1.11.1
+   Compiling version_check v0.9.5
+   Compiling equivalent v1.0.2
+   Compiling fastrand v2.4.1
+   Compiling pkg-config v0.3.33
+   Compiling arrow-schema v58.3.0
+   Compiling zmij v1.0.21
+   Compiling regex-syntax v0.8.10
+   Compiling bitflags v2.11.1
+   Compiling serde_json v1.0.150
+   Compiling smallvec v1.15.1
+   Compiling typenum v1.20.0
+   Compiling thiserror v2.0.18
+   Compiling lexical-util v1.0.7
+   Compiling log v0.4.29
+   Compiling rustc-hash v2.1.2
+   Compiling unicode-width v0.2.2
+   Compiling semver v1.0.28
+   Compiling parking_lot_core v0.9.12
+   Compiling crc32fast v1.5.0
+   Compiling const-oid v0.10.2
+   Compiling ryu v1.0.23
+   Compiling new_debug_unreachable v1.0.6
+   Compiling scopeguard v1.2.0
+   Compiling zstd-safe v7.2.4
+   Compiling simd-adler32 v0.3.9
+   Compiling adler2 v2.0.1
+   Compiling base64 v0.22.1
+   Compiling twox-hash v2.1.2
+   Compiling byteorder v1.5.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling unicode-segmentation v1.13.2
+   Compiling precomputed-hash v0.1.1
+   Compiling bumpalo v3.20.3
+   Compiling cpufeatures v0.3.0
+   Compiling anyhow v1.0.102
+   Compiling zlib-rs v0.6.3
+   Compiling futures-core v0.3.32
+   Compiling pin-project-lite v0.2.17
+   Compiling unicode-casefold v0.2.0
+   Compiling ucd v0.1.1
+   Compiling vcpkg v0.2.15
+   Compiling dtoa v1.0.11
+   Compiling hashbrown v0.17.0
+   Compiling phf_shared v0.12.1
+   Compiling phf_shared v0.13.1
+   Compiling encoding_rs v0.8.35
+   Compiling either v1.15.0
+   Compiling thiserror v1.0.69
+   Compiling futures-sink v0.3.32
+   Compiling lock_api v0.4.14
+   Compiling tinyvec v1.11.0
+   Compiling utf-8 v0.7.6
+   Compiling snap v1.1.1
+   Compiling paste v1.0.15
+   Compiling num-traits v0.2.19
+   Compiling ahash v0.8.12
+   Compiling rustc_version v0.4.1
+   Compiling simdutf8 v0.1.5
+   Compiling slab v0.4.12
+   Compiling rustix v1.1.4
+   Compiling stable_deref_trait v1.2.1
+   Compiling futures-task v0.3.32
+   Compiling dtoa-short v0.3.5
+   Compiling heck v0.5.0
+   Compiling futures-io v0.3.32
+   Compiling typed-path v0.12.3
+   Compiling getrandom v0.4.2
+   Compiling debug_unsafe v0.1.4
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling linux-raw-sys v0.12.1
+   Compiling integer-encoding v3.0.4
+   Compiling getopts v0.2.24
+   Compiling bytemuck v1.25.0
+   Compiling futures-channel v0.3.32
+   Compiling ego-tree v0.11.0
+   Compiling lz4_flex v0.13.0
+   Compiling lz4_flex v0.11.6
+   Compiling phf v0.12.1
+   Compiling aho-corasick v1.1.4
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling comfy-table v7.2.2
+   Compiling miniz_oxide v0.8.9
+   Compiling csv-core v0.1.13
+   Compiling tendril v0.5.0
+   Compiling atoi_simd v0.17.0
+   Compiling fallible-iterator v0.3.0
+   Compiling ciborium-io v0.2.2
+   Compiling clap_lex v1.1.0
+   Compiling seq-macro v0.3.6
+   Compiling anstyle v1.0.14
+   Compiling itertools v0.13.0
+   Compiling fast-float2 v0.2.3
+   Compiling iter-read v1.1.0
+   Compiling quick-xml v0.40.1
+   Compiling bit-vec v0.8.0
+   Compiling phf_generator v0.13.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling servo_arc v0.4.3
+   Compiling same-file v1.0.6
+   Compiling unsafe-libyaml v0.2.11
+   Compiling fnv v1.0.7
+   Compiling quick-error v1.2.3
+   Compiling flatbuffers v25.12.19
+   Compiling cast v0.3.0
+   Compiling unicode-normalization v0.1.25
+   Compiling oorandom v11.1.5
+   Compiling unarray v0.1.4
+   Compiling anes v0.1.6
+   Compiling zopfli v0.8.3
+   Compiling bit-set v0.8.0
+   Compiling phf_codegen v0.13.1
+   Compiling lexical-write-float v1.0.6
+   Compiling hybrid-array v0.4.10
+   Compiling clap_builder v4.6.0
+   Compiling walkdir v2.5.0
+   Compiling syn v2.0.117
+   Compiling string_cache_codegen v0.6.1
+   Compiling indexmap v2.14.0
+   Compiling hashlink v0.12.0
+   Compiling selectors v0.38.0
+   Compiling lexical-core v1.0.6
+   Compiling web_atoms v0.2.4
+   Compiling wait-timeout v0.2.1
+   Compiling page_size v0.6.0
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling jobserver v0.1.34
+   Compiling codepage v0.1.2
+   Compiling quick-xml v0.39.2
+   Compiling dta v0.6.0
+   Compiling rand_core v0.9.5
+   Compiling parking_lot v0.12.5
+   Compiling cc v1.2.60
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling string_cache v0.9.0
+   Compiling regex-automata v0.4.14
+   Compiling digest v0.11.2
+   Compiling num-integer v0.1.46
+   Compiling chrono v0.4.45
+   Compiling num-complex v0.4.6
+   Compiling atoi v2.0.0
+   Compiling ordered-float v2.10.1
+   Compiling sha2 v0.11.0
+   Compiling num-bigint v0.4.6
+   Compiling num-iter v0.1.45
+   Compiling thrift v0.17.0
+   Compiling flate2 v1.1.9
+   Compiling tempfile v3.27.0
+   Compiling criterion-plot v0.8.2
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling libsqlite3-sys v0.38.1
+   Compiling alloca v0.4.0
+   Compiling rusty-fork v0.3.1
+   Compiling zip v7.2.0
+   Compiling clap v4.6.1
+   Compiling csv v1.4.0
+   Compiling num-rational v0.4.2
+   Compiling rust_xlsxwriter v0.95.0
+   Compiling num v0.4.3
+   Compiling regex v1.12.3
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling phf_macros v0.13.1
+   Compiling thiserror-impl v1.0.69
+   Compiling cssparser-macros v0.7.0
+   Compiling futures-macro v0.3.32
+   Compiling derive_more-impl v2.1.1
+   Compiling snafu-derive v0.8.9
+   Compiling tokio-macros v2.7.0
+   Compiling prost-derive v0.13.5
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.52.3
+   Compiling phf v0.13.1
+   Compiling futures-util v0.3.32
+   Compiling cssparser v0.37.0
+   Compiling derive_more v2.1.1
+   Compiling lzokay-native v0.1.0
+   Compiling prost v0.13.5
+   Compiling snafu v0.8.9
+   Compiling markup5ever v0.39.0
+   Compiling html5ever v0.39.0
+   Compiling scraper v0.27.0
+   Compiling fp-types v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-types)
+   Compiling fp-runtime v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-runtime)
+   Compiling serde-pickle v1.2.0
+   Compiling calamine v0.35.0
+   Compiling raptorq v2.0.1
+   Compiling tinytemplate v1.2.1
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling futures v0.3.32
+   Compiling fp-index v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-index)
+   Compiling fp-columnar v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-columnar)
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling arrow-buffer v58.3.0
+   Compiling ciborium-ll v0.2.2
+   Compiling proptest v1.11.0
+   Compiling ciborium v0.2.2
+   Compiling fp-frame v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-frame)
+   Compiling criterion v0.8.2
+   Compiling arrow-data v58.3.0
+   Compiling arrow-array v58.3.0
+   Compiling arrow-select v58.3.0
+   Compiling arrow-row v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling arrow-ord v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling zstd v0.13.3
+   Compiling arrow-ipc v58.3.0
+   Compiling arrow-cast v58.3.0
+   Compiling parquet v58.3.0
+   Compiling arrow-csv v58.3.0
+   Compiling arrow-json v58.3.0
+   Compiling fp-expr v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-expr)
+   Compiling fp-join v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-join)
+   Compiling fp-groupby v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-groupby)
+   Compiling arrow v58.3.0
+   Compiling orc-rust v0.8.0
+   Compiling rusqlite v0.40.1
+   Compiling fp-io v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-io)
+   Compiling fp-conformance v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-jbyuc-20260609T1826/crates/fp-conformance)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 2m 29s

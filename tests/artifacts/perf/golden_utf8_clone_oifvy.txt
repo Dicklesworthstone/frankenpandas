@@ -1,0 +1,17 @@
+br-frankenpandas-oifvy — Arc-share LazyContiguousUtf8 buffers (O(1) clone)
+
+Golden: FNV-1a-64 over the materialized Scalar::Utf8 values of (a) the original
+column and (b) a clone of it.
+  GOLDEN_ORIG_FNV1A64  = 413da8e68b873bd3
+  GOLDEN_CLONE_FNV1A64 = 413da8e68b873bd3   (clone == original)
+  Identical under BOTH baseline (Vec deep copy) and after (Arc share) builds
+  => the shared clone is observationally a deep copy; bit-identical parity.
+
+Same-command A/B, Column::clone of a 1,000,000-row x 12-byte (~12 MB) all-valid
+contiguous-Utf8 column, 500 iterations:
+  baseline (Vec deep copy):  total 1213.225 ms  -> 2.4264 ms / clone
+  after    (Arc share):      total    0.023 ms  -> 0.000046 ms / clone
+  ~52,000x.
+
+Validation: fp-columnar 380 tests pass / 0 failed; fp-frame/fp-join/fp-index
+compile clean.

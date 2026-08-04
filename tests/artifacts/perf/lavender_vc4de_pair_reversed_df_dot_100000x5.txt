@@ -1,0 +1,12 @@
+  [2m2026-06-14T23:36:29.055307Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 3 --runs 10 --export-json tests/artifacts/perf/lavender_vc4de_pair_reversed_df_dot_100000x5.json -n after '/data/projects/.scratch/cargo-target-lavender-vc4de-after/release-perf/examples/perf_profile df_dot 100000 5' -n base '/data/projects/.scratch/cargo-target-lavender-vc4de-base/release-perf/examples/perf_profile df_dot 100000 5'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: after
+  Time (mean ± σ):     637.2 ms ±  16.0 ms    [User: 13241.2 ms, System: 373.2 ms]
+  Range (min … max):   616.5 ms … 670.2 ms    10 runs
+Benchmark 2: base
+  Time (mean ± σ):     693.2 ms ±  25.6 ms    [User: 15104.2 ms, System: 659.2 ms]
+  Range (min … max):   664.4 ms … 733.2 ms    10 runs
+Summary
+  after ran
+    1.09 ± 0.05 times faster than base

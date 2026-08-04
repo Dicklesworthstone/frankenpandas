@@ -1,0 +1,100 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 515  of event 'cycles:P'
+# Event count (approx.): 10661769098
+#
+# Children      Self  Symbol                                                                                                                                                                                                                                                                                                   Shared Object         IPC   [IPC Coverage]
+# ........  ........  .......................................................................................................................................................................................................................................................................................................  ....................  ....................
+#
+    91.72%     0.00%  [.] __GI___clone3                                                                                                                                                                                                                                                                                        libc.so.6             -      -            
+            |          
+             --91.71%--start_thread
+                       |          
+                        --91.71%--<std::sys::thread::unix::Thread>::new::thread_start
+                                  |          
+                                   --91.33%--<std::thread::lifecycle::spawn_unchecked<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+                                             std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>
+                                             <fp_frame::Series>::kendall_no_tie_fast_with_ordered_ranks
+                                             |          
+                                              --1.05%--0xffffffffaf600f0b
+                                                        |          
+                                                         --1.05%--0xffffffffb0c27724
+                                                                   0xffffffffaf9c4bc8
+                                                                   0xffffffffafb39f9d
+                                                                   0xffffffffafb39043
+                                                                   0xffffffffafb52536
+                                                                   0xffffffffafb37e80
+                                                                   0xffffffffafa79cf1
+                                                                   0xffffffffafa89c75
+                                                                   0xffffffffafa7e67c
+
+    91.71%     0.00%  [.] start_thread                                                                                                                                                                                                                                                                                         libc.so.6             -      -            
+            |          
+             --91.71%--<std::sys::thread::unix::Thread>::new::thread_start
+                       |          
+                        --91.33%--<std::thread::lifecycle::spawn_unchecked<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>
+                                  <fp_frame::Series>::kendall_no_tie_fast_with_ordered_ranks
+                                  |          
+                                   --1.05%--0xffffffffaf600f0b
+                                             |          
+                                              --1.05%--0xffffffffb0c27724
+                                                        0xffffffffaf9c4bc8
+                                                        0xffffffffafb39f9d
+                                                        0xffffffffafb39043
+                                                        0xffffffffafb52536
+                                                        0xffffffffafb37e80
+                                                        0xffffffffafa79cf1
+                                                        0xffffffffafa89c75
+                                                        0xffffffffafa7e67c
+
+    91.71%     0.00%  [.] <std::sys::thread::unix::Thread>::new::thread_start                                                                                                                                                                                                                                                  perf_profile          -      -            
+            |          
+             --91.33%--<std::thread::lifecycle::spawn_unchecked<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>
+                       <fp_frame::Series>::kendall_no_tie_fast_with_ordered_ranks
+                       |          
+                        --1.05%--0xffffffffaf600f0b
+                                  |          
+                                   --1.05%--0xffffffffb0c27724
+                                             0xffffffffaf9c4bc8
+                                             0xffffffffafb39f9d
+                                             0xffffffffafb39043
+                                             0xffffffffafb52536
+                                             0xffffffffafb37e80
+                                             0xffffffffafa79cf1
+                                             0xffffffffafa89c75
+                                             0xffffffffafa7e67c
+
+    91.33%     0.00%  [.] <std::thread::lifecycle::spawn_unchecked<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}                                                             perf_profile          -      -            
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>
+               <fp_frame::Series>::kendall_no_tie_fast_with_ordered_ranks
+               |          
+                --1.05%--0xffffffffaf600f0b
+                          |          
+                           --1.05%--0xffffffffb0c27724
+                                     0xffffffffaf9c4bc8
+                                     0xffffffffafb39f9d
+                                     0xffffffffafb39043
+                                     0xffffffffafb52536
+                                     0xffffffffafb37e80
+                                     0xffffffffafa79cf1
+                                     0xffffffffafa89c75
+                                     0xffffffffafa7e67c
+
+    91.33%     0.00%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>                                                                                                                               perf_profile          -      -            
+            |
+            ---<fp_frame::Series>::kendall_no_tie_fast_with_ordered_ranks
+               |          
+                --1.05%--0xffffffffaf600f0b
+                          |          
+                           --1.05%--0xffffffffb0c27724
+                                     0xffffffffaf9c4bc8
+                                     0xffffffffafb39f9d
+                                     0xffffffffafb39043
+                                     0xffffffffafb52536
+                                     0xffffffffafb37e80

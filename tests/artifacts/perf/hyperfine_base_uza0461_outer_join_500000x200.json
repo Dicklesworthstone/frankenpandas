@@ -1,0 +1,30 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-uza0461-base/release-perf/examples/perf_profile outer_join 500000 200",
+      "mean": 2.23449093642,
+      "stddev": 0.0876712197251626,
+      "median": 2.22560484192,
+      "user": 2.1457310333333335,
+      "system": 0.08323622666666666,
+      "min": 2.14067795892,
+      "max": 2.39096953492,
+      "times": [
+        2.39096953492,
+        2.22779531492,
+        2.22341436892,
+        2.16749337592,
+        2.14067795892,
+        2.25659506492
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

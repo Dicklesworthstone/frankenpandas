@@ -1,0 +1,49 @@
+br-frankenpandas-zjc5z — O(n) quickselect for DataFrame.quantile
+================================================================
+
+eydcr fifth-wave probe (DataFrame reductions): quantile(0.5) measured 42ms while
+median measured 2.8ms — same math, but median has a typed agg path and quantile
+did not. DataFrame.quantile materialized col.values() Scalars, then FULL-SORTED
+each column (O(n log n)) and called percentile_linear — which only reads the order
+statistics at lower = floor(q·(n-1)) and upper = ceil(...).
+
+LEVER (one cohesive typed quickselect):
+  1. Typed Float64 extraction: collect present values straight from the f64 +
+     validity slices (no Vec<Scalar> materialization / to_f64). Alone this was only
+     1.09x — the sort, not the materialization, was the wall.
+  2. quantile_select: replace sort + percentile_linear with
+     select_nth_unstable_by(lower) (the lower-th order statistic) plus the min of
+     the right partition for upper = lower+1 — O(n) instead of O(n log n).
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-5; loaded):
+  DataFrame.quantile(0.5):  42  ->  5.26  = 8.0x
+  (typed extraction alone: 42 -> 38.6 = 1.09x; quickselect is the win.)
+
+SCORE: 8.0x >> 2.0 PASS.
+
+ISOMORPHISM:
+  - Typed extraction collects a value iff its materialized Scalar is Float64(finite)
+    — validity set AND datum not NaN — exactly the prior `!is_missing &&
+    to_f64.is_ok()` filter, so `nums` is identical (Int64 columns keep the Scalar
+    loop; the column's f64s are unchanged).
+  - quickselect returns the SAME order statistics as a full partial_cmp sort: for
+    finite data the k-th smallest is unique-valued, so select and sort agree;
+    equal finite values are bit-identical, so the right-partition min equals
+    sorted[lower+1]; percentile_linear's interpolation is then byte-for-byte the
+    same lo·(1-frac) + hi·frac.
+  - The ONLY case a stable sort and an unstable select can disagree is a -0.0/0.0
+    tie (equal under partial_cmp but bit-distinct), so any negative zero present
+    routes to the exact sort + percentile_linear path. NaN never reaches here
+    (filtered during extraction).
+  - Golden sha256 (gap_hunt golden: full elementwise family + quantile at q =
+    0, 0.25, 0.5, 0.9, 1.0 over an all-valid and a nullable (nulls filtered) frame,
+    n=5000 x4) UNCHANGED before/after:
+      346c80e7a5c1f9a747951abb71e3c29679914e81c6f46d59b5b9655d229c8a0a
+
+GATES (rch + local):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 0 failures
+  (note: a stale fp-columnar rlib flake surfaced radix_argsort_i64 — resolved by
+   touch + rebuild -p fp-columnar; unrelated to this change.)

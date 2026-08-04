@@ -3,7 +3,6 @@ name = "fp-frankentui"
 description = "FrankenTUI terminal interface for interactive fp-frame / frankenpandas workflows."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -13,8 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-fp-conformance = { path = "../fp-conformance" }
-fp-runtime = { path = "../fp-runtime" }
+fp-conformance = { path = "../fp-conformance", version = "0.2.0" }
+fp-runtime = { path = "../fp-runtime", version = "0.2.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

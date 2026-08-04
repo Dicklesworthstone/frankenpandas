@@ -1,0 +1,49 @@
+br-frankenpandas-g29hf — Typed Float64 dedup for DataFrame.duplicated + drop_duplicates
+=======================================================================================
+
+Seventh in the eydcr Scalar-bound-elementwise-ops family. duplicated built a
+per-row digest and verified equality via `col.values()[row]` Scalars; drop_duplicates
+calls duplicated() and ALSO ran a `subset_has_all_valid_unique_column` O(n log n)
+sort per column as a uniqueness short-circuit.
+
+LEVER (one cohesive "typed dedup"):
+  1. duplicated(): when EVERY selected column is a contiguous Float64 backing,
+     pre-extract (f64, validity) slices ONCE and digest / compare rows directly,
+     skipping the per-row Scalar materialization. A slot is "present" iff its
+     validity bit is set AND its datum is not NaN (a valid-bit NaN materializes
+     as Float64(NaN), which Scalar::is_missing treats as missing).
+  2. subset_has_all_valid_unique_column(): typed exact-duplicate pre-check — an
+     exact bit duplicate is also a fuzzy duplicate, so the column is not unique
+     and we bail before the sort (the bench's period-9973 dups are found in
+     ~9973 inserts instead of an n-log-n sort of every column).
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-6; loaded):
+  DataFrame.drop_duplicates:  92    ->  29.8  = 3.08x
+  DataFrame.duplicated:       55    ->  27.7  = ~1.97-2.0x
+
+SCORE: drop_duplicates 3.08x >= 2.0 PASS (duplicated ~2.0x via the same digest+equal).
+
+ISOMORPHISM (the digest BYTES are unchanged, so bucket assignment AND hash-collision
+outcomes are identical — critical because float equality is fuzzy, so a different
+hash could change which fuzzy-equal-distinct pairs collide):
+  - Digest: present -> mix(3)+mix(bits); missing -> mix(0); preceded by mix(ncols).
+    "present" = validity.get && !data.is_nan(), exactly Scalar::is_missing's view of
+    the materialized Float64/NaN/Null slot. Byte-for-byte the old scalar_digest.
+  - rows_equal: both-missing -> equal; present-vs-missing -> not; both-present ->
+    the identical fuzzy `float_semantic_eq(a,b)` — matching Scalar::semantic_eq's
+    Float64 / Null arms (incl. -0.0 == 0.0 and the 1e-14 relative tolerance).
+  - subset_has pre-check: exact bit dup => not unique (an exact dup is a fuzzy dup);
+    no exact dup => fall through to the unchanged sort + fuzzy-adjacency walk. The
+    typed buffer (as_f64_slice) is all-valid no-NaN, matching the prior per-Scalar
+    `Float64(v) if !v.is_nan()` filter (else None => return false, same as before).
+  - Gated to all-Float64 selected columns; any other dtype keeps the Scalar path.
+  - Golden sha256 (gap_hunt golden: the full elementwise family + duplicated/
+    drop_duplicates over period-9973-duplicate frames, with and without nulls, all
+    three keep modes) UNCHANGED before/after:
+      50235fec0abd371315293e3107bd3e5a387b5f6dad5bcf43e5ff93b298eaa81f
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

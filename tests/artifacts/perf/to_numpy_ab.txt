@@ -1,0 +1,11 @@
+  [2m2026-06-08T22:17:34.411265Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -c 'cargo build -p fp-frame --example bench_to_numpy --release 2>&1 | tail -1; B=$(find /data/tmp/cargo-target -name bench_to_numpy -path "*release*" -type f 2>/dev/null | head -1); echo "OLD:"; TONUMPY_OLD=1 $B 500000 20 2>&1 | grep -E "GOLDEN_FNV|TIMING"; echo "FAST:"; for i in 1 2 3; do $B 500000 20 2>&1 | grep -E "GOLDEN_FNV|TIMING"; done'[0m
+OLD:
+GOLDEN_FNV 864b726ef229ae8c
+TIMING n=500000 iters=20 per_iter=124.304ms sink=10000000
+FAST:
+GOLDEN_FNV 864b726ef229ae8c
+TIMING n=500000 iters=20 per_iter=41.206ms sink=10000000
+GOLDEN_FNV 864b726ef229ae8c
+TIMING n=500000 iters=20 per_iter=39.433ms sink=10000000
+GOLDEN_FNV 864b726ef229ae8c
+TIMING n=500000 iters=20 per_iter=40.537ms sink=10000000

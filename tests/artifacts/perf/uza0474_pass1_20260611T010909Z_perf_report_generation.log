@@ -1,0 +1,21 @@
+$ perf report --stdio -i tests/artifacts/perf/uza0474_pass1_20260611T010909Z_perf_filter_bool_100000x20000.data --no-children --sort=dso,symbol --percent-limit 0.1 > tests/artifacts/perf/uza0474_pass1_20260611T010909Z_perf_report_filter_bool_100000x20000.txt
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+$ perf report --stdio -i tests/artifacts/perf/uza0474_pass1_20260611T010909Z_perf_filter_bool_100000x20000.data --children --sort=dso,symbol --percent-limit 0.1 > tests/artifacts/perf/uza0474_pass1_20260611T010909Z_perf_report_children_filter_bool_100000x20000.txt
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.

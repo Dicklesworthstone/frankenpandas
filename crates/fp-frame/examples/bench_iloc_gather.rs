@@ -7,10 +7,11 @@
 //! Column::take_positions keeps an all-valid Int64/Float64 buffer contiguous.
 //! Output (values, dtype, negative-index handling) is bit-identical.
 
+use std::time::Instant;
+
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::{NullKind, Scalar};
-use std::time::Instant;
 
 fn s_i64(vals: Vec<i64>) -> Series {
     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
@@ -48,11 +49,17 @@ fn golden() -> String {
 
     // Utf8 + Bool
     let u = s_scalars(
-        vec!["a", "b", "c"].into_iter().map(|x| Scalar::Utf8(x.into())).collect(),
+        vec!["a", "b", "c"]
+            .into_iter()
+            .map(|x| Scalar::Utf8(x.into()))
+            .collect(),
     );
     out.push_str(&format!("utf8={:?}\n", u.iloc(&[2, -3]).unwrap().values()));
     let b = s_scalars(vec![Scalar::Bool(true), Scalar::Bool(false)]);
-    out.push_str(&format!("bool={:?}\n", b.iloc(&[1, 0, 1]).unwrap().values()));
+    out.push_str(&format!(
+        "bool={:?}\n",
+        b.iloc(&[1, 0, 1]).unwrap().values()
+    ));
 
     // Out-of-bounds errors
     out.push_str(&format!("oob_err={}\n", s.iloc(&[99]).is_err()));
@@ -69,7 +76,9 @@ fn main() {
     let mut x: u64 = 0xdead_beef;
     let mut pos: Vec<i64> = (0..n as i64).collect();
     for i in (1..n).rev() {
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let j = (x >> 16) as usize % (i + 1);
         pos.swap(i, j);
     }

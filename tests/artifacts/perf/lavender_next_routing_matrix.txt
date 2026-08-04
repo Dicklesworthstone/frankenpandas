@@ -1,0 +1,65 @@
+binary=/data/projects/.scratch/cargo-target-lavender-next/release-perf/examples/perf_profile
+
+## df_dot 100000 6
+perf_profile: scenario=df_dot n=100000 iters=6
+perf_profile: done 6 iters in 0.727s (121.219 ms/iter), sink=600000
+
+## str_sort_chain 100000 10
+perf_profile: scenario=str_sort_chain n=100000 iters=10
+perf_profile: done 10 iters in 0.139s (13.870 ms/iter), sink=1000000
+
+## str_series_sort 100000 10
+perf_profile: scenario=str_series_sort n=100000 iters=10
+perf_profile: done 10 iters in 0.145s (14.477 ms/iter), sink=1000000
+
+## str_contains 100000 50
+perf_profile: scenario=str_contains n=100000 iters=50
+perf_profile: done 50 iters in 0.046s (0.928 ms/iter), sink=5000000
+
+## str_chain 100000 20
+perf_profile: scenario=str_chain n=100000 iters=20
+perf_profile: done 20 iters in 0.093s (4.629 ms/iter), sink=2000000
+
+## str_value_counts 100000 50
+perf_profile: scenario=str_value_counts n=100000 iters=50
+perf_profile: done 50 iters in 0.071s (1.425 ms/iter), sink=50000
+
+## str_factorize 100000 50
+perf_profile: scenario=str_factorize n=100000 iters=50
+perf_profile: done 50 iters in 0.013s (0.265 ms/iter), sink=4982800
+
+## str_unique 100000 50
+perf_profile: scenario=str_unique n=100000 iters=50
+perf_profile: done 50 iters in 0.057s (1.142 ms/iter), sink=50000
+
+## filter_bool 100000 200
+perf_profile: scenario=filter_bool n=100000 iters=200
+perf_profile: done 200 iters in 0.018s (0.089 ms/iter), sink=10000000
+
+## series_add_align 100000 100
+perf_profile: scenario=series_add_align n=100000 iters=100
+perf_profile: done 100 iters in 0.061s (0.612 ms/iter), sink=10000100
+
+## left_join 500000 20
+perf_profile: scenario=left_join n=500000 iters=20
+perf_profile: done 20 iters in 0.114s (5.716 ms/iter), sink=4887813760
+
+## inner_join 100000 5
+perf_profile: scenario=inner_join n=100000 iters=5
+perf_profile: done 5 iters in 0.035s (7.082 ms/iter), sink=97656800
+
+## str_left_join 100000 10
+perf_profile: scenario=str_left_join n=100000 iters=10
+perf_profile: done 10 iters in 0.168s (16.775 ms/iter), sink=1000000
+
+## csv_read 100000 20
+perf_profile: scenario=csv_read n=100000 iters=20
+perf_profile: done 20 iters in 0.074s (3.698 ms/iter), sink=2000000
+
+## csv_read_options 100000 20
+perf_profile: scenario=csv_read_options n=100000 iters=20
+perf_profile: done 20 iters in 0.069s (3.451 ms/iter), sink=2000000
+
+## csv_parse_dates_dt_year 100000 5
+perf_profile: scenario=csv_parse_dates_dt_year n=100000 iters=5
+perf_profile: done 5 iters in 0.809s (161.737 ms/iter), sink=500000

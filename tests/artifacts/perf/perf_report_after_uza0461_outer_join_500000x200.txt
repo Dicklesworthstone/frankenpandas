@@ -1,0 +1,1608 @@
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 7554486636
+#
+# Children      Self  Command       Shared Object         Symbol                                                                                                                                                                                                                                                                                               
+# ........  ........  ............  ....................  .....................................................................................................................................................................................................................................................................................................
+#
+    99.96%     0.00%  perf_profile  perf_profile          [.] _start
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |          
+               |--94.70%--fp_join::merge_dataframes
+               |          fp_join::merge_dataframes_on_with_options
+               |          |          
+               |          |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          |          
+               |          |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          |          
+               |          |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          |          
+               |          |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          |          
+               |          |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          |          
+               |          |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |          |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |          |                     |          
+               |          |                      --2.83%--realloc
+               |          |                                __memmove_avx_unaligned_erms
+               |          |          
+               |           --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               |          
+               |--4.63%--perf_profile::build_join_frame_offset
+               |          |          
+               |          |--3.17%--<fp_frame::DataFrame>::from_dict
+               |          |          <fp_columnar::Column>::from_values
+               |          |          |          
+               |          |          |--1.68%--__memmove_avx_unaligned_erms
+               |          |          |          |          
+               |          |          |           --1.08%--0xffffffff84c00bb7
+               |          |          |                     0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                      --1.03%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                |          
+               |          |          |                                 --0.98%--0xffffffff853a4de7
+               |          |          |                                           |          
+               |          |          |                                            --0.71%--0xffffffff853a37ea
+               |          |          |          
+               |          |           --1.26%--<fp_columnar::Column>::new
+               |          |          
+               |           --0.95%--0xffffffff84c00bb7
+               |                     |          
+               |                      --0.95%--0xffffffff8622811f
+               |                                0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                |          
+               |                                 --0.90%--0xffffffff853a53ad
+               |                                           |          
+               |                                            --0.84%--0xffffffff853a4de7
+               |                                                      |          
+               |                                                       --0.73%--0xffffffff853a37ea
+               |                                                                 |          
+               |                                                                  --0.63%--0xffffffff853a33d2
+               |                                                                            |          
+               |                                                                             --0.57%--0xffffffff8541df1b
+               |                                                                                       |          
+               |                                                                                        --0.52%--0xffffffff8541a9e8
+               |                                                                                                  0xffffffff853dda90
+               |          
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          core::ptr::drop_in_place::<fp_columnar::Column>
+
+    99.96%     0.00%  perf_profile  libc.so.6             [.] __libc_start_main@@GLIBC_2.34
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |          
+               |--94.70%--fp_join::merge_dataframes
+               |          fp_join::merge_dataframes_on_with_options
+               |          |          
+               |          |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          |          
+               |          |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          |          
+               |          |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          |          
+               |          |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          |          
+               |          |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          |          
+               |          |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |          |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |          |                     |          
+               |          |                      --2.83%--realloc
+               |          |                                __memmove_avx_unaligned_erms
+               |          |          
+               |           --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               |          
+               |--4.63%--perf_profile::build_join_frame_offset
+               |          |          
+               |          |--3.17%--<fp_frame::DataFrame>::from_dict
+               |          |          <fp_columnar::Column>::from_values
+               |          |          |          
+               |          |          |--1.68%--__memmove_avx_unaligned_erms
+               |          |          |          |          
+               |          |          |           --1.08%--0xffffffff84c00bb7
+               |          |          |                     0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                      --1.03%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                |          
+               |          |          |                                 --0.98%--0xffffffff853a4de7
+               |          |          |                                           |          
+               |          |          |                                            --0.71%--0xffffffff853a37ea
+               |          |          |          
+               |          |           --1.26%--<fp_columnar::Column>::new
+               |          |          
+               |           --0.95%--0xffffffff84c00bb7
+               |                     |          
+               |                      --0.95%--0xffffffff8622811f
+               |                                0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                |          
+               |                                 --0.90%--0xffffffff853a53ad
+               |                                           |          
+               |                                            --0.84%--0xffffffff853a4de7
+               |                                                      |          
+               |                                                       --0.73%--0xffffffff853a37ea
+               |                                                                 |          
+               |                                                                  --0.63%--0xffffffff853a33d2
+               |                                                                            |          
+               |                                                                             --0.57%--0xffffffff8541df1b
+               |                                                                                       |          
+               |                                                                                        --0.52%--0xffffffff8541a9e8
+               |                                                                                                  0xffffffff853dda90
+               |          
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          core::ptr::drop_in_place::<fp_columnar::Column>
+
+    99.96%     0.00%  perf_profile  libc.so.6             [.] __libc_start_call_main
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |          
+               |--94.70%--fp_join::merge_dataframes
+               |          fp_join::merge_dataframes_on_with_options
+               |          |          
+               |          |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          |          
+               |          |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          |          
+               |          |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          |          
+               |          |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          |          
+               |          |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          |          
+               |          |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |          |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |          |                     |          
+               |          |                      --2.83%--realloc
+               |          |                                __memmove_avx_unaligned_erms
+               |          |          
+               |           --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               |          
+               |--4.63%--perf_profile::build_join_frame_offset
+               |          |          
+               |          |--3.17%--<fp_frame::DataFrame>::from_dict
+               |          |          <fp_columnar::Column>::from_values
+               |          |          |          
+               |          |          |--1.68%--__memmove_avx_unaligned_erms
+               |          |          |          |          
+               |          |          |           --1.08%--0xffffffff84c00bb7
+               |          |          |                     0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                      --1.03%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                |          
+               |          |          |                                 --0.98%--0xffffffff853a4de7
+               |          |          |                                           |          
+               |          |          |                                            --0.71%--0xffffffff853a37ea
+               |          |          |          
+               |          |           --1.26%--<fp_columnar::Column>::new
+               |          |          
+               |           --0.95%--0xffffffff84c00bb7
+               |                     |          
+               |                      --0.95%--0xffffffff8622811f
+               |                                0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                |          
+               |                                 --0.90%--0xffffffff853a53ad
+               |                                           |          
+               |                                            --0.84%--0xffffffff853a4de7
+               |                                                      |          
+               |                                                       --0.73%--0xffffffff853a37ea
+               |                                                                 |          
+               |                                                                  --0.63%--0xffffffff853a33d2
+               |                                                                            |          
+               |                                                                             --0.57%--0xffffffff8541df1b
+               |                                                                                       |          
+               |                                                                                        --0.52%--0xffffffff8541a9e8
+               |                                                                                                  0xffffffff853dda90
+               |          
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          core::ptr::drop_in_place::<fp_columnar::Column>
+
+    99.96%     0.00%  perf_profile  perf_profile          [.] main
+            |
+            ---main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |          
+               |--94.70%--fp_join::merge_dataframes
+               |          fp_join::merge_dataframes_on_with_options
+               |          |          
+               |          |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          |          
+               |          |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          |          
+               |          |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          |          
+               |          |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          |          
+               |          |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          |          
+               |          |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |          |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |          |                     |          
+               |          |                      --2.83%--realloc
+               |          |                                __memmove_avx_unaligned_erms
+               |          |          
+               |           --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               |          
+               |--4.63%--perf_profile::build_join_frame_offset
+               |          |          
+               |          |--3.17%--<fp_frame::DataFrame>::from_dict
+               |          |          <fp_columnar::Column>::from_values
+               |          |          |          
+               |          |          |--1.68%--__memmove_avx_unaligned_erms
+               |          |          |          |          
+               |          |          |           --1.08%--0xffffffff84c00bb7
+               |          |          |                     0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                      --1.03%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                |          
+               |          |          |                                 --0.98%--0xffffffff853a4de7
+               |          |          |                                           |          
+               |          |          |                                            --0.71%--0xffffffff853a37ea
+               |          |          |          
+               |          |           --1.26%--<fp_columnar::Column>::new
+               |          |          
+               |           --0.95%--0xffffffff84c00bb7
+               |                     |          
+               |                      --0.95%--0xffffffff8622811f
+               |                                0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                |          
+               |                                 --0.90%--0xffffffff853a53ad
+               |                                           |          
+               |                                            --0.84%--0xffffffff853a4de7
+               |                                                      |          
+               |                                                       --0.73%--0xffffffff853a37ea
+               |                                                                 |          
+               |                                                                  --0.63%--0xffffffff853a33d2
+               |                                                                            |          
+               |                                                                             --0.57%--0xffffffff8541df1b
+               |                                                                                       |          
+               |                                                                                        --0.52%--0xffffffff8541a9e8
+               |                                                                                                  0xffffffff853dda90
+               |          
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          core::ptr::drop_in_place::<fp_columnar::Column>
+
+    99.96%     0.00%  perf_profile  perf_profile          [.] std::rt::lang_start_internal
+            |
+            ---std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |          
+               |--94.70%--fp_join::merge_dataframes
+               |          fp_join::merge_dataframes_on_with_options
+               |          |          
+               |          |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          |          
+               |          |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          |          
+               |          |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          |          
+               |          |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          |          
+               |          |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          |          
+               |          |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |          |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |          |                     |          
+               |          |                      --2.83%--realloc
+               |          |                                __memmove_avx_unaligned_erms
+               |          |          
+               |           --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               |          
+               |--4.63%--perf_profile::build_join_frame_offset
+               |          |          
+               |          |--3.17%--<fp_frame::DataFrame>::from_dict
+               |          |          <fp_columnar::Column>::from_values
+               |          |          |          
+               |          |          |--1.68%--__memmove_avx_unaligned_erms
+               |          |          |          |          
+               |          |          |           --1.08%--0xffffffff84c00bb7
+               |          |          |                     0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                      --1.03%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                |          
+               |          |          |                                 --0.98%--0xffffffff853a4de7
+               |          |          |                                           |          
+               |          |          |                                            --0.71%--0xffffffff853a37ea
+               |          |          |          
+               |          |           --1.26%--<fp_columnar::Column>::new
+               |          |          
+               |           --0.95%--0xffffffff84c00bb7
+               |                     |          
+               |                      --0.95%--0xffffffff8622811f
+               |                                0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                |          
+               |                                 --0.90%--0xffffffff853a53ad
+               |                                           |          
+               |                                            --0.84%--0xffffffff853a4de7
+               |                                                      |          
+               |                                                       --0.73%--0xffffffff853a37ea
+               |                                                                 |          
+               |                                                                  --0.63%--0xffffffff853a33d2
+               |                                                                            |          
+               |                                                                             --0.57%--0xffffffff8541df1b
+               |                                                                                       |          
+               |                                                                                        --0.52%--0xffffffff8541a9e8
+               |                                                                                                  0xffffffff853dda90
+               |          
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          core::ptr::drop_in_place::<fp_columnar::Column>
+
+    99.96%     0.00%  perf_profile  perf_profile          [.] std::rt::lang_start::<()>::{closure#0}
+            |
+            ---std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |          
+               |--94.70%--fp_join::merge_dataframes
+               |          fp_join::merge_dataframes_on_with_options
+               |          |          
+               |          |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          |          
+               |          |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          |          
+               |          |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          |          
+               |          |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          |          
+               |          |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          |          
+               |          |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |          |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |          |                     |          
+               |          |                      --2.83%--realloc
+               |          |                                __memmove_avx_unaligned_erms
+               |          |          
+               |           --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               |          
+               |--4.63%--perf_profile::build_join_frame_offset
+               |          |          
+               |          |--3.17%--<fp_frame::DataFrame>::from_dict
+               |          |          <fp_columnar::Column>::from_values
+               |          |          |          
+               |          |          |--1.68%--__memmove_avx_unaligned_erms
+               |          |          |          |          
+               |          |          |           --1.08%--0xffffffff84c00bb7
+               |          |          |                     0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                      --1.03%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                |          
+               |          |          |                                 --0.98%--0xffffffff853a4de7
+               |          |          |                                           |          
+               |          |          |                                            --0.71%--0xffffffff853a37ea
+               |          |          |          
+               |          |           --1.26%--<fp_columnar::Column>::new
+               |          |          
+               |           --0.95%--0xffffffff84c00bb7
+               |                     |          
+               |                      --0.95%--0xffffffff8622811f
+               |                                0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                |          
+               |                                 --0.90%--0xffffffff853a53ad
+               |                                           |          
+               |                                            --0.84%--0xffffffff853a4de7
+               |                                                      |          
+               |                                                       --0.73%--0xffffffff853a37ea
+               |                                                                 |          
+               |                                                                  --0.63%--0xffffffff853a33d2
+               |                                                                            |          
+               |                                                                             --0.57%--0xffffffff8541df1b
+               |                                                                                       |          
+               |                                                                                        --0.52%--0xffffffff8541a9e8
+               |                                                                                                  0xffffffff853dda90
+               |          
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          core::ptr::drop_in_place::<fp_columnar::Column>
+
+    99.96%     0.00%  perf_profile  perf_profile          [.] std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |          
+               |--94.70%--fp_join::merge_dataframes
+               |          fp_join::merge_dataframes_on_with_options
+               |          |          
+               |          |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          |          
+               |          |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          |          
+               |          |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          |          
+               |          |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          |          
+               |          |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          |          
+               |          |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |          |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |          |                     |          
+               |          |                      --2.83%--realloc
+               |          |                                __memmove_avx_unaligned_erms
+               |          |          
+               |           --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               |          
+               |--4.63%--perf_profile::build_join_frame_offset
+               |          |          
+               |          |--3.17%--<fp_frame::DataFrame>::from_dict
+               |          |          <fp_columnar::Column>::from_values
+               |          |          |          
+               |          |          |--1.68%--__memmove_avx_unaligned_erms
+               |          |          |          |          
+               |          |          |           --1.08%--0xffffffff84c00bb7
+               |          |          |                     0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                      --1.03%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                |          
+               |          |          |                                 --0.98%--0xffffffff853a4de7
+               |          |          |                                           |          
+               |          |          |                                            --0.71%--0xffffffff853a37ea
+               |          |          |          
+               |          |           --1.26%--<fp_columnar::Column>::new
+               |          |          
+               |           --0.95%--0xffffffff84c00bb7
+               |                     |          
+               |                      --0.95%--0xffffffff8622811f
+               |                                0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                |          
+               |                                 --0.90%--0xffffffff853a53ad
+               |                                           |          
+               |                                            --0.84%--0xffffffff853a4de7
+               |                                                      |          
+               |                                                       --0.73%--0xffffffff853a37ea
+               |                                                                 |          
+               |                                                                  --0.63%--0xffffffff853a33d2
+               |                                                                            |          
+               |                                                                             --0.57%--0xffffffff8541df1b
+               |                                                                                       |          
+               |                                                                                        --0.52%--0xffffffff8541a9e8
+               |                                                                                                  0xffffffff853dda90
+               |          
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          core::ptr::drop_in_place::<fp_columnar::Column>
+
+    99.96%     0.00%  perf_profile  perf_profile          [.] perf_profile::main
+            |
+            ---perf_profile::main
+               |          
+               |--94.70%--fp_join::merge_dataframes
+               |          fp_join::merge_dataframes_on_with_options
+               |          |          
+               |          |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          |          
+               |          |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          |          
+               |          |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          |          
+               |          |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          |          
+               |          |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          |          
+               |          |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          |          
+               |          |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          |          
+               |          |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |          |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |          |                     |          
+               |          |                      --2.83%--realloc
+               |          |                                __memmove_avx_unaligned_erms
+               |          |          
+               |           --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               |          
+               |--4.63%--perf_profile::build_join_frame_offset
+               |          |          
+               |          |--3.17%--<fp_frame::DataFrame>::from_dict
+               |          |          <fp_columnar::Column>::from_values
+               |          |          |          
+               |          |          |--1.68%--__memmove_avx_unaligned_erms
+               |          |          |          |          
+               |          |          |           --1.08%--0xffffffff84c00bb7
+               |          |          |                     0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                      --1.03%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                |          
+               |          |          |                                 --0.98%--0xffffffff853a4de7
+               |          |          |                                           |          
+               |          |          |                                            --0.71%--0xffffffff853a37ea
+               |          |          |          
+               |          |           --1.26%--<fp_columnar::Column>::new
+               |          |          
+               |           --0.95%--0xffffffff84c00bb7
+               |                     |          
+               |                      --0.95%--0xffffffff8622811f
+               |                                0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                |          
+               |                                 --0.90%--0xffffffff853a53ad
+               |                                           |          
+               |                                            --0.84%--0xffffffff853a4de7
+               |                                                      |          
+               |                                                       --0.73%--0xffffffff853a37ea
+               |                                                                 |          
+               |                                                                  --0.63%--0xffffffff853a33d2
+               |                                                                            |          
+               |                                                                             --0.57%--0xffffffff8541df1b
+               |                                                                                       |          
+               |                                                                                        --0.52%--0xffffffff8541a9e8
+               |                                                                                                  0xffffffff853dda90
+               |          
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          core::ptr::drop_in_place::<fp_columnar::Column>
+
+    94.70%     0.00%  perf_profile  perf_profile          [.] fp_join::merge_dataframes
+            |
+            ---fp_join::merge_dataframes
+               fp_join::merge_dataframes_on_with_options
+               |          
+               |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          
+               |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          
+               |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          
+               |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          
+               |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          
+               |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          
+               |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          
+               |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          
+               |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |                     |          
+               |                      --2.83%--realloc
+               |                                __memmove_avx_unaligned_erms
+               |          
+                --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+
+    94.70%     0.00%  perf_profile  perf_profile          [.] fp_join::merge_dataframes_on_with_options
+            |
+            ---fp_join::merge_dataframes_on_with_options
+               |          
+               |--87.84%--fp_join::build_single_key_dense_i64_outer_merge_output
+               |          |          
+               |          |--19.56%--__memmove_avx_unaligned_erms
+               |          |          
+               |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+               |          |          
+               |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          
+               |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+               |          |          
+               |          |--5.38%--__memset_avx2_unaligned_erms
+               |          |          
+               |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               |          |          
+               |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               |          |          
+               |           --2.89%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               |                     <alloc::raw_vec::RawVecInner>::finish_grow
+               |                     |          
+               |                      --2.83%--realloc
+               |                                __memmove_avx_unaligned_erms
+               |          
+                --6.63%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+
+    87.90%    20.64%  perf_profile  perf_profile          [.] fp_join::build_single_key_dense_i64_outer_merge_output
+            |          
+            |--67.26%--fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          
+            |          |--19.51%--__memmove_avx_unaligned_erms
+            |          |          
+            |          |--16.73%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+            |          |          
+            |          |--6.94%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+            |          |          
+            |          |--6.77%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+            |          |          
+            |          |--5.38%--__memset_avx2_unaligned_erms
+            |          |          
+            |          |--4.69%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+            |          |          
+            |          |--3.96%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+            |          |          
+            |           --2.83%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+            |                     <alloc::raw_vec::RawVecInner>::finish_grow
+            |                     realloc
+            |                     __memmove_avx_unaligned_erms
+            |          
+             --20.64%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       fp_join::merge_dataframes
+                       fp_join::merge_dataframes_on_with_options
+                       |          
+                        --20.59%--fp_join::build_single_key_dense_i64_outer_merge_output
+
+    24.13%    22.08%  perf_profile  libc.so.6             [.] __memmove_avx_unaligned_erms
+            |          
+            |--22.08%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          perf_profile::main
+            |          |          
+            |           --21.93%--fp_join::merge_dataframes
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     |          
+            |                      --21.87%--fp_join::build_single_key_dense_i64_outer_merge_output
+            |                                |          
+            |                                |--19.19%--__memmove_avx_unaligned_erms
+            |                                |          
+            |                                 --2.68%--<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+            |                                           <alloc::raw_vec::RawVecInner>::finish_grow
+            |                                           realloc
+            |                                           __memmove_avx_unaligned_erms
+            |          
+             --2.05%--__memmove_avx_unaligned_erms
+                       |          
+                        --0.93%--0xffffffff84c00bb7
+                                  0xffffffff8622811f
+                                  |          
+                                   --0.87%--0xffffffff84feb96b
+                                             0xffffffff853a5627
+                                             0xffffffff853a53ad
+                                             0xffffffff853a4de7
+                                             |          
+                                              --0.60%--0xffffffff853a37ea
+
+    16.78%    16.62%  perf_profile  perf_profile          [.] fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+            |          
+             --16.62%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       fp_join::merge_dataframes
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       |          
+                        --16.57%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+
+     6.99%     6.83%  perf_profile  perf_profile          [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+            |          
+             --6.83%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       fp_join::merge_dataframes
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+
+     6.77%     6.50%  perf_profile  perf_profile          [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+            |          
+             --6.50%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       fp_join::merge_dataframes
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+
+     6.63%     6.44%  perf_profile  perf_profile          [.] fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+            |          
+             --6.44%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       fp_join::merge_dataframes
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+
+     5.38%     5.38%  perf_profile  libc.so.6             [.] __memset_avx2_unaligned_erms
+            |          
+             --5.38%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       fp_join::merge_dataframes
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       __memset_avx2_unaligned_erms
+
+     4.69%     4.69%  perf_profile  perf_profile          [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+            |          
+             --4.69%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       fp_join::merge_dataframes
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+
+     4.63%     0.30%  perf_profile  perf_profile          [.] perf_profile::build_join_frame_offset
+            |          
+             --4.34%--perf_profile::build_join_frame_offset
+                       |          
+                       |--3.17%--<fp_frame::DataFrame>::from_dict
+                       |          <fp_columnar::Column>::from_values
+                       |          |          
+                       |          |--1.68%--__memmove_avx_unaligned_erms
+                       |          |          |          
+                       |          |           --1.08%--0xffffffff84c00bb7
+                       |          |                     0xffffffff8622811f
+                       |          |                     |          
+                       |          |                      --1.03%--0xffffffff84feb96b
+                       |          |                                0xffffffff853a5627
+                       |          |                                0xffffffff853a53ad
+                       |          |                                |          
+                       |          |                                 --0.98%--0xffffffff853a4de7
+                       |          |                                           |          
+                       |          |                                            --0.71%--0xffffffff853a37ea
+                       |          |          
+                       |           --1.26%--<fp_columnar::Column>::new
+                       |          
+                        --0.66%--0xffffffff84c00bb7
+                                  |          
+                                   --0.66%--0xffffffff8622811f
+                                             0xffffffff84feb96b
+                                             0xffffffff853a5627
+                                             |          
+                                              --0.60%--0xffffffff853a53ad
+                                                        |          
+                                                         --0.55%--0xffffffff853a4de7
+
+     3.96%     3.77%  perf_profile  perf_profile          [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+            |          
+             --3.77%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       fp_join::merge_dataframes
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+
+     3.17%     0.00%  perf_profile  perf_profile          [.] <fp_frame::DataFrame>::from_dict
+            |
+            ---<fp_frame::DataFrame>::from_dict
+               <fp_columnar::Column>::from_values
+               |          
+               |--1.68%--__memmove_avx_unaligned_erms
+               |          |          
+               |           --1.08%--0xffffffff84c00bb7
+               |                     0xffffffff8622811f
+               |                     |          
+               |                      --1.03%--0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                0xffffffff853a53ad
+               |                                |          
+               |                                 --0.98%--0xffffffff853a4de7
+               |                                           |          
+               |                                            --0.71%--0xffffffff853a37ea
+               |          
+                --1.26%--<fp_columnar::Column>::new
+
+     3.17%     0.00%  perf_profile  perf_profile          [.] <fp_columnar::Column>::from_values
+            |
+            ---<fp_columnar::Column>::from_values
+               |          
+               |--1.68%--__memmove_avx_unaligned_erms
+               |          |          
+               |           --1.08%--0xffffffff84c00bb7
+               |                     0xffffffff8622811f
+               |                     |          
+               |                      --1.03%--0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                0xffffffff853a53ad
+               |                                |          
+               |                                 --0.98%--0xffffffff853a4de7
+               |                                           |          
+               |                                            --0.71%--0xffffffff853a37ea
+               |          
+                --1.26%--<fp_columnar::Column>::new
+
+     2.89%     0.00%  perf_profile  perf_profile          [.] <alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+            |
+            ---<alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+               <alloc::raw_vec::RawVecInner>::finish_grow
+               |          
+                --2.83%--realloc
+                          __memmove_avx_unaligned_erms
+
+     2.89%     0.00%  perf_profile  perf_profile          [.] <alloc::raw_vec::RawVecInner>::finish_grow
+            |
+            ---<alloc::raw_vec::RawVecInner>::finish_grow
+               |          
+                --2.83%--realloc
+                          __memmove_avx_unaligned_erms
+
+     2.83%     0.00%  perf_profile  libc.so.6             [.] realloc
+            |
+            ---realloc
+               __memmove_avx_unaligned_erms
+
+     2.46%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c00bb7
+            |
+            ---0xffffffff84c00bb7
+               |          
+                --2.46%--0xffffffff8622811f
+                          |          
+                           --2.35%--0xffffffff84feb96b
+                                     0xffffffff853a5627
+                                     |          
+                                      --2.29%--0xffffffff853a53ad
+                                                |          
+                                                 --2.15%--0xffffffff853a4de7
+                                                           |          
+                                                            --1.54%--0xffffffff853a37ea
+                                                                      |          
+                                                                       --1.12%--0xffffffff853a33d2
+                                                                                 |          
+                                                                                  --1.07%--0xffffffff8541df1b
+                                                                                            |          
+                                                                                             --0.85%--0xffffffff8541a9e8
+                                                                                                       0xffffffff853dda90
+
+     2.46%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8622811f
+            |
+            ---0xffffffff8622811f
+               |          
+                --2.35%--0xffffffff84feb96b
+                          0xffffffff853a5627
+                          |          
+                           --2.29%--0xffffffff853a53ad
+                                     |          
+                                      --2.15%--0xffffffff853a4de7
+                                                |          
+                                                 --1.54%--0xffffffff853a37ea
+                                                           |          
+                                                            --1.12%--0xffffffff853a33d2
+                                                                      |          
+                                                                       --1.07%--0xffffffff8541df1b
+                                                                                 |          
+                                                                                  --0.85%--0xffffffff8541a9e8
+                                                                                            0xffffffff853dda90
+
+     2.35%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853a5627
+            |
+            ---0xffffffff853a5627
+               |          
+                --2.30%--0xffffffff853a53ad
+                          |          
+                           --2.16%--0xffffffff853a4de7
+                                     |          
+                                      --1.54%--0xffffffff853a37ea
+                                                |          
+                                                 --1.12%--0xffffffff853a33d2
+                                                           |          
+                                                            --1.07%--0xffffffff8541df1b
+                                                                      |          
+                                                                       --0.85%--0xffffffff8541a9e8
+                                                                                 0xffffffff853dda90
+
+     2.35%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84feb96b
+            |
+            ---0xffffffff84feb96b
+               0xffffffff853a5627
+               |          
+                --2.29%--0xffffffff853a53ad
+                          |          
+                           --2.15%--0xffffffff853a4de7
+                                     |          
+                                      --1.54%--0xffffffff853a37ea
+                                                |          
+                                                 --1.12%--0xffffffff853a33d2
+                                                           |          
+                                                            --1.07%--0xffffffff8541df1b
+                                                                      |          
+                                                                       --0.85%--0xffffffff8541a9e8
+                                                                                 0xffffffff853dda90
+
+     2.30%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853a53ad
+            |
+            ---0xffffffff853a53ad
+               |          
+                --2.16%--0xffffffff853a4de7
+                          |          
+                           --1.54%--0xffffffff853a37ea
+                                     |          
+                                      --1.12%--0xffffffff853a33d2
+                                                |          
+                                                 --1.07%--0xffffffff8541df1b
+                                                           |          
+                                                            --0.85%--0xffffffff8541a9e8
+                                                                      0xffffffff853dda90
+
+     2.16%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853a4de7
+            |
+            ---0xffffffff853a4de7
+               |          
+                --1.54%--0xffffffff853a37ea
+                          |          
+                           --1.12%--0xffffffff853a33d2
+                                     |          
+                                      --1.07%--0xffffffff8541df1b
+                                                |          
+                                                 --0.85%--0xffffffff8541a9e8
+                                                           0xffffffff853dda90
+
+     1.65%     0.11%  perf_profile  [unknown]             [.] 0xffffffff853a37ea
+            |          
+             --1.54%--0xffffffff853a37ea
+                       |          
+                        --1.12%--0xffffffff853a33d2
+                                  |          
+                                   --1.07%--0xffffffff8541df1b
+                                             |          
+                                              --0.85%--0xffffffff8541a9e8
+                                                        0xffffffff853dda90
+
+     1.26%     0.44%  perf_profile  perf_profile          [.] <fp_columnar::Column>::new
+            |          
+             --0.82%--<fp_columnar::Column>::new
+
+     1.12%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a33d2
+            |
+            ---0xffffffff853a33d2
+               |          
+                --1.07%--0xffffffff8541df1b
+                          |          
+                           --0.85%--0xffffffff8541a9e8
+                                     0xffffffff853dda90
+
+     1.10%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8541df1b
+            |
+            ---0xffffffff8541df1b
+               |          
+                --0.88%--0xffffffff8541a9e8
+                          0xffffffff853dda90
+
+     1.10%     0.61%  perf_profile  [unknown]             [.] 0xffffffff8621b2b7
+            |          
+             --0.61%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+
+     1.02%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00f0b
+            |
+            ---0xffffffff84c00f0b
+
+     0.88%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8541a9e8
+            |
+            ---0xffffffff8541a9e8
+               0xffffffff853dda90
+
+     0.88%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853dda90
+            |
+            ---0xffffffff853dda90
+
+     0.67%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0012b
+            |
+            ---0xffffffff84c0012b
+               0xffffffff86220551
+
+     0.67%     0.00%  perf_profile  [unknown]             [k] 0xffffffff86220551
+            |
+            ---0xffffffff86220551
+
+     0.67%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cc7f5
+            |
+            ---0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     0.67%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cb02c
+            |
+            ---0xffffffff853cb02c
+
+     0.63%     0.00%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<fp_frame::DataFrame>
+            |
+            ---core::ptr::drop_in_place::<fp_frame::DataFrame>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_columnar::Column>
+
+     0.63%     0.00%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+            |
+            ---core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_columnar::Column>
+
+     0.63%     0.00%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<fp_columnar::Column>
+            |
+            ---core::ptr::drop_in_place::<fp_columnar::Column>
+
+     0.55%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c01199
+            |
+            ---0xffffffff84c01199
+
+     0.51%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00b90
+            |
+            ---0xffffffff84c00b90
+
+     0.50%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853dc6c9
+     0.46%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853c9742
+     0.46%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539cea1
+     0.46%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539cd76
+     0.46%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539cb30
+     0.46%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539c594
+     0.44%     0.05%  perf_profile  perf_profile          [.] <fp_columnar::ColumnData>::from_scalars
+     0.44%     0.44%  perf_profile  [unknown]             [k] 0xffffffff84c01192
+     0.43%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86227729
+     0.43%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85021e6e
+     0.43%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85021a80
+     0.43%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8502171f
+     0.38%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84fc4bc8
+     0.38%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86227724
+     0.35%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539c06e
+     0.35%     0.00%  perf_profile  libc.so.6             [.] _int_free_chunk
+     0.35%     0.00%  perf_profile  libc.so.6             [.] systrim.constprop.0
+     0.35%     0.00%  perf_profile  libc.so.6             [.] __default_morecore@GLIBC_2.2.5
+     0.35%     0.00%  perf_profile  libc.so.6             [.] __brk
+     0.35%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f24dda
+     0.35%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ab362
+     0.35%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ab2c0
+     0.33%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85139f5d
+     0.33%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85139003
+     0.32%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85091286
+     0.31%     0.00%  perf_profile  libc.so.6             [.] __munmap
+     0.31%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f24dad
+     0.31%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853aa42b
+     0.31%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ceac8
+     0.31%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cc961
+     0.29%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539b7d0
+     0.28%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853dc432
+     0.28%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853a3963
+     0.28%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853442bf
+     0.27%     0.00%  perf_profile  [unknown]             [.] 0xffffffff851524f6
+     0.27%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850814b2
+     0.27%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853adcca
+     0.27%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853fc79e
+     0.26%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a33ec
+     0.23%     0.23%  perf_profile  [unknown]             [k] 0xffffffff84d0410b
+     0.23%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a3957
+     0.23%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853da487
+     0.22%     0.17%  perf_profile  [unknown]             [k] 0xffffffff84d04109
+     0.22%     0.22%  perf_profile  perf_profile          [.] fp_types::infer_dtype
+     0.22%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853439e9
+     0.22%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853438f4
+     0.22%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85137e40
+     0.22%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853437ad
+     0.21%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853c9794
+     0.21%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ae78e
+     0.21%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86228a43
+     0.20%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86227734
+     0.18%     0.18%  perf_profile  perf_profile          [.] <alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow
+     0.17%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d9102
+     0.17%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d8f99
+     0.17%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d7d2a
+     0.17%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853bb5d6
+     0.17%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b9650
+     0.17%     0.17%  perf_profile  perf_profile          [.] <fp_columnar::ValidityMask>::from_values
+     0.16%     0.16%  perf_profile  [unknown]             [k] 0xffffffff86228131
+     0.16%     0.16%  perf_profile  [unknown]             [k] 0xffffffff84c01248
+     0.16%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85342072
+     0.15%     0.15%  perf_profile  [unknown]             [k] 0xffffffff86223c8e
+     0.15%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85458faf
+     0.13%     0.07%  perf_profile  [unknown]             [.] 0xffffffff85452e42
+     0.11%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853436a3
+     0.11%     0.05%  perf_profile  [unknown]             [k] 0xffffffff8541a995
+     0.11%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622884d
+     0.11%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85123fbd
+     0.11%     0.11%  perf_profile  [unknown]             [k] 0xffffffff85452de1
+     0.11%     0.06%  perf_profile  [unknown]             [.] 0xffffffff8541deff
+     0.11%     0.11%  perf_profile  [unknown]             [k] 0xffffffff85452a61
+     0.11%     0.11%  perf_profile  [unknown]             [k] 0xffffffff853a4fa3
+     0.11%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84feb92c
+     0.11%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85392d40
+     0.10%     0.10%  perf_profile  [unknown]             [k] 0xffffffff85452a65
+     0.10%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8510f1e4
+     0.09%     0.09%  perf_profile  [unknown]             [k] 0xffffffff85137e07
+     0.09%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85079c48
+     0.09%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f9d3da
+     0.08%     0.08%  perf_profile  [unknown]             [k] 0xffffffff850a7443
+     0.08%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85079cb1
+     0.08%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85089c45
+     0.08%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850a70b0
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85452dd0
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853adf3d
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff853d7e8f
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff853432f3
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539c2c1
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ae480
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853433b2
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff862287c0
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8513cee5
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8541a8a2
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff857bfc46
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff85300d60
+     0.06%     0.00%  perf_profile  perf_profile          [.] fp_join::collect_overlapping_column_names
+     0.06%     0.00%  perf_profile  perf_profile          [.] <core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<std::collections::hash::set::Iter<&alloc::string::String>, fp_join::collect_overlapping_column_names::{closure#0}>, fp_join::collect_overlapping_column_names::{closure#1}> as core::iter::traits::iterator::Iterator>::next
+     0.06%     0.00%  perf_profile  perf_profile          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&&alloc::string::String>
+     0.06%     0.00%  perf_profile  perf_profile          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a37d1
+     0.06%     0.06%  perf_profile  perf_profile          [.] fp_join::collect_join_key_columns
+     0.06%     0.00%  perf_profile  perf_profile          [.] fp_join::ordered_unique_int64_outer_positions
+     0.06%     0.00%  perf_profile  perf_profile          [.] <fp_columnar::ScalarValues>::as_slice
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00b93
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff84c0118f
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c01585
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff857a3ad2
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85136ccb
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85157a45
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85157873
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8515762e
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85137c02
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85136b3f
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff851367df
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff857a3b27
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff85452de6
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff8507b119
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85079d0c
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850919bc
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850914d3
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8507b112
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850b2c14
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff853a5827
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c015e5
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff86228770
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ddaf1
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff850a77d0
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff85104b34
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8510fc9e
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8510f816
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8510ebba
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8505b24b
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff856a01cb
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ec9ff
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff854585f0
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff8539a86f
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85139ee7
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8513f6f8
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff8513f75b
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85458fb2
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853dd916
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff8507b157
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85081368
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff862251e2
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff8502173c
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff8513830e
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff8530d38a
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff85021a7b
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff854049f8
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff8541a8a9
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853bb56d
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853d95a7
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff861f66c8
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853a56fa
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853d7e94
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff85342161
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8536a276
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853b9625
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff85392de1
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853a37b5
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff8541ddb9
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84d04104
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853414e8
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85455446
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff854529c1
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff85458f96
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff85341136
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853435d8
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85458fd3
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853a5707
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff854578a4
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85456e08
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a3437
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853b811c
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853bbcee
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853d7e8a
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff85341142
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853432f8
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85341121
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85455447
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff857c02ab
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a4e56
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853dc362
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8541dd89
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d91ce
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a395b
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff85392d17
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853414fb
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85341519
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853d9574
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853439c7
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8534144d
+     0.05%     0.05%  perf_profile  [unknown]             [.] 0xffffffff86228130
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853dd915
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d9235
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a4c22
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff861f67ea
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853a3805
+     0.05%     0.05%  perf_profile  perf_profile          [.] <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+     0.05%     0.00%  perf_profile  libc.so.6             [.] malloc
+     0.05%     0.00%  perf_profile  libc.so.6             [.] __libc_calloc2
+     0.05%     0.00%  perf_profile  libc.so.6             [.] _int_malloc
+     0.05%     0.00%  perf_profile  perf_profile          [.] fp_join::build_single_key_dense_i64_outer_merge_output::{closure#3}
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff85452ccf
+     0.05%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853435e0
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff850817e4
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85452e38
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85452aa6
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff84f87bc0
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85137e12
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a31e8
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff8539b7bc
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853daf3b
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853436a6
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a4c5e
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b83e0
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff862251f7
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853d2593
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853db06b
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d43b0
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d3d35
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d2980
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539c086
+     0.04%     0.04%  perf_profile  [unknown]             [k] 0xffffffff850b6b86
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86228852
+     0.04%     0.04%  perf_profile  [unknown]             [k] 0xffffffff85392dcf
+     0.04%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_start_user
+     0.04%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_start
+     0.04%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_sysdep_start
+     0.04%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] dl_main
+     0.04%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_relocate_object
+     0.04%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_relocate_object_no_relro
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a4df4
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539df72
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539d716
+     0.01%     0.01%  perf_profile  [unknown]             [k] 0xffffffff853dd919
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0x000073b500ef878b
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f25398
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8548bea9
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8548bbf7
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8548a03a
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85489f2c
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85489bec
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853d43d3
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff855298d3
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85527189
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8584181c
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84feb89e
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853437dc
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853daf98
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00f4b
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86227465
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853a33d5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622f445
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86228929
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622f947
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853badbb
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85529184
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8548a478
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff853acfb5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff862289ac
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853267c9
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85326b38
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8621c6a7
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d6df
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85314705
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85313869
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853136ae
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8621c6a9
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85124022
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f8cacc
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f8c9d6
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0188e
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312e7b
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f8c9d1
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d582
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85078cd8
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312e70
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00f8b
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2bc
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531294d
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2c3
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530a963
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f330ff
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f32f97
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff862288a5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d72f
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcb
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff854529f1
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85013697
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff861eb8a8
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850cd871
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8506d596
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8506f8df
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622769a
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84fc01dc
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff851626e3
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff851623d5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85078fb8
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850716e9
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850c9b1d
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622777a
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85138885
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff851388a2
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850799c5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85079602
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85071679
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8508a9ce
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8508a402
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f8c9c1
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0x000073b500ef878b
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84c0012b
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff86220551
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84f25398
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8548bea9
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8548bbf7
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8548a03a
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85489f2c
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85489bec
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff855290b9
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8548c37d
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85317605
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff853141e6
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86227466
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff86227da0
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85326b49
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530d384
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8512400a
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8621c6a1
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85123f65
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0185b
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8621c6ac
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8531386c
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85305851
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff852ff1fb
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8621f945
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d59b
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8620a0eb
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff852ff1c6
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff852ff1f5
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c01879
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622768a
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8620a0b1
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8620a0c3
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0181e
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853263a6
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84c0188e
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85313ac2
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84f2b931
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84f2ff25
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84fdedcd
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d285
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d286
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff852ff1c5
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff86224c9d
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8620a0c7
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d280
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f88b27
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622898e
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312aba
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85456a4d
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f2e574
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530d2f5
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b65
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f337e9
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2cc
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85313a57
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85313869
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d55a
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531470c
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d289
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b80
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff853136ae
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85312e70
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8531294d
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530a963
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84f330ff
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84f32f97
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d384
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531473a
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84f88cb7
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8510f1d0
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530aa69
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531471d
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8620a0e3
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcd
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f32f8e
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b66
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b70
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d280
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2bc
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2d0
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f337e5
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b20
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b75
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d28b
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2c3
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b69
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8501366d
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d57c
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85314671
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85314719
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84d04104
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00efe
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c01566
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f2e572
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f2e578
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f2e5b7
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f88cb7
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84fee4b5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d54c
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d72a
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff852fe628
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff852fe9fc
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff852ff1eb
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85300d65
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85305848
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530a974
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530a9dd
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531297b
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312e5e
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312e73
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531386a
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85314662
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531467c
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85326438
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853267f7
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85326b44
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8621c6a4
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff862288cd
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622892c
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622896a
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622897f
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622f961
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8623a4f6
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8623a4fc
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

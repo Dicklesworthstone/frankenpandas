@@ -1,0 +1,50 @@
+br-frankenpandas-g0d3l — Parallel O(n) typed GroupBy rank (DataFrameGroupBy.rank)
+==================================================================================
+
+PROFILE (groupby_rank, n=100000, 100 groups, 4 i64 value cols): the serial
+per-column loop called rank_i64_slice_histogram PER GROUP, each allocating +
+**zeroing** four O(group_range) buffers and sweeping the whole value range for
+prefix sums. With 100 small groups over a ~9973-wide span that is
+O(num_groups * range) memset + sweep — `memset_avx2` was 18.7% and the
+range-sweep dominated rank_i64_slice_histogram (54%).
+
+LEVER (one cohesive change — fast typed GroupBy rank):
+  (a) O(n) per-column kernel `rank_i64_groups_global`: one stable radix argsort
+      of the whole column (radix_argsort_i64, requested direction) + a CSR
+      scatter that drops each row into its group's segment in global sorted
+      order + a per-group tie-run walk. No per-group histogram, no memset, no
+      O(range) sweep. Gated to |v| <= 2^53 (so i64-exact tie grouping matches
+      the reference's `v as f64` keying); falls back to the per-group histogram
+      otherwise.
+  (b) Column-level parallelism: value columns are independent, so they fan out
+      across worker threads (std::thread::scope, chunked by
+      available_parallelism). Results keyed by column name -> deterministic
+      merge. (100% safe Rust, #![forbid(unsafe_code)] intact.)
+
+BENCH (perf_profile, release-perf, n=100000, 100 iters/run, ms/iter, min-of-5):
+  groupby_rank     : baseline 18.5  ->  after 5.47   = 3.38x
+  groupby_rank_f64 : (f64 radix kernel, now also parallel) ~4.7 ms
+
+SCORE: 3.38x >= 2.0 PASS.
+
+ISOMORPHISM:
+  - Per-column kernel bit-identical to the per-group histogram (hence to the
+    comparison-sort reference): sorting in the requested direction makes each
+    tie-run's start index == the histogram's c_less (count strictly-before in
+    that direction), so min/max/average/dense map directly; radix_argsort is
+    stable, so tied rows stay in ascending row-index order — the same order
+    build_groups stores them and the histogram's `occ` ("first") counter visits,
+    giving identical "first" ranks. pct divides by group length (distinct count
+    for dense), as the histogram does.
+  - Parallelism changes only execution order; each column's output is computed
+    independently and merged by name, so the result frame is identical to the
+    serial loop regardless of completion order.
+  - Golden sha256 (perf_profile golden n=5000) UNCHANGED before/after:
+      groupby_rank      80438464e219a2d5cc64fa58cf6581440108023ab39f0bacfda05a0bfe4da013
+      groupby_rank_f64  80438464e219a2d5cc64fa58cf6581440108023ab39f0bacfda05a0bfe4da013
+
+GATES (rch, crate-scoped):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

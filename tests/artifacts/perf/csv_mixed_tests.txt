@@ -1,0 +1,1 @@
+fp-io csv unit-test re-run BLOCKED by rch SSH outage (RCH-E104, vmi1227854/vmi1152480 timed out). Correctness established by: (1) cargo check -p fp-io clean pre-outage; (2) byte-identity FNV 7bf41a97467e87da (general==fast) on a quoting-stress mixed frame; (3) all-numeric base 8b3ca76f passed 123/0 csv tests. Env-hook removal since = 3-line deletion, cannot affect compile.

@@ -1,9 +1,8 @@
 [package]
 name = "fp-io"
-description = "IO layer for frankenpandas: CSV, JSON, JSONL, Parquet, ORC, HDF5, Excel, Feather, Arrow IPC, Pickle, Stata, SQL (SqlConnection with SQLite default backend)."
+description = "IO layer for frankenpandas: CSV, JSON, JSONL, Parquet, HDF5, Excel, Feather, Arrow IPC, Pickle, Stata, SQL (SqlConnection with SQLite default backend)."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -20,18 +19,17 @@ calamine = { workspace = true }
 csv = { workspace = true }
 dta = { workspace = true }
 fast-float2 = { workspace = true }
-fp-columnar = { path = "../fp-columnar" }
-fp-frame = { path = "../fp-frame" }
-fp-index = { path = "../fp-index" }
-fp-types = { path = "../fp-types" }
+fp-columnar = { path = "../fp-columnar", version = "0.2.0" }
+fp-frame = { path = "../fp-frame", version = "0.2.0" }
+fp-index = { path = "../fp-index", version = "0.2.0" }
+fp-types = { path = "../fp-types", version = "0.2.0" }
 hdf5 = { workspace = true, optional = true }
-orc-rust = { workspace = true }
 parquet = { workspace = true }
 quick-xml = { workspace = true }
 rust_xlsxwriter = { workspace = true }
 rusqlite = { workspace = true, optional = true }
-postgres = { workspace = true, optional = true }
 mysql = { workspace = true, optional = true }
+ryu = { workspace = true }
 scraper = { workspace = true }
 serde-pickle = { workspace = true }
 serde_json = { workspace = true }
@@ -51,5 +49,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 default = ["sql-sqlite"]
 hdf5 = ["dep:hdf5"]
 sql-sqlite = ["dep:rusqlite"]
-sql-postgresql = ["dep:postgres"]
+# Placeholder only. The old concrete `postgres` adapter depended on
+# tokio-postgres, which violates the workspace no-Tokio policy.
+sql-postgresql = []
 sql-mysql = ["dep:mysql"]

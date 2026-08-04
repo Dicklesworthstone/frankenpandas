@@ -1,0 +1,80 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 515  of event 'cycles:P'
+# Event count (approx.): 10661769098
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                   Shared Object     IPC   [IPC Coverage]
+# ........  .......................................................................................................................................................................................................................................................................................................  ................  ....................
+#
+    90.26%  [.] <fp_frame::Series>::kendall_no_tie_fast_with_ordered_ranks                                                                                                                                                                                                                                           perf_profile      -      -            
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>
+               <std::thread::lifecycle::spawn_unchecked<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+               <std::sys::thread::unix::Thread>::new::thread_start
+               start_thread
+               __GI___clone3
+
+     2.53%  [.] core::slice::sort::stable::quicksort::quicksort::<u32, <[u32]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>                                                                                                                                                         perf_profile      -      -            
+            |          
+             --2.50%--core::slice::sort::stable::quicksort::quicksort::<u32, <[u32]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>
+                       core::slice::sort::stable::quicksort::quicksort::<u32, <[u32]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>
+                       |          
+                        --2.50%--core::slice::sort::stable::quicksort::quicksort::<u32, <[u32]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>
+                                  |          
+                                   --2.04%--core::slice::sort::stable::drift::sort::<u32, <[u32]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>
+                                             core::slice::sort::stable::driftsort_main::<u32, <[u32]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}, alloc::vec::Vec<u32>>
+                                             <fp_frame::DataFrame>::pairwise_rank_corr
+                                             perf_profile::main
+                                             std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                                             std::rt::lang_start::<()>::{closure#0}
+                                             std::rt::lang_start_internal
+                                             main
+                                             __libc_start_call_main
+                                             __libc_start_main@@GLIBC_2.34
+                                             _start
+
+     2.35%  [.] <fp_frame::DataFrame>::pairwise_rank_corr                                                                                                                                                                                                                                                            perf_profile      -      -            
+            |
+            ---perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.10%  [.] perf_profile::build_corr_frame                                                                                                                                                                                                                                                                       perf_profile      -      -            
+            |          
+             --1.06%--perf_profile::build_corr_frame
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.05%  [k] 0xffffffffafb0deda                                                                                                                                                                                                                                                                                   [unknown]         -      -            
+            |
+            ---0xffffffffafa89c75
+               0xffffffffafa79cf1
+               0xffffffffafb37e80
+               0xffffffffafb52536
+               0xffffffffafb39043
+               0xffffffffafb39f9d
+               0xffffffffaf9c4bc8
+               0xffffffffb0c27724
+               0xffffffffaf600f0b
+               <fp_frame::Series>::kendall_no_tie_fast_with_ordered_ranks
+               std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>
+               <std::thread::lifecycle::spawn_unchecked<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+               <std::sys::thread::unix::Thread>::new::thread_start
+               start_thread
+               __GI___clone3
+
+     0.89%  [.] core::slice::sort::shared::smallsort::bidirectional_merge::<u32, <[u32]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>                                                                                                                                               perf_profile      -      -            

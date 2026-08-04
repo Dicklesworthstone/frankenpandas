@@ -1,0 +1,36 @@
+br-frankenpandas-3llep — Typed Int64 fast path for Column.fillna (all-valid no-op)
+==================================================================================
+
+Int64 vein (gt 154x, diff 49x, clip 35x, nunique 25.6x, arith 20x prior).
+Column::fillna's typed path (e8vzt) was Float64-only; an all-valid Int64 column
+fell to the per-element Scalar clone loop + Self::new revalidation (i64.fillna
+35.7ms @ 200000 x 8 cols) even though fillna on an all-valid column fills nothing
+and is a pure copy.
+
+LEVER (one): as_i64_slice returns Some only for an all-valid Int64 backing, so
+fillna re-ingests the contiguous i64 buffer typed (from_i64_values) instead of
+cloning each Scalar and revalidating.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-4; loaded):
+  DataFrame.fillna(0) [Int64]:  35.7  ->  1.09  = 32.8x
+
+SCORE: 32.8x >> 2.0 PASS.
+
+ISOMORPHISM:
+  - as_i64_slice Some => all-valid Int64 => no missing slot => the dtype-cast fill
+    is never applied; the output is the identical all-valid Int64 column the Scalar
+    loop would rebuild value-for-value.
+  - cast_scalar(fill, dtype) is still evaluated above (with `?`), so an invalid
+    fill still errors exactly as before.
+  - Nullable Int64 (as_i64_slice None) keeps the Scalar fill loop; Float64 keeps the
+    e8vzt path; the Null-dtype branch is untouched.
+  - Golden sha256 (gap_hunt golden: full family + Int64 fillna over int_frame(5000,4))
+    UNCHANGED:
+      bf585471aa7126db0ed5c3d2b360cf3c9f90c0218b7c8f12cbf251287c537636
+
+GATES (rch + local):
+  cargo check  -p fp-columnar: OK
+  cargo clippy -p fp-columnar: clean
+  cargo test   -p fp-columnar: 399 passed
+  cargo test   -p fp-frame: 2831 passed
+  cargo test   -p fp-conformance: 0 failures

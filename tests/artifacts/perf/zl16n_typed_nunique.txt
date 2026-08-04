@@ -1,0 +1,37 @@
+br-frankenpandas-zl16n — Typed Float64 + Fx-hashed dedup for DataFrame.nunique
+==============================================================================
+
+eydcr fifth-wave probe (DataFrame reductions): nunique 41ms. nunique_with_dropna
+built a HashMap<ScalarKey, ()> (SipHash) from col.values() per column.
+
+LEVER (one cohesive typed dedup, same shape as the isin win):
+  - Typed Float64 branch: dedup the present values straight from the f64 + validity
+    slices into an FxHashSet<u64> of normalized bits — no Vec<Scalar>
+    materialization, no ScalarKey SipHash.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-5; loaded):
+  DataFrame.nunique:  41  ->  10.3  = 4.0x
+
+SCORE: 4.0x >= 2.0 PASS.
+
+ISOMORPHISM (matches scalar_key_skip_missing's Float64 arm exactly):
+  - A value is counted iff its materialized Scalar is Float64(finite) — validity set
+    AND datum not NaN (Float64(NaN) and Null are missing). Its dedup key is
+    ScalarKey::FloatBits of the datum after the -0.0 -> +0.0 normalization
+    (`if v == 0.0 { 0.0 } else { v }`), so +0.0 and -0.0 collapse to one key exactly
+    as the Scalar path does; FxHashSet<u64> membership over those bits is identical
+    to the HashMap<ScalarKey> dedup.
+  - Every other slot is a missing value; the Scalar path collapses all missing into
+    a single bool bucket (scalar_key_skip_missing returns None), counted as +1 iff
+    !dropna — replicated by the missing_seen flag.
+  - Int64 / non-Float64 columns keep the ScalarKey path unchanged.
+  - Golden sha256 (gap_hunt golden: full elementwise/reduction family + nunique over
+    an all-valid frame, a nullable frame (dropna=true), and the same nullable frame
+    with dropna=false (missing bucket counted), n=5000 x4) UNCHANGED:
+      a752efc943b19e5c44f4795bbebd48a19e0f419f842a2c9954e2bea4745eae39
+
+GATES (rch + local):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 0 failures

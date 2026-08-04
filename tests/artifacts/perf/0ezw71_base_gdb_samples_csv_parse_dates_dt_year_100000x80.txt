@@ -1,0 +1,140 @@
+
+--- sample 1 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 2 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 3 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 4 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 5 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 6 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 7 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 8 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 9 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 10 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 11 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 12 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 13 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 14 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 15 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 16 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 17 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 18 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 19 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.
+
+--- sample 20 ---
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+The program is not being run.

@@ -1,0 +1,17 @@
+WARNING: Kernel address maps (/proc/{kallsyms,modules}) are restricted,
+check /proc/sys/kernel/kptr_restrict and /proc/sys/kernel/perf_event_paranoid.
+
+Samples in kernel functions may not be resolved if a suitable vmlinux
+file is not found in the buildid cache or in the vmlinux path.
+
+Samples in kernel modules won't be resolved at all.
+
+If some relocation was applied (e.g. kexec) symbols may be misresolved
+even with a suitable vmlinux or kallsyms file.
+
+Couldn't record kernel reference relocation symbol
+Symbol resolution may be skewed if relocation was used (e.g. kexec).
+Check /proc/kallsyms permission or run as root.
+join_bench join_type=inner rows=1000000 right_rows=1000000 key_cardinality=1024 ordered_unique=false str_ordered=true wide_sparse=false stride=1048576 force_generic=false warmup=3 iters=20 output_rows=100000 mean_ms=0.001 p50_ms=0.001 p95_ms=0.001 p99_ms=0.001 checksum=4999706700.000
+[ perf record: Woken up 2 times to write data ]
+[ perf record: Captured and wrote 0.030 MB tests/artifacts/perf/perf_base_3wo1d_str_ordered_1000000x1000000.data (147 samples) ]

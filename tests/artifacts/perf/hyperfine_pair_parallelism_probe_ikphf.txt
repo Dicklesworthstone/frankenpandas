@@ -1,0 +1,33 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-before-20260608T032916Z/release-perf/examples/perf_profile inner_join 100000 50
+  Time (mean ± σ):     116.8 ms ±  10.9 ms    [User: 78.4 ms, System: 36.2 ms]
+  Range (min … max):   100.5 ms … 146.3 ms    15 runs
+
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-after-20260608T033740Z/release-perf/examples/perf_profile inner_join 100000 50
+  Time (mean ± σ):     302.9 ms ±  13.8 ms    [User: 106.5 ms, System: 192.5 ms]
+  Range (min … max):   278.3 ms … 330.0 ms    15 runs
+
+Benchmark 3: /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-before-20260608T032916Z/release-perf/examples/perf_profile inner_join_read 100000 10
+  Time (mean ± σ):      1.105 s ±  0.016 s    [User: 0.853 s, System: 3.503 s]
+  Range (min … max):    1.080 s …  1.149 s    15 runs
+
+Benchmark 4: /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-after-20260608T033740Z/release-perf/examples/perf_profile inner_join_read 100000 10
+  Time (mean ± σ):      1.145 s ±  0.064 s    [User: 0.885 s, System: 3.575 s]
+  Range (min … max):    1.095 s …  1.346 s    15 runs
+
+  Warning: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+Benchmark 5: /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-before-20260608T032916Z/release-perf/examples/perf_profile join_1to1 100000 100
+  Time (mean ± σ):      60.7 ms ±   5.2 ms    [User: 42.7 ms, System: 17.7 ms]
+  Range (min … max):    55.6 ms …  76.0 ms    15 runs
+
+Benchmark 6: /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-after-20260608T033740Z/release-perf/examples/perf_profile join_1to1 100000 100
+  Time (mean ± σ):      67.8 ms ±   4.9 ms    [User: 47.4 ms, System: 19.9 ms]
+  Range (min … max):    59.5 ms …  74.6 ms    15 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-before-20260608T032916Z/release-perf/examples/perf_profile join_1to1 100000 100 ran
+    1.12 ± 0.12 times faster than /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-after-20260608T033740Z/release-perf/examples/perf_profile join_1to1 100000 100
+    1.92 ± 0.24 times faster than /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-before-20260608T032916Z/release-perf/examples/perf_profile inner_join 100000 50
+    4.99 ± 0.48 times faster than /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-after-20260608T033740Z/release-perf/examples/perf_profile inner_join 100000 50
+   18.21 ± 1.57 times faster than /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-before-20260608T032916Z/release-perf/examples/perf_profile inner_join_read 100000 10
+   18.86 ± 1.92 times faster than /data/projects/.scratch/cargo-target-orangepeak-parallelism-probe-ikphf-after-20260608T033740Z/release-perf/examples/perf_profile inner_join_read 100000 10

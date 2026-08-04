@@ -1,0 +1,12 @@
+merge_asof RightGather — typed nullable-f64 output (was Scalar gather + Column::new)
+Golden bit-identical: asof_join sha256 a88823e3accea6ac before==after.
+A/B min-of-5:
+  asof_join @200k (30 iters): 26.997 -> 7.084 ms/iter = 3.81x
+  asof_join @1M   (8 iters):  27.011 -> 7.115 ms/iter = 3.80x
+Tests: fp-join 108 pass (was 105+3 FAILED on first attempt — fixed by using 0.0
+datum not NaN for unmatched slots, so LazyNullableFloat64 materializes Null(NaN)),
+fp-frame asof 10 + merge 5 pass.
+Isomorphism: as_f64_slice source is all-valid => no NaN values, so matched slot =
+finite Float64(v) (valid bit), unmatched = 0.0 datum + cleared bit => Null(NaN) —
+exactly the Scalar gather + Column::new result. f64-only (Int64 unmatched NullKind
+differs: Null vs NaN).

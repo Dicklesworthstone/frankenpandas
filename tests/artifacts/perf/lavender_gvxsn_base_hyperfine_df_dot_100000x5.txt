@@ -1,0 +1,3 @@
+Benchmark 1: ./.rch-target-lavenderstone-next/release-perf/examples/perf_profile df_dot 100000 5
+  Time (mean ± σ):     679.2 ms ±  10.6 ms    [User: 14908.3 ms, System: 644.7 ms]
+  Range (min … max):   666.2 ms … 696.5 ms    9 runs

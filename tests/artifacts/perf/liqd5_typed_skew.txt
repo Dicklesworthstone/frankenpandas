@@ -1,0 +1,35 @@
+br-frankenpandas-liqd5 — Typed Float64 numeric_values for skew / kurtosis
+=========================================================================
+
+eydcr fifth-wave probe: skew 12.5ms while var/std measured ~2.4ms. var/std go
+through numeric_moments (a typed single-pass Welford accumulation), but skew and
+kurtosis collect their values through numeric_values, which materialized
+col.values() into a Vec<Scalar> + per-element to_f64 before the moment passes.
+
+LEVER (one, shared by every numeric_values caller): typed Float64 fast path —
+collect present values straight from the f64 + validity slices, in index order.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-5; loaded):
+  DataFrame.skew:  12.5  ->  5.74  = 2.18x
+  (kurtosis and sem share numeric_values and inherit the same speedup.)
+
+SCORE: 2.18x >= 2.0 PASS.
+
+ISOMORPHISM:
+  - A value is collected iff its materialized Scalar is Float64(finite) — validity
+    set AND datum not NaN (Float64(NaN)/Null are missing) — exactly the prior
+    `!is_missing` filter, and in the same index order, so `vals`, its length
+    (count), and mean = sum/len are byte-identical (identical summation order).
+  - The downstream skew/kurtosis moment passes (m2/m3/m4 over `vals`) are unchanged,
+    so their f64 results are identical.
+  - Int64 / non-Float64 columns keep the Scalar loop (as_f64_slice_with_validity is
+    None), so their to_f64 conversion path is unchanged.
+  - Golden sha256 (gap_hunt golden: full elementwise/reduction family + skew and
+    kurtosis over an all-valid frame and a nullable frame, n=5000 x4) UNCHANGED:
+      39fc5a909f5dd5f68515afe4672c7ad04c6566401e6b0c262cafbca4f249957a
+
+GATES (rch + local):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 0 failures

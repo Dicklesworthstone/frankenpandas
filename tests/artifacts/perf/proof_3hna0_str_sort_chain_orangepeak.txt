@@ -1,0 +1,87 @@
+bead=br-frankenpandas-3hna0
+agent=OrangePeak
+target=str_sort_chain 200000 5
+head_before=daa18f3216205410a2e9c50db8c2c77d018b3bfc
+rebased_parent=3cda38efe4e9353af4db413d50ada152e281b457
+rebased_head=5866ba64247e5cfbdb4921f30379de483005ed82
+
+profile_before:
+  samples=749
+  ScalarValues::as_slice self=22.64%
+  Series::sort_values_na comparator self=21.72%
+  Column::take_positions self=9.95%
+  __memcmp_avx2_movbe children=33.47%
+
+lever:
+  Series::sort_values_na now dispatches non-categorical, na_position='last',
+  contiguous all-valid Utf8 columns through Column::argsort_with followed by
+  the existing Series::reorder_by_positions.
+
+score:
+  Impact=4
+  Confidence=5
+  Effort=2
+  Score=10.0
+
+benchmarks:
+  before_10_run_mean=804.9 ms +/- 59.6
+  after_10_run_mean=391.5 ms +/- 7.8
+  speedup_before_over_after=2.06x
+  paired_before_mean=815.6 ms +/- 40.1
+  paired_after_mean=370.4 ms +/- 19.0
+  paired_speedup=2.20x +/- 0.16
+  rebased_parent_paired_mean=806.7 ms +/- 32.0
+  rebased_after_paired_mean=371.7 ms +/- 11.9
+  rebased_paired_speedup=2.17x +/- 0.11
+
+golden_sha256:
+  before=374ac23ba59651a7717bd38f613056a57acfc2a42406d03151fea09438d552eb
+  after=374ac23ba59651a7717bd38f613056a57acfc2a42406d03151fea09438d552eb
+  rebased_parent=374ac23ba59651a7717bd38f613056a57acfc2a42406d03151fea09438d552eb
+  rebased_after=374ac23ba59651a7717bd38f613056a57acfc2a42406d03151fea09438d552eb
+  dump_cmp=identical
+  rebased_sha_cmp=identical
+
+isomorphism:
+  Ordering preserved: yes. The fast path is limited to valid Utf8 byte slices;
+    Rust str/String ordering and utf8_msd_argsort both use lexicographic byte
+    order with shorter-prefix-first.
+  Tie-breaking unchanged: yes. The old comparator sort and the MSD counting
+    scatter are stable, so equal strings keep original row/index order.
+  NA behavior unchanged: yes. The fast path requires na_position='last' and
+    contiguous all-valid Utf8; nullable inputs and na_position='first' fall
+    through to the old comparator.
+  Categorical behavior unchanged: yes. The guard requires categorical.is_none().
+  Floating-point: N/A.
+  RNG: N/A.
+  Metadata: Series::reorder_by_positions is unchanged and preserves name,
+    index name, categorical metadata, and sparse metadata.
+
+profile_after:
+  samples=395
+  Scalar comparator removed from top residuals.
+  top residuals:
+    Column::take_positions self=20.99%
+    utf8_msd_sort_range self=15.28%
+    __libc_malloc2 self=10.00%
+    _int_malloc self=7.50%
+
+profile_after_rebased:
+  samples=425
+  Scalar comparator remains removed from top residuals.
+  top residuals:
+    Column::take_positions self=25.61%
+    utf8_msd_sort_range self=17.37%
+    alloc_perturb self=7.00%
+    _int_malloc self=4.09%
+    __libc_malloc2 self=3.99%
+
+validation:
+  RCH cargo test -p fp-frame series_sort_values_contiguous_utf8_matches_scalar_reference --lib: pass
+  RCH cargo test -p fp-frame series_sort_values_contiguous_utf8_matches_scalar_reference --lib after rebase: pass
+  RCH cargo check -p fp-frame --lib: pass
+  cargo fmt -p fp-frame --check: blocked by pre-existing formatting drift outside this lever
+  RCH cargo clippy -p fp-frame --lib -- -D warnings: blocked by pre-existing doc_lazy_continuation at crates/fp-frame/src/lib.rs:46498
+  RCH cargo clippy -p fp-frame --lib -- -D warnings -A clippy::doc_lazy_continuation: pass
+  git diff --check: pass
+  UBS crates/fp-frame/src/lib.rs: timed out after 180s without a result

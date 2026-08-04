@@ -1,0 +1,13 @@
+aggregate_str_dense — group-label ordering via MSD byte-radix (was sort_by+memcmp)
+Bit-identical (before==after) goldens @5000, all 11 str_groupby reductions:
+  median 9ba09cb8  prod b4ff5da5  sum 2691faae  mean 10db0fd3  var 18566650
+  std 7643f0d1  first 897b2cb2  last dca20152  min 5c871221  max 3cd423ed  count fec26ab2
+A/B (min-of-5):
+  str_groupby_median @200k: 88.07 -> 60.63 ms/iter = 1.45x; @1M 1221.7 -> 781.3 = 1.56x
+  str_groupby_sum    @200k: 83.14 -> 58.70 ms/iter = 1.42x; @1M 1192.9 -> 751.1 = 1.59x
+  str_groupby_prod   @200k: 78.52 -> 54.91 ms/iter = 1.43x
+Lever: group keys are unique per gid (span_to_gid dedups) so the stable MSD
+radix permutation == sort_by(sa.cmp(sb)) bit-for-bit. Caps ~1.6x (sort is ~35-40%
+of the op; remainder is FxHash grouping + n IndexLabel::Utf8 String allocs + Scalar
+output). NEXT PIVOT: contiguous-Utf8 index backing to kill the per-label String
+alloc + enable typed output (the remaining dominant cost).

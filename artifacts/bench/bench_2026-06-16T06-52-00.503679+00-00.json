@@ -1,0 +1,219 @@
+{
+  "schema_version": "v3",
+  "timestamp": "2026-06-16T06:52:00.503679+00:00",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.0",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle"
+    }
+  },
+  "parameters": {
+    "sizes": [
+      "1M"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "dataframe_ops"
+    ],
+    "cv_threshold": 5.0,
+    "min_iterations": 10,
+    "warmup_iterations": 3
+  },
+  "results": [
+    {
+      "workload": "sort_values_single",
+      "category": "dataframe_ops",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 69776.15,
+        "p95_us": 76678.44,
+        "p99_us": 79732.8,
+        "mean_us": 69774.95,
+        "stddev_us": 4992.78,
+        "cv_pct": 7.16,
+        "throughput_rows_sec": 14331544,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 123933.96,
+        "p95_us": 131155.51,
+        "p99_us": 134799.29,
+        "mean_us": 125043.69,
+        "stddev_us": 3838.76,
+        "cv_pct": 3.07,
+        "throughput_rows_sec": 8068814,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "sort_values_multi",
+      "category": "dataframe_ops",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 186801.27,
+        "p95_us": 208589.72,
+        "p99_us": 210279.37,
+        "mean_us": 189556.16,
+        "stddev_us": 12242.48,
+        "cv_pct": 6.46,
+        "throughput_rows_sec": 5353283,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 834824.84,
+        "p95_us": 904902.4,
+        "p99_us": 919200.46,
+        "mean_us": 841581.19,
+        "stddev_us": 39407.14,
+        "cv_pct": 4.68,
+        "throughput_rows_sec": 1197856,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "filter_bool_mask",
+      "category": "dataframe_ops",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 10299.83,
+        "p95_us": 11549.85,
+        "p99_us": 11842.84,
+        "mean_us": 10463.62,
+        "stddev_us": 728.18,
+        "cv_pct": 6.96,
+        "throughput_rows_sec": 97088962,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 39628.18,
+        "p95_us": 44945.32,
+        "p99_us": 46007.49,
+        "mean_us": 40209.96,
+        "stddev_us": 2097.53,
+        "cv_pct": 5.22,
+        "throughput_rows_sec": 25234565,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "drop_duplicates",
+      "category": "dataframe_ops",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 12176.44,
+        "p95_us": 14720.07,
+        "p99_us": 15466.94,
+        "mean_us": 12473.43,
+        "stddev_us": 1730.56,
+        "cv_pct": 13.87,
+        "throughput_rows_sec": 82125837,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 80622.57,
+        "p95_us": 83303.52,
+        "p99_us": 84151.32,
+        "mean_us": 80324.62,
+        "stddev_us": 2102.54,
+        "cv_pct": 2.62,
+        "throughput_rows_sec": 12403474,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "value_counts",
+      "category": "dataframe_ops",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 112326.57,
+        "p95_us": 124606.04,
+        "p99_us": 128608.6,
+        "mean_us": 114159.01,
+        "stddev_us": 5200.28,
+        "cv_pct": 4.56,
+        "throughput_rows_sec": 8902613,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 184933.25,
+        "p95_us": 219511.68,
+        "p99_us": 243505.21,
+        "mean_us": 188372.58,
+        "stddev_us": 17123.37,
+        "cv_pct": 9.09,
+        "throughput_rows_sec": 5407356,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "cumsum",
+      "category": "dataframe_ops",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 8393.86,
+        "p95_us": 9037.0,
+        "p99_us": 9299.13,
+        "mean_us": 8328.87,
+        "stddev_us": 505.9,
+        "cv_pct": 6.07,
+        "throughput_rows_sec": 119134687,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 161588.92,
+        "p95_us": 167308.27,
+        "p99_us": 168363.21,
+        "mean_us": 162716.88,
+        "stddev_us": 2687.82,
+        "cv_pct": 1.65,
+        "throughput_rows_sec": 6188543,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    }
+  ],
+  "summary": {
+    "total_workloads": 6,
+    "valid_workloads": 0,
+    "dropped_high_cv": 6,
+    "category_scores": {},
+    "weighted_score": 1.3,
+    "claim_validated": false
+  }
+}

@@ -1,0 +1,39 @@
+br-frankenpandas-k9tlb — Index::is_monotonic_increasing/decreasing lazy-Int64 fast path
+========================================================================================
+
+Vein: same as gzi1i (dtype), bqfj0 (memory_usage), 6ubrp (argsort) — avoid the
+lazy-Int64 -> Vec<IndexLabel> materialization tax.
+
+Problem: Index::is_monotonic_increasing / is_monotonic_decreasing
+(fp-index/src/lib.rs ~2086/2105) iterate `self.labels.windows(2)`, which Derefs
+to IndexLabels::as_slice() and materializes the full Vec<IndexLabel> via
+`materialized.get_or_init(...)` (lib.rs:704-741). For the common RangeIndex /
+affine / typed-Int64 backings this allocates O(n) 24-byte IndexLabel enums just
+to compare order.
+
+Fix (bit-identical, additive):
+  1. Affine Int64 backing (int64_affine_range(): unit-range/affine — the DEFAULT
+     index): monotonicity is O(1) from the step sign.
+       increasing  <=>  step >= 0
+       decreasing  <=>  step <= 0
+     (len <= 1 => both true; affine with len>1 has step != 0 by construction.)
+     No materialization at all.
+  2. Typed non-affine Int64 (int64_view() -> &[i64]): scan the i64 slice instead
+     of the wider IndexLabel window. int64_view populates the int64_typed cache,
+     NOT `materialized`, so the label vector is still never built.
+  3. Fallback: the original IndexLabel windows() scan for non-Int64 indexes.
+
+Correctness: all-Int64 backings carry no missing labels, and
+IndexLabel::Int64(a) {<,>} IndexLabel::Int64(b) matches a {<,>} b, so paths 1-2
+are bit-identical to the fallback. New test
+`int64_monotonic_predicates_avoid_label_materialization_k9tlb` asserts:
+  - ascending affine [0,2,4,6]: inc=true dec=false, materialized stays None
+  - descending affine [12,8,4,0]: inc=false dec=true, materialized stays None
+  - typed non-monotonic [4,0,7]: inc=false dec=false, materialized stays None
+  - typed sorted asc/desc, single-element, empty (both-true) cases
+  - equivalence vs the object-int64 path
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-index int64_monotonic_..._k9tlb  -> 1 passed
+  cargo test -p fp-index (full suite)               -> exit 0 (no regression)
+  ubs crates/fp-index/src/lib.rs                     -> 0 critical, exit 0

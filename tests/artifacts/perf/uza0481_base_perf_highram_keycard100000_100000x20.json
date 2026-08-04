@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "bead": "br-frankenpandas-tn6qb.4",
+  "profile_name": "uza0481-base-perf",
+  "generated_at_unix_ms": 1781213777627,
+  "command": "/data/projects/.scratch/cargo-target-orangepeak-uza0481-base/release-perf/high_ram_perf_baseline --profile uza0481-base-perf --rows 100000 --iters 20 --warmup 3 --frame-cols 10 --key-cardinality 100000",
+  "config": {
+    "rows": 100000,
+    "iters": 20,
+    "warmup": 3,
+    "frame_cols": 10,
+    "key_cardinality": 100000,
+    "join_type": "inner",
+    "alignment_overlap_rows": 50000
+  },
+  "host": {
+    "os": "linux",
+    "arch": "x86_64",
+    "available_parallelism": 64,
+    "rss_high_water_source": "/proc/self/status VmHWM"
+  },
+  "workloads": [
+    {
+      "name": "filter_boolean_mask",
+      "category": "filter",
+      "rows_in": 100000,
+      "rows_out": 50000,
+      "iters": 20,
+      "mean_ms": 13.6604671,
+      "p50_ms": 13.381832,
+      "p95_ms": 15.659954,
+      "p99_ms": 16.362524,
+      "throughput_rows_per_sec": 7320393.897804563,
+      "input_bytes_estimate": 9700000,
+      "output_bytes_estimate": 4400000,
+      "rss_high_water_kib": 36848,
+      "checksum": 31251625000.0
+    },
+    {
+      "name": "dataframe_groupby_sum",
+      "category": "groupby",
+      "rows_in": 100000,
+      "rows_out": 100000,
+      "iters": 20,
+      "mean_ms": 58.66260475,
+      "p50_ms": 54.967313,
+      "p95_ms": 79.56715,
+      "p99_ms": 81.071898,
+      "throughput_rows_per_sec": 1704663.48069892,
+      "input_bytes_estimate": 2400000,
+      "output_bytes_estimate": 1600000,
+      "rss_high_water_kib": 40208,
+      "checksum": 2500075000.0
+    },
+    {
+      "name": "dataframe_inner_join",
+      "category": "join",
+      "rows_in": 200000,
+      "rows_out": 100000,
+      "iters": 20,
+      "mean_ms": 1.21952595,
+      "p50_ms": 1.195392,
+      "p95_ms": 1.327372,
+      "p99_ms": 1.370664,
+      "throughput_rows_per_sec": 163998150.26486316,
+      "input_bytes_estimate": 4800000,
+      "output_bytes_estimate": 12000000,
+      "rss_high_water_kib": 36848,
+      "checksum": 5999907607.0
+    },
+    {
+      "name": "series_add_outer_alignment",
+      "category": "alignment",
+      "rows_in": 200000,
+      "rows_out": 150000,
+      "iters": 20,
+      "mean_ms": 2.2495068,
+      "p50_ms": 2.010055,
+      "p95_ms": 3.119766,
+      "p99_ms": 4.724584,
+      "throughput_rows_per_sec": 88908377.60525997,
+      "input_bytes_estimate": 3200000,
+      "output_bytes_estimate": 2400000,
+      "rss_high_water_kib": 36848,
+      "checksum": 7499950000.0
+    },
+    {
+      "name": "csv_write_read_roundtrip",
+      "category": "io",
+      "rows_in": 100000,
+      "rows_out": 100000,
+      "iters": 20,
+      "mean_ms": 82.40995915,
+      "p50_ms": 83.092785,
+      "p95_ms": 87.579848,
+      "p99_ms": 91.36833,
+      "throughput_rows_per_sec": 1213445.5717661886,
+      "throughput_bytes_per_sec": 104494287.93340203,
+      "input_bytes_estimate": 8800000,
+      "output_bytes_estimate": 8800000,
+      "io_payload_bytes": 8611370,
+      "rss_high_water_kib": 86076,
+      "checksum": 62503875000.0
+    }
+  ],
+  "delta_artifact_contract": {
+    "required_fields": [
+      "name",
+      "category",
+      "rows_in",
+      "p50_ms",
+      "p95_ms",
+      "p99_ms",
+      "throughput_rows_per_sec",
+      "input_bytes_estimate",
+      "output_bytes_estimate",
+      "rss_high_water_kib"
+    ],
+    "compare_key": "workloads[].name",
+    "regression_rule": "future deltas should flag p95 drift >10% on the same profile/host and >20% as a blocker",
+    "pandas_companion": "record pandas oracle rows beside matching workloads when pandas is available; keep missing oracle runs explicit rather than inferred"
+  },
+  "notes": [
+    "measurement-only harness; no optimization levers are applied",
+    "default smoke profile is intentionally small; use --profile high-ram --rows 100000 --iters 30 on a quiet 64-core host for durable baselines",
+    "RSS is process high-water at workload completion, so later workloads can inherit previous peaks; use separate process runs for isolated RSS attribution"
+  ]
+}

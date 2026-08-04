@@ -1,0 +1,120 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 218  of event 'cycles:P'
+# Event count (approx.): 1539962563
+#
+# Children      Self  Symbol                                                             Shared Object         IPC   [IPC Coverage]
+# ........  ........  .................................................................  ....................  ....................
+#
+    99.90%     0.00%  [.] _start                                                         perf_profile          -      -
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--81.68%--fp_join::merge_dataframes_on_with_options
+               |          |
+               |          |--69.94%--fp_join::merge_single_key_inner_unsorted
+               |          |          |
+               |          |          |--34.30%--__memcmp_avx2_movbe
+               |          |          |          |
+               |          |          |           --1.47%--0xffffffff84c00f0b
+               |          |          |                     0xffffffff86227729
+               |          |          |                     0xffffffff85021e6e
+               |          |          |                     0xffffffff85021a80
+               |          |          |                     0xffffffff8502171f
+               |          |          |                     0xffffffff85091286
+               |          |          |                     0xffffffff850815d7
+               |          |          |
+               |          |          |--10.42%--fp_join::strictly_increasing_utf8_key_spans
+               |          |          |
+               |          |           --10.34%--fp_join::build_single_key_inner_merge_output
+               |          |                     |
+               |          |                     |--7.41%--<fp_columnar::Column>::take_positions
+               |          |                     |          |
+               |          |                     |           --1.38%--0xffffffff84c00bb7
+               |          |                     |                     0xffffffff8622811f
+               |          |                     |                     0xffffffff84feb96b
+               |          |                     |                     0xffffffff853a5627
+               |          |                     |                     0xffffffff853a53ad
+               |          |                     |                     0xffffffff853a4de7
+               |          |                     |                     0xffffffff853a37ea
+               |          |                     |                     0xffffffff853a3437
+               |          |                     |                     0xffffffff85404a1c
+               |          |                     |
+               |          |                      --2.92%--__memmove_avx_unaligned_erms
+               |          |
+               |           --11.75%--__memcmp_avx2_movbe
+               |
+               |--14.85%--perf_profile::build_str_join_frame
+               |          |
+               |          |--4.81%--0xffffffff84c00bb7
+               |          |          |
+               |          |           --4.81%--0xffffffff8622811f
+               |          |                     0xffffffff84feb96b
+               |          |                     0xffffffff853a5627
+               |          |                     0xffffffff853a53ad
+               |          |                     0xffffffff853a4de7
+               |          |                     |
+               |          |                     |--3.27%--0xffffffff853a37ea
+               |          |                     |          |
+               |          |                     |           --3.23%--0xffffffff853a33d2
+               |          |                     |                     0xffffffff8541df1b
+               |          |                     |                     0xffffffff8541a9e8
+               |          |                     |                     |
+               |          |                     |                      --3.23%--0xffffffff853dda90
+               |          |                     |                                |
+               |          |                     |                                 --3.23%--0xffffffff853dc6c9
+               |          |                     |                                           0xffffffff8621b2b7
+               |          |                     |
+               |          |                      --1.54%--0xffffffff853a3795
+               |          |
+               |           --4.80%--core::fmt::write
+               |                     |
+               |                      --4.70%--<usize as core::fmt::LowerHex>::fmt
+               |                                |
+               |                                 --4.43%--<core::fmt::Formatter>::pad_integral
+               |                                           |
+               |                                            --1.80%--<alloc::string::String as core::fmt::Write>::write_char
+               |
+                --3.37%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          core::ptr::drop_in_place::<fp_index::Index>
+                          |
+                           --3.33%--__munmap
+                                     0xffffffff84c0012b
+                                     0xffffffff86220551
+                                     0xffffffff84f24dad
+                                     0xffffffff853aa42b
+                                     0xffffffff853ceac8
+                                     0xffffffff853cc961
+                                     0xffffffff853cc7f5
+                                     0xffffffff853cb02c
+                                     |
+                                     |--2.11%--0xffffffff853c9794
+                                     |          0xffffffff853ae78e
+                                     |          0xffffffff853adcca
+                                     |          0xffffffff853fc79e
+                                     |          0xffffffff853435d8
+                                     |          0xffffffff85459378
+                                     |          0xffffffff85455251
+                                     |
+                                      --1.22%--0xffffffff853c9742
+                                                0xffffffff8539cea1
+                                                0xffffffff8539cd76
+                                                0xffffffff8539cb30
+                                                0xffffffff8539c594
+                                                0xffffffff8539c06e
+                                                0xffffffff8539b7d0
+
+    99.90%     0.00%  [.] __libc_start_main@@GLIBC_2.34                                  libc.so.6             -      -
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal

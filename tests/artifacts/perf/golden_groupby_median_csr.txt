@@ -1,0 +1,9 @@
+groupby median CSR bucketing (gmcsr) — O(ng) per-group Vec allocs -> 1 flat array + offsets
+Golden bit-identical: str_groupby_median sha256 9ba09cb8b52f3ada before==after.
+A/B min-of-7 @200k (build_str_key_frame unique keys, ng~=n): 53.231 -> 32.998 ms/iter = 1.61x
+(loaded; ~1.9x lightly loaded). Tests: fp-frame 2830 (incl 26 median) green; clippy clean.
+Lever: dense_group_median_f64 + typed_median_f64_slice replace Vec<Vec<f64>> buckets (one heap Vec
+per group = O(ng) allocs, the wall for high-cardinality groupby median) with count->prefix-sum offsets
+-> scatter into ONE flat array -> in-place quickselect per group sub-slice. Applied to all 6 median
+sites (aggregate_str_dense f64/i64, aggregate_named_func f64/i64, numeric transform f64/i64).
+Bit-identical: median is order-independent so per-group select on the contiguous run == per-group Vec.

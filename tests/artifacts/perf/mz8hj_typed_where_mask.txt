@@ -1,0 +1,50 @@
+br-frankenpandas-mz8hj — Typed Float64 fast path for DataFrame.where_cond + mask
+================================================================================
+
+eydcr third-wave op (after the frame-compare commit). where_cond 58ms, mask 69ms.
+Both reindexed cond (Left align), materialized the self column to Scalars per
+element, selected, and rebuilt via Column::from_values.
+
+LEVER (one shared helper where_mask_typed_f64): identical + UNIQUE index to cond +
+finite Float64 fill + every column Float64 with a contiguous backing => the Left
+alignment is the identity, so select straight from the f64 + validity slices into a
+typed output (from_f64_values_with_validity), skipping the cond reindex, the
+per-element self Scalar materialization, and the from_values revalidation. mask is
+the same helper with mask_mode=true (the Bool arms swap).
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-3; loaded):
+  DataFrame.where_cond:  58  ->  3.7  = 15.8x
+  DataFrame.mask:        69  ->  4.1  = 16.9x
+
+SCORE: 15.8x / 16.9x >> 2.0 PASS.
+
+ISOMORPHISM:
+  - cond == Bool(keep_self) (where: cond true; mask: cond false) keeps the self
+    value: a present Float64, or — when self is missing / a valid-bit NaN — the
+    cleared bit + datum materializes the same Null(NaN) / Float64(NaN) the general
+    `val.clone()` of the missing self produced.
+  - The other Bool keeps the finite fill (a present Float64), matching fill.clone().
+  - cond == Null (and any non-Bool cond, which for where -> fill / mask -> self):
+    where yields Null(NaN) (cleared bit + non-NaN datum), exactly the general arms
+    `Null(_) => Null(NaN)` / `_ => fill`(where) or `val`(mask).
+  - CRITICAL GATE — index.is_unique(): for a duplicate-label index the general path
+    Left-aligns cond, mapping each self row to cond's FIRST occurrence of that
+    label, which positional access does NOT reproduce. The proptest
+    prop_dataframe_where_is_translation_covariant generates duplicate-label frames
+    and caught the divergence; gating on is_unique() restores bit-identicality
+    (duplicate-label frames keep the general path). Also gated to finite Float64
+    fill + all-Float64 contiguous columns.
+  - Golden sha256 (gap_hunt golden: full elementwise family + where_cond/mask over
+    a gt-derived nullable cond, all-valid and nullable self, finite and None fill,
+    n=5000 x4) UNCHANGED before/after:
+      171d2f9d0a816a1a75bf1d5b76eca45c506c59d43f113cb39a3280255f3b096e
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 0 failures (incl. the 8 where/mask proptests)
+
+NOTE: a separate, pre-existing flaky proptest (prop_cov_self_equals_var_at_ddof_one)
+surfaced during this session's runs — cov's one-pass formula vs var's two-pass
+cancel for large near-equal values. Unrelated to this change (filed br-r3sfc).

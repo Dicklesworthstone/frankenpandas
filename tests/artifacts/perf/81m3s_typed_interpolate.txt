@@ -1,0 +1,42 @@
+br-frankenpandas-81m3s — Typed Float64 fast path for Series/DataFrame.interpolate
+=================================================================================
+
+Sixth in the eydcr Scalar-bound-elementwise-ops family (diff 30x, pct_change 38x,
+combine_first 5.6x, ffill/bfill 18-19x, corr/cov/corrwith 33x). interpolate(linear)
+copied Vec<Scalar> (vals.to_vec), did a per-gap to_f64 dispatch, and rebuilt via
+Column::new — even for typed Float64.
+
+LEVER (one): read raw f64 + validity via Column::as_f64_slice_with_validity and
+fill into a typed buffer + validity mask: scan gaps, linearly fill interior gaps
+`lv + t*(rv-lv)` with `t=(offset+1)/gap_len`, forward-carry the left anchor for a
+trailing gap, and leave leading / right-anchorless gaps missing. DataFrame.interpolate
+delegates per-column via apply_per_column.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter; machine loaded):
+  DataFrame.interpolate:  41.9  ->  4.6  = 9.1x
+
+SCORE: 9.1x >> 2.0 PASS.
+
+ISOMORPHISM (each filled value independent — no f64 reassociation):
+  - The row immediately before a gap is, by the gap-scan invariant, an unmodified
+    original VALID anchor (the loop jumps i to j+1 past each gap, so a new gap's
+    `gap_start-1` is either the previous gap's right anchor or an untouched valid
+    row), so reading `data[gap_start-1]` matches the general path's
+    `out[gap_start-1].to_f64()`.
+  - Interior gap: `lv + t*(rv-lv)` with the identical t and the identical f64
+    products — a present Float64, validity set.
+  - Trailing gap (no right anchor): carry `lv` — a present Float64, validity set.
+  - Leading gap / gap with no left anchor: untouched — out keeps the stored datum
+    and the cleared validity bit, materialising Null(NaN) (non-NaN datum) or
+    Float64(NaN) (NaN datum), exactly the original `vals[i].clone()` of the
+    missing slot.
+  - Float64 dtype only (the Timedelta64 branch never applies); index + name kept.
+  - Golden sha256 (gap_hunt golden: the full elementwise family + interpolate of a
+    nullable frame, n=5000 x4) UNCHANGED before/after:
+      8ced21179e54f0ceb2b25846a0b295c1f84133b1f9549bd6f965ba31a84a8e1b
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

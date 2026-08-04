@@ -1,0 +1,25 @@
+perf_profile: scenario=df_kendall n=200000 iters=1
+perf_profile: done 1 iters in 0.493s (492.806 ms/iter), sink=32
+	Command being timed: "/data/projects/.scratch/cargo-target-orangepeak-uza0487-base/release-perf/examples/perf_profile df_kendall 200000 1"
+	User time (seconds): 3.49
+	System time (seconds): 0.16
+	Percent of CPU this job got: 736%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.49
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 310268
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 79792
+	Voluntary context switches: 107
+	Involuntary context switches: 840
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 8
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

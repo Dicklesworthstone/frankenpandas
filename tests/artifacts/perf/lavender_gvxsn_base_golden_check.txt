@@ -1,0 +1,2 @@
+tests/artifacts/perf/lavender_gvxsn_base_golden_df_dot_2000.txt: OK
+tests/artifacts/perf/lavender_gvxsn_base_golden_df_dot_5000.txt: OK

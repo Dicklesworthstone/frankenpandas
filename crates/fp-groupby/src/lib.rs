@@ -69,13 +69,13 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexError, IndexLabel, align_union, validate_alignment_plan};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::{DType, NullKind, Scalar, Timedelta, Timestamp};
+use fp_types::{DType, IntervalClosed, NullKind, PeriodFreq, Scalar, Timedelta, Timestamp};
 // Group accumulation maps key on GroupKeyRef and read group ORDER from a
 // separate `ordering` Vec (first-seen order), never from map iteration. So the
 // hasher is observationally invisible: swapping SipHash -> FxHash changes only
 // bucket placement, not any output value or order. FxHash (rustc-hash) is pure
 // safe Rust; on the hot string-key path it is ~2x the std SipHasher.
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,19 +178,45 @@ fn groupby_sum_with_trace(
         Some((aligned_keys, aligned_values))
     };
 
+    let input_rows = aligned_storage
+        .as_ref()
+        .map_or_else(|| keys.len(), |(aligned_keys, _)| aligned_keys.len());
+    // Record an admission decision for policy observability without altering
+    // the current groupby output behavior.
+    let _ = policy.decide_join_admission(input_rows, ledger);
+    let estimated_bytes = estimate_groupby_intermediate_bytes(input_rows);
+    let use_arena = exec_options.use_arena && estimated_bytes <= exec_options.arena_budget_bytes;
+
+    // Identity-aligned, all-valid Int64 columns already expose contiguous raw
+    // buffers. Keep the dense direct-address algorithm, but run it before
+    // `values()` materializes two Scalar arrays. The helper preserves the
+    // exact i128 accumulator, sorted/first-seen order, and overflow promotion
+    // used by `try_groupby_sum_dense_int64_values`; wide key ranges still fall
+    // through to the former allocator-selected Scalar route.
+    if aligned_storage.is_none()
+        && let (Some(raw_keys), Some(raw_values)) =
+            (keys.column().as_i64_slice(), values.column().as_i64_slice())
+        && let Some((out_index, out_values)) =
+            try_groupby_sum_dense_int64_slices(raw_keys, raw_values, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        let result = Series::new("sum", Index::new(out_index), out_column)?;
+        return Ok((
+            result,
+            GroupByExecutionTrace {
+                used_arena: false,
+                input_rows,
+                estimated_bytes,
+            },
+        ));
+    }
+
     let (aligned_keys_values, aligned_values_values): (&[Scalar], &[Scalar]) =
         if let Some((aligned_keys, aligned_values)) = aligned_storage.as_ref() {
             (aligned_keys.values(), aligned_values.values())
         } else {
             (keys.values(), values.values())
         };
-
-    let input_rows = aligned_keys_values.len();
-    // Record an admission decision for policy observability without altering
-    // the current groupby output behavior.
-    let _ = policy.decide_join_admission(input_rows, ledger);
-    let estimated_bytes = estimate_groupby_intermediate_bytes(input_rows);
-    let use_arena = exec_options.use_arena && estimated_bytes <= exec_options.arena_budget_bytes;
 
     let result = if use_arena {
         groupby_sum_with_arena(aligned_keys_values, aligned_values_values, options)?
@@ -406,7 +432,7 @@ fn emit_groupby_result<'a>(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(Scalar::Float64(sum));
@@ -459,10 +485,10 @@ impl<'a> GroupKeyRef<'a> {
                 }
             }
             Scalar::Period(v) => {
-                if *v == i64::MIN {
+                if v.ordinal == i64::MIN {
                     Self::Null(NullKind::NaT)
                 } else {
-                    Self::Period(*v)
+                    Self::Period(v.ordinal)
                 }
             }
             Scalar::Interval(iv) => {
@@ -575,7 +601,7 @@ fn groupby_sum_timedelta64(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(Scalar::Timedelta64(sum));
@@ -659,7 +685,7 @@ fn groupby_sum_utf8(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(Scalar::Utf8(joined));
@@ -757,7 +783,7 @@ fn groupby_sum_int64(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(match i64::try_from(total) {
@@ -771,6 +797,140 @@ fn groupby_sum_int64(
 }
 
 const DENSE_INT_KEY_RANGE_LIMIT: i128 = 65_536;
+
+/// Dense-bucket `groupby_sum` directly over all-valid Int64 buffers.
+///
+/// This is the raw-slice equivalent of `try_groupby_sum_dense_int64_values`:
+/// it uses the same i128 totals, first-seen tape, ascending bucket emission,
+/// and i64-overflow promotion while avoiding full-column Scalar materialization.
+fn try_groupby_sum_dense_int64_slices(
+    keys: &[i64],
+    values: &[i64],
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if keys.len() != values.len() {
+        return None;
+    }
+    if keys.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    for &key in keys {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+    }
+
+    let span = i128::from(max_key) - i128::from(min_key) + 1;
+    if span <= 0 || span > DENSE_INT_KEY_RANGE_LIMIT {
+        return None;
+    }
+
+    let bucket_len = usize::try_from(span).ok()?;
+    let mut sums = vec![0_i128; bucket_len];
+    let mut seen = vec![false; bucket_len];
+    let mut ordering = Vec::<i64>::new();
+    for (&key, &value) in keys.iter().zip(values) {
+        let raw = i128::from(key) - i128::from(min_key);
+        let bucket = usize::try_from(raw).ok()?;
+        if !seen[bucket] {
+            seen[bucket] = true;
+            ordering.push(key);
+        }
+        sums[bucket] += i128::from(value);
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    if sort {
+        for (bucket, was_seen) in seen.iter().enumerate() {
+            if !*was_seen {
+                continue;
+            }
+            let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(match i64::try_from(sums[bucket]) {
+                Ok(value) => Scalar::Int64(value),
+                Err(_) => Scalar::Float64(sums[bucket] as f64),
+            });
+        }
+    } else {
+        for key in ordering {
+            let raw = i128::from(key) - i128::from(min_key);
+            let bucket = usize::try_from(raw).ok()?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(match i64::try_from(sums[bucket]) {
+                Ok(value) => Scalar::Int64(value),
+                Err(_) => Scalar::Float64(sums[bucket] as f64),
+            });
+        }
+    }
+
+    Some((out_index, out_values))
+}
+
+/// Dense-bucket `groupby_mean` directly over all-valid Int64 buffers.
+///
+/// This is the raw-slice equivalent of the `AggFunc::Mean` arm in
+/// `try_groupby_agg_dense_int64`: it casts each value to f64, folds in row
+/// order, and divides by the same per-bucket count. Keeping it before
+/// `Series::values()` avoids materializing both input columns as Scalars.
+fn try_groupby_mean_dense_int64_slices(
+    keys: &[i64],
+    values: &[i64],
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if keys.len() != values.len() {
+        return None;
+    }
+    if keys.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    for &key in keys {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+    }
+
+    let span = i128::from(max_key) - i128::from(min_key) + 1;
+    if span <= 0 || span > DENSE_INT_KEY_RANGE_LIMIT {
+        return None;
+    }
+
+    let bucket_len = usize::try_from(span).ok()?;
+    let mut sums = vec![0.0_f64; bucket_len];
+    let mut counts = vec![0_i64; bucket_len];
+    let mut seen = vec![false; bucket_len];
+    let mut ordering = Vec::<i64>::new();
+    for (&key, &value) in keys.iter().zip(values) {
+        let raw = i128::from(key) - i128::from(min_key);
+        let bucket = usize::try_from(raw).ok()?;
+        if !seen[bucket] {
+            seen[bucket] = true;
+            ordering.push(key);
+        }
+        sums[bucket] += value as f64;
+        counts[bucket] += 1;
+    }
+
+    if sort {
+        ordering.sort_unstable();
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in ordering {
+        let raw = i128::from(key) - i128::from(min_key);
+        let bucket = usize::try_from(raw).ok()?;
+        out_index.push(IndexLabel::Int64(key));
+        out_values.push(Scalar::Float64(sums[bucket] / counts[bucket] as f64));
+    }
+
+    Some((out_index, out_values))
+}
 
 /// Scan keys and return (min, max, saw_any_int). Returns None if a non-Int64,
 /// non-droppable-null key is found.
@@ -1088,6 +1248,20 @@ fn try_groupby_agg_dense_int64(
             | AggFunc::Var
             | AggFunc::Std
     ) {
+        return None;
+    }
+
+    // Int64/Bool prod must preserve Int64 output (pandas parity, mirroring Sum).
+    // The dense path accumulates a Float64 product, so route integer/bool prod to
+    // the generic scalar path which keeps an i64 product. Int64 columns are always
+    // all-valid (mixed Int64+Null upcasts to Float64 at construction), so the first
+    // non-missing value reliably reflects the column dtype. br-frankenpandas-rl25i.
+    if matches!(func, AggFunc::Prod)
+        && values
+            .iter()
+            .find(|v| !v.is_missing())
+            .is_some_and(|v| matches!(v, Scalar::Int64(_) | Scalar::Bool(_)))
+    {
         return None;
     }
 
@@ -1475,10 +1649,7 @@ fn try_groupby_median_dense_int64(
                 }
             } else if slice.len().is_multiple_of(2) {
                 let (lo_part, &mut hi, _) = slice.select_nth_unstable_by(mid, cmp);
-                let lo = lo_part
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max);
+                let lo = lo_part.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 Scalar::Float64((lo + hi) / 2.0)
             } else {
                 let (_, &mut median, _) = slice.select_nth_unstable_by(mid, cmp);
@@ -1487,6 +1658,903 @@ fn try_groupby_median_dense_int64(
         };
         out_values.push(agg);
     }
+    Some((out_index, out_values))
+}
+
+/// Counter-only generic path for `groupby.count()` and `groupby.size()`.
+///
+/// The full generic aggregation fallback stores every non-missing group value
+/// in a per-group `Vec<Scalar>` before calling `nancount` or reading the total
+/// row count. Count/size do not need those values: they only need the same
+/// group-key map, first-source index, non-missing counter, and total counter.
+///
+/// Bit-identical to the value-vector path because it uses the same
+/// `GroupKeyRef` equality, the same first-seen ordering vector, the same
+/// `compare_group_labels` sort, and the same label reconstruction from the
+/// first source row. The only removed work is cloning unused values.
+fn try_groupby_count_size_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Count | AggFunc::Size) {
+        return None;
+    }
+
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, i64, i64)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, 0, 0)
+        });
+
+        if !value.is_missing() {
+            entry.1 += 1;
+        }
+        entry.2 += 1;
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, non_missing, total) = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[*source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(Scalar::Int64(if matches!(func, AggFunc::Count) {
+            *non_missing
+        } else {
+            *total
+        }));
+    }
+
+    Some((out_index, out_values))
+}
+
+/// Numeric generic-key path for `groupby.mean()`.
+///
+/// The generic fallback hashes the same keys, clones every non-missing value
+/// into a per-group `Vec<Scalar>`, then `nanmean` scans each group. Mean only
+/// needs the same group map plus a streaming `to_f64()` sum and count. This
+/// helper deliberately accepts only values that `nanmean` would reduce through
+/// its numeric `to_f64()` fold; Timedelta64 and other non-numeric groups fall
+/// back to the existing vector path so dtype-preserving pandas semantics stay
+/// untouched.
+fn try_groupby_mean_numeric_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, f64, usize)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, 0.0, 0)
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        let value = value.to_f64().ok()?;
+        entry.1 += value;
+        entry.2 += 1;
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, sum, count) = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[*source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(if *count == 0 {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            Scalar::Float64(*sum / *count as f64)
+        });
+    }
+
+    Some((out_index, out_values))
+}
+
+#[derive(Debug, Clone)]
+struct VarStdScalarAccumulator {
+    source_idx: usize,
+    sum: f64,
+    count: usize,
+    sum_sq: f64,
+}
+
+/// Numeric generic-key path for `groupby.var()` and `groupby.std()`.
+///
+/// The generic fallback hashes the same keys, clones every non-missing value
+/// into a per-group `Vec<Scalar>`, then `nanvar`/`nanstd` performs a two-pass
+/// numeric scan. This helper keeps the same group map and performs those two
+/// passes directly over the input rows, avoiding per-group value vectors while
+/// preserving the ddof=1 NaN boundary and output ordering. Timedelta and
+/// non-numeric values fall back to the existing vector path so dtype-specific
+/// pandas compatibility stays untouched.
+fn try_groupby_var_std_numeric_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Var | AggFunc::Std) {
+        return None;
+    }
+
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, VarStdScalarAccumulator>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            VarStdScalarAccumulator {
+                source_idx: pos,
+                sum: 0.0,
+                count: 0,
+                sum_sq: 0.0,
+            }
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        if matches!(value, Scalar::Timedelta64(_)) {
+            return None;
+        }
+        let value = value.to_f64().ok()?;
+        entry.sum += value;
+        entry.count += 1;
+    }
+
+    for (key, value) in keys.iter().zip(values.iter()) {
+        if dropna && key.is_missing() {
+            continue;
+        }
+        if value.is_missing() {
+            continue;
+        }
+        if matches!(value, Scalar::Timedelta64(_)) {
+            return None;
+        }
+        let value = value.to_f64().ok()?;
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups
+            .get_mut(&key_id)
+            .expect("second pass references only first-pass groups");
+        let mean = entry.sum / entry.count as f64;
+        entry.sum_sq += (value - mean).powi(2);
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .source_idx
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let group = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[group.source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(if group.count <= 1 {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            let var = group.sum_sq / (group.count - 1) as f64;
+            Scalar::Float64(if matches!(func, AggFunc::Std) {
+                var.sqrt()
+            } else {
+                var
+            })
+        });
+    }
+
+    Some((out_index, out_values))
+}
+
+fn scalar_group_label(label: &Scalar) -> IndexLabel {
+    match label {
+        Scalar::Int64(v) => IndexLabel::Int64(*v),
+        Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+        Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+        Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+        Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+        Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+        Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+        Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+        Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+        Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+    }
+}
+
+fn numeric_median_scalar(values: &mut [f64]) -> Scalar {
+    if values.is_empty() {
+        return Scalar::Null(NullKind::NaN);
+    }
+
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(Ordering::Equal);
+    let mid = values.len() / 2;
+    if values
+        .iter()
+        .any(|x| x.is_nan() || (*x == 0.0 && x.is_sign_negative()))
+    {
+        values.sort_by(cmp);
+        if values.len().is_multiple_of(2) {
+            Scalar::Float64((values[mid - 1] + values[mid]) / 2.0)
+        } else {
+            Scalar::Float64(values[mid])
+        }
+    } else if values.len().is_multiple_of(2) {
+        let (lo_part, &mut hi, _) = values.select_nth_unstable_by(mid, cmp);
+        let lo = lo_part.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Scalar::Float64((lo + hi) / 2.0)
+    } else {
+        let (_, &mut median, _) = values.select_nth_unstable_by(mid, cmp);
+        Scalar::Float64(median)
+    }
+}
+
+/// Numeric generic-key path for `groupby.median()`.
+///
+/// The generic fallback hashes the same keys, clones every non-missing value
+/// into a per-group `Vec<Scalar>`, then `nanmedian` allocates a second
+/// `Vec<f64>` via `collect_finite`. Median still needs one sortable vector per
+/// group, but for numeric values it can store `f64` directly and reuse the same
+/// order-statistic selection as the dense Int64-key path. Timedelta and
+/// non-numeric values fall back to the existing vector path so dtype-specific
+/// pandas compatibility stays untouched.
+fn try_groupby_median_numeric_vectors(
+    keys: &[Scalar],
+    values: &[Scalar],
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, Vec<f64>)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, Vec::new())
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        if matches!(value, Scalar::Timedelta64(_)) {
+            return None;
+        }
+        entry.1.push(value.to_f64().ok()?);
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, values) = groups
+            .get_mut(key)
+            .expect("ordering references only inserted keys");
+        out_index.push(scalar_group_label(&keys[*source_idx]));
+        out_values.push(numeric_median_scalar(values));
+    }
+
+    Some((out_index, out_values))
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum NuniqueValueKey<'a> {
+    Bool(bool),
+    Int64(i64),
+    FloatBits(u64),
+    Utf8(&'a str),
+    Timedelta64(i64),
+    Datetime64(i64),
+    Period(i64, PeriodFreq),
+    Interval(u64, u64, IntervalClosed),
+}
+
+fn nunique_value_key(value: &Scalar) -> Option<NuniqueValueKey<'_>> {
+    if value.is_missing() {
+        return None;
+    }
+    Some(match value {
+        Scalar::Bool(v) => NuniqueValueKey::Bool(*v),
+        Scalar::Int64(v) => NuniqueValueKey::Int64(*v),
+        Scalar::Float64(v) => {
+            let normalized = if *v == 0.0 { 0.0 } else { *v };
+            NuniqueValueKey::FloatBits(normalized.to_bits())
+        }
+        Scalar::Utf8(v) => NuniqueValueKey::Utf8(v.as_str()),
+        Scalar::Timedelta64(v) => NuniqueValueKey::Timedelta64(*v),
+        Scalar::Datetime64(v) => NuniqueValueKey::Datetime64(*v),
+        Scalar::Period(v) => NuniqueValueKey::Period(v.ordinal, v.freq),
+        Scalar::Interval(v) => NuniqueValueKey::Interval(
+            if v.left == 0.0 { 0.0 } else { v.left }.to_bits(),
+            if v.right == 0.0 { 0.0 } else { v.right }.to_bits(),
+            v.closed,
+        ),
+        Scalar::Null(_) => return None,
+    })
+}
+
+struct NuniqueScalarAccumulator<'a> {
+    source_idx: usize,
+    seen: FxHashSet<NuniqueValueKey<'a>>,
+}
+
+/// Generic string/object-key path for `groupby.nunique()`.
+///
+/// The fallback hashes the same groups, clones every non-missing value into a
+/// per-group `Vec<Scalar>`, and only then calls `nannunique`. Distinct-counting
+/// needs no value order and no owned scalars, so this stores the exact borrowed
+/// bucket keys that `nannunique` would derive and preserves the same missing
+/// skip, `-0.0`/`+0.0` normalization, and dtype-specific equality.
+fn try_groupby_nunique_borrowed_sets(
+    keys: &[Scalar],
+    values: &[Scalar],
+    dropna: bool,
+    sort: bool,
+) -> (Vec<IndexLabel>, Vec<Scalar>) {
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, NuniqueScalarAccumulator<'_>>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            NuniqueScalarAccumulator {
+                source_idx: pos,
+                seen: FxHashSet::default(),
+            }
+        });
+
+        if let Some(value_key) = nunique_value_key(value) {
+            entry.seen.insert(value_key);
+        }
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .source_idx
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let group = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        out_index.push(scalar_group_label(&keys[group.source_idx]));
+        out_values.push(Scalar::Int64(group.seen.len() as i64));
+    }
+
+    (out_index, out_values)
+}
+
+fn update_min_max_scalar_slot(
+    slot: &mut Option<Scalar>,
+    invalid: &mut bool,
+    value: &Scalar,
+    take_min: bool,
+) {
+    if value.is_missing() || *invalid {
+        return;
+    }
+
+    let Some(current) = slot else {
+        *slot = Some(value.clone());
+        return;
+    };
+
+    let replace = match (&*current, value) {
+        (Scalar::Int64(a), Scalar::Int64(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (Scalar::Float64(a), Scalar::Float64(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (Scalar::Utf8(a), Scalar::Utf8(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (Scalar::Bool(a), Scalar::Bool(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (Scalar::Timedelta64(a), Scalar::Timedelta64(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (a, b) => match (a.to_f64(), b.to_f64()) {
+            (Ok(af), Ok(bf)) => {
+                if take_min {
+                    bf < af
+                } else {
+                    bf > af
+                }
+            }
+            _ => {
+                *invalid = true;
+                false
+            }
+        },
+    };
+
+    if replace {
+        *current = value.clone();
+    }
+}
+
+/// Generic string/object-key path for `groupby.min()` and `groupby.max()`.
+///
+/// The generic fallback hashes the same keys, clones every non-missing value
+/// into a per-group `Vec<Scalar>`, then calls `nanmin`/`nanmax`. Min/max only
+/// need the current extremum scalar plus the same "incomparable pair => NaN"
+/// witness, so this keeps a single slot per group and mirrors
+/// `fp_types::nanmin`/`nanmax` comparison order exactly.
+fn try_groupby_min_max_scalar_slot(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Min | AggFunc::Max) {
+        return None;
+    }
+
+    let take_min = matches!(func, AggFunc::Min);
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, Option<Scalar>, bool)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, None, false)
+        });
+
+        update_min_max_scalar_slot(&mut entry.1, &mut entry.2, value, take_min);
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, slot, invalid) = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[*source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(if *invalid {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            slot.clone().unwrap_or(Scalar::Null(NullKind::NaN))
+        });
+    }
+
+    Some((out_index, out_values))
+}
+
+/// Generic string/object-key path for `groupby.first()` and `groupby.last()`.
+///
+/// The generic fallback stores every non-missing value per group, then selects
+/// the first or last slot. This path keeps only that selected scalar while
+/// preserving the same group admission, ordering, label, and all-missing
+/// `Null(NaN)` behavior.
+fn try_groupby_first_last_scalar_slot(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::First | AggFunc::Last) {
+        return None;
+    }
+
+    let take_first = matches!(func, AggFunc::First);
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, Option<Scalar>)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, None)
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        if !take_first || entry.1.is_none() {
+            entry.1 = Some(value.clone());
+        }
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, slot) = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[*source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(slot.clone().unwrap_or(Scalar::Null(NullKind::NaN)));
+    }
+
+    Some((out_index, out_values))
+}
+
+#[derive(Debug, Clone)]
+struct SumProdScalarAccumulator {
+    source_idx: usize,
+    sum: i128,
+    prod_i128: Option<i128>,
+    prod_f64: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SumProdFloatAccumulator {
+    source_idx: usize,
+    sum: f64,
+    prod: f64,
+}
+
+/// Generic string/object-key path for integer/bool `groupby.sum()` and
+/// `groupby.prod()`.
+///
+/// The fallback already has dtype-preserving branches for Int64/Bool values,
+/// but it reaches them only after building a per-group `Vec<Scalar>`. This
+/// helper streams the same i128 sum/product state per group and keeps the same
+/// f64 product fallback witness for integer overflow.
+fn try_groupby_sum_prod_integer_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    value_dtype: DType,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Sum | AggFunc::Prod)
+        || !matches!(value_dtype, DType::Int64 | DType::Bool)
+    {
+        return None;
+    }
+
+    let take_sum = matches!(func, AggFunc::Sum);
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, SumProdScalarAccumulator>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            SumProdScalarAccumulator {
+                source_idx: pos,
+                sum: 0,
+                prod_i128: Some(1),
+                prod_f64: 1.0,
+            }
+        });
+
+        let value_i128 = match value {
+            Scalar::Int64(x) => i128::from(*x),
+            Scalar::Bool(b) => i128::from(u8::from(*b)),
+            _ => continue,
+        };
+        if take_sum {
+            entry.sum += value_i128;
+        } else {
+            entry.prod_i128 = entry
+                .prod_i128
+                .and_then(|prod| prod.checked_mul(value_i128));
+            entry.prod_f64 *= value_i128 as f64;
+        }
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .source_idx
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let group = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[group.source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(if take_sum {
+            match i64::try_from(group.sum) {
+                Ok(sum) => Scalar::Int64(sum),
+                Err(_) => Scalar::Float64(group.sum as f64),
+            }
+        } else {
+            match group.prod_i128.and_then(|prod| i64::try_from(prod).ok()) {
+                Some(prod) => Scalar::Int64(prod),
+                None => Scalar::Float64(group.prod_f64),
+            }
+        });
+    }
+
+    Some((out_index, out_values))
+}
+
+/// Generic string/object-key path for Float64 `groupby.sum()` and
+/// `groupby.prod()`.
+///
+/// The scalar fallback clones every non-missing Float64 into a per-group
+/// `Vec<Scalar>` before calling `nansum`/`nanprod`. Those reducers are already
+/// streaming f64 folds, so keep only the per-group accumulator state here.
+fn try_groupby_sum_prod_float_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    value_dtype: DType,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Sum | AggFunc::Prod) || !matches!(value_dtype, DType::Float64) {
+        return None;
+    }
+
+    let take_sum = matches!(func, AggFunc::Sum);
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, SumProdFloatAccumulator>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            SumProdFloatAccumulator {
+                source_idx: pos,
+                sum: 0.0,
+                prod: 1.0,
+            }
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        let Scalar::Float64(x) = value else {
+            return None;
+        };
+        if take_sum {
+            entry.sum += *x;
+        } else {
+            entry.prod *= *x;
+        }
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .source_idx
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let group = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[group.source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(Scalar::Float64(if take_sum {
+            group.sum
+        } else {
+            group.prod
+        }));
+    }
+
     Some((out_index, out_values))
 }
 
@@ -1511,15 +2579,35 @@ pub fn groupby_agg(
         Some((aligned_keys, aligned_values))
     };
 
+    let input_rows = aligned_storage
+        .as_ref()
+        .map_or_else(|| keys.len(), |(aligned_keys, _)| aligned_keys.len());
+    // Record an admission decision for policy observability without altering
+    // the current groupby output behavior.
+    let _ = policy.decide_join_admission(input_rows, ledger);
+
+    // Identity-aligned, all-valid Int64 inputs already expose raw buffers.
+    // Mean's dense fold is exactly representable over those slices, so run it
+    // before `values()` materializes two Scalar arrays. Wide key ranges keep
+    // the existing Scalar path, as do aligned, nullable, and non-Int64 inputs.
+    if aligned_storage.is_none()
+        && matches!(func, AggFunc::Mean)
+        && let (Some(raw_keys), Some(raw_values)) =
+            (keys.column().as_i64_slice(), values.column().as_i64_slice())
+        && let Some((out_index, out_values)) =
+            try_groupby_mean_dense_int64_slices(raw_keys, raw_values, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new("mean", Index::new(out_index), out_column)?);
+    }
+
     let (key_vals, val_vals): (&[Scalar], &[Scalar]) =
         if let Some((ref ak, ref av)) = aligned_storage {
             (ak.values(), av.values())
         } else {
             (keys.values(), values.values())
         };
-    // Record an admission decision for policy observability without altering
-    // the current groupby output behavior.
-    let _ = policy.decide_join_admission(key_vals.len(), ledger);
+    let value_dtype = values.column().dtype();
 
     let agg_name = match func {
         AggFunc::Sum => "sum",
@@ -1546,6 +2634,124 @@ pub fn groupby_agg(
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
     }
 
+    // Generic string/object-key count and size only need counters, not cloned
+    // per-group values. Keep this after the dense Int64 path so existing typed
+    // direct-address count/size behavior stays unchanged.
+    if let Some((out_index, out_values)) =
+        try_groupby_count_size_counter(key_vals, val_vals, func, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key mean only needs a streaming sum and count for
+    // numeric values. Non-numeric or Timedelta values fall back to the vector
+    // path below, preserving dtype-specific pandas compatibility.
+    if matches!(func, AggFunc::Mean)
+        && let Some((out_index, out_values)) =
+            try_groupby_mean_numeric_counter(key_vals, val_vals, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key var/std use the same two-pass numeric formula
+    // as nanvar/nanstd, but do not need a cloned Vec<Scalar> per group.
+    if matches!(func, AggFunc::Var | AggFunc::Std)
+        && let Some((out_index, out_values)) = try_groupby_var_std_numeric_counter(
+            key_vals,
+            val_vals,
+            func,
+            options.dropna,
+            options.sort,
+        )
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Bounded Int64 keys should reach the direct-address CSR median before the
+    // generic numeric-key hash path. Both paths use the same numeric median
+    // selection, but the dense path avoids per-row hashing and per-group Vecs.
+    if matches!(func, AggFunc::Median)
+        && let Some((out_index, out_values)) =
+            try_groupby_median_dense_int64(key_vals, val_vals, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key median needs sortable values, but it can store
+    // numeric f64 values directly instead of cloning Scalar values and then
+    // allocating a second collect_finite vector inside nanmedian.
+    if matches!(func, AggFunc::Median)
+        && let Some((out_index, out_values)) =
+            try_groupby_median_numeric_vectors(key_vals, val_vals, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key min/max only need one scalar slot per group,
+    // not a cloned value Vec. Keep this after dense Int64 so the typed direct
+    // path remains the fastest route for small integer domains.
+    if matches!(func, AggFunc::Min | AggFunc::Max)
+        && let Some((out_index, out_values)) =
+            try_groupby_min_max_scalar_slot(key_vals, val_vals, func, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key first/last only need one selected scalar per
+    // group, not a cloned value Vec. The dense Int64 route above remains first
+    // chance for small integer key domains.
+    if matches!(func, AggFunc::First | AggFunc::Last)
+        && let Some((out_index, out_values)) = try_groupby_first_last_scalar_slot(
+            key_vals,
+            val_vals,
+            func,
+            options.dropna,
+            options.sort,
+        )
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key integer sum/prod only need streaming
+    // accumulators, not a cloned value Vec. Float64 has the matching fast path
+    // below; timedelta, string, and mixed-object semantics stay on fallback.
+    if matches!(func, AggFunc::Sum | AggFunc::Prod)
+        && let Some((out_index, out_values)) = try_groupby_sum_prod_integer_counter(
+            key_vals,
+            val_vals,
+            func,
+            value_dtype,
+            options.dropna,
+            options.sort,
+        )
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key Float64 sum/prod use the same left-to-right f64
+    // fold as nansum/nanprod, but avoid cloning per-group Scalar vectors.
+    if matches!(func, AggFunc::Sum | AggFunc::Prod)
+        && let Some((out_index, out_values)) = try_groupby_sum_prod_float_counter(
+            key_vals,
+            val_vals,
+            func,
+            value_dtype,
+            options.dropna,
+            options.sort,
+        )
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
     // Dense 2-D seen-bitset distinct count for bounded Int64 keys+values.
     if matches!(func, AggFunc::Nunique)
         && let Some((out_index, out_values)) =
@@ -1555,11 +2761,12 @@ pub fn groupby_agg(
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
     }
 
-    // Dense CSR group-and-sort median for bounded Int64 keys + numeric values.
-    if matches!(func, AggFunc::Median)
-        && let Some((out_index, out_values)) =
-            try_groupby_median_dense_int64(key_vals, val_vals, options.dropna, options.sort)
-    {
+    // Generic string/object-key nunique only needs per-group distinct buckets,
+    // not cloned value vectors. Keep this after the dense Int64 seen-bitset
+    // route so bounded integer key/value cases retain the direct-address path.
+    if matches!(func, AggFunc::Nunique) {
+        let (out_index, out_values) =
+            try_groupby_nunique_borrowed_sets(key_vals, val_vals, options.dropna, options.sort);
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
     }
@@ -1600,7 +2807,6 @@ pub fn groupby_agg(
     let mut out_values = Vec::with_capacity(ordering.len());
     // Per br-frankenpandas-l75ms: keep groupby_agg(Sum) consistent with the
     // dedicated groupby_sum — pandas preserves the integer dtype for sum.
-    let value_dtype = values.column().dtype();
 
     for key in &ordering {
         let (source_idx, vals, total_count) = groups
@@ -1618,7 +2824,7 @@ pub fn groupby_agg(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
 
@@ -1672,6 +2878,25 @@ pub fn groupby_agg(
             AggFunc::Std => fp_types::nanstd(vals, 1),
             AggFunc::Median => fp_types::nanmedian(vals),
             AggFunc::Nunique => fp_types::nannunique(vals),
+            // pandas groupby.prod() preserves Int64 for integer/bool input,
+            // mirroring Sum (the earlier Float64-only path diverged from pandas).
+            // Accumulate an i128 product and keep Int64 when it fits; fall back to
+            // the Float64 nanprod only on i64 overflow. br-frankenpandas-rl25i.
+            AggFunc::Prod if matches!(value_dtype, DType::Int64 | DType::Bool) => {
+                let mut total: Option<i128> = Some(1);
+                for v in vals {
+                    let x = match v {
+                        Scalar::Int64(x) => i128::from(*x),
+                        Scalar::Bool(b) => i128::from(*b),
+                        _ => continue,
+                    };
+                    total = total.and_then(|t| t.checked_mul(x));
+                }
+                match total.and_then(|t| i64::try_from(t).ok()) {
+                    Some(x) => Scalar::Int64(x),
+                    None => fp_types::nanprod(vals),
+                }
+            }
             AggFunc::Prod => fp_types::nanprod(vals),
             AggFunc::Size => Scalar::Int64(*total_count as i64),
         };
@@ -1849,7 +3074,7 @@ fn scalar_to_hash_bits(value: &Scalar) -> u64 {
         Scalar::Null(_) => 0,
         Scalar::Timedelta64(v) => *v as u64,
         Scalar::Datetime64(v) => *v as u64,
-        Scalar::Period(v) => *v as u64,
+        Scalar::Period(v) => v.ordinal as u64,
         Scalar::Interval(iv) => iv.left.to_bits() ^ iv.right.to_bits(),
     }
 }
@@ -2005,22 +3230,25 @@ impl KllSketch {
         let offset = (self.compact_count + level) % 2;
         self.compact_count = self.compact_count.wrapping_add(1);
 
-        // Promote every other element to the next level; discard the rest.
-        // Standard KLL: compactor is cleared after compaction.
-        let promoted: Vec<f64> = self.compactors[level]
-            .iter()
-            .copied()
-            .enumerate()
-            .filter_map(|(i, v)| if i % 2 == offset { Some(v) } else { None })
-            .collect();
-
-        self.compactors[level].clear();
-
         // Ensure next level exists.
         if level + 1 >= self.compactors.len() {
             self.compactors.push(Vec::with_capacity(self.k * 2));
         }
-        self.compactors[level + 1].extend(promoted);
+
+        // Promote every other element to the next level; discard the rest.
+        // The disjoint borrows let us stream directly into the destination,
+        // retaining the current level's capacity without a temporary Vec.
+        let (through_current, after_current) = self.compactors.split_at_mut(level + 1);
+        let current = &mut through_current[level];
+        let next = &mut after_current[0];
+        next.extend(
+            current
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(i, v)| if i % 2 == offset { Some(v) } else { None }),
+        );
+        current.clear();
 
         // Recursively compact if next level overflows.
         if self.compactors[level + 1].len() >= self.capacity_at_level(level + 1) {
@@ -2221,14 +3449,17 @@ pub fn approx_value_counts(values: &[Scalar]) -> Vec<(Scalar, u64)> {
 
 #[cfg(test)]
 mod tests {
+    use fp_columnar::Column;
     use fp_frame::Series;
-    use fp_index::IndexLabel;
+    use fp_index::{Index, IndexLabel};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{NullKind, Scalar};
 
     use super::{
         GroupByExecutionOptions, GroupByOptions, groupby_nunique, groupby_prod, groupby_size,
-        groupby_sum, groupby_sum_with_options, groupby_sum_with_trace,
+        groupby_sum, groupby_sum_with_options, groupby_sum_with_trace, try_groupby_agg_dense_int64,
+        try_groupby_mean_dense_int64_slices, try_groupby_median_dense_int64,
+        try_groupby_median_numeric_vectors, try_groupby_sum_dense_int64_slices,
         try_groupby_sum_dense_int64_values,
     };
 
@@ -2359,6 +3590,944 @@ mod tests {
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         assert_eq!(out.values(), &[Scalar::Int64(6), Scalar::Int64(4)]);
+    }
+
+    #[test]
+    fn dense_int64_groupby_matches_handcomputed_oracle_k3zcv() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-k3zcv): the dense Int64-key
+        // groupby fast paths (sum 1432b615, count/min/max dense streaming) must
+        // equal an INDEPENDENT hand-computed grouping. Deterministic seeded LCG —
+        // no rand crate, no mocks.
+        let mut state: u64 = 0x1234_5678_9abc_def1;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..1200u32 {
+            let n = (next() % 14) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
+
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("keys");
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("values");
+
+            // Independent oracle: group rows by key, sorted ascending (pandas
+            // default). BTreeMap gives ascending key order.
+            let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v);
+            }
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_sum: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(vs.iter().sum()))
+                .collect();
+            let exp_count: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(vs.len() as i64))
+                .collect();
+            let exp_min: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(*vs.iter().min().unwrap()))
+                .collect();
+            let exp_max: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(*vs.iter().max().unwrap()))
+                .collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            let opts = || GroupByOptions::default();
+            let pol = RuntimePolicy::strict();
+            let mut led = EvidenceLedger::new();
+
+            let s = groupby_sum(&keys, &values, opts(), &pol, &mut led).expect("sum");
+            assert_eq!(s.index().labels(), exp_keys, "sum keys {ctx}");
+            assert_eq!(s.values(), exp_sum.as_slice(), "sum vals {ctx}");
+
+            let c = groupby_count(&keys, &values, opts(), &pol, &mut led).expect("count");
+            assert_eq!(c.values(), exp_count.as_slice(), "count vals {ctx}");
+
+            let mn = groupby_min(&keys, &values, opts(), &pol, &mut led).expect("min");
+            assert_eq!(mn.values(), exp_min.as_slice(), "min vals {ctx}");
+
+            let mx = groupby_max(&keys, &values, opts(), &pol, &mut led).expect("max");
+            assert_eq!(mx.values(), exp_max.as_slice(), "max vals {ctx}");
+        }
+    }
+
+    #[test]
+    fn dense_int64_groupby_first_last_matches_handcomputed_oracle_ypgw6() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-ypgw6): groupby_first/last carry
+        // ROW-ORDER (positional) semantics distinct from the reductions covered by
+        // k3zcv. Assert they equal a hand-computed grouping that preserves row
+        // order. Deterministic seeded LCG — no rand crate, no mocks.
+        let mut state: u64 = 0x6b1e_55ed_a17a_c0de;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..1200u32 {
+            let n = (next() % 14) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 41) as i64 - 20).collect();
+
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("keys");
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("values");
+
+            // Independent oracle: group rows by key (ascending = pandas default),
+            // preserving ROW ORDER within each group.
+            let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v);
+            }
+            let exp_first: Vec<Scalar> = groups.values().map(|vs| Scalar::Int64(vs[0])).collect();
+            let exp_last: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(*vs.last().unwrap()))
+                .collect();
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            let pol = RuntimePolicy::strict();
+            let mut led = EvidenceLedger::new();
+
+            let f = groupby_first(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("first");
+            assert_eq!(f.index().labels(), exp_keys, "first keys {ctx}");
+            assert_eq!(f.values(), exp_first.as_slice(), "first vals {ctx}");
+
+            let l = groupby_last(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("last");
+            assert_eq!(l.values(), exp_last.as_slice(), "last vals {ctx}");
+        }
+    }
+
+    #[test]
+    fn dense_int64_groupby_nunique_matches_handcomputed_oracle_xnbl7() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Oracle differential (br-frankenpandas-xnbl7): groupby_nunique (dense
+        // 2-D seen-bitset path b562aef4) must equal a hand-computed per-group
+        // distinct-value count. Deterministic seeded LCG — no rand, no mocks.
+        let mut state: u64 = 0x09e2_177b_1dea_d5e7_u64.wrapping_mul(3);
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..1200u32 {
+            let n = (next() % 14) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            // Small value range so duplicates within a group are common.
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 6) as i64).collect();
+
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("keys");
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("values");
+
+            // Independent oracle: distinct non-null value count per key (keys
+            // ascending = pandas default).
+            let mut groups: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().insert(*v);
+            }
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_nunique: Vec<Scalar> = groups
+                .values()
+                .map(|set| Scalar::Int64(set.len() as i64))
+                .collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            let mut led = EvidenceLedger::new();
+            let out = groupby_nunique(
+                &keys,
+                &values,
+                GroupByOptions::default(),
+                &RuntimePolicy::strict(),
+                &mut led,
+            )
+            .expect("nunique");
+            assert_eq!(out.index().labels(), exp_keys, "nunique keys {ctx}");
+            assert_eq!(out.values(), exp_nunique.as_slice(), "nunique vals {ctx}");
+        }
+    }
+
+    #[test]
+    fn dense_int64_groupby_prod_matches_handcomputed_oracle_ybda2() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-ybda2): groupby_prod (dense Prod
+        // streaming path ab5a2aba) must equal a hand-computed per-group product.
+        // Tiny values (0..=2) keep products well within i64 (no overflow).
+        // Deterministic seeded LCG — no rand, no mocks.
+        let mut state: u64 = 0x70d_face_b00c_1357u64.wrapping_mul(5);
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..1200u32 {
+            let n = (next() % 12) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 3) as i64).collect();
+
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("keys");
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("values");
+
+            let mut groups: BTreeMap<i64, i64> = BTreeMap::new();
+            let mut keys_seen: BTreeMap<i64, ()> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                keys_seen.entry(*k).or_default();
+                let e = groups.entry(*k).or_insert(1);
+                *e *= *v;
+            }
+            let exp_keys: Vec<IndexLabel> =
+                keys_seen.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            // groupby_prod preserves Int64 for Int64 input (pandas parity, fixed in
+            // br-frankenpandas-rl25i; previously returned Float64).
+            let exp_prod: Vec<Scalar> = groups.values().map(|&p| Scalar::Int64(p)).collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            let mut led = EvidenceLedger::new();
+            let out = groupby_prod(
+                &keys,
+                &values,
+                GroupByOptions::default(),
+                &RuntimePolicy::strict(),
+                &mut led,
+            )
+            .expect("prod");
+            assert_eq!(out.index().labels(), exp_keys, "prod keys {ctx}");
+            assert_eq!(out.values(), exp_prod.as_slice(), "prod vals {ctx}");
+        }
+    }
+
+    #[test]
+    fn groupby_order_invariant_aggregations_q60t7() {
+        // Metamorphic (br-frankenpandas-q60t7): order-insensitive aggregations
+        // must be invariant to input row order. Compute each on the original rows
+        // and on the row-reversed rows; assert identical index + values.
+        // Deterministic seeded LCG — no rand, no mocks.
+        let mut s: u64 = 0x0d2e_4c91_a17a_5e7f;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+
+        use super::GroupByError;
+        type GbFn = fn(
+            &Series,
+            &Series,
+            GroupByOptions,
+            &RuntimePolicy,
+            &mut EvidenceLedger,
+        ) -> Result<Series, GroupByError>;
+        let aggs: [(&str, GbFn); 5] = [
+            ("sum", groupby_sum),
+            ("count", groupby_count),
+            ("min", groupby_min),
+            ("max", groupby_max),
+            ("prod", groupby_prod),
+        ];
+
+        for iter in 0..1000u32 {
+            let n = (next() % 12) as usize + 1;
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 3) as i64).collect();
+
+            let mk = |keyv: &[i64], valv: &[i64]| {
+                let idx: Vec<IndexLabel> = (0..keyv.len() as i64).map(IndexLabel::Int64).collect();
+                let k = Series::from_values(
+                    "k",
+                    idx.clone(),
+                    keyv.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                )
+                .unwrap();
+                let v = Series::from_values(
+                    "v",
+                    idx,
+                    valv.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                )
+                .unwrap();
+                (k, v)
+            };
+
+            let (k1, v1) = mk(&key_vals, &val_vals);
+            let mut rk = key_vals.clone();
+            let mut rv = val_vals.clone();
+            rk.reverse();
+            rv.reverse();
+            let (k2, v2) = mk(&rk, &rv);
+
+            for (name, f) in aggs {
+                let mut l1 = EvidenceLedger::new();
+                let mut l2 = EvidenceLedger::new();
+                let a = f(
+                    &k1,
+                    &v1,
+                    GroupByOptions::default(),
+                    &RuntimePolicy::strict(),
+                    &mut l1,
+                )
+                .expect("agg orig");
+                let b = f(
+                    &k2,
+                    &v2,
+                    GroupByOptions::default(),
+                    &RuntimePolicy::strict(),
+                    &mut l2,
+                )
+                .expect("agg rev");
+                assert_eq!(
+                    a.index().labels(),
+                    b.index().labels(),
+                    "{name} keys order-invariance iter={iter} keys={key_vals:?}"
+                );
+                assert_eq!(
+                    a.values(),
+                    b.values(),
+                    "{name} vals order-invariance iter={iter} keys={key_vals:?} vals={val_vals:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn groupby_size_sum_equals_n_5cb23() {
+        // Invariant (br-frankenpandas-5cb23): sum of groupby_size == n (all-valid keys).
+        // Seeded LCG, no mocks.
+        let mut s: u64 = 0x4c0b_0c2d_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let pol = RuntimePolicy::strict();
+        for iter in 0..400u32 {
+            let n = (next() % 20) as usize + 1;
+            let keys: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let ks = Series::from_values(
+                "k",
+                idx.clone(),
+                keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let vs = Series::from_values(
+                "v",
+                idx,
+                (0..n).map(|i| Scalar::Int64(i as i64)).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let mut l = EvidenceLedger::new();
+            let size = groupby_size(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap();
+            let total: i64 = size
+                .values()
+                .iter()
+                .map(|c| match c {
+                    Scalar::Int64(x) => *x,
+                    Scalar::Float64(x) => *x as i64,
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!(total, n as i64, "sum(size)==n iter={iter}");
+        }
+    }
+
+    #[test]
+    fn groupby_min_le_mean_le_max_3obe6() {
+        // Metamorphic (br-frankenpandas-3obe6): per group, min<=mean<=max. Seeded LCG.
+        let mut s: u64 = 0x4c0b_0b2c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let getf = |c: &[Scalar]| -> Vec<f64> {
+            c.iter()
+                .map(|v| match v {
+                    Scalar::Int64(x) => *x as f64,
+                    Scalar::Float64(x) => *x,
+                    _ => f64::NAN,
+                })
+                .collect()
+        };
+        let pol = RuntimePolicy::strict();
+        for iter in 0..400u32 {
+            let n = (next() % 16) as usize + 1;
+            let keys: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
+            let vals: Vec<f64> = (0..n).map(|_| (next() % 200) as f64 / 3.0 - 33.0).collect();
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let ks = Series::from_values(
+                "k",
+                idx.clone(),
+                keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let vs = Series::from_values(
+                "v",
+                idx,
+                vals.iter().map(|&x| Scalar::Float64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let mut l = EvidenceLedger::new();
+            let mins = getf(
+                groupby_min(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            let means = getf(
+                groupby_mean(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            let maxs = getf(
+                groupby_max(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            for g in 0..mins.len() {
+                assert!(mins[g] <= means[g] + 1e-9, "min<=mean iter={iter} g={g}");
+                assert!(means[g] <= maxs[g] + 1e-9, "mean<=max iter={iter} g={g}");
+            }
+        }
+    }
+
+    #[test]
+    fn groupby_sum_equals_mean_times_count_0czr8() {
+        // Metamorphic (br-frankenpandas-0czr8): per group, sum == mean * count.
+        // Seeded LCG, no mocks.
+        let mut s: u64 = 0x4c0c_0b1c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let getf = |c: &[Scalar]| -> Vec<f64> {
+            c.iter()
+                .map(|v| match v {
+                    Scalar::Int64(x) => *x as f64,
+                    Scalar::Float64(x) => *x,
+                    _ => f64::NAN,
+                })
+                .collect()
+        };
+        let pol = RuntimePolicy::strict();
+        for iter in 0..400u32 {
+            let n = (next() % 16) as usize + 1;
+            let keys: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
+            let vals: Vec<f64> = (0..n).map(|_| (next() % 100) as f64 / 3.0).collect();
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let ks = Series::from_values(
+                "k",
+                idx.clone(),
+                keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let vs = Series::from_values(
+                "v",
+                idx,
+                vals.iter().map(|&x| Scalar::Float64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let mut l = EvidenceLedger::new();
+            let sums = getf(
+                groupby_sum(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            let means = getf(
+                groupby_mean(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            let counts = getf(
+                groupby_count(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            assert_eq!(sums.len(), means.len(), "len iter={iter}");
+            assert_eq!(sums.len(), counts.len(), "len iter={iter}");
+            for g in 0..sums.len() {
+                assert!(
+                    (sums[g] - means[g] * counts[g]).abs() < 1e-6,
+                    "sum==mean*count iter={iter} g={g}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn groupby_count_vs_size_null_values_z1o82() {
+        // br-frankenpandas-z1o82: count excludes null values; size counts all rows.
+        let idx: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+        let keys = Series::from_values(
+            "k",
+            idx.clone(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "v",
+            idx,
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(20.0),
+            ],
+        )
+        .unwrap();
+        let pol = RuntimePolicy::strict();
+        let mut l1 = EvidenceLedger::new();
+        let mut l2 = EvidenceLedger::new();
+        let count =
+            groupby_count(&keys, &values, GroupByOptions::default(), &pol, &mut l1).unwrap();
+        let size = groupby_size(&keys, &values, GroupByOptions::default(), &pol, &mut l2).unwrap();
+        // a: count 1 (NaN excluded), size 2; b: count 1, size 1.
+        assert_eq!(
+            count.values(),
+            &[Scalar::Int64(1), Scalar::Int64(1)],
+            "count excludes NaN"
+        );
+        assert_eq!(
+            size.values(),
+            &[Scalar::Int64(2), Scalar::Int64(1)],
+            "size counts all rows"
+        );
+    }
+
+    #[test]
+    fn groupby_drops_null_key_rows_tr1un() {
+        // br-frankenpandas-tr1un: groupby (dropna=true default) excludes null-key
+        // rows. Keys [a,null,a,b] vals [10,20,30,40] -> a=40, b=40 (null row dropped).
+        let idx: Vec<IndexLabel> = (0..4i64).map(IndexLabel::Int64).collect();
+        let keys = Series::from_values(
+            "k",
+            idx.clone(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "v",
+            idx,
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+        let mut led = EvidenceLedger::new();
+        let out = groupby_sum(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut led,
+        )
+        .unwrap();
+        // Null-key group excluded; a and b only.
+        assert_eq!(out.len(), 2, "null-key group dropped");
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned())
+            ]
+        );
+        assert_eq!(
+            out.values(),
+            &[Scalar::Int64(40), Scalar::Int64(40)],
+            "sums exclude null-key value 20"
+        );
+    }
+
+    #[test]
+    fn groupby_var_std_two_pass_oracle_7io1l() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-7io1l): groupby_var/std == per-group
+        // two-pass variance (ddof=1; NaN for n<2), std==sqrt(var). Seeded LCG, no mocks.
+        let mut st: u64 = 0x7a20_1c0d_2b3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        let num = |s: &Scalar| -> f64 {
+            match s {
+                Scalar::Float64(x) => *x,
+                Scalar::Int64(x) => *x as f64,
+                _ => f64::NAN,
+            }
+        };
+        for iter in 0..800u32 {
+            let n = (next() % 12) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 4) as i64 - 1).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            let mut groups: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v as f64);
+            }
+            let exp_var: Vec<f64> = groups
+                .values()
+                .map(|vs| {
+                    if vs.len() < 2 {
+                        f64::NAN
+                    } else {
+                        let m = vs.iter().sum::<f64>() / vs.len() as f64;
+                        vs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (vs.len() as f64 - 1.0)
+                    }
+                })
+                .collect();
+
+            let pol = RuntimePolicy::strict();
+            let mut led = EvidenceLedger::new();
+            let var = groupby_var(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("var");
+            let std = groupby_std(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("std");
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            for (i, ev) in exp_var.iter().enumerate() {
+                let gv = num(&var.values()[i]);
+                let gs = num(&std.values()[i]);
+                if ev.is_nan() {
+                    assert!(gv.is_nan(), "var NaN {ctx} i={i}");
+                    assert!(gs.is_nan(), "std NaN {ctx} i={i}");
+                } else {
+                    assert!((gv - ev).abs() < 1e-7, "var {ctx} i={i}: {gv} vs {ev}");
+                    assert!((gs - ev.sqrt()).abs() < 1e-7, "std {ctx} i={i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn groupby_median_matches_sorted_middle_oracle_k3awo() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-k3awo): groupby_median == per-group
+        // sorted-middle (odd -> middle, even -> mean of two middles), ascending
+        // keys. Deterministic seeded LCG, no mocks.
+        let mut st: u64 = 0x6ed1_a40c_3b2a_1908;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for iter in 0..1000u32 {
+            let n = (next() % 12) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 4) as i64 - 1).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v);
+            }
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_median: Vec<f64> = groups
+                .values()
+                .map(|vs| {
+                    let mut s = vs.clone();
+                    s.sort_unstable();
+                    let m = s.len() / 2;
+                    if s.len() % 2 == 1 {
+                        s[m] as f64
+                    } else {
+                        (s[m - 1] + s[m]) as f64 / 2.0
+                    }
+                })
+                .collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            let mut led = EvidenceLedger::new();
+            let out = groupby_median(
+                &keys,
+                &values,
+                GroupByOptions::default(),
+                &RuntimePolicy::strict(),
+                &mut led,
+            )
+            .expect("median");
+            assert_eq!(out.index().labels(), exp_keys, "median keys {ctx}");
+            for (i, got) in out.values().iter().enumerate() {
+                let g = match got {
+                    Scalar::Float64(x) => *x,
+                    Scalar::Int64(x) => *x as f64,
+                    _ => f64::NAN,
+                };
+                assert!(
+                    (g - exp_median[i]).abs() < 1e-9,
+                    "median val {ctx} i={i}: {g} vs {}",
+                    exp_median[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dense_median_dispatch_matches_generic_bits() {
+        let keys = vec![
+            Scalar::Int64(2),
+            Scalar::Int64(-1),
+            Scalar::Int64(2),
+            Scalar::Int64(-1),
+            Scalar::Int64(0),
+            Scalar::Int64(0),
+            Scalar::Int64(3),
+        ];
+        let values = vec![
+            Scalar::Float64(9.0),
+            Scalar::Float64(-0.0),
+            Scalar::Float64(1.0),
+            Scalar::Float64(0.0),
+            Scalar::Float64(4.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::Null),
+        ];
+
+        for sort in [false, true] {
+            let dense = try_groupby_median_dense_int64(&keys, &values, true, sort)
+                .expect("bounded Int64 keys take the dense path");
+            let generic = try_groupby_median_numeric_vectors(&keys, &values, true, sort)
+                .expect("numeric values take the generic path");
+
+            assert_eq!(dense.0, generic.0);
+            assert_eq!(dense.1.len(), generic.1.len());
+            for (dense_value, generic_value) in dense.1.iter().zip(&generic.1) {
+                match (dense_value, generic_value) {
+                    (Scalar::Float64(dense), Scalar::Float64(generic)) => {
+                        assert_eq!(dense.to_bits(), generic.to_bits());
+                    }
+                    _ => assert_eq!(dense_value, generic_value),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dense_int64_groupby_sparse_keys_matches_oracle_u4c5a() {
+        use std::collections::BTreeMap;
+
+        // Oracle (br-frankenpandas-u4c5a): widely-spread keys exceed the dense
+        // histogram threshold, exercising the sparse/hash grouping path. It must
+        // match the same BTreeMap oracle as the dense path. Seeded LCG, no mocks.
+        const WIDE_KEYS: [i64; 6] = [0, 1, -1, 1_000_000, -500_000, 7];
+        let mut st: u64 = 0x5a2e_5e00_4c5a_d00d;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+
+        for iter in 0..1000u32 {
+            let n = (next() % 14) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n)
+                .map(|_| WIDE_KEYS[(next() as usize) % WIDE_KEYS.len()])
+                .collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
+
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v);
+            }
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_sum: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(vs.iter().sum()))
+                .collect();
+            let exp_count: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(vs.len() as i64))
+                .collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?}");
+            let pol = RuntimePolicy::strict();
+            let mut led = EvidenceLedger::new();
+            let sum = groupby_sum(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("sum");
+            assert_eq!(sum.index().labels(), exp_keys, "sparse sum keys {ctx}");
+            assert_eq!(sum.values(), exp_sum.as_slice(), "sparse sum vals {ctx}");
+            let cnt = groupby_count(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("count");
+            assert_eq!(
+                cnt.values(),
+                exp_count.as_slice(),
+                "sparse count vals {ctx}"
+            );
+        }
     }
 
     #[test]
@@ -2726,6 +4895,145 @@ mod tests {
         assert_eq!(
             first_seen_values,
             vec![Scalar::Int64(4), Scalar::Int64(2), Scalar::Int64(4)]
+        );
+    }
+
+    #[test]
+    fn dense_int64_raw_sum_matches_scalar_reference_zjkxd() {
+        let raw_keys = vec![10_i64, 5, 10, -2, 5];
+        let raw_values = vec![i64::MAX, 2, 1, 4, -3];
+        let scalar_keys = raw_keys
+            .iter()
+            .copied()
+            .map(Scalar::Int64)
+            .collect::<Vec<_>>();
+        let scalar_values = raw_values
+            .iter()
+            .copied()
+            .map(Scalar::Int64)
+            .collect::<Vec<_>>();
+
+        for sort in [true, false] {
+            let expected =
+                try_groupby_sum_dense_int64_values(&scalar_keys, &scalar_values, true, sort)
+                    .expect("former Scalar dense path");
+            let actual = try_groupby_sum_dense_int64_slices(&raw_keys, &raw_values, sort)
+                .expect("raw dense path");
+            assert_eq!(actual, expected);
+
+            let index = Index::from_range(0, raw_keys.len() as i64, 1);
+            let keys = Series::new(
+                "key",
+                index.clone(),
+                Column::from_i64_values_owned(raw_keys.clone()),
+            )
+            .expect("typed keys");
+            let values = Series::new(
+                "value",
+                index,
+                Column::from_i64_values_owned(raw_values.clone()),
+            )
+            .expect("typed values");
+            let mut ledger = EvidenceLedger::new();
+            let public = groupby_sum(
+                &keys,
+                &values,
+                GroupByOptions {
+                    sort,
+                    ..GroupByOptions::default()
+                },
+                &RuntimePolicy::strict(),
+                &mut ledger,
+            )
+            .expect("public raw sum");
+            let expected_public = Series::new(
+                "sum",
+                Index::new(expected.0.clone()),
+                Column::from_values(expected.1.clone()).expect("former output column"),
+            )
+            .expect("former public output");
+            assert_eq!(public.index(), expected_public.index());
+            assert_eq!(public.values(), expected_public.values());
+        }
+
+        assert_eq!(
+            try_groupby_sum_dense_int64_slices(&[], &[], true),
+            Some((Vec::new(), Vec::new()))
+        );
+        assert!(try_groupby_sum_dense_int64_slices(&[0], &[], true).is_none());
+        assert!(try_groupby_sum_dense_int64_slices(&[i64::MIN, i64::MAX], &[1, 2], true).is_none());
+    }
+
+    #[test]
+    fn dense_int64_raw_mean_matches_scalar_reference_o9svg() {
+        let raw_keys = vec![10_i64, 5, 10, -2, 5];
+        let raw_values = vec![i64::MAX, 2, i64::MIN + 1, 4, -3];
+        let scalar_keys = raw_keys
+            .iter()
+            .copied()
+            .map(Scalar::Int64)
+            .collect::<Vec<_>>();
+        let scalar_values = raw_values
+            .iter()
+            .copied()
+            .map(Scalar::Int64)
+            .collect::<Vec<_>>();
+
+        for sort in [true, false] {
+            let expected = try_groupby_agg_dense_int64(
+                &scalar_keys,
+                &scalar_values,
+                AggFunc::Mean,
+                true,
+                sort,
+            )
+            .expect("former Scalar dense path");
+            let actual = try_groupby_mean_dense_int64_slices(&raw_keys, &raw_values, sort)
+                .expect("raw dense path");
+            assert_eq!(actual, expected);
+
+            let index = Index::from_range(0, raw_keys.len() as i64, 1);
+            let keys = Series::new(
+                "key",
+                index.clone(),
+                Column::from_i64_values_owned(raw_keys.clone()),
+            )
+            .expect("typed keys");
+            let values = Series::new(
+                "value",
+                index,
+                Column::from_i64_values_owned(raw_values.clone()),
+            )
+            .expect("typed values");
+            let mut ledger = EvidenceLedger::new();
+            let public = groupby_mean(
+                &keys,
+                &values,
+                GroupByOptions {
+                    sort,
+                    ..GroupByOptions::default()
+                },
+                &RuntimePolicy::strict(),
+                &mut ledger,
+            )
+            .expect("public raw mean");
+            let expected_public = Series::new(
+                "mean",
+                Index::new(expected.0.clone()),
+                Column::from_values(expected.1.clone()).expect("former output column"),
+            )
+            .expect("former public output");
+            assert_eq!(public.index(), expected_public.index());
+            assert_eq!(public.values(), expected_public.values());
+        }
+
+        assert_eq!(
+            try_groupby_mean_dense_int64_slices(&[], &[], true),
+            Some((Vec::new(), Vec::new()))
+        );
+        assert!(try_groupby_mean_dense_int64_slices(&[0], &[], true).is_none());
+        assert!(
+            try_groupby_mean_dense_int64_slices(&[i64::MIN, i64::MAX], &[1, 2], true).is_none()
         );
     }
 
@@ -3404,6 +5712,166 @@ mod tests {
     }
 
     #[test]
+    fn groupby_min_max_utf8_keys_skip_missing_and_keep_order() {
+        let keys = Series::from_values(
+            "key",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let min_sorted = groupby_min(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let max_sorted = groupby_max(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            min_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            max_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            &min_sorted.values()[..2],
+            &[Scalar::Int64(5), Scalar::Int64(1)]
+        );
+        assert_eq!(
+            &max_sorted.values()[..2],
+            &[Scalar::Int64(5), Scalar::Int64(3)]
+        );
+        assert!(min_sorted.values()[2].is_missing());
+        assert!(max_sorted.values()[2].is_missing());
+
+        let first_seen = GroupByOptions {
+            sort: false,
+            ..GroupByOptions::default()
+        };
+        let min_unsorted = groupby_min(
+            &keys,
+            &values,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let max_unsorted = groupby_max(
+            &keys,
+            &values,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            min_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            max_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            &min_unsorted.values()[..2],
+            &[Scalar::Int64(1), Scalar::Int64(5)]
+        );
+        assert_eq!(
+            &max_unsorted.values()[..2],
+            &[Scalar::Int64(3), Scalar::Int64(5)]
+        );
+        assert!(min_unsorted.values()[2].is_missing());
+        assert!(max_unsorted.values()[2].is_missing());
+    }
+
+    #[test]
+    fn groupby_min_max_object_key_incomparable_values_return_nan() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("x".into()), Scalar::Int64(1)],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let out_min = groupby_min(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let out_max = groupby_max(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out_min.index().labels(), &["a".into()]);
+        assert_eq!(out_max.index().labels(), &["a".into()]);
+        assert!(out_min.values()[0].is_missing());
+        assert!(out_max.values()[0].is_missing());
+    }
+
+    #[test]
     fn groupby_first_basic() {
         let (keys, values) = make_grouped_data();
         let mut ledger = EvidenceLedger::new();
@@ -3444,6 +5912,164 @@ mod tests {
     }
 
     #[test]
+    fn groupby_first_last_utf8_keys_skip_missing_and_keep_order() {
+        let keys = Series::from_values(
+            "key",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let first_sorted = groupby_first(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let last_sorted = groupby_last(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            first_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            last_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            &first_sorted.values()[..2],
+            &[Scalar::Int64(10), Scalar::Int64(1)]
+        );
+        assert_eq!(
+            &last_sorted.values()[..2],
+            &[Scalar::Int64(5), Scalar::Int64(2)]
+        );
+        assert!(first_sorted.values()[2].is_missing());
+        assert!(last_sorted.values()[2].is_missing());
+
+        let first_seen = GroupByOptions {
+            sort: false,
+            ..GroupByOptions::default()
+        };
+        let first_unsorted = groupby_first(
+            &keys,
+            &values,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let last_unsorted = groupby_last(
+            &keys,
+            &values,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            first_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            last_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            &first_unsorted.values()[..2],
+            &[Scalar::Int64(1), Scalar::Int64(10)]
+        );
+        assert_eq!(
+            &last_unsorted.values()[..2],
+            &[Scalar::Int64(2), Scalar::Int64(5)]
+        );
+        assert!(first_unsorted.values()[2].is_missing());
+        assert!(last_unsorted.values()[2].is_missing());
+    }
+
+    #[test]
+    fn groupby_first_last_object_values_preserve_selected_scalar() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("x".into()), Scalar::Int64(7)],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let out_first = groupby_first(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let out_last = groupby_last(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out_first.values(), &[Scalar::Utf8("x".into())]);
+        assert_eq!(out_last.values(), &[Scalar::Int64(7)]);
+    }
+
+    #[test]
     fn groupby_agg_sum_matches_dedicated_sum() {
         let (keys, values) = make_grouped_data();
         let mut ledger = EvidenceLedger::new();
@@ -3467,6 +6093,373 @@ mod tests {
 
         assert_eq!(agg.index().labels(), dedicated.index().labels());
         assert_eq!(agg.values(), dedicated.values());
+    }
+
+    #[test]
+    fn groupby_agg_sum_prod_utf8_keys_stream_integer_slots() {
+        let keys = Series::from_values(
+            "key",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(5),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let sum_sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod_sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sum_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            prod_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            sum_sorted.values(),
+            &[Scalar::Int64(15), Scalar::Int64(5), Scalar::Int64(0)]
+        );
+        assert_eq!(
+            prod_sorted.values(),
+            &[Scalar::Int64(50), Scalar::Int64(6), Scalar::Int64(1)]
+        );
+
+        let first_seen = GroupByOptions {
+            sort: false,
+            ..GroupByOptions::default()
+        };
+        let sum_unsorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod_unsorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sum_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            prod_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            sum_unsorted.values(),
+            &[Scalar::Int64(5), Scalar::Int64(15), Scalar::Int64(0)]
+        );
+        assert_eq!(
+            prod_unsorted.values(),
+            &[Scalar::Int64(6), Scalar::Int64(50), Scalar::Int64(1)]
+        );
+    }
+
+    #[test]
+    fn groupby_agg_sum_prod_bool_and_prod_overflow_preserve_fallbacks() {
+        let bool_keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let bool_values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let bool_sum = groupby_agg(
+            &bool_keys,
+            &bool_values,
+            AggFunc::Sum,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let bool_prod = groupby_agg(
+            &bool_keys,
+            &bool_values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(bool_sum.values(), &[Scalar::Int64(1), Scalar::Int64(1)]);
+        assert_eq!(bool_prod.values(), &[Scalar::Int64(0), Scalar::Int64(1)]);
+
+        let overflow_keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let overflow_values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(i64::MAX), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let overflow_prod = groupby_agg(
+            &overflow_keys,
+            &overflow_values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            overflow_prod.values(),
+            &[Scalar::Float64((i64::MAX as f64) * 2.0)]
+        );
+    }
+
+    #[test]
+    fn groupby_agg_sum_prod_float64_utf8_keys_stream_counters_2qb1i() {
+        let keys = Series::from_values(
+            "key",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(4.0),
+                Scalar::Float64(-2.0),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let sum_sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod_sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sum_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            prod_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            sum_sorted.values(),
+            &[
+                Scalar::Float64(6.0),
+                Scalar::Float64(-0.5),
+                Scalar::Float64(0.0),
+            ]
+        );
+        assert_eq!(
+            prod_sorted.values(),
+            &[
+                Scalar::Float64(8.0),
+                Scalar::Float64(-3.0),
+                Scalar::Float64(1.0),
+            ]
+        );
+
+        let first_seen = GroupByOptions {
+            sort: false,
+            ..GroupByOptions::default()
+        };
+        let sum_unsorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod_unsorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sum_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            prod_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            sum_unsorted.values(),
+            &[
+                Scalar::Float64(-0.5),
+                Scalar::Float64(6.0),
+                Scalar::Float64(0.0),
+            ]
+        );
+        assert_eq!(
+            prod_unsorted.values(),
+            &[
+                Scalar::Float64(-3.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(1.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_agg_sum_prod_timedelta_fallback_preserved_2qb1i() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Timedelta64(2), Scalar::Timedelta64(3)],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let sum = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(sum.values(), &[Scalar::Timedelta64(5)]);
+        assert!(prod.values()[0].is_missing());
     }
 
     #[test]
@@ -3912,6 +6905,356 @@ mod tests {
     }
 
     #[test]
+    fn groupby_var_std_utf8_keys_stream_numeric_counters_uza04202() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..7).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("d".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..7).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+
+        let sorted_var = groupby_var(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        let sorted_std = groupby_std(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_var.index().labels(),
+            &["a".into(), "b".into(), "c".into(), "d".into()]
+        );
+        assert_eq!(sorted_std.index().labels(), sorted_var.index().labels());
+        assert!(sorted_var.values()[0].is_missing());
+        assert_eq!(sorted_var.values()[1], Scalar::Float64(2.0));
+        assert!(sorted_var.values()[2].is_missing());
+        assert!(sorted_var.values()[3].is_missing());
+        let b_std = match sorted_std.values()[1] {
+            Scalar::Float64(v) => v,
+            _ => f64::NAN,
+        };
+        assert!((b_std - 2.0_f64.sqrt()).abs() < 1e-12);
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let unsorted_var = groupby_var(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            unsorted_var.index().labels(),
+            &["b".into(), "a".into(), "c".into(), "d".into()]
+        );
+        assert_eq!(unsorted_var.values()[0], Scalar::Float64(2.0));
+        assert!(unsorted_var.values()[1].is_missing());
+    }
+
+    #[test]
+    fn groupby_var_std_timedelta_fallback_preserves_dtype_uza04202() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..4).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "td",
+            (0..4).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Timedelta64(10),
+                Scalar::Timedelta64(20),
+                Scalar::Timedelta64(30),
+                Scalar::Null(NullKind::NaT),
+            ],
+        )
+        .unwrap();
+
+        let var = groupby_var(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        let std = groupby_std(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(var.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(std.index().labels(), var.index().labels());
+        assert_eq!(
+            var.values(),
+            &[
+                Scalar::Timedelta64(50),
+                Scalar::Timedelta64(fp_types::Timedelta::NAT)
+            ]
+        );
+        assert_eq!(
+            std.values(),
+            &[
+                Scalar::Timedelta64(7),
+                Scalar::Timedelta64(fp_types::Timedelta::NAT)
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_median_utf8_keys_numeric_vectors_uza04203() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..8).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("d".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..8).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(8.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+
+        let sorted = groupby_median(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into(), "d".into()]
+        );
+        assert_eq!(
+            sorted.values(),
+            &[
+                Scalar::Float64(6.0),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(8.0)
+            ]
+        );
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let unsorted = groupby_median(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into(), "d".into()]
+        );
+        assert_eq!(
+            unsorted.values(),
+            &[
+                Scalar::Float64(3.0),
+                Scalar::Float64(6.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(8.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_median_timedelta_fallback_preserves_dtype_uza04203() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..5).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "td",
+            (0..5).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Timedelta64(10),
+                Scalar::Timedelta64(20),
+                Scalar::Timedelta64(30),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Timedelta64(50),
+            ],
+        )
+        .unwrap();
+
+        let out = groupby_median(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Timedelta64(15), Scalar::Timedelta64(40)]
+        );
+    }
+
+    #[test]
+    fn groupby_nunique_utf8_keys_borrowed_sets_uza04204() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..12).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("d".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("d".to_owned()),
+                Scalar::Utf8("e".to_owned()),
+                Scalar::Utf8("e".to_owned()),
+                Scalar::Utf8("e".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..12).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Float64(-0.0),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(0.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Timedelta64(5),
+                Scalar::Float64(1.0),
+                Scalar::Timedelta64(5),
+                Scalar::Bool(true),
+                Scalar::Int64(1),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+
+        let sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Nunique,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into(), "d".into(), "e".into()]
+        );
+        assert_eq!(
+            sorted.values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+            ]
+        );
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let unsorted = groupby_nunique(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into(), "d".into(), "e".into()]
+        );
+        assert_eq!(
+            unsorted.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+            ]
+        );
+    }
+
+    #[test]
     fn groupby_median_even_count() {
         let keys = Series::from_values(
             "key",
@@ -4123,6 +7466,306 @@ mod tests {
             assert!(
                 q25 <= q50 && q50 <= q75,
                 "quantiles not monotonic: q25={q25}, q50={q50}, q75={q75}"
+            );
+        }
+
+        #[test]
+        #[ignore = "foreground attribution probe"]
+        fn kll_compaction_promotion_allocation_profile_xagv2() {
+            const K: usize = 32;
+            const VALUES: usize = 131_072;
+            const SAMPLES: usize = 9;
+
+            #[derive(Debug, PartialEq)]
+            struct ProbeKll {
+                compactors: Vec<Vec<f64>>,
+                size: usize,
+                compact_count: usize,
+            }
+
+            impl ProbeKll {
+                fn new() -> Self {
+                    Self {
+                        compactors: vec![Vec::with_capacity(K * 2)],
+                        size: 0,
+                        compact_count: 0,
+                    }
+                }
+
+                fn insert(&mut self, value: f64, stream: bool) {
+                    self.compactors[0].push(value);
+                    self.size += 1;
+                    if self.compactors[0].len() >= K * 2 {
+                        self.compact(0, stream);
+                    }
+                }
+
+                fn compact(&mut self, level: usize, stream: bool) {
+                    self.compactors[level]
+                        .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+                    let offset = (self.compact_count + level) % 2;
+                    self.compact_count = self.compact_count.wrapping_add(1);
+
+                    if level + 1 >= self.compactors.len() {
+                        self.compactors.push(Vec::with_capacity(K * 2));
+                    }
+                    if stream {
+                        let (through_current, after_current) =
+                            self.compactors.split_at_mut(level + 1);
+                        let current = &mut through_current[level];
+                        let next = &mut after_current[0];
+                        next.extend(
+                            current
+                                .iter()
+                                .copied()
+                                .enumerate()
+                                .filter_map(|(idx, value)| (idx % 2 == offset).then_some(value)),
+                        );
+                        current.clear();
+                    } else {
+                        let promoted = self.compactors[level]
+                            .iter()
+                            .copied()
+                            .enumerate()
+                            .filter_map(|(idx, value)| (idx % 2 == offset).then_some(value))
+                            .collect::<Vec<_>>();
+                        self.compactors[level].clear();
+                        self.compactors[level + 1].extend(promoted);
+                    }
+
+                    if self.compactors[level + 1].len() >= K * 2 {
+                        self.compact(level + 1, stream);
+                    }
+                }
+            }
+
+            fn build(values: &[f64], stream: bool) -> ProbeKll {
+                let mut sketch = ProbeKll::new();
+                for &value in values {
+                    sketch.insert(value, stream);
+                }
+                sketch
+            }
+
+            fn elapsed(values: &[f64], stream: bool) -> (u128, ProbeKll) {
+                let started = std::time::Instant::now();
+                let sketch = build(std::hint::black_box(values), stream);
+                (started.elapsed().as_nanos(), sketch)
+            }
+
+            fn median(mut samples: Vec<u128>) -> u128 {
+                samples.sort_unstable();
+                samples[samples.len() / 2]
+            }
+
+            let mut state = 0xD1B5_4A32_D192_ED03_u64;
+            let values = (0..VALUES)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    ((state >> 24) & 0x00ff_ffff) as f64
+                })
+                .collect::<Vec<_>>();
+
+            let former = build(&values, false);
+            let candidate = build(&values, true);
+            assert_eq!(candidate, former);
+
+            for _ in 0..2 {
+                std::hint::black_box(elapsed(&values, false));
+                std::hint::black_box(elapsed(&values, true));
+            }
+            let mut former_samples = Vec::with_capacity(SAMPLES);
+            let mut candidate_samples = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                let order = if sample.is_multiple_of(2) {
+                    [false, true]
+                } else {
+                    [true, false]
+                };
+                for stream in order {
+                    let (elapsed, sketch) = elapsed(&values, stream);
+                    assert_eq!(sketch, former);
+                    if stream {
+                        candidate_samples.push(elapsed);
+                    } else {
+                        former_samples.push(elapsed);
+                    }
+                }
+            }
+            let former_ns = median(former_samples);
+            let candidate_ns = median(candidate_samples);
+            println!(
+                "KLL_PROMOTION_PROFILE values={VALUES} k={K} compactions={} former_ns={former_ns} candidate_ns={candidate_ns} directional_ratio={:.6}",
+                former.compact_count,
+                former_ns as f64 / candidate_ns as f64
+            );
+        }
+
+        fn former_kll_compact(sketch: &mut KllSketch, level: usize) {
+            sketch.compactors[level]
+                .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+            let offset = (sketch.compact_count + level) % 2;
+            sketch.compact_count = sketch.compact_count.wrapping_add(1);
+            let promoted = sketch.compactors[level]
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(idx, value)| (idx % 2 == offset).then_some(value))
+                .collect::<Vec<_>>();
+            sketch.compactors[level].clear();
+            if level + 1 >= sketch.compactors.len() {
+                sketch.compactors.push(Vec::with_capacity(sketch.k * 2));
+            }
+            sketch.compactors[level + 1].extend(promoted);
+            if sketch.compactors[level + 1].len() >= sketch.capacity_at_level(level + 1) {
+                former_kll_compact(sketch, level + 1);
+            }
+        }
+
+        fn former_kll_insert(sketch: &mut KllSketch, value: f64) {
+            sketch.compactors[0].push(value);
+            sketch.size += 1;
+            if sketch.compactors[0].len() >= sketch.capacity_at_level(0) {
+                former_kll_compact(sketch, 0);
+            }
+        }
+
+        fn build_kll(values: &[f64], k: usize, candidate: bool) -> KllSketch {
+            let mut sketch = KllSketch::new(k);
+            for &value in values {
+                if candidate {
+                    sketch.insert(value);
+                } else {
+                    former_kll_insert(&mut sketch, value);
+                }
+            }
+            sketch
+        }
+
+        fn assert_kll_bits_equal(candidate: &KllSketch, former: &KllSketch) {
+            assert_eq!(candidate.k, former.k);
+            assert_eq!(candidate.size, former.size);
+            assert_eq!(candidate.compact_count, former.compact_count);
+            assert_eq!(candidate.compactors.len(), former.compactors.len());
+            for (candidate_level, former_level) in
+                candidate.compactors.iter().zip(&former.compactors)
+            {
+                assert_eq!(candidate_level.len(), former_level.len());
+                assert!(
+                    candidate_level
+                        .iter()
+                        .zip(former_level)
+                        .all(|(candidate, former)| candidate.to_bits() == former.to_bits())
+                );
+            }
+            for quantile in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                assert_eq!(
+                    candidate.quantile(quantile).map(f64::to_bits),
+                    former.quantile(quantile).map(f64::to_bits)
+                );
+            }
+        }
+
+        #[test]
+        fn kll_streamed_promotion_matches_former_bits_xagv2() {
+            for k in [8, 32, 256] {
+                let mut former = KllSketch::new(k);
+                let mut candidate = KllSketch::new(k);
+                for idx in 0..4_097_u64 {
+                    let value = match idx % 257 {
+                        0 => f64::NEG_INFINITY,
+                        1 => f64::INFINITY,
+                        2 => -0.0,
+                        3 => 0.0,
+                        _ => idx.wrapping_mul(6_364_136_223_846_793_005) as i64 as f64,
+                    };
+                    former_kll_insert(&mut former, value);
+                    candidate.insert(value);
+                    if idx < 20 || idx.is_power_of_two() || idx == 4_096 {
+                        assert_kll_bits_equal(&candidate, &former);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "foreground release A/B harness"]
+        fn kll_streamed_promotion_public_ab_xagv2() {
+            const K: usize = 32;
+            const VALUES: usize = 131_072;
+            const BATCH: usize = 4;
+            const BLOCKS: usize = 9;
+
+            fn elapsed(values: &[f64], candidate: bool) -> u128 {
+                std::hint::black_box(build_kll(values, K, candidate));
+                let started = std::time::Instant::now();
+                for _ in 0..BATCH {
+                    let sketch = build_kll(std::hint::black_box(values), K, candidate);
+                    std::hint::black_box(sketch.quantile(0.5));
+                    std::hint::black_box(sketch);
+                }
+                started.elapsed().as_nanos()
+            }
+
+            fn median(mut samples: Vec<u128>) -> u128 {
+                samples.sort_unstable();
+                samples[samples.len() / 2]
+            }
+
+            fn spread(left: u128, right: u128) -> f64 {
+                left.abs_diff(right) as f64 / ((left + right) as f64 / 2.0)
+            }
+
+            let mut state = 0xD1B5_4A32_D192_ED03_u64;
+            let values = (0..VALUES)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    ((state >> 24) & 0x00ff_ffff) as f64
+                })
+                .collect::<Vec<_>>();
+            let former = build_kll(&values, K, false);
+            let candidate = build_kll(&values, K, true);
+            assert_kll_bits_equal(&candidate, &former);
+
+            let body_started = std::time::Instant::now();
+            let mut former_a = Vec::with_capacity(BLOCKS);
+            let mut former_b = Vec::with_capacity(BLOCKS);
+            let mut candidate_a = Vec::with_capacity(BLOCKS);
+            let mut candidate_b = Vec::with_capacity(BLOCKS);
+            for block in 0..BLOCKS {
+                let order = if block.is_multiple_of(2) {
+                    [(false, 0), (true, 0), (true, 1), (false, 1)]
+                } else {
+                    [(true, 1), (false, 1), (false, 0), (true, 0)]
+                };
+                for (candidate, duplicate) in order {
+                    let sample = elapsed(&values, candidate);
+                    match (candidate, duplicate) {
+                        (false, 0) => former_a.push(sample),
+                        (false, _) => former_b.push(sample),
+                        (true, 0) => candidate_a.push(sample),
+                        (true, _) => candidate_b.push(sample),
+                    }
+                }
+            }
+
+            let former_a = median(former_a) / BATCH as u128;
+            let former_b = median(former_b) / BATCH as u128;
+            let candidate_a = median(candidate_a) / BATCH as u128;
+            let candidate_b = median(candidate_b) / BATCH as u128;
+            let former_mean = (former_a + former_b) as f64 / 2.0;
+            let candidate_mean = (candidate_a + candidate_b) as f64 / 2.0;
+            println!(
+                "KLL_STREAM_AB values={VALUES} k={K} compactions={} former_a_ns={former_a} former_b_ns={former_b} candidate_a_ns={candidate_a} candidate_b_ns={candidate_b} former_spread={:.6} candidate_spread={:.6} speedup={:.6} body_seconds={:.6}",
+                former.compact_count,
+                spread(former_a, former_b),
+                spread(candidate_a, candidate_b),
+                former_mean / candidate_mean,
+                body_started.elapsed().as_secs_f64()
             );
         }
 
@@ -4375,8 +8018,9 @@ mod tests {
 
         let result = groupby_prod(&keys, &values, options, &policy, &mut ledger).unwrap();
         assert_eq!(result.len(), 2);
-        assert_eq!(result.values()[0], Scalar::Float64(6.0)); // x: 2*3
-        assert_eq!(result.values()[1], Scalar::Float64(20.0)); // y: 4*5
+        // pandas groupby.prod() preserves Int64 for integer input (br-frankenpandas-rl25i).
+        assert_eq!(result.values()[0], Scalar::Int64(6)); // x: 2*3
+        assert_eq!(result.values()[1], Scalar::Int64(20)); // y: 4*5
     }
 
     #[test]
@@ -4442,5 +8086,192 @@ mod tests {
         // count excludes nulls, size includes nulls
         assert_eq!(count_result.values()[0], Scalar::Int64(1)); // 1 non-null
         assert_eq!(size_result.values()[0], Scalar::Int64(2)); // 2 total
+    }
+
+    #[test]
+    fn groupby_count_size_utf8_counter_path_preserves_null_and_order_semantics() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..6).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..6).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let count = groupby_count(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        let size = groupby_size(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            count.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            count.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(0)]
+        );
+        assert_eq!(
+            size.values(),
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(1)]
+        );
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let first_seen_size =
+            groupby_size(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            first_seen_size.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            first_seen_size.values(),
+            &[Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(1)]
+        );
+    }
+
+    #[test]
+    fn groupby_mean_utf8_counter_path_preserves_null_and_order_semantics() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..6).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..6).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let mean = groupby_mean(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(mean.index().labels(), &["a".into(), "b".into(), "c".into()]);
+        assert_eq!(
+            mean.values(),
+            &[
+                Scalar::Float64(5.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN)
+            ]
+        );
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let first_seen_mean =
+            groupby_mean(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            first_seen_mean.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            first_seen_mean.values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::NaN)
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_mean_utf8_counter_path_preserves_timedelta_fallback() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..4).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "td",
+            (0..4).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Timedelta64(10),
+                Scalar::Timedelta64(20),
+                Scalar::Timedelta64(30),
+                Scalar::Null(NullKind::NaT),
+            ],
+        )
+        .unwrap();
+
+        let mean = groupby_mean(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(mean.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            mean.values(),
+            &[Scalar::Timedelta64(15), Scalar::Timedelta64(30)]
+        );
     }
 }

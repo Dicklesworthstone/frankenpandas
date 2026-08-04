@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-3l7a6-base/release-perf/examples/perf_profile df_dot 100000 1
+  Time (mean ± σ):     341.1 ms ±   8.5 ms    [User: 2513.4 ms, System: 483.8 ms]
+  Range (min … max):   328.2 ms … 351.3 ms    7 runs
+ 

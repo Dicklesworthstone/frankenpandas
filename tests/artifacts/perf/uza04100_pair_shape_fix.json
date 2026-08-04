@@ -1,0 +1,160 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-base/release-perf/examples/perf_profile str_groupby_count 200000 6",
+      "mean": 0.20454123700000001,
+      "stddev": 0.006070395745274997,
+      "median": 0.2036143265,
+      "user": 0.25324758666666664,
+      "system": 0.07386934666666665,
+      "min": 0.198379134,
+      "max": 0.213918768,
+      "times": [
+        0.198379134,
+        0.208900527,
+        0.20517774,
+        0.19882034,
+        0.213918768,
+        0.202050913
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-after-shape/release-perf/examples/perf_profile str_groupby_count 200000 6",
+      "mean": 0.03190706183333334,
+      "stddev": 0.002465006979902119,
+      "median": 0.031405337500000005,
+      "user": 0.02212792,
+      "system": 0.009620846666666667,
+      "min": 0.028765383000000002,
+      "max": 0.035907973,
+      "times": [
+        0.03330063,
+        0.031904083,
+        0.028765383000000002,
+        0.030657709999999998,
+        0.035907973,
+        0.030906592000000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-base/release-perf/examples/perf_profile str_groupby_sum 200000 6",
+      "mean": 0.184838866,
+      "stddev": 0.012032114144697178,
+      "median": 0.185276838,
+      "user": 0.2316632533333333,
+      "system": 0.07364617999999999,
+      "min": 0.169024271,
+      "max": 0.202610353,
+      "times": [
+        0.185785673,
+        0.202610353,
+        0.18476800300000001,
+        0.192169383,
+        0.169024271,
+        0.174675513
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-after-shape/release-perf/examples/perf_profile str_groupby_sum 200000 6",
+      "mean": 0.03339594433333334,
+      "stddev": 0.002779633287669198,
+      "median": 0.033604361,
+      "user": 0.023303920000000002,
+      "system": 0.00997118,
+      "min": 0.029556013,
+      "max": 0.036379036000000003,
+      "times": [
+        0.03216104,
+        0.029556013,
+        0.031309666,
+        0.036379036000000003,
+        0.035922229,
+        0.035047682000000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-base/release-perf/examples/perf_profile str_groupby_std 200000 6",
+      "mean": 0.2265567505,
+      "stddev": 0.009714989103152466,
+      "median": 0.228795711,
+      "user": 0.25169242,
+      "system": 0.09739534666666665,
+      "min": 0.21333958,
+      "max": 0.236711009,
+      "times": [
+        0.216286706,
+        0.22848656,
+        0.236711009,
+        0.21333958,
+        0.229104862,
+        0.235411786
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-after-shape/release-perf/examples/perf_profile str_groupby_std 200000 6",
+      "mean": 0.036034757166666674,
+      "stddev": 0.0031089372452831154,
+      "median": 0.0360544395,
+      "user": 0.024003253333333332,
+      "system": 0.01188951333333333,
+      "min": 0.032574112,
+      "max": 0.039717473,
+      "times": [
+        0.032910911,
+        0.039717473,
+        0.034499382,
+        0.038897168,
+        0.037609497,
+        0.032574112
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

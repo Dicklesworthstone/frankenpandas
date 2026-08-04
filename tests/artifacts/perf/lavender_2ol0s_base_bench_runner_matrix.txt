@@ -1,0 +1,36 @@
+Running FrankenPandas benchmarks...
+Sizes: [10000, 100000], Runs: 20
+  Size: 10000...
+  Size: 100000...
+{
+  "environment": {
+    "library": "frankenpandas",
+    "version": "0.1.0",
+    "rust_version": "nightly",
+    "timestamp": "1781553883"
+  },
+  "results": [
+    {"name":"io/csv_read","size":10000,"runs":20,"p50_ns":26681,"p95_ns":26701,"p99_ns":26701,"p50_ms":0.027,"p95_ms":0.027,"p99_ms":0.027},
+    {"name":"io/csv_write","size":10000,"runs":20,"p50_ns":14037980,"p95_ns":18168577,"p99_ns":18168577,"p50_ms":14.038,"p95_ms":18.169,"p99_ms":18.169},
+    {"name":"dataframe_ops/sort_single","size":10000,"runs":20,"p50_ns":5621,"p95_ns":6002,"p99_ns":6002,"p50_ms":0.006,"p95_ms":0.006,"p99_ms":0.006},
+    {"name":"dataframe_ops/drop_duplicates","size":10000,"runs":20,"p50_ns":46218,"p95_ns":58019,"p99_ns":58019,"p50_ms":0.046,"p95_ms":0.058,"p99_ms":0.058},
+    {"name":"dataframe_ops/cumsum","size":10000,"runs":20,"p50_ns":487604,"p95_ns":717079,"p99_ns":717079,"p50_ms":0.488,"p95_ms":0.717,"p99_ms":0.717},
+    {"name":"groupby/sum","size":10000,"runs":20,"p50_ns":131620,"p95_ns":154733,"p99_ns":154733,"p50_ms":0.132,"p95_ms":0.155,"p99_ms":0.155},
+    {"name":"groupby/mean","size":10000,"runs":20,"p50_ns":112944,"p95_ns":123414,"p99_ns":123414,"p50_ms":0.113,"p95_ms":0.123,"p99_ms":0.123},
+    {"name":"rolling/mean","size":10000,"runs":20,"p50_ns":80633,"p95_ns":89599,"p99_ns":89599,"p50_ms":0.081,"p95_ms":0.090,"p99_ms":0.090},
+    {"name":"rolling/std","size":10000,"runs":20,"p50_ns":155535,"p95_ns":203776,"p99_ns":203776,"p50_ms":0.156,"p95_ms":0.204,"p99_ms":0.204},
+    {"name":"indexing/iloc_slice","size":10000,"runs":20,"p50_ns":519605,"p95_ns":662896,"p99_ns":662896,"p50_ms":0.520,"p95_ms":0.663,"p99_ms":0.663},
+    {"name":"indexing/reindex","size":10000,"runs":20,"p50_ns":52760,"p95_ns":59864,"p99_ns":59864,"p50_ms":0.053,"p95_ms":0.060,"p99_ms":0.060},
+    {"name":"io/csv_read","size":100000,"runs":20,"p50_ns":288537,"p95_ns":397333,"p99_ns":397333,"p50_ms":0.289,"p95_ms":0.397,"p99_ms":0.397},
+    {"name":"io/csv_write","size":100000,"runs":20,"p50_ns":144352583,"p95_ns":157188074,"p99_ns":157188074,"p50_ms":144.353,"p95_ms":157.188,"p99_ms":157.188},
+    {"name":"dataframe_ops/sort_single","size":100000,"runs":20,"p50_ns":48321,"p95_ns":60384,"p99_ns":60384,"p50_ms":0.048,"p95_ms":0.060,"p99_ms":0.060},
+    {"name":"dataframe_ops/drop_duplicates","size":100000,"runs":20,"p50_ns":660312,"p95_ns":682413,"p99_ns":682413,"p50_ms":0.660,"p95_ms":0.682,"p99_ms":0.682},
+    {"name":"dataframe_ops/cumsum","size":100000,"runs":20,"p50_ns":831145,"p95_ns":1492047,"p99_ns":1492047,"p50_ms":0.831,"p95_ms":1.492,"p99_ms":1.492},
+    {"name":"groupby/sum","size":100000,"runs":20,"p50_ns":856363,"p95_ns":1035763,"p99_ns":1035763,"p50_ms":0.856,"p95_ms":1.036,"p99_ms":1.036},
+    {"name":"groupby/mean","size":100000,"runs":20,"p50_ns":834341,"p95_ns":889686,"p99_ns":889686,"p50_ms":0.834,"p95_ms":0.890,"p99_ms":0.890},
+    {"name":"rolling/mean","size":100000,"runs":20,"p50_ns":818982,"p95_ns":1622424,"p99_ns":1622424,"p50_ms":0.819,"p95_ms":1.622,"p99_ms":1.622},
+    {"name":"rolling/std","size":100000,"runs":20,"p50_ns":1574934,"p95_ns":2004027,"p99_ns":2004027,"p50_ms":1.575,"p95_ms":2.004,"p99_ms":2.004},
+    {"name":"indexing/iloc_slice","size":100000,"runs":20,"p50_ns":905075,"p95_ns":975118,"p99_ns":975118,"p50_ms":0.905,"p95_ms":0.975,"p99_ms":0.975},
+    {"name":"indexing/reindex","size":100000,"runs":20,"p50_ns":645313,"p95_ns":687883,"p99_ns":687883,"p50_ms":0.645,"p95_ms":0.688,"p99_ms":0.688}
+  ]
+}

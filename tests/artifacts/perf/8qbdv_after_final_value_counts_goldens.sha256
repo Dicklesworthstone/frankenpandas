@@ -1,0 +1,3 @@
+8cedbe33b7c286e9ef7998bee56da5c402124ee06cd47e88f78b27ff2be5de9b  crates/fp-frame/tests/goldens/series_value_counts_basic.txt
+5122667d6f69c7f7414a38e8c937a325db2a9baacca73af8000438e61fbcd4c6  crates/fp-frame/tests/goldens/value_counts_basic.txt
+ca68b11d3ce01363b58c9c98919d1a68bffed7a9aa82712ff998976a9e679bb3  crates/fp-frame/tests/goldens/dataframe_value_counts_basic.txt

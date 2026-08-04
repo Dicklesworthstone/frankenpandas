@@ -1,0 +1,67 @@
+## df_dot
+perf_profile: scenario=df_dot n=100000 iters=5
+perf_profile: done 5 iters in 0.555s (110.949 ms/iter), sink=500000
+
+## csv_parse_dates_dt_year
+perf_profile: scenario=csv_parse_dates_dt_year n=100000 iters=5
+perf_profile: done 5 iters in 0.404s (80.752 ms/iter), sink=500000
+
+## str_outer_join
+perf_profile: scenario=str_outer_join n=100000 iters=5
+perf_profile: done 5 iters in 0.188s (37.638 ms/iter), sink=750000
+
+## str_left_join
+perf_profile: scenario=str_left_join n=100000 iters=5
+perf_profile: done 5 iters in 0.169s (33.796 ms/iter), sink=500000
+
+## inner_join
+perf_profile: scenario=inner_join n=100000 iters=5
+perf_profile: done 5 iters in 0.042s (8.451 ms/iter), sink=97656800
+
+## left_join
+perf_profile: scenario=left_join n=100000 iters=5
+perf_profile: done 5 iters in 0.014s (2.817 ms/iter), sink=49078400
+
+## str_sort
+perf_profile: scenario=str_sort n=100000 iters=5
+perf_profile: done 5 iters in 0.066s (13.142 ms/iter), sink=500000
+
+## str_groupby_sum
+perf_profile: scenario=str_groupby_sum n=100000 iters=5
+perf_profile: done 5 iters in 0.013s (2.672 ms/iter), sink=320
+
+## str_groupby_mean
+perf_profile: scenario=str_groupby_mean n=100000 iters=5
+perf_profile: done 5 iters in 0.015s (2.919 ms/iter), sink=320
+
+## str_groupby_count_lowcard
+perf_profile: scenario=str_groupby_count_lowcard n=100000 iters=5
+perf_profile: done 5 iters in 0.013s (2.545 ms/iter), sink=320
+
+## groupby_transform_median
+perf_profile: scenario=groupby_transform_median n=100000 iters=5
+perf_profile: done 5 iters in 0.025s (5.022 ms/iter), sink=500000
+
+## groupby_transform_std
+perf_profile: scenario=groupby_transform_std n=100000 iters=5
+perf_profile: done 5 iters in 0.024s (4.735 ms/iter), sink=500000
+
+## series_add_align
+perf_profile: scenario=series_add_align n=100000 iters=5
+perf_profile: done 5 iters in 0.020s (3.993 ms/iter), sink=500005
+
+## sort_single
+perf_profile: scenario=sort_single n=100000 iters=5
+perf_profile: done 5 iters in 0.007s (1.381 ms/iter), sink=500000
+
+## csv_read
+perf_profile: scenario=csv_read n=100000 iters=5
+perf_profile: done 5 iters in 0.066s (13.229 ms/iter), sink=500000
+
+## csv_read_options
+perf_profile: scenario=csv_read_options n=100000 iters=5
+perf_profile: done 5 iters in 0.070s (13.935 ms/iter), sink=500000
+
+## filter_bool
+perf_profile: scenario=filter_bool n=100000 iters=5
+perf_profile: done 5 iters in 0.014s (2.729 ms/iter), sink=250000

@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-jbyuc11111111111-gate-after/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --join-type inner --warmup 3 --iters 20
+  Time (mean ± σ):     106.8 ms ±   2.8 ms    [User: 61.9 ms, System: 44.5 ms]
+  Range (min … max):   103.7 ms … 112.2 ms    10 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-jbyuc11111111111-gate-base/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --join-type inner --warmup 3 --iters 20
+  Time (mean ± σ):     145.2 ms ±  25.6 ms    [User: 94.1 ms, System: 50.0 ms]
+  Range (min … max):   122.0 ms … 198.9 ms    10 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-jbyuc11111111111-gate-after/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --join-type inner --warmup 3 --iters 20 ran
+    1.36 ± 0.24 times faster than /data/projects/.scratch/cargo-target-orangepeak-jbyuc11111111111-gate-base/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --join-type inner --warmup 3 --iters 20

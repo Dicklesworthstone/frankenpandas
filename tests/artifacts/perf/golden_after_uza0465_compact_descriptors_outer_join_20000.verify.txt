@@ -1,0 +1,1 @@
+tests/artifacts/perf/golden_after_uza0465_compact_descriptors_outer_join_20000.txt: OK

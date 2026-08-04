@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-3wo1d-after/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --iters 20
+  Time (mean ± σ):     102.1 ms ±   3.3 ms    [User: 53.5 ms, System: 48.1 ms]
+  Range (min … max):    94.9 ms … 110.6 ms    30 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-3wo1d-base/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --iters 20
+  Time (mean ± σ):     105.6 ms ±   5.3 ms    [User: 60.4 ms, System: 44.6 ms]
+  Range (min … max):    98.3 ms … 125.7 ms    30 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-3wo1d-after/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --iters 20 ran
+    1.03 ± 0.06 times faster than /data/projects/.scratch/cargo-target-orangepeak-3wo1d-base/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --iters 20

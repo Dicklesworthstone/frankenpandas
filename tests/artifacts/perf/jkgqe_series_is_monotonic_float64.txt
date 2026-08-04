@@ -1,0 +1,29 @@
+br-frankenpandas-jkgqe — Series::is_monotonic_* Float64 typed fast path
+=======================================================================
+
+Series::is_monotonic_increasing/decreasing had an Int64 fast path (z53ed) but
+Float64 still went through self.column.values() — boxing every element into a
+Scalar plus per-pair semantic_le/semantic_ge + is_missing dispatch.
+
+Fix (bit-identical, additive): a Float64 fast path via Column::as_f64_slice()
+(requires dtype == Float64 && validity.all(); explicit-null columns correctly
+fall through to the Scalar path). Scan the &[f64]:
+  increasing: pair contributes false if either is NaN, else a <= b
+  decreasing: ... else a >= b
+This matches the Scalar path exactly:
+  - is_missing(Float64(NaN)) == v.is_nan(), so a NaN bails false (a NaN window
+    makes .all() false) — same as the Scalar is_missing bail.
+  - for non-NaN values (including +/-inf) f64 <= / >= equals semantic_le/ge,
+    because semantic_cmp uses partial_cmp which is a total order off NaN.
+
+Already test-guarded: series_predicate_fast_paths_match_scalar_reference_59dk2
+generates Float64 series (including NaN) and asserts is_monotonic_increasing/
+decreasing == the Scalar-path reference — so it directly validates this new fast
+path and would catch any divergence.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-frame 59dk2 + series_is_monotonic*  -> 13 passed, 0 failed
+  cargo test -p fp-frame (full)  -> exit 0 (all passed)
+  ubs crates/fp-frame/src/lib.rs -> no finding references the changed is_monotonic
+                                    lines; whole-file criticals are the documented
+                                    FP inventory (UBS_TRIAGE.md).

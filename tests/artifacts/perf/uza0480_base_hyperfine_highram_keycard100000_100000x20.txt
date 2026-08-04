@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza0480-base/release-perf/high_ram_perf_baseline --profile uza0480-base-hyperfine --rows 100000 --iters 20 --warmup 3 --frame-cols 10 --key-cardinality 100000
+  Time (mean ± σ):      3.956 s ±  0.158 s    [User: 3.186 s, System: 0.785 s]
+  Range (min … max):    3.796 s …  4.238 s    10 runs
+ 

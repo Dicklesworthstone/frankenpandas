@@ -1,0 +1,40 @@
+br-frankenpandas-0zp9e — Typed Float64 fast path for Series/DataFrame.clip
+==========================================================================
+
+Second-wave eydcr op. An extended gap_hunt probe over more un-benched ops found
+clip 53ms, fillna 47ms, rank(avg) 34ms as the next gaps (round/abs/cummax/cummin/
+cumprod already typed at ~2-5ms). clip materialized Vec<Scalar>, did per-element
+to_f64, and rebuilt via Column::new even for typed Float64.
+
+LEVER (one): a Float64 column never takes the Int64-dtype-preserving branch, so
+clip is a single f64 pass — read raw f64 + validity via as_f64_slice_with_validity,
+clamp each present value to the (already NaN-filtered + swap-normalized) bounds
+into a typed buffer + validity mask, emit via from_f64_values_with_validity.
+DataFrame.clip delegates per-column.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-5; loaded):
+  DataFrame.clip(0,1000):  53.1  ->  3.9  = 13.6x
+
+SCORE: 13.6x >> 2.0 PASS.
+
+ISOMORPHISM (per-element clamp; no reassociation):
+  - The bound normalization (NaN bounds -> None; reversed scalar bounds swapped
+    per pandas GH2747) is the SHARED code computed before the fast path, so the
+    effective bounds are identical.
+  - Present value: clamp `if v < lo { v = lo }` then `if v > hi { v = hi }` (the
+    identical order) -> Float64 present, matching the general `to_f64` + clamp.
+  - Missing slot (validity clear) OR a valid-bit NaN (which Scalar::is_missing
+    treats as missing, the general path's `if val.is_missing() { push clone }`):
+    left untouched with a cleared validity bit, so it materializes Null(NaN) /
+    Float64(NaN) exactly as the original missing `val.clone()`.
+  - Float64 dtype only (Int64 keeps the integer-preserving branch); index + name
+    preserved.
+  - Golden sha256 (gap_hunt golden: the full elementwise family + clip two-sided,
+    nullable, reversed-bound swap, and one-sided, n=5000 x4) UNCHANGED:
+      05053bd664af8b376df3ef79c450188cdb88c8c58b5e3caac998c6fb95e17df0
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

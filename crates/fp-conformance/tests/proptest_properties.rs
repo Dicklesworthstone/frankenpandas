@@ -216,7 +216,7 @@ fn poison_numeric_scalar(value: &Scalar) -> Scalar {
         }
         Scalar::Timedelta64(_) => Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
         Scalar::Datetime64(v) => Scalar::Datetime64(v.saturating_add(1)),
-        Scalar::Period(v) => Scalar::Period(v.saturating_add(1)),
+        Scalar::Period(v) => Scalar::Period(v.shift(1)),
         Scalar::Interval(iv) => Scalar::Interval(*iv),
     }
 }
@@ -2894,7 +2894,9 @@ proptest! {
                     IndexLabel::Int64(_)
                     | IndexLabel::Utf8(_)
                     | IndexLabel::Timedelta64(_)
-                    | IndexLabel::Datetime64(_) => {}
+                    | IndexLabel::Datetime64(_)
+                    | IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_) => {}
                     // All labels must be non-null when dropna=true. This used
                     // to be vacuous (IndexLabel had no null variant); since
                     // br-frankenpandas-joeff added IndexLabel::Null it is a
@@ -6310,11 +6312,11 @@ proptest! {
         factor in 0.25f64..5.0,
     ) {
         let baseline = series
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed for numeric inputs");
         let scaled = scale_series(&series, factor);
         let scaled_change = scaled
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed after positive scaling");
         prop_assert!(
             approx_equal_series(&baseline, &scaled_change),
@@ -6329,11 +6331,11 @@ proptest! {
         periods in 1usize..=3,
     ) {
         let baseline = series
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed for numeric inputs");
         let flipped = sign_flip_series(&series);
         let flipped_change = flipped
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed after sign flipping");
         prop_assert!(
             approx_equal_series(&baseline, &flipped_change),
@@ -6348,7 +6350,7 @@ proptest! {
         periods in 1usize..=3,
     ) {
         let observed = series
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed for numeric inputs");
         let reconstructed = reconstruct_pct_change_series(&series, periods);
         prop_assert!(
@@ -6365,11 +6367,11 @@ proptest! {
         factor in 0.25f64..5.0,
     ) {
         let baseline = df
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed for numeric inputs");
         let scaled = scale_dataframe(&df, factor);
         let scaled_change = scaled
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed after positive scaling");
         prop_assert!(
             approx_equal_dataframe(&baseline, &scaled_change),
@@ -6384,11 +6386,11 @@ proptest! {
         periods in 1usize..=3,
     ) {
         let baseline = df
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed for numeric inputs");
         let flipped = sign_flip_dataframe(&df);
         let flipped_change = flipped
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed after sign flipping");
         prop_assert!(
             approx_equal_dataframe(&baseline, &flipped_change),
@@ -6403,7 +6405,7 @@ proptest! {
         periods in 1usize..=3,
     ) {
         let observed = df
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed for numeric inputs");
         let reconstructed = reconstruct_pct_change_dataframe(&df, periods);
         prop_assert!(
@@ -11213,7 +11215,7 @@ proptest! {
     /// NaN since a lone missing value fails min_periods=1).
     #[test]
     fn prop_rolling_window1_is_identity(series in arb_numeric_series("roll1", 12)) {
-        if series.len() == 0 { return Ok(()); }
+        if series.is_empty() { return Ok(()); }
         let out = match series.rolling(1, Some(1)).sum() { Ok(s) => s, Err(_) => return Ok(()) };
         let iv = series.column().values();
         let ov = out.column().values();
@@ -11379,10 +11381,7 @@ fn arb_coindexed_groupby(max_len: usize) -> impl Strategy<Value = (Series, Serie
             ],
             len,
         );
-        let vals = proptest::collection::vec(
-            (-1_000i64..1_000).prop_map(Scalar::Int64),
-            len,
-        );
+        let vals = proptest::collection::vec((-1_000i64..1_000).prop_map(Scalar::Int64), len);
         (idx, keys, vals).prop_filter_map("coindexed construct", |(i, k, v)| {
             let keys = Series::from_values("k".to_owned(), i.clone(), k).ok()?;
             let values = Series::from_values("v".to_owned(), i, v).ok()?;
@@ -11410,10 +11409,10 @@ proptest! {
         let vv = values.column().values();
         let mut expected: i128 = 0;
         for (k, v) in kv.iter().zip(vv.iter()) {
-            if !k.is_missing() {
-                if let Scalar::Int64(n) = v {
-                    expected += *n as i128;
-                }
+            if !k.is_missing()
+                && let Scalar::Int64(n) = v
+            {
+                expected += *n as i128;
             }
         }
         let mut total: i128 = 0;
@@ -11577,10 +11576,10 @@ proptest! {
             if let Some(o) = mm_f64(&out[i]) {
                 prop_assert!(o >= lo - tol && o <= hi + tol, "clip[{}]={} outside [{},{}]", i, o, lo, hi);
                 // Values already inside the band must be untouched.
-                if let Some(x) = mm_f64(&inp[i]) {
-                    if x >= lo && x <= hi {
-                        prop_assert!((o - x).abs() <= tol, "clip altered in-band value at {}: {} -> {}", i, x, o);
-                    }
+                if let Some(x) = mm_f64(&inp[i])
+                    && x >= lo && x <= hi
+                {
+                    prop_assert!((o - x).abs() <= tol, "clip altered in-band value at {}: {} -> {}", i, x, o);
                 }
             }
         }
@@ -11667,8 +11666,8 @@ proptest! {
                 ),
             }
         }
-        for i in (len - ku)..len {
-            prop_assert!(out[i].is_missing(), "shift round-trip tail {} should be missing", i);
+        for (i, value) in out.iter().enumerate().take(len).skip(len - ku) {
+            prop_assert!(value.is_missing(), "shift round-trip tail {} should be missing", i);
         }
     }
 }
@@ -11837,7 +11836,7 @@ proptest! {
             (Just(df), proptest::collection::vec(0_i64..n, 0..=12))
         })
     ) {
-        if df.index().len() == 0 {
+        if df.index().is_empty() {
             return Ok(());
         }
         let taken = match df.take(&positions, 0) {
@@ -11918,7 +11917,7 @@ proptest! {
     /// (the primitive-gather kernel, fi6zx typed-columnar work).
     #[test]
     fn prop_dataframe_sort_values_conserves_column_multisets(df in arb_numeric_dataframe(12)) {
-        if df.index().len() == 0 {
+        if df.index().is_empty() {
             return Ok(());
         }
         let names: Vec<String> = df.column_names().iter().map(|s| (*s).clone()).collect();

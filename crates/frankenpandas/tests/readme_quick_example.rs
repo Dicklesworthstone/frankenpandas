@@ -1122,7 +1122,9 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = monthly.aggregate(&["mean", "sem"])?;
     assert_eq!(monthly.keys().len(), 2);
     assert_eq!(
-        monthly.indices().get(&IndexLabel::Utf8("2024-01".into())),
+        monthly
+            .indices()
+            .get(&IndexLabel::Utf8("2024-01-31".into())),
         Some(&vec![0, 1])
     );
     assert_eq!(monthly.groups(), monthly.indices());
@@ -1131,7 +1133,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     assert_eq!(monthly.ngroups(), 2);
     assert_eq!(monthly.ndim(), 1);
     assert!(monthly.exclusions().is_empty());
-    assert_eq!(monthly.get_group("2024-01")?.len(), 2);
+    assert_eq!(monthly.get_group("2024-01-31")?.len(), 2);
     let _ = monthly.asfreq()?;
     let _ = monthly.ffill(None)?;
     let _ = monthly.bfill(None)?;
@@ -1240,7 +1242,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = drs.aggregate(&["sem", "size", "nunique"])?;
     assert_eq!(drs.keys().len(), 2);
     assert_eq!(
-        drs.indices().get(&IndexLabel::Utf8("2024-01".into())),
+        drs.indices().get(&IndexLabel::Utf8("2024-01-31".into())),
         Some(&vec![0, 1])
     );
     assert_eq!(drs.groups(), drs.indices());
@@ -1249,7 +1251,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     assert_eq!(drs.ngroups(), 2);
     assert_eq!(drs.ndim(), 2);
     assert!(drs.exclusions().is_empty());
-    assert_eq!(drs.get_group("2024-01")?.len(), 2);
+    assert_eq!(drs.get_group("2024-01-31")?.len(), 2);
     let _ = drs.asfreq()?;
     let _ = drs.ffill(None)?;
     let _ = drs.bfill(None)?;
@@ -2052,8 +2054,25 @@ fn readme_type_coercion_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     let _ = df.convert_dtypes()?;
     let _ = df.infer_objects()?;
 
-    // Coerce to numeric — Utf8 strings parsed; non-parseable → NaN.
-    let str_series = Series::from_values(
+    // to_numeric — Utf8 strings parsed to numbers. The bare module-level fn
+    // mirrors pandas' `errors='raise'` DEFAULT: a clean column parses, but an
+    // unparseable value is rejected (NOT silently coerced to NaN — that needs
+    // `errors='coerce'`). Verified vs pandas 2.2.3:
+    //   pd.to_numeric(pd.Series(['1.5','not_a_number','3.0']))
+    //     -> ValueError: Unable to parse string "not_a_number" at position 1
+    let clean = Series::from_values(
+        "s",
+        labels.clone(),
+        vec![
+            Scalar::Utf8("1.5".into()),
+            Scalar::Utf8("2".into()),
+            Scalar::Utf8("3.0".into()),
+        ],
+    )?;
+    let numeric = to_numeric(&clean)?;
+    assert_eq!(numeric.len(), 3);
+
+    let unparseable = Series::from_values(
         "s",
         labels,
         vec![
@@ -2062,8 +2081,10 @@ fn readme_type_coercion_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
             Scalar::Utf8("3.0".into()),
         ],
     )?;
-    let numeric = to_numeric(&str_series)?;
-    assert_eq!(numeric.len(), 3);
+    assert!(
+        to_numeric(&unparseable).is_err(),
+        "bare to_numeric defaults to errors='raise', matching pandas"
+    );
     Ok(())
 }
 
@@ -4985,14 +5006,19 @@ fn readme_display_impls() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(format!("{}", IntervalClosed::Neither), "neither");
 
     // ── Interval Display (pandas str() parity per docstring) ───
+    // FrankenPandas stores only `interval[float64]`, so endpoints render with
+    // Python `str(float)` semantics — whole numbers KEEP ".0", matching
+    // `str(pd.Interval(0.0, 5.0, 'right')) == "(0.0, 5.0]"` (br-5xw1b, verified
+    // vs pandas 2.2.3). The scalar repr does NOT trim ".0" the way an
+    // IntervalIndex/cut array display does.
     let iv = Interval::new(0.0, 5.0, IntervalClosed::Right);
-    assert_eq!(format!("{iv}"), "(0, 5]");
+    assert_eq!(format!("{iv}"), "(0.0, 5.0]");
     let iv_left = Interval::new(0.0, 5.0, IntervalClosed::Left);
-    assert_eq!(format!("{iv_left}"), "[0, 5)");
+    assert_eq!(format!("{iv_left}"), "[0.0, 5.0)");
     let iv_both = Interval::new(0.0, 5.0, IntervalClosed::Both);
-    assert_eq!(format!("{iv_both}"), "[0, 5]");
+    assert_eq!(format!("{iv_both}"), "[0.0, 5.0]");
     let iv_neither = Interval::new(0.0, 5.0, IntervalClosed::Neither);
-    assert_eq!(format!("{iv_neither}"), "(0, 5)");
+    assert_eq!(format!("{iv_neither}"), "(0.0, 5.0)");
 
     // ── Timestamp Display ───────────────────────────────────────
     let ts = Timestamp::from_nanos(1_700_000_000_000_000_000);

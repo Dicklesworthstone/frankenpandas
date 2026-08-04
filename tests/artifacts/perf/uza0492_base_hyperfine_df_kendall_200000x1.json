@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-lavenderstone-uza0492-base/release-perf/examples/perf_profile df_kendall 200000 1",
+      "mean": 0.48977825711999995,
+      "stddev": 0.014010299883272027,
+      "median": 0.48536815672000005,
+      "user": 3.5286309999999994,
+      "system": 0.16520782,
+      "min": 0.47991930272000005,
+      "max": 0.51397717472,
+      "times": [
+        0.51397717472,
+        0.48071348772000005,
+        0.48891316372000004,
+        0.47991930272000005,
+        0.48536815672000005
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,140 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 157  of event 'cycles:P'
+# Event count (approx.): 1192332552
+#
+# Children      Self  Symbol                                                                                                                Shared Object         IPC   [IPC Coverage]
+# ........  ........  ....................................................................................................................  ....................  ....................
+#
+    99.93%     0.00%  [.] _start                                                                                                            perf_profile          -      -
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--68.51%--fp_join::merge_dataframes_on_with_options
+               |          |
+               |          |--66.70%--fp_join::merge_single_key_inner_unsorted
+               |          |          |
+               |          |          |--30.74%--__memcmp_avx2_movbe
+               |          |          |
+               |          |          |--19.51%--fp_join::strictly_increasing_utf8_key_spans
+               |          |          |
+               |          |           --12.63%--fp_join::build_single_key_inner_merge_output
+               |          |                     |
+               |          |                     |--7.34%--<fp_columnar::Column>::take_positions
+               |          |                     |          |
+               |          |                     |           --3.67%--0xffffffff84c00b90
+               |          |                     |
+               |          |                      --5.19%--__memmove_avx_unaligned_erms
+               |          |
+               |           --1.80%--__memcmp_avx2_movbe
+               |
+               |--20.37%--perf_profile::build_str_join_frame
+               |          |
+               |          |--11.93%--core::fmt::write
+               |          |          |
+               |          |          |--6.59%--<usize as core::fmt::LowerHex>::fmt
+               |          |          |          |
+               |          |          |          |--4.41%--<alloc::string::String as core::fmt::Write>::write_char
+               |          |          |          |
+               |          |          |           --2.01%--<core::fmt::Formatter>::pad_integral
+               |          |          |
+               |          |           --2.07%--<alloc::string::String as core::fmt::Write>::write_str
+               |          |
+               |          |--3.84%--0xffffffff862280a1
+               |          |
+               |           --2.52%--0xffffffff84c00b90
+               |
+               |--5.65%--__memmove_avx_unaligned_erms
+               |          |
+               |           --1.40%--0xffffffff84c00bb7
+               |                     |
+               |                      --1.40%--0xffffffff8622811f
+               |                                0xffffffff84feb92c
+               |                                0xffffffff85392d4f
+               |
+                --5.41%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                          |--3.60%--core::ptr::drop_in_place::<fp_index::Index>
+                          |          |
+                          |           --1.80%--__munmap
+                          |                     0xffffffff84c0012b
+                          |                     0xffffffff86220551
+                          |                     0xffffffff84f24dad
+                          |                     0xffffffff853aa42b
+                          |                     0xffffffff853ceac8
+                          |                     0xffffffff853cc961
+                          |                     0xffffffff853cc7f5
+                          |                     0xffffffff853cb02c
+                          |                     0xffffffff853c9794
+                          |                     0xffffffff853ae78e
+                          |                     0xffffffff853adcca
+                          |                     0xffffffff853fc79e
+                          |                     0xffffffff853436a3
+                          |                     0xffffffff853432f8
+                          |                     0xffffffff85341121
+                          |                     0xffffffff8536ba42
+                          |
+                           --1.80%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                                     core::ptr::drop_in_place::<fp_columnar::Column>
+                                     __munmap
+                                     0xffffffff84c0012b
+                                     0xffffffff86220551
+                                     0xffffffff84f24dad
+                                     0xffffffff853aa42b
+                                     0xffffffff853ceac8
+                                     0xffffffff853cc961
+                                     0xffffffff853cc7f5
+                                     0xffffffff853cb02c
+                                     0xffffffff853c9742
+                                     0xffffffff8539cea1
+                                     0xffffffff8539cd76
+                                     0xffffffff8539cb30
+                                     0xffffffff8539c594
+                                     0xffffffff8539c06e
+                                     0xffffffff8539b7d0
+
+    99.93%     0.00%  [.] __libc_start_main@@GLIBC_2.34                                                                                     libc.so.6             -      -
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--68.51%--fp_join::merge_dataframes_on_with_options
+               |          |
+               |          |--66.70%--fp_join::merge_single_key_inner_unsorted
+               |          |          |
+               |          |          |--30.74%--__memcmp_avx2_movbe
+               |          |          |
+               |          |          |--19.51%--fp_join::strictly_increasing_utf8_key_spans
+               |          |          |
+               |          |           --12.63%--fp_join::build_single_key_inner_merge_output
+               |          |                     |
+               |          |                     |--7.34%--<fp_columnar::Column>::take_positions
+               |          |                     |          |
+               |          |                     |           --3.67%--0xffffffff84c00b90
+               |          |                     |
+               |          |                      --5.19%--__memmove_avx_unaligned_erms
+               |          |
+               |           --1.80%--__memcmp_avx2_movbe
+               |
+               |--20.37%--perf_profile::build_str_join_frame
+               |          |
+               |          |--11.93%--core::fmt::write
+               |          |          |
+               |          |          |--6.59%--<usize as core::fmt::LowerHex>::fmt
+               |          |          |          |
+               |          |          |          |--4.41%--<alloc::string::String as core::fmt::Write>::write_char
+               |          |          |          |
+               |          |          |           --2.01%--<core::fmt::Formatter>::pad_integral

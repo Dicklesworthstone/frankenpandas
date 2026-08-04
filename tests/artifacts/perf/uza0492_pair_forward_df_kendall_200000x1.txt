@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavenderstone-uza0492-base/release-perf/examples/perf_profile df_kendall 200000 1
+  Time (mean ± σ):     497.7 ms ±  10.1 ms    [User: 3566.2 ms, System: 157.0 ms]
+  Range (min … max):   479.7 ms … 508.9 ms    10 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-lavenderstone-uza0492-after/release-perf/examples/perf_profile df_kendall 200000 1
+  Time (mean ± σ):     569.0 ms ±   7.2 ms    [User: 6291.8 ms, System: 163.1 ms]
+  Range (min … max):   557.0 ms … 581.5 ms    10 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-lavenderstone-uza0492-base/release-perf/examples/perf_profile df_kendall 200000 1 ran
+    1.14 ± 0.03 times faster than /data/projects/.scratch/cargo-target-lavenderstone-uza0492-after/release-perf/examples/perf_profile df_kendall 200000 1

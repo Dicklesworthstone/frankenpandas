@@ -3,7 +3,6 @@ name = "fp-frame"
 description = "DataFrame and Series with pandas-API parity, AACE index alignment, and GroupBy / Rolling / Resample integration."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -13,19 +12,37 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = []
+default = ["lazy-transpose-view"]
 # Emit `tracing` spans/events for hot-path operations (groupby, rolling,
 # resample, IO). Off by default so users who don't attach a tracing
 # subscriber pay no dependency cost. Per br-frankenpandas-7gd4.
 tracing = ["dep:tracing"]
+# br-frankenpandas-l4vzc storage path: build a lazy homogeneous
+# Float64/Int64/Bool/Datetime64/Timedelta64 transpose without constructing one
+# public String/Column/BTreeMap entry per source row. DEFAULT since 2026-07-22:
+# the full DataFrame storage integration (DataFrameColumnsStore =
+# LazyDataFrameColumns with per-output-column lazy slots) landed and was
+# certified green on the full fp-frame suite + official same-host bench
+# (31.9x-60.1x vs pandas, 779x-4474x vs the eager path, all CV<5%; see
+# docs/NEGATIVE_EVIDENCE.md 2026-07-10 cod_fp rows). Opt out via
+# default-features = false.
+lazy-transpose-view = []
+# block-storage: O(1) `.values`/`.to_numpy` view backed by a single
+# column-major `Arc<[f64]>` block, matching pandas' zero-copy homogeneous-float
+# `.values` (which is F-contiguous). Default-OFF: this is an architectural
+# storage path wired through construction over several commits, so the default
+# build/tests are unaffected until it is complete. Implies `lazy-transpose-view`
+# because it adds a variant to the `LazyDataFrameColumns` column store, which
+# only exists under that feature.
+block-storage = ["lazy-transpose-view"]
 
 [dependencies]
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
-fp-columnar = { path = "../fp-columnar" }
-fp-index = { path = "../fp-index" }
-fp-runtime = { path = "../fp-runtime" }
-fp-types = { path = "../fp-types" }
+fp-columnar = { path = "../fp-columnar", version = "0.2.0" }
+fp-index = { path = "../fp-index", version = "0.2.0" }
+fp-runtime = { path = "../fp-runtime", version = "0.2.0" }
+fp-types = { path = "../fp-types", version = "0.2.0" }
 regex = { workspace = true }
 rustc-hash = "2"
 serde = { workspace = true }
@@ -40,3 +57,7 @@ unicode-normalization = { workspace = true }
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 targets = ["x86_64-unknown-linux-gnu"]
+
+[dev-dependencies]
+mimalloc = "0.1"
+sha2 = "0.11.0"

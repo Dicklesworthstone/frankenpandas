@@ -1,0 +1,34 @@
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/bin/join-bench.rs:140:
+         .collect::<Vec<_>>();
+ 
+     let mut columns = std::collections::BTreeMap::new();
+-    columns.insert("id".to_string(), Column::from_utf8_contiguous(bytes, offsets));
++    columns.insert(
++        "id".to_string(),
++        Column::from_utf8_contiguous(bytes, offsets),
++    );
+     columns.insert(value_name.to_string(), Column::from_f64_values(values));
+     let column_order = vec!["id".to_string(), value_name.to_string()];
+-    Ok(DataFrame::new_with_column_order(index, columns, column_order)?)
++    Ok(DataFrame::new_with_column_order(
++        index,
++        columns,
++        column_order,
++    )?)
+ }
+ 
+ fn build_wide_sparse_frame(
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:6891:
+         FusedInt64Side, InnerPositionPlan, JoinExecutionOptions, JoinType, PositionSelection,
+         build_dense_i64_inner_output_data, build_single_key_inner_contiguous_no_overlap_output,
+         join_series, join_series_with_options, join_series_with_trace,
+-        lower_hex_overlap_plan_from_certificates,
+-        ordered_unique_utf8_inner_position_plan, ordered_unique_utf8_inner_positions,
+-        ordered_utf8_lower_hex_overlap_len, strictly_increasing_utf8_key_spans,
+-        utf8_span_lower_bound,
++        lower_hex_overlap_plan_from_certificates, ordered_unique_utf8_inner_position_plan,
++        ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
++        strictly_increasing_utf8_key_spans, utf8_span_lower_bound,
+     };
+ 
+     fn contiguous_utf8_column(values: &[&str]) -> Column {

@@ -1,0 +1,14 @@
+crates/fp-frame/tests/goldens/dataframe_expanding_skew_basic.txt: OK
+crates/fp-frame/tests/goldens/dataframe_rolling_skew_basic.txt: OK
+tests/artifacts/perf/proof_lavender_g2veb_online_moments.md: OK
+tests/artifacts/perf/lavender_g2veb_online_base_bench_window_moments.txt: OK
+tests/artifacts/perf/lavender_g2veb_online_candidate_bench_window_moments.txt: OK
+tests/artifacts/perf/lavender_g2veb_test_skew_filter_after_golden.txt: OK
+tests/artifacts/perf/lavender_g2veb_test_kurt_filter.txt: OK
+tests/artifacts/perf/lavender_g2veb_online_cargo_check_fp_frame.txt: OK
+tests/artifacts/perf/lavender_g2veb_clippy_fp_frame.txt: OK
+tests/artifacts/perf/lavender_g2veb_merge_cargo_check_fp_frame.txt: OK
+tests/artifacts/perf/lavender_g2veb_merge_clippy_fp_frame.txt: OK
+tests/artifacts/perf/lavender_g2veb_rustfmt_check_final.txt: OK
+tests/artifacts/perf/lavender_g2veb_merge_rustfmt_check.txt: OK
+tests/artifacts/perf/lavender_g2veb_online_ubs_touched.txt: OK

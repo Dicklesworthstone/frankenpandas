@@ -1,0 +1,13 @@
+  [2m2026-06-08T21:47:40.093803Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -c 'cargo build -p fp-conformance --example bench_csv_write --release 2>&1 | tail -1; B=/data/tmp/cargo-target/release/examples/bench_csv_write; echo BASELINE; for i in 1 2 3 4 5; do CSV_NO_FAST=1 $B 500000 10 2>&1 | grep -oE "per_iter=[0-9.]+ms"; done; echo FAST; for i in 1 2 3 4 5; do $B 500000 10 2>&1 | grep -oE "per_iter=[0-9.]+ms"; done'[0m
+BASELINE
+per_iter=292.315ms
+per_iter=282.875ms
+per_iter=288.938ms
+per_iter=289.899ms
+per_iter=284.134ms
+FAST
+per_iter=151.220ms
+per_iter=156.506ms
+per_iter=158.204ms
+per_iter=152.651ms
+per_iter=155.294ms

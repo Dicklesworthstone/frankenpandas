@@ -1,0 +1,11 @@
+Benchmark 1: candidate_csv_dt_year
+  Time (mean ± σ):     420.3 ms ±  31.4 ms    [User: 350.6 ms, System: 68.5 ms]
+  Range (min … max):   384.6 ms … 476.3 ms    12 runs
+
+Benchmark 2: base_csv_dt_year
+  Time (mean ± σ):     460.9 ms ±  24.3 ms    [User: 387.3 ms, System: 70.5 ms]
+  Range (min … max):   425.8 ms … 490.8 ms    12 runs
+
+Summary
+  candidate_csv_dt_year ran
+    1.10 ± 0.10 times faster than base_csv_dt_year

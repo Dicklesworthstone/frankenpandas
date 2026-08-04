@@ -1,0 +1,46 @@
+br-frankenpandas-z0dze — Typed Int64 frame-vs-frame comparison (gt/lt/ge/le/eq/ne)
+==================================================================================
+
+FRESH VEIN. The Float64 typed-fast-path campaign left Int64 DataFrame ops on the
+Scalar path. A gap_hunt probe over an 8-column all-valid Int64 frame surfaced:
+  i64.gt 189.6ms, i64.diff 83.7ms, i64.clip 50.1ms  (vs i64.abs/cumsum ~1ms, typed)
+— exactly the proven winning profile (multi-column, materialization-bound), since
+the Float64 typed paths gate on dtype Float64 and Int64 falls through to the
+align(Outer) + per-element Scalar to_f64 comparison.
+
+LEVER (one): extend the p1725 binary_cmp_op typed fast path (identical+unique index,
+same columns) to all-valid Int64 columns via as_i64_slice. Compare each i64 cast to
+f64 — matching the general path, which compares lv.to_f64()/rv.to_f64() — then build
+the Bool column. All-valid Int64 means no missing pair, so the result is an
+all-valid Bool via from_bool_values. One fast path serves all six comparison ops.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-4; loaded):
+  DataFrame.gt(frame) [Int64]:  189.6  ->  1.23  = 154x
+
+SCORE: 154x >> 2.0 PASS.
+
+ISOMORPHISM:
+  - The general binary_cmp_op compares lv.to_f64() <op> rv.to_f64(); Int64(v).to_f64()
+    is `v as f64`, so the typed path's `(ld[i] as f64) <op> (rd[i] as f64)` is the
+    identical computation — including the precision loss above 2^53 that the Scalar
+    path also incurs (NOT an i64 compare, which would diverge there).
+  - Gated to all-valid Int64 (dtype DType::Int64; as_i64_slice returns Some only for
+    a contiguous all-valid Int64 backing). A nullable Int64 column has dtype
+    Int64Nullable -> the gate's `matches!(Float64 | Int64)` rejects it -> the whole
+    op keeps the exact align + Scalar path. Float64 columns keep the existing f64
+    branch; mixed Float64/Int64 per column falls back (neither both-f64 nor both-i64
+    accessor succeeds).
+  - All-valid => no missing pair => all-valid Bool via from_bool_values (same Bool
+    values the general from_values([Bool,..]) yields).
+  - Golden sha256 (gap_hunt golden: full family + Int64 frame gt/lt/eq/ge over two
+    int_frame(5000,4) frames, values in [-4000, ~6000]) UNCHANGED:
+      8aa8bc38e40370d6a925c2f49a0e435269cec5f7d464a7a875b25c85cab61f30
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2831 passed
+  cargo test   -p fp-conformance: 0 failures
+
+NEXT (same fresh vein): i64.diff 84ms (extend igxsj Float64 diff to Int64) and
+i64.clip 50ms (extend 0zp9e to Int64) — the Float64 campaign's Int64 counterparts.

@@ -1,0 +1,40 @@
+br-frankenpandas-99smu — Typed Int64 frame-vs-frame arithmetic (add/sub/mul/div)
+=================================================================================
+
+Int64 vein (gt 154x, diff 49x, clip 35x, nunique 25.6x prior). binary_df_op's typed
+fast path (73cu1) was Float64-only; all-valid Int64 columns fell to the per-element
+Scalar to_f64 loop (i64.add_df 47.7ms @ 200000 x 8 cols).
+
+The general path combines via to_f64 (`Float64(op(l, r))`), so Int64 arithmetic
+produces a Float64 output.
+
+LEVER (one, serves add/sub/mul/div): inside the same-shape branch, when both
+columns are all-valid Int64 (as_i64_slice), apply `op(ld[i] as f64, rd[i] as f64)`
+into a typed Float64 buffer.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-4; loaded):
+  DataFrame.add_df(frame) [Int64]:  47.7  ->  2.38  = 20x
+
+SCORE: 20x >> 2.0 PASS.
+
+ISOMORPHISM:
+  - Int64::to_f64 is `v as f64` and always Ok, so the typed op over the i64s cast
+    to f64 is the identical computation the Scalar arm performs.
+  - A finite result is a present Float64; an NaN result (e.g. 0/0) is the missing
+    Float64(NaN) (cleared validity bit + NaN datum), exactly as from_values
+    materializes Scalar::Float64(NaN). All-valid Int64 => no Err/Null pair.
+  - Gated to as_i64_slice (all-valid Int64) on both sides; nullable Int64 / mixed
+    Float64-Int64 / Float64 keep their existing paths.
+  - Golden sha256 (gap_hunt golden: full family + Int64 add/sub/mul over int_frame
+    + div-by-self 0/0->NaN) UNCHANGED:
+      7022267d9966542cf2916e87ecc8c94026dc3d8b9f59f5388425f2f80c755d44
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2831 passed
+  cargo test   -p fp-conformance: 0 failures
+
+Int64 vein: gt 154x, diff 49x, clip 35x, nunique 25.6x, arith 20x. STILL OPEN:
+i64.fillna 35ms, i64.quantile 13ms; i64.where/mask 53/59ms (data-dependent output
+dtype - needs care).

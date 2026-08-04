@@ -1,0 +1,14 @@
+  [2m2026-06-16T20:18:27.173790Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 3 --runs 10 --export-json tests/artifacts/perf/lavender_corr_cov_lazy_candidate_hyperfine_corr_cov_100000.json '/data/projects/.scratch/cargo-target-lavender-gowx2-candidate/release-perf/examples/perf_profile df_corr 100000 1' '/data/projects/.scratch/cargo-target-lavender-gowx2-candidate/release-perf/examples/perf_profile df_cov 100000 1'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-gowx2-candidate/release-perf/examples/perf_profile df_corr 100000 1
+  Time (mean ± σ):      76.1 ms ±   6.4 ms    [User: 43.6 ms, System: 32.3 ms]
+  Range (min … max):    65.1 ms …  85.2 ms    10 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-lavender-gowx2-candidate/release-perf/examples/perf_profile df_cov 100000 1
+  Time (mean ± σ):      74.3 ms ±   5.9 ms    [User: 43.3 ms, System: 30.8 ms]
+  Range (min … max):    66.3 ms …  82.6 ms    10 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-lavender-gowx2-candidate/release-perf/examples/perf_profile df_cov 100000 1 ran
+    1.02 ± 0.12 times faster than /data/projects/.scratch/cargo-target-lavender-gowx2-candidate/release-perf/examples/perf_profile df_corr 100000 1

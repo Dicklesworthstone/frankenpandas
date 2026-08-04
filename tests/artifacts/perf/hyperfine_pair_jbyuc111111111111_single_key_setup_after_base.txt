@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-jbyuc111111111111-fc692c56-after/release-perf/examples/perf_profile str_inner_join 1000000 1000000
+  Time (mean ± σ):     972.6 ms ±  36.6 ms    [User: 855.6 ms, System: 103.1 ms]
+  Range (min … max):   935.7 ms … 1023.6 ms    10 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-jbyuc111111111111-fc692c56-base/release-perf/examples/perf_profile str_inner_join 1000000 1000000
+  Time (mean ± σ):      1.073 s ±  0.220 s    [User: 0.965 s, System: 0.100 s]
+  Range (min … max):    0.656 s …  1.252 s    10 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-jbyuc111111111111-fc692c56-after/release-perf/examples/perf_profile str_inner_join 1000000 1000000 ran
+    1.10 ± 0.23 times faster than /data/projects/.scratch/cargo-target-orangepeak-jbyuc111111111111-fc692c56-base/release-perf/examples/perf_profile str_inner_join 1000000 1000000

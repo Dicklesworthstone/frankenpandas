@@ -1,0 +1,12 @@
+str_groupby sort-based grouping (one MSD byte-radix replaces FxHash group + label-radix + from_utf8) (prk0a)
+Goldens bit-identical (before==after) all 11 reductions:
+  sum 2691faae mean 10db0fd3 count fec26ab2 min 5c871221 max 3cd423ed var 18566650
+  std 7643f0d1 first 897b2cb2 last dca20152 prod b4ff5da5 median 9ba09cb8
+A/B min-of-5 @200k: sum 49.97->34.09=1.47x, first 48.34->33.94=1.42x, var 49.19->37.61=1.31x,
+  median 41.53->40.64=1.02x (selection-bound). Tests: fp-columnar 385 + fp-frame 2830 (incl 192 groupby) green.
+Lever: aggregate_str_dense (sort=True) radix-argsorts all n key spans ONCE (utf8_msd_argsort_bytes,
+new &[&[u8]] variant — no from_utf8); the sorted equal-key runs yield groups + sorted order + gid_per_row
++ run-rep labels in one pass, replacing FxHashMap grouping + a separate label radix + 2x from_utf8.
+sort=False keeps the hash path (first-seen order). Bit-identical: groups by exact key span, dense
+accumulators order-independent per gid, gids emitted in ascending key order (== prior sort output).
+NEXT for >=2.0: parallelize the top-level radix buckets (independent) — the radix is now the floor.

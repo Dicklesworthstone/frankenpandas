@@ -1,0 +1,13 @@
+Diff in /data/projects/frankenpandas/crates/fp-frame/src/lib.rs:16833:
+         self.rolling_var_online(1, VarOutputKind::Var)
+     }
+
+[31m-    fn rolling_var_online(
+[m[31m-        &self,
+[m[31m-        ddof: usize,
+[m[31m-        kind: VarOutputKind,
+[m[31m-    ) -> Result<Series, FrameError> {
+[m[32m+    fn rolling_var_online(&self, ddof: usize, kind: VarOutputKind) -> Result<Series, FrameError> {
+[m         self.validate()?;
+         let col = self.series.column();
+         let len = col.len();

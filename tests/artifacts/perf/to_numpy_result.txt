@@ -1,0 +1,1 @@
+DataFrame/Series to_numpy typed fast path. GOLDEN FNV-1a-64 over output IDENTICAL old==fast: 864b726ef229ae8c. Same-binary A/B 500000x8, min of 3: old 124.3ms -> fast 39.4ms = 3.16x. fp-frame numpy tests 6 passed/0 failed. Lever: resolve columns once + as_f64_slice/as_i64_slice (old code did a BTreeMap lookup + values() per cell, n*m).

@@ -1,0 +1,30 @@
+br-frankenpandas-q70pn — differential harness for fp-index affine Int64 lookups
+===============================================================================
+
+Motivation: recent fp-index commits fast-pathed lookup methods on affine Int64
+ranges with subtle semantics: searchsorted (ymhb6 — arithmetic insertion point
+instead of binary search), asof (1851g/4jr8s — last element <= key), get_loc /
+position (affine.position O(1) arithmetic). No cross-cutting differential guard.
+
+Harness (test fp-index: int64_affine_lookup_fast_paths_match_materialized_q70pn):
+deterministic seeded LCG (no rand crate, no mocks). For 2000 ascending affine
+Int64 ranges (random start, step 1..=4, len 1..=9) it compares the affine index
+(arithmetic FAST PATH) against the materialized equivalent (Index::new of
+IndexLabel::Int64 => binary-search / linear FALLBACK), querying EVERY integer
+across the span [min-2 .. max+2] (below-min, exact element, between-elements,
+above-max), and asserts agreement for:
+  - get_loc(label)            (Option<usize>)
+  - position(needle)          (Option<usize>)
+  - asof(key)                 (Option<IndexLabel>)
+  - searchsorted(value,"left") and ("right")  (insertion points)
+plus get_indexer over a small mixed present/absent target index per range.
+
+Result: PASS (1 passed). The affine arithmetic lookup fast paths are bit-identical
+to the trusted materialized binary-search/linear fallback across exact, absent,
+boundary, and out-of-range queries. Guards searchsorted/asof/get_loc against
+future regression.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-index int64_affine_lookup_fast_paths_match_materialized_q70pn -> 1 passed
+  cargo test -p fp-index (full)  -> all passed, 0 failed
+  ubs crates/fp-index/src/lib.rs -> 0 critical

@@ -1,0 +1,2 @@
+perf_profile: scenario=filter_bool n=100000 iters=20000
+perf_profile: done 20000 iters in 0.059s (0.003 ms/iter), sink=1000000000

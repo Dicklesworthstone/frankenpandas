@@ -1,0 +1,2 @@
+ddbde1c39c4856c19700fe90a29f6acce2a742a98a298585f896b0b02cdbb535  tests/artifacts/perf/lavender_vc4de_base_golden_df_dot_2000.txt
+04af7c2bb0e772d23ed69b3733da0778c3693ba1e67557c0126fcbd4458fdb3d  tests/artifacts/perf/lavender_vc4de_base_golden_df_dot_5000.txt

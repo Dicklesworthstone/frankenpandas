@@ -1,0 +1,254 @@
+{
+  "schema": "frankenpandas-radix-parallel-residual-ab-v2",
+  "bead": "br-frankenpandas-j5841",
+  "decision": "KEEP",
+  "classification": "maintenance-self-speedup",
+  "workload": "dataframe_ops/sort_values_single 10M float64",
+  "comparison": "exact-base baseline versus one-file candidate, interleaved on one host",
+  "host": {
+    "hostname": "vmi1149989",
+    "cpu_model": "AMD EPYC Processor (with IBPB)",
+    "physical_cores": 10,
+    "logical_threads": 10,
+    "threads_per_core": 1,
+    "ram_bytes": 63196901376,
+    "numa_nodes": 1,
+    "kernel": "6.17.0-40-generic",
+    "affinity_cpus": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  },
+  "build": {
+    "base_commit": "7a5bf7143bc996d7956dc5faf38628a71390c331",
+    "worker": "vmi1264463",
+    "command_contract": "CARGO_TARGET_DIR=/data/tmp/cargo-target RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 rch exec --no-self-healing --base 7a5bf7143bc996d7956dc5faf38628a71390c331 --clean-overlay --overlay-path crates/fp-columnar/src/lib.rs -- cargo build -j1 -p fp-bench --profile release-perf",
+    "candidate_source_sha256": "286d23ffe4116360ba758e62e741451036d176fb3739280d458ab037ce9b36b6",
+    "confirmation": {
+      "worker": "vmi1264463",
+      "command_contract": "CARGO_TARGET_DIR=/data/tmp/cargo-target RCH_BUILD_TIMEOUT_SEC=3600 RCH_WORKER=vmi1264463 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 rch exec --no-self-healing --base 7a5bf7143bc996d7956dc5faf38628a71390c331 --clean-overlay --overlay-path crates/fp-columnar/src/lib.rs -- cargo build -j1 -p fp-bench --profile release-perf",
+      "exit_code": 0,
+      "cargo_elapsed_seconds": 2392,
+      "rch_elapsed_seconds": 2769.7,
+      "local_fallback_allowed": false
+    }
+  },
+  "arms": {
+    "baseline": {
+      "elf_sha256": "4aa06eda20230eb79ff02d29ba00f9cba4839db8451034cca9cd84c19a852f8d",
+      "elf_bytes": 73771208,
+      "samples": 800,
+      "p50_ms": 508.579875
+    },
+    "candidate": {
+      "elf_sha256": "2bb3b92f2e5ccaa258868ce1613c9e0c2716f31bc29f7dfa6e946ea6c894a5d3",
+      "elf_bytes": 73873472,
+      "samples": 800,
+      "p50_ms": 344.8114825
+    }
+  },
+  "result": {
+    "ratio_baseline_over_candidate": 1.4749505187954408,
+    "bootstrap_median_ci95": [1.4289284428509277, 1.5332640798075692],
+    "bootstrap_resamples": 20000,
+    "per_round_ratios": [
+      1.4487146698875089,
+      1.5831810031920814,
+      1.554388657397156,
+      1.398260452332358,
+      1.2194330898638515,
+      1.3899703858455563,
+      1.5489223382051276,
+      1.7060399278723073,
+      1.4625489462184837,
+      1.5553607700872951,
+      1.3714374207225015,
+      1.4391665568083094,
+      1.3417042125488574,
+      1.5753959248556284,
+      1.560006041621083,
+      1.4885049119888516
+    ],
+    "checksum": "4957dea0fe3e2ed1",
+    "checksums_agree": true,
+    "observed_operation_threads": [10],
+    "cv_provenance_only": {
+      "baseline": 0.4206527069483474,
+      "candidate": 0.5776540438547895
+    }
+  },
+  "corrected_null_gate": {
+    "effect_ci_excludes_1": true,
+    "effect_deviation": 0.4749505187954408,
+    "effect_deviation_exceeds_2x_null_half_width": true,
+    "null_samples": 800,
+    "null_median": 1.0028503889424498,
+    "null_bootstrap_ci95": [0.9715272195688016, 1.0333791614821621],
+    "null_half_width": 0.03092597095668026,
+    "two_x_null_half_width": 0.06185194191336052,
+    "null_median_deviation": 0.002850388942449822,
+    "null_median_within_2pct": true,
+    "decidable": true
+  },
+  "measurement_attempts": [
+    {
+      "label": "final_elf_initial_8_round",
+      "decision": "REJECT_NULL_UNDECIDABLE",
+      "samples_per_arm": 400,
+      "ratio_baseline_over_candidate": 1.3831077286376845,
+      "bootstrap_median_ci95": [1.3366588894012272, 1.4478839972500066],
+      "baseline_p50_ms": 524.6890205,
+      "candidate_p50_ms": 379.3551360000001,
+      "null_median": 1.0233095123067355,
+      "null_bootstrap_ci95": [0.9903219705683098, 1.0647401309536626],
+      "null_half_width": 0.03720908019267638,
+      "effect_deviation": 0.3831077286376845,
+      "two_x_null_half_width": 0.07441816038535276,
+      "null_median_deviation": 0.023309512306735503,
+      "corrected_clauses": {
+        "effect_ci_excludes_1": true,
+        "effect_deviation_exceeds_2x_null_half_width": true,
+        "null_median_within_2pct": false,
+        "decidable": false
+      }
+    },
+    {
+      "label": "final_elf_confirmatory_16_round",
+      "decision": "KEEP",
+      "samples_per_arm": 800,
+      "ratio_baseline_over_candidate": 1.4749505187954408,
+      "bootstrap_median_ci95": [1.4289284428509277, 1.5332640798075692],
+      "baseline_p50_ms": 508.579875,
+      "candidate_p50_ms": 344.8114825,
+      "null_median": 1.0028503889424498,
+      "null_bootstrap_ci95": [0.9715272195688016, 1.0333791614821621],
+      "null_half_width": 0.03092597095668026,
+      "effect_deviation": 0.4749505187954408,
+      "two_x_null_half_width": 0.06185194191336052,
+      "null_median_deviation": 0.002850388942449822,
+      "corrected_clauses": {
+        "effect_ci_excludes_1": true,
+        "effect_deviation_exceeds_2x_null_half_width": true,
+        "null_median_within_2pct": true,
+        "decidable": true
+      }
+    }
+  ],
+  "disk_directive": {
+    "cargo_target_dir": "/data/tmp/cargo-target",
+    "fresh_per_run_target_created": false,
+    "closeout_observation": {
+      "timestamp_utc": "2026-07-31T06:36:06Z",
+      "data_free_bytes": 283651051520,
+      "shared_target_bytes": 70171809361,
+      "peer_local_rustc_observed": "transient FrankenMermaid processes; exited before immediate follow-up",
+      "peer_processes_or_artifacts_touched": false
+    },
+    "reclaimed_from_data_bytes": 73881938,
+    "recovery_location": "/tmp/cod-j5841-reclaimed-20260731",
+    "moved_files": [
+      {"name": "cod-j5841-corrected-null-wrapper.py", "bytes": 1587},
+      {"name": "cod-j5841-radix-ab.py", "bytes": 8455},
+      {"name": "cod-j5841-final-fp-bench", "bytes": 73871896}
+    ],
+    "already_absent_when_inspected": [
+      "cargo-target-h2-receipts",
+      "cargo-target-h1-continuous",
+      "cargo-target-p8-retry"
+    ],
+    "left_intact_as_live_or_peer_owned": [
+      "cargo-target",
+      "cargo-target-franken-whisper",
+      "cargo-target-h3-scaling"
+    ]
+  },
+  "live_pandas_corrected_gate_retest": {
+    "decision": "REJECT_NO_NEW_HEADLINE",
+    "reason": "every host-clear row had at least one engine A/A median more than 2% from unity",
+    "candidate_elf_sha256": "df5aff7e7f0c79190182c5ecd1cbe5040eb716b12dbb452d112d57b72c0af346",
+    "harness": {
+      "sha256": "b3e644a0eaced8b9e9b95461f91020c744dfbe640120e6d9b5c55a8702b7b29d",
+      "bytes": 114720
+    },
+    "corrected_gate_wrapper": {
+      "sha256": "5ea19c2cefe4f4c216178f83210b2d4b3cdcefa4ccb4bbecfece20b668ab3c8e",
+      "bytes": 1587
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "python_elf_sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+      "python_elf_bytes": 6894448
+    },
+    "hosts": {
+      "vmi1149989": {
+        "cpu_model": "AMD EPYC Processor (with IBPB)",
+        "physical_cores": 10,
+        "logical_threads": 10,
+        "threads_per_core": 1,
+        "ram_bytes": 63196901376,
+        "kernel": "6.17.0-40-generic"
+      },
+      "vmi1227854": {
+        "cpu_model": "AMD EPYC Processor (with IBPB)",
+        "physical_cores": 10,
+        "logical_threads": 10,
+        "threads_per_core": 1,
+        "ram_bytes": 63196905472,
+        "kernel": "6.17.0-35-generic"
+      }
+    },
+    "rows": [
+      {
+        "host_identity": "vmi1149989",
+        "diagnostic_ratio_pandas_over_candidate": 7.745,
+        "observed_operation_threads": {"frankenpandas": 10, "pandas": 1},
+        "aa_median": {"frankenpandas": 0.916468, "pandas": 0.985557},
+        "host_wide_all_checkpoints_clear": true,
+        "corrected_gate": "reject"
+      },
+      {
+        "host_identity": "vmi1149989",
+        "diagnostic_ratio_pandas_over_candidate": 6.391,
+        "observed_operation_threads": {"frankenpandas": 10, "pandas": 1},
+        "aa_median": {"frankenpandas": 1.072611, "pandas": 0.988726},
+        "host_wide_all_checkpoints_clear": true,
+        "corrected_gate": "reject"
+      },
+      {
+        "host_identity": "vmi1149989",
+        "diagnostic_ratio_pandas_over_candidate": 7.120,
+        "observed_operation_threads": {"frankenpandas": 10, "pandas": 1},
+        "aa_median": {"frankenpandas": 1.071710, "pandas": 0.992730},
+        "host_wide_all_checkpoints_clear": true,
+        "corrected_gate": "reject"
+      },
+      {
+        "host_identity": "vmi1227854",
+        "diagnostic_ratio_pandas_over_candidate": 7.664,
+        "observed_operation_threads": {"frankenpandas": 10, "pandas": 1},
+        "aa_median": {"frankenpandas": 1.114704, "pandas": 1.043016},
+        "host_wide_all_checkpoints_clear": true,
+        "corrected_gate": "reject"
+      },
+      {
+        "host_identity": "vmi1227854",
+        "diagnostic_ratio_pandas_over_candidate": 7.882,
+        "observed_operation_threads": {"frankenpandas": 10, "pandas": 1},
+        "aa_median": {"frankenpandas": 0.971774, "pandas": 1.053060},
+        "host_wide_all_checkpoints_clear": true,
+        "corrected_gate": "reject"
+      },
+      {
+        "host_identity": "vmi1227854",
+        "diagnostic_ratio_pandas_over_candidate": 9.014,
+        "observed_operation_threads": {"frankenpandas": 10, "pandas": 1},
+        "aa_median": {"frankenpandas": 0.894001, "pandas": 0.989966},
+        "host_wide_all_checkpoints_clear": true,
+        "corrected_gate": "reject"
+      }
+    ]
+  },
+  "notes": [
+    "The observed operation thread count, not the requested affinity cap, is the headline provenance.",
+    "CV is provenance only and did not gate the decision.",
+    "This A/B proves a maintenance self-speedup. A live-pandas headline requires a separately admissible same-invocation incumbent row.",
+    "Follow-up br-frankenpandas-qm0bm owns attribution of the new 84.92% Column::take_positions aggregate residual."
+  ]
+}

@@ -1,0 +1,8 @@
+
+'/proc/sys/kernel/perf_event_paranoid' is currently set to 4.
+In order for samply to work with a non-root user, this level needs
+to be set to 1 or lower.
+You can execute the following command and then try again:
+    echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+
+SAMPLY_STATUS=1

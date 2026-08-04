@@ -1,0 +1,672 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 8327519736
+#
+# Overhead  Shared Object         Symbol                                                                                                                                                                                                                  IPC   [IPC Coverage]
+# ........  ....................  ......................................................................................................................................................................................................................  ....................
+#
+    23.05%  libc.so.6             [.] __memmove_avx_unaligned_erms                                                                                                                                                                                        -      -            
+            |          
+             --22.74%--__memcpy_avx_unaligned_erms (inlined)
+                       |          
+                       |--16.10%--<fp_columnar::Column>::as_i64_arc
+                       |          copy_from_slice<i64> (inlined)
+                       |          from_slice<i64> (inlined)
+                       |          from<i64> (inlined)
+                       |          call_once<fn(&[i64]) -> alloc::sync::Arc<[i64], alloc::alloc::Global>, (&[i64])> (inlined)
+                       |          map<&[i64], alloc::sync::Arc<[i64], alloc::alloc::Global>, fn(&[i64]) -> alloc::sync::Arc<[i64], alloc::alloc::Global>> (inlined)
+                       |          as_i64_arc (inlined)
+                       |          fp_join::build_single_key_dense_i64_outer_merge_output
+                       |          fp_join::merge_dataframes_on_with_options
+                       |          fp_join::merge_dataframes
+                       |          merge_dataframes_on (inlined)
+                       |          merge_dataframes (inlined)
+                       |          perf_profile::main
+                       |          
+                       |--3.68%--<alloc::sync::Arc<[usize]> as core::convert::From<alloc::vec::Vec<usize>>>::from
+                       |          from<usize, alloc::alloc::Global> (inlined)
+                       |          fp_join::build_single_key_dense_i64_outer_merge_output
+                       |          fp_join::merge_dataframes_on_with_options
+                       |          fp_join::merge_dataframes
+                       |          merge_dataframes_on (inlined)
+                       |          merge_dataframes (inlined)
+                       |          perf_profile::main
+                       |          
+                        --2.82%--__GI_memcpy (inlined)
+                                  _int_realloc
+                                  __GI___libc_realloc (inlined)
+                                  <std::alloc::System as core::alloc::global::GlobalAlloc>::realloc (inlined)
+                                  __rustc::__rdl_realloc (inlined)
+                                  realloc_nonnull (inlined)
+                                  grow_impl_runtime (inlined)
+                                  grow_impl (inlined)
+                                  grow (inlined)
+                                  finish_grow<alloc::alloc::Global> (inlined)
+                                  <alloc::raw_vec::RawVec<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column)>>>>::grow_one
+                                  grow_one<alloc::alloc::Global> (inlined)
+                                  grow_one<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, fp_columnar::Column), alloc::alloc::Global>>, alloc::alloc::Global> (inlined)
+                                  fp_join::build_single_key_dense_i64_outer_merge_output
+                                  push<(usize, usize, usize), alloc::alloc::Global> (inlined)
+                                  fp_join::build_single_key_dense_i64_outer_merge_output
+                                  fp_join::merge_dataframes_on_with_options
+                                  fp_join::merge_dataframes
+                                  merge_dataframes_on (inlined)
+                                  merge_dataframes (inlined)
+                                  perf_profile::main
+
+    18.28%  perf_profile          [.] fp_join::build_single_key_dense_i64_outer_merge_output                                                                                                                                                              -      -            
+            |          
+            |--10.31%--fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          
+            |          |--3.07%--fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.71%--push_mut<(usize, usize, usize), alloc::alloc::Global> (inlined)
+            |          |          push<(usize, usize, usize), alloc::alloc::Global> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.31%--fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.26%--{closure#0}<core::slice::iter::Iter<i64>, core::slice::iter::Iter<i64>> (inlined)
+            |          |          or_else<&i64, core::iter::adapters::chain::{impl#1}::next::{closure_env#0}<core::slice::iter::Iter<i64>, core::slice::iter::Iter<i64>>> (inlined)
+            |          |          next<core::slice::iter::Iter<i64>, core::slice::iter::Iter<i64>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--0.77%--next<usize> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --0.67%--and_then_or_clear<core::slice::iter::Iter<i64>, &i64, fn(&mut core::slice::iter::Iter<i64>) -> core::option::Option<&i64>> (inlined)
+            |                     next<core::slice::iter::Iter<i64>, core::slice::iter::Iter<i64>> (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--2.75%--write<(usize, usize, usize)> (inlined)
+            |          push_mut<(usize, usize, usize), alloc::alloc::Global> (inlined)
+            |          push<(usize, usize, usize), alloc::alloc::Global> (inlined)
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          
+            |           --2.71%--fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--2.36%--push_mut<(usize, usize, usize), alloc::alloc::Global> (inlined)
+            |          push<(usize, usize, usize), alloc::alloc::Global> (inlined)
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          
+            |           --2.31%--fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--1.12%--max<i64> (inlined)
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          fp_join::merge_dataframes_on_with_options
+            |          fp_join::merge_dataframes
+            |          merge_dataframes_on (inlined)
+            |          merge_dataframes (inlined)
+            |          perf_profile::main
+            |          
+             --0.68%--eq<usize> (inlined)
+                       next<usize> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+    17.91%  perf_profile          [.] fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}                                                                                                                                                 -      -            
+            |          
+            |--16.14%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+            |          |          
+            |          |--10.97%--fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.79%--index_mut<usize, usize> (inlined)
+            |          |          index_mut<usize, usize, alloc::alloc::Global> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.74%--next<i64> (inlined)
+            |          |          |          
+            |          |          |--1.16%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+            |          |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          |          fp_join::merge_dataframes_on_with_options
+            |          |          |          fp_join::merge_dataframes
+            |          |          |          merge_dataframes_on (inlined)
+            |          |          |          merge_dataframes (inlined)
+            |          |          |          perf_profile::main
+            |          |          |          
+            |          |           --0.58%--next<core::slice::iter::Iter<i64>> (inlined)
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--0.82%--index<usize, usize> (inlined)
+            |          |          index<usize, usize, alloc::alloc::Global> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --0.77%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+             --1.77%--eq<i64> (inlined)
+                       next<i64> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+     6.98%  perf_profile          [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice               -      -            
+            |          
+            |--5.33%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#4}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+            |          |          
+            |          |--2.08%--from_iter_exact<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+            |          |          to_arc_slice<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>, alloc::sync::Arc<[usize], alloc::alloc::Global>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--2.04%--next<(usize, usize, usize)> (inlined)
+            |          |          next<usize, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}> (inlined)
+            |          |          next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+            |          |          from_iter_exact<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+            |          |          to_arc_slice<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>, alloc::sync::Arc<[usize], alloc::alloc::Global>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --1.22%--map<&(usize, usize, usize), usize, &mut fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}> (inlined)
+            |                     next<usize, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}> (inlined)
+            |                     next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+            |                     from_iter_exact<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+            |                     to_arc_slice<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>, alloc::sync::Arc<[usize], alloc::alloc::Global>> (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+             --1.65%--eq<(usize, usize, usize)> (inlined)
+                       next<(usize, usize, usize)> (inlined)
+                       next<usize, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}> (inlined)
+                       next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+                       from_iter_exact<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+                       to_arc_slice<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#4}>, alloc::sync::Arc<[usize], alloc::alloc::Global>> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+     6.58%  perf_profile          [.] fp_join::build_single_key_dense_i64_outer_all_matched_merge_output                                                                                                                                                  -      -            
+            |          
+            |--2.40%--{closure#0} (inlined)
+            |          |          
+            |          |--1.26%--build_single_key_dense_i64_outer_all_matched_merge_output (inlined)
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --1.14%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--1.93%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+            |          |          
+            |          |--1.02%--{closure#0} (inlined)
+            |          |          |          
+            |          |           --0.73%--build_single_key_dense_i64_outer_all_matched_merge_output (inlined)
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |           --0.62%--fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--1.27%--max<i64> (inlined)
+            |          {closure#0} (inlined)
+            |          |          
+            |           --1.02%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+             --0.98%--min<i64> (inlined)
+                       {closure#0} (inlined)
+                       |          
+                        --0.88%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+                                  fp_join::merge_dataframes_on_with_options
+                                  fp_join::merge_dataframes
+                                  merge_dataframes_on (inlined)
+                                  merge_dataframes (inlined)
+                                  perf_profile::main
+
+     5.86%  perf_profile          [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice       -      -            
+            |          
+            |--5.06%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+            |          |          
+            |          |--2.12%--next<(usize, usize, usize)> (inlined)
+            |          |          next<(usize, usize), core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}> (inlined)
+            |          |          next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+            |          |          from_iter_exact<(usize, usize), core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+            |          |          to_arc_slice<(usize, usize), core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#7}>, alloc::sync::Arc<[(usize, usize)], alloc::alloc::Global>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.68%--from_iter_exact<(usize, usize), core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+            |          |          to_arc_slice<(usize, usize), core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#7}>, alloc::sync::Arc<[(usize, usize)], alloc::alloc::Global>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --1.25%--map<&(usize, usize, usize), (usize, usize), &mut fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}> (inlined)
+            |                     next<(usize, usize), core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}> (inlined)
+            |                     next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+            |                     from_iter_exact<(usize, usize), core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+            |                     to_arc_slice<(usize, usize), core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#7}>, alloc::sync::Arc<[(usize, usize)], alloc::alloc::Global>> (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+             --0.76%--eq<(usize, usize, usize)> (inlined)
+                       next<(usize, usize, usize)> (inlined)
+                       next<(usize, usize), core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}> (inlined)
+                       next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+                       from_iter_exact<(usize, usize), core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+                       to_arc_slice<(usize, usize), core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure_env#0}>> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#7}>, alloc::sync::Arc<[(usize, usize)], alloc::alloc::Global>> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+     5.33%  libc.so.6             [.] __memset_avx2_unaligned_erms                                                                                                                                                                                        -      -            
+            |
+            ---__memset_avx2_unaligned_erms
+               |          
+                --5.28%--<std::alloc::System as core::alloc::global::GlobalAlloc>::alloc_zeroed (inlined)
+                          __rustc::__rdl_alloc_zeroed (inlined)
+                          alloc_zeroed (inlined)
+                          alloc_impl_runtime (inlined)
+                          alloc_impl (inlined)
+                          allocate_zeroed (inlined)
+                          try_allocate_in<alloc::alloc::Global> (inlined)
+                          with_capacity_zeroed_in<alloc::alloc::Global> (inlined)
+                          with_capacity_zeroed_in<usize, alloc::alloc::Global> (inlined)
+                          from_elem<usize, alloc::alloc::Global> (inlined)
+                          from_elem<usize> (inlined)
+                          fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}
+                          fp_join::build_single_key_dense_i64_outer_merge_output
+                          fp_join::merge_dataframes_on_with_options
+                          fp_join::merge_dataframes
+                          merge_dataframes_on (inlined)
+                          merge_dataframes (inlined)
+                          perf_profile::main
+
+     5.31%  perf_profile          [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice  -      -            
+            |          
+            |--3.60%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure#0}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+            |          |          
+            |          |--1.95%--next<(usize, usize, usize)> (inlined)
+            |          |          next<usize, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}> (inlined)
+            |          |          next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+            |          |          from_iter_exact<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+            |          |          to_arc_slice<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>, alloc::sync::Arc<[usize], alloc::alloc::Global>> (inlined)
+            |          |          {closure#6} (inlined)
+            |          |          then<alloc::sync::Arc<[usize], alloc::alloc::Global>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#6}> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --0.83%--call_once<(&(usize, usize, usize)), fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}> (inlined)
+            |                     map<&(usize, usize, usize), usize, &mut fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}> (inlined)
+            |                     next<usize, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}> (inlined)
+            |                     next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+            |                     from_iter_exact<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+            |                     to_arc_slice<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>, alloc::sync::Arc<[usize], alloc::alloc::Global>> (inlined)
+            |                     {closure#6} (inlined)
+            |                     then<alloc::sync::Arc<[usize], alloc::alloc::Global>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#6}> (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--0.91%--{closure#0} (inlined)
+            |          call_once<(&(usize, usize, usize)), fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}> (inlined)
+            |          map<&(usize, usize, usize), usize, &mut fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}> (inlined)
+            |          next<usize, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}> (inlined)
+            |          next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+            |          from_iter_exact<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+            |          to_arc_slice<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>, alloc::sync::Arc<[usize], alloc::alloc::Global>> (inlined)
+            |          {closure#6} (inlined)
+            |          then<alloc::sync::Arc<[usize], alloc::alloc::Global>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#6}> (inlined)
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          fp_join::merge_dataframes_on_with_options
+            |          fp_join::merge_dataframes
+            |          merge_dataframes_on (inlined)
+            |          merge_dataframes (inlined)
+            |          perf_profile::main
+            |          
+             --0.79%--eq<(usize, usize, usize)> (inlined)
+                       next<(usize, usize, usize)> (inlined)
+                       next<usize, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}> (inlined)
+                       next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+                       from_iter_exact<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+                       to_arc_slice<usize, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}::{closure_env#0}>, alloc::sync::Arc<[usize], alloc::alloc::Global>> (inlined)
+                       {closure#6} (inlined)
+                       then<alloc::sync::Arc<[usize], alloc::alloc::Global>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#6}> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+     4.90%  perf_profile          [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice                -      -            
+            |          
+            |--4.23%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#5}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+            |          |          
+            |          |--1.68%--next<(usize, usize, usize)> (inlined)
+            |          |          next<bool, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}> (inlined)
+            |          |          next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+            |          |          from_iter_exact<bool, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+            |          |          to_arc_slice<bool, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>, alloc::sync::Arc<[bool], alloc::alloc::Global>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.50%--from_iter_exact<bool, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+            |          |          to_arc_slice<bool, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>, alloc::sync::Arc<[bool], alloc::alloc::Global>> (inlined)
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --1.06%--call_once<(&(usize, usize, usize)), fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}> (inlined)
+            |                     map<&(usize, usize, usize), bool, &mut fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}> (inlined)
+            |                     next<bool, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}> (inlined)
+            |                     next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+            |                     from_iter_exact<bool, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+            |                     to_arc_slice<bool, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>, alloc::sync::Arc<[bool], alloc::alloc::Global>> (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+             --0.67%--eq<(usize, usize, usize)> (inlined)
+                       next<(usize, usize, usize)> (inlined)
+                       next<bool, core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}> (inlined)
+                       next<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+                       from_iter_exact<bool, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+                       to_arc_slice<bool, core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       collect<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure_env#5}>, alloc::sync::Arc<[bool], alloc::alloc::Global>> (inlined)
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+     0.49%  [unknown]             [k] 0xffffffff8621b2b7                                                                                                                                                                                                  -      -            
+     0.47%  perf_profile          [.] <fp_columnar::Column>::new                                                                                                                                                                                          -      -            
+     0.28%  [unknown]             [k] 0xffffffff84c01192                                                                                                                                                                                                  -      -            
+     0.24%  perf_profile          [.] <alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow                                                                                                                                                                   -      -            
+     0.23%  perf_profile          [.] fp_types::infer_dtype                                                                                                                                                                                               -      -            
+     0.20%  perf_profile          [.] perf_profile::build_join_frame_offset                                                                                                                                                                               -      -            
+     0.15%  perf_profile          [.] <fp_columnar::ValidityMask>::from_values                                                                                                                                                                            -      -            
+     0.14%  [unknown]             [k] 0xffffffff84d04109                                                                                                                                                                                                  -      -            
+     0.11%  [unknown]             [k] 0xffffffff853a4e56                                                                                                                                                                                                  -      -            
+     0.10%  perf_profile          [.] <fp_columnar::ColumnData>::from_scalars                                                                                                                                                                             -      -            
+     0.10%  [unknown]             [k] 0xffffffff85452de9                                                                                                                                                                                                  -      -            
+     0.06%  [unknown]             [k] 0xffffffff853b81d3                                                                                                                                                                                                  -      -            
+     0.06%  [unknown]             [k] 0xffffffff85331789                                                                                                                                                                                                  -      -            
+     0.06%  [unknown]             [k] 0xffffffff854552b3                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85393d71                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff859228fb                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85341328                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff84d04104                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853a4de7                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853da48b                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853a3827                                                                                                                                                                                                  -      -            
+     0.05%  perf_profile          [.] <alloc::sync::Arc<[usize]> as core::convert::From<alloc::vec::Vec<usize>>>::from                                                                                                                                    -      -            
+     0.05%  [unknown]             [k] 0xffffffff853a376b                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853b968d                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85342161                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853d95aa                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853d91a4                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff84c00002                                                                                                                                                                                                  -      -            
+     0.05%  perf_profile          [.] <hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>                                                                        -      -            
+     0.05%  [unknown]             [k] 0xffffffff85341324                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853d8e04                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853a56ff                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85104b3a                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff854578c9                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85088502                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853da487                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff84feb8ed                                                                                                                                                                                                  -      -            
+     0.05%  libc.so.6             [.] _int_malloc                                                                                                                                                                                                         -      -            
+     0.05%  perf_profile          [.] core::ptr::drop_in_place::<fp_columnar::Column>                                                                                                                                                                     -      -            
+     0.05%  [unknown]             [k] 0xffffffff8541df05                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85393d73                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff84feb80d                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853d7ea3                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff86223c8e                                                                                                                                                                                                  -      -            
+     0.05%  perf_profile          [.] perf_profile::main                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85459373                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853b81a7                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853db493                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85452997                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85452a54                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff8545525c                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853433ad                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853dd916                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff8539c06e                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853436a6                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853a390d                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff850a7266                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853bb57b                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853b8114                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff853a37a5                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff8514c180                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff85392d17                                                                                                                                                                                                  -      -            
+     0.05%  [unknown]             [k] 0xffffffff861f65ba                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff8534161f                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff853d910d                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff8545555b                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff853d8d80                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff84c01248                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff8510f1e4                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff85452e00                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff85455447                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff8541a9d7                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff853db076                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff84d0410b                                                                                                                                                                                                  -      -            
+     0.04%  [unknown]             [k] 0xffffffff86228a01                                                                                                                                                                                                  -      -            
+     0.04%  perf_profile          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                                -      -            
+     0.04%  [unknown]             [k] 0xffffffff84fea922                                                                                                                                                                                                  -      -            
+     0.03%  [unknown]             [k] 0xffffffff85394553                                                                                                                                                                                                  -      -            
+     0.03%  [unknown]             [k] 0xffffffff85404a1a                                                                                                                                                                                                  -      -            
+     0.03%  [unknown]             [k] 0xffffffff85452e38                                                                                                                                                                                                  -      -            
+     0.02%  ld-linux-x86-64.so.2  [.] _dl_load_cache_lookup                                                                                                                                                                                               -      -            
+     0.01%  [unknown]             [k] 0xffffffff853a38b9                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85392d3b                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85302a11                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff853a4ee9                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff853acfee                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85069b41                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff84f8c9d1                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8507e5d7                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8507e72e                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff84c0188e                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff84c01884                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8622fbc7                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85456a4d                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff852ff1fd                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85314671                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff84c0187f                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff86224c51                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff84c01859                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff84fdedcb                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff86224c2a                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff862248db                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff86224b76                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8530d280                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8530d2bc                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff86228550                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff850c2906                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85300b65                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8530d2c3                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff84fdedcd                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff850c2910                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8530d285                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8530d286                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8530d289                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff84fdedd1                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85104b43                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85300b66                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85300b69                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff85300b80                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8530d29f                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff8530d2cc                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff862251d0                                                                                                                                                                                                  -      -            
+     0.00%  [unknown]             [k] 0xffffffff86228551                                                                                                                                                                                                  -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

@@ -1,0 +1,733 @@
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 101  of event 'cycles:P'
+# Event count (approx.): 38362954
+#
+# Children      Self  Command       Shared Object         Symbol
+# ........  ........  ............  ....................  ..............................................................................................................................................................................................................................................................................
+#
+    95.01%     0.00%  perf_profile  perf_profile          [.] _start
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--80.06%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--20.31%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --7.38%--__memcmp_avx2_movbe
+               |                     |
+               |                      --7.32%--0xffffffff84c00f0b
+               |                                0xffffffff86227729
+               |                                0xffffffff85021e6e
+               |                                0xffffffff85021a80
+               |                                0xffffffff8502171f
+               |                                0xffffffff85091286
+               |                                0xffffffff850817d1
+               |
+                --14.95%--perf_profile::build_numeric_frame
+                          |
+                           --14.91%--<fp_columnar::Column>::from_values
+                                     |
+                                      --14.70%--<fp_columnar::Column>::new
+                                                |
+                                                 --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    95.01%     0.00%  perf_profile  libc.so.6             [.] __libc_start_main@@GLIBC_2.34
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--80.06%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--20.31%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --7.38%--__memcmp_avx2_movbe
+               |                     |
+               |                      --7.32%--0xffffffff84c00f0b
+               |                                0xffffffff86227729
+               |                                0xffffffff85021e6e
+               |                                0xffffffff85021a80
+               |                                0xffffffff8502171f
+               |                                0xffffffff85091286
+               |                                0xffffffff850817d1
+               |
+                --14.95%--perf_profile::build_numeric_frame
+                          |
+                           --14.91%--<fp_columnar::Column>::from_values
+                                     |
+                                      --14.70%--<fp_columnar::Column>::new
+                                                |
+                                                 --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    95.01%     0.00%  perf_profile  libc.so.6             [.] __libc_start_call_main
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--80.06%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--20.31%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --7.38%--__memcmp_avx2_movbe
+               |                     |
+               |                      --7.32%--0xffffffff84c00f0b
+               |                                0xffffffff86227729
+               |                                0xffffffff85021e6e
+               |                                0xffffffff85021a80
+               |                                0xffffffff8502171f
+               |                                0xffffffff85091286
+               |                                0xffffffff850817d1
+               |
+                --14.95%--perf_profile::build_numeric_frame
+                          |
+                           --14.91%--<fp_columnar::Column>::from_values
+                                     |
+                                      --14.70%--<fp_columnar::Column>::new
+                                                |
+                                                 --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    95.01%     0.00%  perf_profile  perf_profile          [.] main
+            |
+            ---main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--80.06%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--20.31%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --7.38%--__memcmp_avx2_movbe
+               |                     |
+               |                      --7.32%--0xffffffff84c00f0b
+               |                                0xffffffff86227729
+               |                                0xffffffff85021e6e
+               |                                0xffffffff85021a80
+               |                                0xffffffff8502171f
+               |                                0xffffffff85091286
+               |                                0xffffffff850817d1
+               |
+                --14.95%--perf_profile::build_numeric_frame
+                          |
+                           --14.91%--<fp_columnar::Column>::from_values
+                                     |
+                                      --14.70%--<fp_columnar::Column>::new
+                                                |
+                                                 --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    95.01%     0.00%  perf_profile  perf_profile          [.] std::rt::lang_start_internal
+            |
+            ---std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--80.06%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--20.31%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --7.38%--__memcmp_avx2_movbe
+               |                     |
+               |                      --7.32%--0xffffffff84c00f0b
+               |                                0xffffffff86227729
+               |                                0xffffffff85021e6e
+               |                                0xffffffff85021a80
+               |                                0xffffffff8502171f
+               |                                0xffffffff85091286
+               |                                0xffffffff850817d1
+               |
+                --14.95%--perf_profile::build_numeric_frame
+                          |
+                           --14.91%--<fp_columnar::Column>::from_values
+                                     |
+                                      --14.70%--<fp_columnar::Column>::new
+                                                |
+                                                 --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    95.01%     0.00%  perf_profile  perf_profile          [.] std::rt::lang_start::<()>::{closure#0}
+            |
+            ---std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--80.06%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--20.31%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --7.38%--__memcmp_avx2_movbe
+               |                     |
+               |                      --7.32%--0xffffffff84c00f0b
+               |                                0xffffffff86227729
+               |                                0xffffffff85021e6e
+               |                                0xffffffff85021a80
+               |                                0xffffffff8502171f
+               |                                0xffffffff85091286
+               |                                0xffffffff850817d1
+               |
+                --14.95%--perf_profile::build_numeric_frame
+                          |
+                           --14.91%--<fp_columnar::Column>::from_values
+                                     |
+                                      --14.70%--<fp_columnar::Column>::new
+                                                |
+                                                 --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    95.01%     0.00%  perf_profile  perf_profile          [.] std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--80.06%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--20.31%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --7.38%--__memcmp_avx2_movbe
+               |                     |
+               |                      --7.32%--0xffffffff84c00f0b
+               |                                0xffffffff86227729
+               |                                0xffffffff85021e6e
+               |                                0xffffffff85021a80
+               |                                0xffffffff8502171f
+               |                                0xffffffff85091286
+               |                                0xffffffff850817d1
+               |
+                --14.95%--perf_profile::build_numeric_frame
+                          |
+                           --14.91%--<fp_columnar::Column>::from_values
+                                     |
+                                      --14.70%--<fp_columnar::Column>::new
+                                                |
+                                                 --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    95.01%     0.00%  perf_profile  perf_profile          [.] perf_profile::main
+            |
+            ---perf_profile::main
+               |
+               |--80.06%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--20.31%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --7.38%--__memcmp_avx2_movbe
+               |                     |
+               |                      --7.32%--0xffffffff84c00f0b
+               |                                0xffffffff86227729
+               |                                0xffffffff85021e6e
+               |                                0xffffffff85021a80
+               |                                0xffffffff8502171f
+               |                                0xffffffff85091286
+               |                                0xffffffff850817d1
+               |
+                --14.95%--perf_profile::build_numeric_frame
+                          |
+                           --14.91%--<fp_columnar::Column>::from_values
+                                     |
+                                      --14.70%--<fp_columnar::Column>::new
+                                                |
+                                                 --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    80.06%    42.94%  perf_profile  perf_profile          [.] <fp_frame::DataFrame>::loc_bool
+            |
+            |--42.94%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          perf_profile::main
+            |          <fp_frame::DataFrame>::loc_bool
+            |
+             --37.12%--<fp_frame::DataFrame>::loc_bool
+                       |
+                       |--20.31%--<fp_frame::DataFrame>::new_with_axes
+                       |
+                        --7.38%--__memcmp_avx2_movbe
+                                  |
+                                   --7.32%--0xffffffff84c00f0b
+                                             0xffffffff86227729
+                                             0xffffffff85021e6e
+                                             0xffffffff85021a80
+                                             0xffffffff8502171f
+                                             0xffffffff85091286
+                                             0xffffffff850817d1
+
+    20.31%     0.04%  perf_profile  perf_profile          [.] <fp_frame::DataFrame>::new_with_axes
+            |
+             --20.27%--<fp_frame::DataFrame>::new_with_axes
+
+    15.10%     7.72%  perf_profile  libc.so.6             [.] __memcmp_avx2_movbe
+            |
+            |--7.72%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          perf_profile::main
+            |          <fp_frame::DataFrame>::loc_bool
+            |          |
+            |           --7.56%--<fp_frame::DataFrame>::new_with_axes
+            |
+             --7.38%--__memcmp_avx2_movbe
+                       |
+                        --7.32%--0xffffffff84c00f0b
+                                  0xffffffff86227729
+                                  0xffffffff85021e6e
+                                  0xffffffff85021a80
+                                  0xffffffff8502171f
+                                  0xffffffff85091286
+                                  0xffffffff850817d1
+
+    14.95%     0.04%  perf_profile  perf_profile          [.] perf_profile::build_numeric_frame
+            |
+             --14.91%--perf_profile::build_numeric_frame
+                       |
+                        --14.91%--<fp_columnar::Column>::from_values
+                                  |
+                                   --14.70%--<fp_columnar::Column>::new
+                                             |
+                                              --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    14.91%     0.00%  perf_profile  perf_profile          [.] <fp_columnar::Column>::from_values
+            |
+            ---<fp_columnar::Column>::from_values
+               |
+                --14.70%--<fp_columnar::Column>::new
+                          |
+                           --8.10%--<fp_columnar::ValidityMask>::from_values
+
+    14.70%     6.60%  perf_profile  perf_profile          [.] <fp_columnar::Column>::new
+            |
+            |--8.10%--<fp_columnar::Column>::new
+            |          <fp_columnar::ValidityMask>::from_values
+            |
+             --6.60%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       perf_profile::build_numeric_frame
+                       <fp_columnar::Column>::from_values
+                       <fp_columnar::Column>::new
+
+     8.10%     8.10%  perf_profile  perf_profile          [.] <fp_columnar::ValidityMask>::from_values
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               perf_profile::build_numeric_frame
+               <fp_columnar::Column>::from_values
+               <fp_columnar::Column>::new
+               <fp_columnar::ValidityMask>::from_values
+
+     7.32%     7.32%  perf_profile  [unknown]             [k] 0xffffffff84fc3de8
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               <fp_frame::DataFrame>::loc_bool
+               __memcmp_avx2_movbe
+               0xffffffff84c00f0b
+               0xffffffff86227729
+               0xffffffff85021e6e
+               0xffffffff85021a80
+               0xffffffff8502171f
+               0xffffffff85091286
+               0xffffffff850817d1
+
+     7.32%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00f0b
+            |
+            ---0xffffffff84c00f0b
+               0xffffffff86227729
+               0xffffffff85021e6e
+               0xffffffff85021a80
+               0xffffffff8502171f
+               0xffffffff85091286
+               0xffffffff850817d1
+
+     7.32%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86227729
+            |
+            ---0xffffffff86227729
+               0xffffffff85021e6e
+               0xffffffff85021a80
+               0xffffffff8502171f
+               0xffffffff85091286
+               0xffffffff850817d1
+
+     7.32%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85021e6e
+            |
+            ---0xffffffff85021e6e
+               0xffffffff85021a80
+               0xffffffff8502171f
+               0xffffffff85091286
+               0xffffffff850817d1
+
+     7.32%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85021a80
+            |
+            ---0xffffffff85021a80
+               0xffffffff8502171f
+               0xffffffff85091286
+               0xffffffff850817d1
+
+     7.32%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8502171f
+            |
+            ---0xffffffff8502171f
+               0xffffffff85091286
+               0xffffffff850817d1
+
+     7.32%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85091286
+            |
+            ---0xffffffff85091286
+               0xffffffff850817d1
+
+     7.32%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850817d1
+            |
+            ---0xffffffff850817d1
+
+     6.83%     6.83%  perf_profile  perf_profile          [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               <fp_frame::DataFrame>::loc_bool
+               <fp_frame::DataFrame>::new_with_axes
+
+     6.14%     5.93%  perf_profile  libc.so.6             [.] __memmove_avx_unaligned_erms
+            |
+             --5.93%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       <fp_frame::DataFrame>::loc_bool
+                       |
+                        --5.88%--<fp_frame::DataFrame>::new_with_axes
+
+     5.40%     5.40%  perf_profile  perf_profile          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |
+             --5.40%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       <fp_frame::DataFrame>::loc_bool
+
+     4.95%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_start_user
+            |
+            ---_dl_start_user
+               _dl_start
+               _dl_sysdep_start
+               dl_main
+               |
+                --4.83%--_dl_relocate_object
+                          _dl_relocate_object_no_relro
+                          0xffffffff84c00b90
+
+     4.95%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_start
+            |
+            ---_dl_start
+               _dl_sysdep_start
+               dl_main
+               |
+                --4.83%--_dl_relocate_object
+                          _dl_relocate_object_no_relro
+                          0xffffffff84c00b90
+
+     4.95%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_sysdep_start
+            |
+            ---_dl_sysdep_start
+               dl_main
+               |
+                --4.83%--_dl_relocate_object
+                          _dl_relocate_object_no_relro
+                          0xffffffff84c00b90
+
+     4.95%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] dl_main
+            |
+            ---dl_main
+               |
+                --4.83%--_dl_relocate_object
+                          _dl_relocate_object_no_relro
+                          0xffffffff84c00b90
+
+     4.83%     4.83%  perf_profile  [unknown]             [k] 0xffffffff84d0410b
+            |
+            ---_dl_start_user
+               _dl_start
+               _dl_sysdep_start
+               dl_main
+               _dl_relocate_object
+               _dl_relocate_object_no_relro
+               0xffffffff84c00b90
+
+     4.83%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_relocate_object
+            |
+            ---_dl_relocate_object
+               _dl_relocate_object_no_relro
+               0xffffffff84c00b90
+
+     4.83%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_relocate_object_no_relro
+            |
+            ---_dl_relocate_object_no_relro
+               0xffffffff84c00b90
+
+     4.83%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00b90
+            |
+            ---0xffffffff84c00b90
+
+     3.73%     3.73%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<fp_index::IndexLabels>
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               <fp_frame::DataFrame>::loc_bool
+
+     0.15%     0.00%  perf_profile  perf_profile          [.] <fp_columnar::Column>::take_affine_all_valid_float64_positions
+     0.12%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_map_object_deps
+     0.12%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_catch_exception
+     0.12%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] openaux
+     0.12%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_map_new_object
+     0.12%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_map_object_from_fd
+     0.12%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] mmap64
+     0.12%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0012b
+     0.12%     0.00%  perf_profile  [unknown]             [k] 0xffffffff86220551
+     0.11%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c01199
+     0.11%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86228a43
+     0.10%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00bb7
+     0.08%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f25500
+     0.08%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f81c56
+     0.08%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853aa9a0
+     0.08%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8536aa79
+     0.08%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853abb08
+     0.08%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cdee2
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622f947
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86228929
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00f4b
+     0.06%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86227465
+     0.06%     0.06%  perf_profile  [unknown]             [k] 0xffffffff85457876
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff853b9657
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622811f
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84feb96b
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a5627
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a53ad
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a4de7
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff8544ecb2
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a38ed
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86228130
+     0.05%     0.00%  perf_profile  perf_profile          [.] <core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, <fp_frame::DataFrame>::normalize_column_order::{closure#0}>> as core::iter::traits::iterator::Iterator>::next
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff84f8c9d1
+     0.05%     0.05%  perf_profile  [unknown]             [k] 0xffffffff862289ac
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622884d
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85124022
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f8cacc
+     0.05%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f8c9d6
+     0.04%     0.00%  perf_profile  perf_profile          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+     0.04%     0.04%  perf_profile  [unknown]             [k] 0xffffffff8583cac6
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00f8b
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86227644
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84fc01dc
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff851626e3
+     0.04%     0.04%  perf_profile  [unknown]             [k] 0xffffffff861f653c
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cbc17
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ca765
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ca3ef
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85393a44
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853f09cd
+     0.04%     0.04%  perf_profile  [unknown]             [k] 0xffffffff85080faa
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622f2bd
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506fd7b
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506cb18
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8508a3b2
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8508a305
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8508129a
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850a70c7
+     0.04%     0.04%  perf_profile  [unknown]             [k] 0xffffffff853aad45
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cbae8
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86202178
+     0.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff861f6519
+     0.04%     0.04%  perf_profile  [unknown]             [k] 0xffffffff853198ea
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0x00007bb469af878b
+     0.04%     0.04%  perf_profile  perf_profile          [.] <fp_index::Index>::from_i64_strided_values
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f25398
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8548bea9
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8548bbf7
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8548a03a
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85489f2c
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85489bec
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0xffffffff855290b9
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8548c3c8
+     0.04%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85030304
+     0.02%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622f445
+     0.02%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d6df
+     0.02%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85314705
+     0.02%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85313869
+     0.02%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853136ae
+     0.01%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312e70
+     0.01%     0.01%  perf_profile  [unknown]             [k] 0xffffffff8530d2c3
+     0.01%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531294d
+     0.01%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312e7b
+     0.01%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530a963
+     0.01%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f330ff
+     0.01%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f32f97
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2bc
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8620a0c7
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d280
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530d384
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622fbbf
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2cc
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d285
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850c2842
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531279b
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcb
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0x00007bb469af878b
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84c0012b
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff86220551
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff84f25398
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8548bea9
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8548bbf7
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8548a03a
+     0.00%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] mprotect
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a37ea
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86220691
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85489f2c
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff851240d7
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a33d2
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85489bec
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cbdc5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8541df1b
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff855290b9
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f247b9
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cb0a1
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8541a9e8
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8548c37d
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b18af
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853caf42
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ddb37
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85317605
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b15fe
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff853141e6
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b10f0
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85313a57
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b0f00
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85313869
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b0c22
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff853136ae
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00f70
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f88b27
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff852ff1c5
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b65
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b80
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d286
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff85312e70
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85326b38
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8531294d
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85314671
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853267c9
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530a965
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8506d54c
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530d393
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8620a0a3
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8621c6a7
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8623b8a6
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f32f8e
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b66
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2af
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d29c
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d280
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2bc
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b69
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2c3
+     0.00%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcd
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b0880
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b08b5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b04ab
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853afc2b
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622898e
+     0.00%     0.00%  perf-exec     [unknown]             [k] 0xffffffff852ff1c5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84d04104
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f2e51c
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f2e5b7
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff852ff1eb
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff852ff1fb
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85300f95
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85300fdb
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853057c0
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530a9be
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8530d2f5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312862
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8531298e
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853129a9
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312aba
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312c4d
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85312c5b
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b08c5
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85456a4d
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8620a0a6
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622892c
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff86228972
+     0.00%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8623a357
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

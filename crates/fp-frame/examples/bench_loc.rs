@@ -7,10 +7,11 @@
 //! labels return all matches in ascending index order; selector order and
 //! duplicate selectors are preserved; a missing label fails closed.
 
+use std::time::Instant;
+
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::Scalar;
-use std::time::Instant;
 
 fn s_from(labels: Vec<i64>, vals: Vec<i64>) -> Series {
     let idx: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Int64).collect();
@@ -23,11 +24,19 @@ fn golden() -> String {
     // Duplicate index label 10 at positions 0 and 2.
     let s = s_from(vec![10, 20, 10, 30], vec![100, 200, 300, 400]);
     // Selector order [10, 30, 20]; 10 returns both matches (asc position).
-    let r = s.loc(&[IndexLabel::Int64(10), IndexLabel::Int64(30), IndexLabel::Int64(20)]).unwrap();
+    let r = s
+        .loc(&[
+            IndexLabel::Int64(10),
+            IndexLabel::Int64(30),
+            IndexLabel::Int64(20),
+        ])
+        .unwrap();
     out.push_str(&format!("labels={:?}\n", r.index().labels()));
     out.push_str(&format!("values={:?}\n", r.values()));
     // Duplicate selector entries preserved.
-    let r2 = s.loc(&[IndexLabel::Int64(20), IndexLabel::Int64(20)]).unwrap();
+    let r2 = s
+        .loc(&[IndexLabel::Int64(20), IndexLabel::Int64(20)])
+        .unwrap();
     out.push_str(&format!("dup_sel_values={:?}\n", r2.values()));
     // Missing label fails closed.
     let err = s.loc(&[IndexLabel::Int64(99)]);

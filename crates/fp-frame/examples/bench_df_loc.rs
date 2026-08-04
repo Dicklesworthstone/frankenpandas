@@ -7,12 +7,12 @@
 //! index labels return all matches in ascending index order; selector order
 //! and duplicate selectors are preserved; a missing label fails closed.
 
+use std::{collections::BTreeMap, time::Instant};
+
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::{Index, IndexLabel};
 use fp_types::Scalar;
-use std::collections::BTreeMap;
-use std::time::Instant;
 
 fn df_from(labels: Vec<i64>, c0: Vec<i64>, c1: Vec<i64>) -> DataFrame {
     let index = Index::new(labels.into_iter().map(IndexLabel::Int64).collect());
@@ -31,7 +31,11 @@ fn df_from(labels: Vec<i64>, c0: Vec<i64>, c1: Vec<i64>) -> DataFrame {
 fn golden() -> String {
     let mut out = String::new();
     // Duplicate index label 10 at positions 0 and 2.
-    let df = df_from(vec![10, 20, 10, 30], vec![100, 200, 300, 400], vec![1, 2, 3, 4]);
+    let df = df_from(
+        vec![10, 20, 10, 30],
+        vec![100, 200, 300, 400],
+        vec![1, 2, 3, 4],
+    );
     // Selector order [30, 10, 20]; 10 returns both matches (ascending position).
     let r = df
         .loc(&[
@@ -47,7 +51,10 @@ fn golden() -> String {
     let r2 = df
         .loc(&[IndexLabel::Int64(20), IndexLabel::Int64(20)])
         .unwrap();
-    out.push_str(&format!("dup_a={:?}\n", r2.columns().get("a").unwrap().values()));
+    out.push_str(&format!(
+        "dup_a={:?}\n",
+        r2.columns().get("a").unwrap().values()
+    ));
     // Missing label fails closed.
     let err = df.loc(&[IndexLabel::Int64(99)]);
     out.push_str(&format!("missing_is_err={}\n", err.is_err()));

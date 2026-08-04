@@ -1,0 +1,4 @@
+$ hyperfine --warmup 3 --runs 10 --export-json tests/artifacts/perf/uza0474_pass1_20260611T010909Z_hyperfine_filter_bool_100000x1000.json /data/projects/.scratch/cargo-target-orangepeak-uza0474-base/release-perf/examples/perf_profile\ filter_bool\ 100000\ 1000
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza0474-base/release-perf/examples/perf_profile filter_bool 100000 1000
+  Time (mean ± σ):     152.8 ms ±   3.3 ms    [User: 125.7 ms, System: 26.5 ms]
+  Range (min … max):   147.2 ms … 158.9 ms    10 runs

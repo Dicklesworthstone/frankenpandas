@@ -1,0 +1,4 @@
+Benchmark 1: /data/tmp/cargo-target/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 100k --dtype float64 --json
+  Time (mean ± σ):     254.4 ms ±  13.1 ms    [User: 134.3 ms, System: 169.8 ms]
+  Range (min … max):   242.2 ms … 280.1 ms    10 runs
+ 

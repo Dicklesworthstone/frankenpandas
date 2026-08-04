@@ -3,7 +3,6 @@ name = "fp-index"
 description = "Flat and multi-level row index types (Index, MultiIndex) for pandas-parity dataframes."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -13,11 +12,23 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-fp-types = { path = "../fp-types" }
+fp-types = { path = "../fp-types", version = "0.2.0" }
 chrono = { workspace = true }
 rustc-hash = "2"
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false }
+sha2 = "0.11.0"
+
+[[bench]]
+name = "range_index_asof"
+harness = false
+
+[[bench]]
+name = "range_index_indexers"
+harness = false
 
 [package.metadata.docs.rs]
 all-features = true

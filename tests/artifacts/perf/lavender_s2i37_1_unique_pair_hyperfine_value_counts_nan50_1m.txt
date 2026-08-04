@@ -1,0 +1,11 @@
+Benchmark 1: open_base
+  Time (mean ± σ):      2.084 s ±  0.036 s    [User: 1.489 s, System: 0.739 s]
+  Range (min … max):    2.032 s …  2.144 s    10 runs
+
+Benchmark 2: unique_candidate
+  Time (mean ± σ):      1.366 s ±  0.023 s    [User: 0.967 s, System: 0.535 s]
+  Range (min … max):    1.339 s …  1.405 s    10 runs
+
+Summary
+  unique_candidate ran
+    1.53 ± 0.04 times faster than open_base

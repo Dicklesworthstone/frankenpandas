@@ -1,0 +1,3 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavenderstone-uza04117-base/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 100k --dtype float64 --json
+  Time (mean ± σ):     300.1 ms ±   9.0 ms    [User: 160.1 ms, System: 196.6 ms]
+  Range (min … max):   290.0 ms … 317.2 ms    10 runs

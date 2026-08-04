@@ -1,0 +1,16 @@
+  [2m2026-06-08T22:05:06.890890Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -c 'cargo build -p fp-conformance --example bench_csv_write --release 2>&1 | tail -1; B=/data/tmp/cargo-target/release/examples/bench_csv_write; echo "GENERAL:"; CSV_NO_FAST=1 $B 500000 8 2>&1 | grep -E "SMALL_FNV|BIG_FNV|TIMING"; echo "FAST:"; for i in 1 2 3 4 5; do $B 500000 8 2>&1 | grep -E "BIG_FNV|TIMING"; done'[0m
+GENERAL:
+SMALL_FNV 1df2cd9f34c0c4b5 len=950
+BIG_FNV 7bf41a97467e87da len=25111062
+TIMING n=500000 iters=8 per_iter=353.251ms sink=200888496
+FAST:
+BIG_FNV 7bf41a97467e87da len=25111062
+TIMING n=500000 iters=8 per_iter=176.237ms sink=200888496
+BIG_FNV 7bf41a97467e87da len=25111062
+TIMING n=500000 iters=8 per_iter=180.212ms sink=200888496
+BIG_FNV 7bf41a97467e87da len=25111062
+TIMING n=500000 iters=8 per_iter=176.546ms sink=200888496
+BIG_FNV 7bf41a97467e87da len=25111062
+TIMING n=500000 iters=8 per_iter=177.097ms sink=200888496
+BIG_FNV 7bf41a97467e87da len=25111062
+TIMING n=500000 iters=8 per_iter=177.021ms sink=200888496

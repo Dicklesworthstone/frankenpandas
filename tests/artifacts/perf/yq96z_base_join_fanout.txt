@@ -1,0 +1,16 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavenderstone-yq96z-base/release-perf/examples/perf_profile left_join 500000 20
+  Time (mean ± σ):     707.6 ms ±  24.7 ms    [User: 308.2 ms, System: 398.1 ms]
+  Range (min … max):   669.1 ms … 743.0 ms    8 runs
+
+Benchmark 2: /data/projects/.scratch/cargo-target-lavenderstone-yq96z-base/release-perf/examples/perf_profile outer_join 500000 20
+  Time (mean ± σ):      75.6 ms ±   7.9 ms    [User: 34.0 ms, System: 41.5 ms]
+  Range (min … max):    68.5 ms …  93.3 ms    8 runs
+
+Benchmark 3: /data/projects/.scratch/cargo-target-lavenderstone-yq96z-base/release-perf/examples/perf_profile right_join 500000 20
+  Time (mean ± σ):     640.1 ms ±  26.4 ms    [User: 315.6 ms, System: 324.1 ms]
+  Range (min … max):   615.7 ms … 699.7 ms    8 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-lavenderstone-yq96z-base/release-perf/examples/perf_profile outer_join 500000 20 ran
+    8.46 ± 0.95 times faster than /data/projects/.scratch/cargo-target-lavenderstone-yq96z-base/release-perf/examples/perf_profile right_join 500000 20
+    9.36 ± 1.04 times faster than /data/projects/.scratch/cargo-target-lavenderstone-yq96z-base/release-perf/examples/perf_profile left_join 500000 20

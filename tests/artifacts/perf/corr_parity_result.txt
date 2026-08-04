@@ -1,0 +1,6 @@
+pandas 2.2.3  n=1000000 m=8
+max_abs_diff = 1.102e-16
+max_rel_diff = 1.287e-11
+exceeds_1e-10 = False
+exceeds_1e-12 = False
+worst [5,7]: fp=1.78056284104888447e-03 pandas=1.78056284104877432e-03

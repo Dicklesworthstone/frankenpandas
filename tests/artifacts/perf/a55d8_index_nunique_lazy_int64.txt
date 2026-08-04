@@ -1,0 +1,28 @@
+br-frankenpandas-a55d8 — Index::nunique affine-Int64 fast path
+==============================================================
+
+Vein: avoid the lazy-Int64 -> Vec<IndexLabel> materialization tax
+(gzi1i dtype, k9tlb is_monotonic, ikbh9 argmin/argmax, bqfj0 memory_usage, …).
+
+Problem: Index::nunique -> nunique_with_dropna(dropna) calls
+self.unique().labels.iter().filter(!missing).count() (fp-index/src/lib.rs
+~2560/2568). For an affine Int64 backing, unique() is an O(1) clone, but the
+final iter().count() Derefs to IndexLabels::as_slice() and materializes the full
+Vec<IndexLabel> just to count.
+
+Fix (bit-identical, additive): an affine Int64 backing (int64_affine_range:
+RangeIndex / unit / affine) is strictly monotonic, so all `len` labels are
+distinct, and an Int64 backing carries no missing labels. Therefore
+nunique == affine.len for either dropna setting — return it early, O(1), no
+materialization.
+
+New test int64_nunique_avoid_label_materialization_a55d8:
+  - ascending affine [0,2,4,6,8]: nunique == 5 == nunique_with_dropna(false),
+    materialized stays None
+  - descending affine [20,15,10,5]: nunique == 4, materialized None
+  - object path with a duplicate [1,1,2]: nunique == 2 (equivalence)
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-index int64_nunique_..._a55d8  -> 1 passed
+  cargo test -p fp-index (full)                    -> all passed, 0 failed
+  ubs crates/fp-index/src/lib.rs                   -> 0 critical

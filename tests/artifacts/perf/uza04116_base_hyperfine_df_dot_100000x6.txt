@@ -1,0 +1,4 @@
+Benchmark 1: /data/tmp/cargo-target/release-perf/examples/perf_profile df_dot 100000 6
+  Time (mean ± σ):     927.5 ms ±  24.0 ms    [User: 16815.1 ms, System: 2857.2 ms]
+  Range (min … max):   901.9 ms … 969.1 ms    8 runs
+ 

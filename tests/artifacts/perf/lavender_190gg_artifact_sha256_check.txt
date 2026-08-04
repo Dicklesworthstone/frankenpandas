@@ -1,0 +1,11 @@
+crates/fp-frame/tests/goldens/rolling_dataframe_corr_with_basic.txt: OK
+crates/fp-frame/tests/goldens/rolling_dataframe_cov_with_basic.txt: OK
+tests/artifacts/perf/proof_lavender_190gg_rolling_cov_corr_online.md: OK
+tests/artifacts/perf/lavender_190gg_base_bench_rolling_cov_corr.txt: OK
+tests/artifacts/perf/lavender_190gg_candidate_bench_rolling_cov_corr_after_clamp.txt: OK
+tests/artifacts/perf/lavender_190gg_test_rolling_cov_corr_after_clamp.txt: OK
+tests/artifacts/perf/lavender_190gg_test_rolling_dataframe_goldens_after_clamp.txt: OK
+tests/artifacts/perf/lavender_190gg_cargo_check_fp_frame.txt: OK
+tests/artifacts/perf/lavender_190gg_clippy_fp_frame.txt: OK
+tests/artifacts/perf/lavender_190gg_candidate_rustfmt_check.txt: OK
+tests/artifacts/perf/lavender_190gg_ubs_touched.txt: OK

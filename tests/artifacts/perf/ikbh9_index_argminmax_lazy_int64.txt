@@ -1,0 +1,39 @@
+br-frankenpandas-ikbh9 — Index::argmin/argmax lazy-Int64 fast path
+==================================================================
+
+Vein: avoid the lazy-Int64 -> Vec<IndexLabel> materialization tax
+(gzi1i dtype, k9tlb is_monotonic, bqfj0 memory_usage, 6ubrp argsort, …).
+
+Problem: Index::argmin/argmax (fp-index/src/lib.rs ~2498/2510) call
+self.labels.iter().min_by/max_by, which Derefs to IndexLabels::as_slice() and
+materializes the full Vec<IndexLabel> just to locate the extreme position.
+
+Fix (bit-identical, additive):
+  1. Affine Int64 backing (int64_affine_range: RangeIndex / unit / affine): the
+     extreme sits at a known end — no scan, no materialization.
+       argmin = step >= 0 ? 0 : len-1
+       argmax = step >= 0 ? len-1 : 0
+     (len == 1 => 0 both; len == 0 => None.) Affine is strictly monotonic, so the
+     extremum is unique and the index is unambiguous.
+  2. Lazy typed/strided Int64 (guarded by has_lazy_int64_backing(), like
+     any()/all(), so already-materialized indexes keep the label iter and avoid
+     an extra i64 allocation): scan the int64_view() &[i64] with the SAME
+     min_by/max_by.
+  3. Non-Int64 / materialized-only: original label-iter fallback.
+
+Tie-break correctness: Rust's Iterator::min_by returns the FIRST of equal
+minima, max_by the LAST of equal maxima. Both the i64-view path and the fallback
+use the identical min_by/max_by, and IndexLabel::Int64(a).cmp(b) == a.cmp(b)
+over the identical element order, so the chosen position is bit-identical.
+
+New test int64_argminmax_avoid_label_materialization_ikbh9 covers:
+  - ascending affine [0,2,4,6]: argmin 0, argmax 3 (materialized stays None)
+  - descending affine [12,8,4,0]: argmin 3, argmax 0
+  - typed ties [3,1,1,2]: argmin 1 (first min), argmax 0; materialized None
+  - typed ties [5,2,5,1]: argmax 2 (last max), argmin 3
+  - equivalence vs the object-Int64 path; single-element; empty -> None
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-index int64_argminmax_..._ikbh9  -> 1 passed
+  cargo test -p fp-index (full)                      -> 410 passed, 0 failed
+  ubs crates/fp-index/src/lib.rs                     -> 0 critical

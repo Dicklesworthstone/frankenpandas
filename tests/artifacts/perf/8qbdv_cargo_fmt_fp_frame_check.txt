@@ -1,0 +1,156 @@
+Diff in /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/src/lib.rs:3731:
+                 Some(fp_columnar::radix_argsort_f64(&data, true))
+             } else {
+                 let mut keyed: Vec<(usize, f64)> = data.into_iter().enumerate().collect();
+-                keyed.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
++                keyed
++                    .sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
+                 Some(keyed.into_iter().map(|(position, _)| position).collect())
+             }
+         }
+Diff in /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/src/lib.rs:34768:
+         // `take_positions` is already typed; only the owning thread differs, so
+         // the gathered columns are byte-identical. Shared by boolean-filter /
+         // loc_bool / positional take.
+-        let col_refs: Vec<&Column> =
+-            self.column_order.iter().map(|name| &self.columns[name]).collect();
++        let col_refs: Vec<&Column> = self
++            .column_order
++            .iter()
++            .map(|name| &self.columns[name])
++            .collect();
+         let build_col = |column: &Column| -> Column {
+             if let Some(certificate) = certificate {
+                 column.take_positions_with_affine_certificate(
+Diff in /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/src/lib.rs:34818:
+                     slots[i] = Some(c);
+                 }
+             }
+-            slots.into_iter().map(|s| s.expect("every column gathered")).collect()
++            slots
++                .into_iter()
++                .map(|s| s.expect("every column gathered"))
++                .collect()
+         } else {
+             col_refs.iter().map(|c| build_col(c)).collect()
+         };
+Diff in /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/src/lib.rs:42057:
+                 } else {
+                     let vals = col.values();
+                     std::borrow::Cow::Owned(
+-                        (0..m).map(|i| vals[i].to_f64().unwrap_or(f64::NAN)).collect(),
++                        (0..m)
++                            .map(|i| vals[i].to_f64().unwrap_or(f64::NAN))
++                            .collect(),
+                     )
+                 }
+             })
+Diff in /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/src/lib.rs:42239:
+                     slots[j] = Some(col);
+                 }
+             }
+-            columns.extend(slots.into_iter().map(|s| s.expect("every output column built")));
++            columns.extend(
++                slots
++                    .into_iter()
++                    .map(|s| s.expect("every output column built")),
++            );
+         } else {
+             columns.extend((0..n).map(build_col));
+         }
+Diff in /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/src/lib.rs:42800:
+         // 100k×10 reindex that was ~58x slower than pandas. Resolve each new
+         // label to `Some(row)`/`None` ONCE, shared across all columns.
+         let new_len = new_labels.len();
+-        let positions: Vec<Option<usize>> = if let Some((start, len)) =
+-            self.index.int64_unit_range_labels()
+-        {
+-            // Unit-range Int64 index (the pandas RangeIndex default): a label
+-            // Int64(v) maps to position v-start arithmetically — O(1) per label,
+-            // NO hashmap build/probe (br-frankenpandas-uza04.112). The unit range
+-            // is strictly unique, so this matches the `or_insert` first-seen map
+-            // exactly; a non-Int64 / out-of-range label is absent (None), same as
+-            // a hashmap miss against an all-Int64 index.
+-            new_labels
+-                .iter()
+-                .map(|label| match label {
+-                    IndexLabel::Int64(v) => {
+-                        let off = v.wrapping_sub(start);
+-                        if off >= 0 && (off as u64) < len as u64 {
+-                            Some(off as usize)
+-                        } else {
+-                            None
++        let positions: Vec<Option<usize>> =
++            if let Some((start, len)) = self.index.int64_unit_range_labels() {
++                // Unit-range Int64 index (the pandas RangeIndex default): a label
++                // Int64(v) maps to position v-start arithmetically — O(1) per label,
++                // NO hashmap build/probe (br-frankenpandas-uza04.112). The unit range
++                // is strictly unique, so this matches the `or_insert` first-seen map
++                // exactly; a non-Int64 / out-of-range label is absent (None), same as
++                // a hashmap miss against an all-Int64 index.
++                new_labels
++                    .iter()
++                    .map(|label| match label {
++                        IndexLabel::Int64(v) => {
++                            let off = v.wrapping_sub(start);
++                            if off >= 0 && (off as u64) < len as u64 {
++                                Some(off as usize)
++                            } else {
++                                None
++                            }
+                         }
+-                    }
+-                    _ => None,
+-                })
+-                .collect()
+-        } else {
+-            let mut old_lookup: FxHashMap<&IndexLabel, usize> =
+-                FxHashMap::with_capacity_and_hasher(self.index.len(), Default::default());
+-            for (i, label) in self.index.labels().iter().enumerate() {
+-                old_lookup.entry(label).or_insert(i);
+-            }
+-            new_labels.iter().map(|label| old_lookup.get(label).copied()).collect()
+-        };
++                        _ => None,
++                    })
++                    .collect()
++            } else {
++                let mut old_lookup: FxHashMap<&IndexLabel, usize> =
++                    FxHashMap::with_capacity_and_hasher(self.index.len(), Default::default());
++                for (i, label) in self.index.labels().iter().enumerate() {
++                    old_lookup.entry(label).or_insert(i);
++                }
++                new_labels
++                    .iter()
++                    .map(|label| old_lookup.get(label).copied())
++                    .collect()
++            };
+ 
+         // Gather each output column from the shared `positions`. The per-column
+         // gather is the reindex hot phase (10 cols × new_len); columns are
+Diff in /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/src/lib.rs:42873:
+             }
+         };
+ 
+-        let col_refs: Vec<&Column> =
+-            self.column_order.iter().map(|name| &self.columns[name]).collect();
++        let col_refs: Vec<&Column> = self
++            .column_order
++            .iter()
++            .map(|name| &self.columns[name])
++            .collect();
+         let ncols = col_refs.len();
+         let worker_count = std::thread::available_parallelism()
+             .map_or(1, std::num::NonZeroUsize::get)
+Diff in /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/src/lib.rs:42918:
+                 .map(|s| s.expect("every column built"))
+                 .collect::<Result<Vec<_>, _>>()?
+         } else {
+-            col_refs.iter().map(|c| build_col(c)).collect::<Result<Vec<_>, _>>()?
++            col_refs
++                .iter()
++                .map(|c| build_col(c))
++                .collect::<Result<Vec<_>, _>>()?
+         };
+ 
+         let mut result_cols = BTreeMap::new();

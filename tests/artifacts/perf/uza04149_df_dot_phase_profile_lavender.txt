@@ -1,0 +1,40 @@
+br-frankenpandas-uza04.149 — df_dot construction/drop phase profile
+================================================================
+
+Binary: target/release/examples/perf_profile (release, RCH_REQUIRE_REMOTE=0)
+Command: FP_DOT_PROFILE=1 perf_profile df_dot 100000 3
+Scenario: A = build_corr_frame(100000, 256), B = build_corr_frame(256, 256)
+          C = A.dot(B) -> 100000 x 256 (all-finite Float64 GEMM fast path)
+
+Per-iter phase timers (DataFrame::dot inner, + outer dot/len/drop):
+
+  iter 1: collect_a=32.9us loop=403.4us b_extract=43.3us column_build=278.5us
+          insert=61.6us  total_before_return=436.7us
+          OUTER dot=480.6us  len=160ns  drop=192.2us  iter=672.9us
+  iter 2: collect_a=26.3us loop=374.6us b_extract=31.6us column_build=267.2us
+          insert=56.0us  total_before_return=401.1us
+          OUTER dot=437.7us  len=40ns   drop=187.7us  iter=625.4us
+  iter 3: collect_a=27.5us loop=372.1us b_extract=28.4us column_build=266.8us
+          insert=57.0us  total_before_return=399.9us
+          OUTER dot=437.7us  len=40ns   drop=187.1us  iter=624.8us
+
+Harness-reported: "done 3 iters in 0.232s (77.366 ms/iter)".
+
+CONCLUSION (measurement artifact — NOT a real perf gap):
+  - Real per-iter cost is ~625us (dot construct 437us + drop 187us).
+  - The 77 ms/iter figure is one-time setup: perf_profile's `start` timer
+    wraps the match arm, so build_corr_frame(100000, 256) (~25.6M f64 frame
+    construction for A, plus B) is counted once and divided by iters=3,
+    mis-attributed as per-iter df_dot cost.
+  - The dot result is a LAZY plan (ScalarValues::lazy_all_valid_float64_dot);
+    the GEMM is deferred to materialization, which this harness never triggers
+    (sink reads out.len(), the row count, then drops). Construction + drop is
+    sub-millisecond and already optimal. GEMM materialization itself is
+    alien-optimized (register-blocked tiled kernel) per prior work.
+  - No one-lever optimization is warranted. df_dot should be DEQUEUED from the
+    local routing matrix; its ranking is a harness setup artifact, not a gap.
+
+ACTION: reverted the temporary FP_DOT_PROFILE / FP_DOT_PROFILE_OUTER timers
+(committed prematurely in 090bfb8c) from DataFrame::dot and perf_profile.rs,
+restoring the clean all-finite GEMM fast path. Bit-transparent: instrumentation
+removal only; computed result unchanged.

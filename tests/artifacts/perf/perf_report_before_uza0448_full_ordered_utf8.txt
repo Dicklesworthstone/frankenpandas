@@ -1,0 +1,932 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 137  of event 'cycles:P'
+# Event count (approx.): 301344811
+#
+# Overhead  Symbol                                               Shared Object     IPC   [IPC Coverage]
+# ........  ...................................................  ................  ....................
+#
+    40.30%  [.] join_bench::add_numeric_checksum                 join-bench        -      -            
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+    13.47%  [k] 0xffffffff8621b2b7                               [unknown]         -      -            
+            |          
+            |--6.63%--0xffffffff84c01199
+            |          |          
+            |          |--3.83%--__memmove_avx_unaligned_erms
+            |          |          |          
+            |          |          |--2.44%--join_bench::build_ordered_utf8_frame
+            |          |          |          join_bench::main
+            |          |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          |          |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          |          |          std::rt::lang_start_internal
+            |          |          |          main
+            |          |          |          __libc_start_call_main
+            |          |          |          __libc_start_main@@GLIBC_2.34
+            |          |          |          _start
+            |          |          |          
+            |          |           --1.39%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          |                     <std::sys::sync::once::futex::Once>::call
+            |          |                     <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+            |          |                     <fp_columnar::Column>::utf8_arc_view_source
+            |          |                     <fp_columnar::Column>::take_contiguous_range
+            |          |                     fp_join::build_single_key_inner_merge_output_with_selections
+            |          |                     fp_join::merge_single_key_inner_unsorted
+            |          |                     fp_join::merge_dataframes
+            |          |                     join_bench::merge_once
+            |          |                     join_bench::main
+            |          |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          |                     std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          |                     std::rt::lang_start_internal
+            |          |                     main
+            |          |                     __libc_start_call_main
+            |          |                     __libc_start_main@@GLIBC_2.34
+            |          |                     _start
+            |          |          
+            |           --2.80%--fp_columnar::lower_hex_sequence_utf8_contiguous
+            |                     <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |                     <std::sys::sync::once::futex::Once>::call
+            |                     <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+            |                     <fp_columnar::Column>::utf8_arc_view_source
+            |                     <fp_columnar::Column>::take_contiguous_range
+            |                     fp_join::build_single_key_inner_merge_output_with_selections
+            |                     fp_join::merge_single_key_inner_unsorted
+            |                     fp_join::merge_dataframes
+            |                     join_bench::merge_once
+            |                     join_bench::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |                     std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |          
+            |--2.53%--__memmove_avx_unaligned_erms
+            |          <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          <std::sys::sync::once::futex::Once>::call
+            |          <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+            |          <fp_columnar::Column>::utf8_arc_view_source
+            |          <fp_columnar::Column>::take_contiguous_range
+            |          fp_join::build_single_key_inner_merge_output_with_selections
+            |          fp_join::merge_single_key_inner_unsorted
+            |          fp_join::merge_dataframes
+            |          join_bench::merge_once
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--1.47%--0xffffffff86228120
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--1.46%--0xffffffff84d04104
+            |          0xffffffff86228130
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --1.38%--0xffffffff853438c5
+                       0xffffffff853439e9
+                       0xffffffff853442bf
+                       0xffffffff853a3963
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+                       join_bench::build_ordered_utf8_frame
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     6.25%  [.] join_bench::build_ordered_utf8_frame             join-bench        -      -            
+            |          
+            |--1.77%--0xffffffff853a5106
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--1.72%--0xffffffff853a5151
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+            |--1.58%--0xffffffff853d909d
+            |          0xffffffff853da487
+            |          0xffffffff853dc432
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          join_bench::build_ordered_utf8_frame
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --1.05%--0xffffffff86239bd6
+                       0xffffffff853da487
+                       0xffffffff853dc432
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       join_bench::build_ordered_utf8_frame
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     5.26%  [.] __memmove_avx_unaligned_erms                     libc.so.6         -      -            
+            |          
+            |--3.32%--__memmove_avx_unaligned_erms
+            |          <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          <std::sys::sync::once::futex::Once>::call
+            |          <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+            |          <fp_columnar::Column>::utf8_arc_view_source
+            |          <fp_columnar::Column>::take_contiguous_range
+            |          fp_join::build_single_key_inner_merge_output_with_selections
+            |          fp_join::merge_single_key_inner_unsorted
+            |          fp_join::merge_dataframes
+            |          join_bench::merge_once
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --1.94%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+                       |          
+                        --1.88%--join_bench::build_ordered_utf8_frame
+                                  join_bench::main
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                                  std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                                  std::rt::lang_start_internal
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     2.39%  [.] fp_columnar::lower_hex_sequence_utf8_contiguous  join-bench        -      -            
+            |
+            ---0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               fp_columnar::lower_hex_sequence_utf8_contiguous
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.89%  [k] 0xffffffff854578da                               [unknown]         -      -            
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.86%  [k] 0xffffffff853b84dc                               [unknown]         -      -            
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.80%  [k] 0xffffffff853a5145                               [unknown]         -      -            
+            |
+            ---0xffffffff85404a1a
+               0xffffffff853a3437
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.75%  [k] 0xffffffff8541a9f6                               [unknown]         -      -            
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.58%  [k] 0xffffffff8541dd22                               [unknown]         -      -            
+            |
+            ---0xffffffff853a3847
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               fp_columnar::lower_hex_sequence_utf8_contiguous
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.44%  [k] 0xffffffff853d43d3                               [unknown]         -      -            
+            |
+            ---0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               core::ptr::drop_in_place::<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.43%  [k] 0xffffffff85452e3d                               [unknown]         -      -            
+            |
+            ---0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __default_morecore@GLIBC_2.2.5
+               systrim.constprop.0
+               _int_free_chunk
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.43%  [k] 0xffffffff853436a3                               [unknown]         -      -            
+            |
+            ---0xffffffff85459378
+               0xffffffff853435d8
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __default_morecore@GLIBC_2.2.5
+               systrim.constprop.0
+               _int_free_chunk
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.42%  [k] 0xffffffff853d2333                               [unknown]         -      -            
+            |
+            ---0xffffffff853d43b0
+               0xffffffff853db06b
+               0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __default_morecore@GLIBC_2.2.5
+               systrim.constprop.0
+               _int_free_chunk
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.42%  [k] 0xffffffff853bbcf7                               [unknown]         -      -            
+            |
+            ---0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.38%  [k] 0xffffffff84feb950                               [unknown]         -      -            
+            |
+            ---0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.37%  [k] 0xffffffff85080fb1                               [unknown]         -      -            
+            |
+            ---0xffffffff85091286
+               0xffffffff8502171f
+               0xffffffff85021a80
+               0xffffffff85021e6e
+               0xffffffff8622777f
+               0xffffffff84c00f0b
+               0xffffffff86239c41
+               0xffffffff853437d2
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.34%  [k] 0xffffffff853dae05                               [unknown]         -      -            
+            |
+            ---0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               fp_columnar::lower_hex_sequence_utf8_contiguous
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.31%  [k] 0xffffffff86228a46                               [unknown]         -      -            
+            |
+            ---0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.29%  [k] 0xffffffff85395f9e                               [unknown]         -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.26%  [k] 0xffffffff853d7e8c                               [unknown]         -      -            
+            |
+            ---0xffffffff853d8f99
+               0xffffffff853d9102
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.21%  [k] 0xffffffff853a340e                               [unknown]         -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.21%  [k] 0xffffffff84c01192                               [unknown]         -      -            
+            |
+            ---0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.19%  [k] 0xffffffff862287f5                               [unknown]         -      -            
+            |
+            ---0xffffffff85458faf
+               0xffffffff853a33ec
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.16%  [k] 0xffffffff8541df4e                               [unknown]         -      -            
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.14%  [k] 0xffffffff853d43cf                               [unknown]         -      -            
+            |
+            ---0xffffffff853435e0
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <fp_columnar::Column>::from_f64_values
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.11%  [k] 0xffffffff853a56b1                               [unknown]         -      -            
+            |
+            ---0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               fp_columnar::lower_hex_sequence_utf8_contiguous
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#7}::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::initialize::<<std::sync::once_lock::OnceLock<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[usize]>)>>::get_or_init<<fp_columnar::Column>::utf8_arc_view_source::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::utf8_arc_view_source
+               <fp_columnar::Column>::take_contiguous_range
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.48%  [k] 0xffffffff853dd936                               [unknown]         -      -            
+     0.19%  [k] 0xffffffff853d8e00                               [unknown]         -      -            
+     0.16%  [k] 0xffffffff853dd981                               [unknown]         -      -            
+     0.14%  [k] 0xffffffff853cb0ec                               [unknown]         -      -            
+     0.13%  [k] 0xffffffff8532f46f                               [unknown]         -      -            
+     0.13%  [k] 0xffffffff84c01248                               [unknown]         -      -            
+     0.02%  [k] 0xffffffff853a4fa3                               [unknown]         -      -            
+     0.01%  [k] 0xffffffff853a50ea                               [unknown]         -      -            
+     0.01%  [k] 0xffffffff85341ffb                               [unknown]         -      -            
+     0.01%  [k] 0xffffffff853d71e9                               [unknown]         -      -            
+     0.01%  [k] 0xffffffff84ff0eac                               [unknown]         -      -            
+     0.01%  [k] 0xffffffff84d0410b                               [unknown]         -      -            
+     0.01%  [k] 0xffffffff8541a960                               [unknown]         -      -            
+     0.01%  [k] 0xffffffff853aaca8                               [unknown]         -      -            
+     0.01%  [k] 0xffffffff8541dd16                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8621c6a1                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff86228929                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8623a4f9                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff853263f4                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8510f1f0                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8621c6a9                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff86227695                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff84f2dae0                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff85312dac                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff85312979                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff84c0185b                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2c3                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff84fdedcb                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2bc                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d280                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d286                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff84f32f8e                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b65                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b69                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d289                               [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2cc                               [unknown]         -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

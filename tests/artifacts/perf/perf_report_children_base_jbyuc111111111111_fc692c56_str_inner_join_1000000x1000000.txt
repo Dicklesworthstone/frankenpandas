@@ -1,0 +1,1341 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 711  of event 'cycles:P'
+# Event count (approx.): 2520014721
+#
+# Children      Self  Symbol                                                                                                                                                                                                                                                                                                                                                                              IPC   [IPC Coverage]
+# ........  ........  ..................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    99.87%     0.00%  [.] _start                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               |          
+                --98.58%--perf_profile::main
+                          |          
+                          |--66.52%--fp_join::merge_dataframes_on_with_options
+                          |          |          
+                          |          |--43.70%--fp_join::merge_single_key_inner_unsorted
+                          |          |          |          
+                          |          |          |--27.85%--fp_join::build_single_key_inner_merge_output_with_selections
+                          |          |          |          |          
+                          |          |          |          |--6.12%--__memmove_avx_unaligned_erms
+                          |          |          |          |          
+                          |          |          |          |--5.83%--<fp_columnar::Column>::take_contiguous_range
+                          |          |          |          |          |          
+                          |          |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+                          |          |          |          |          
+                          |          |          |          |--5.07%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                          |          |          |          |          |          
+                          |          |          |          |           --3.49%--__libc_malloc2
+                          |          |          |          |                     |          
+                          |          |          |          |                      --3.33%--_int_malloc
+                          |          |          |          |                                |          
+                          |          |          |          |                                 --2.57%--malloc_consolidate
+                          |          |          |          |          
+                          |          |          |          |--2.70%--<fp_index::Index>::new_known_unique_int64_unit_range
+                          |          |          |          |          
+                          |          |          |          |--2.35%--__libc_malloc2
+                          |          |          |          |          _int_malloc
+                          |          |          |          |          
+                          |          |          |           --2.17%--__memcmp_avx2_movbe
+                          |          |          |          
+                          |          |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                          |          |          |          |          
+                          |          |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                          |          |          |                     <std::sys::sync::once::futex::Once>::call
+                          |          |          |          
+                          |          |          |--3.65%--__memmove_avx_unaligned_erms
+                          |          |          |          
+                          |          |           --2.84%--__memcmp_avx2_movbe
+                          |          |          
+                          |           --16.54%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                          |                     |          
+                          |                     |--6.34%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                          |                     |          |          
+                          |                     |           --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                          |                     |          
+                          |                      --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+                          |                                |          
+                          |                                 --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+                          |          
+                          |--14.65%--perf_profile::build_str_join_frame
+                          |          |          
+                          |          |--5.73%--0xffffffff84c00bb7
+                          |          |          |          
+                          |          |           --5.27%--0xffffffff8622811f
+                          |          |                     |          
+                          |          |                      --4.93%--0xffffffff84feb96b
+                          |          |                                0xffffffff853a5627
+                          |          |                                |          
+                          |          |                                 --4.75%--0xffffffff853a53ad
+                          |          |                                           |          
+                          |          |                                            --4.58%--0xffffffff853a4de7
+                          |          |                                                      |          
+                          |          |                                                       --3.45%--0xffffffff853a37ea
+                          |          |                                                                 |          
+                          |          |                                                                  --2.61%--0xffffffff853a33d2
+                          |          |                                                                            0xffffffff8541df1b
+                          |          |                                                                            |          
+                          |          |                                                                             --2.45%--0xffffffff8541a9e8
+                          |          |                                                                                       |          
+                          |          |                                                                                        --2.29%--0xffffffff853dda90
+                          |          |          
+                          |           --3.43%--__memmove_avx_unaligned_erms
+                          |                     |          
+                          |                      --2.31%--0xffffffff84c00bb7
+                          |                                |          
+                          |                                 --2.16%--0xffffffff8622811f
+                          |          
+                          |--10.86%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                          |          |          
+                          |          |--6.87%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |          |          
+                          |          |           --2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                          |          |          
+                          |           --2.21%--cfree@GLIBC_2.2.5
+                          |          
+                           --3.23%--cfree@GLIBC_2.2.5
+
+    99.87%     0.00%  [.] __libc_start_main@@GLIBC_2.34                                                                                                                                                                                                                                                                                                                                                   -      -            
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               |          
+                --98.58%--perf_profile::main
+                          |          
+                          |--66.52%--fp_join::merge_dataframes_on_with_options
+                          |          |          
+                          |          |--43.70%--fp_join::merge_single_key_inner_unsorted
+                          |          |          |          
+                          |          |          |--27.85%--fp_join::build_single_key_inner_merge_output_with_selections
+                          |          |          |          |          
+                          |          |          |          |--6.12%--__memmove_avx_unaligned_erms
+                          |          |          |          |          
+                          |          |          |          |--5.83%--<fp_columnar::Column>::take_contiguous_range
+                          |          |          |          |          |          
+                          |          |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+                          |          |          |          |          
+                          |          |          |          |--5.07%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                          |          |          |          |          |          
+                          |          |          |          |           --3.49%--__libc_malloc2
+                          |          |          |          |                     |          
+                          |          |          |          |                      --3.33%--_int_malloc
+                          |          |          |          |                                |          
+                          |          |          |          |                                 --2.57%--malloc_consolidate
+                          |          |          |          |          
+                          |          |          |          |--2.70%--<fp_index::Index>::new_known_unique_int64_unit_range
+                          |          |          |          |          
+                          |          |          |          |--2.35%--__libc_malloc2
+                          |          |          |          |          _int_malloc
+                          |          |          |          |          
+                          |          |          |           --2.17%--__memcmp_avx2_movbe
+                          |          |          |          
+                          |          |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                          |          |          |          |          
+                          |          |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                          |          |          |                     <std::sys::sync::once::futex::Once>::call
+                          |          |          |          
+                          |          |          |--3.65%--__memmove_avx_unaligned_erms
+                          |          |          |          
+                          |          |           --2.84%--__memcmp_avx2_movbe
+                          |          |          
+                          |           --16.54%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                          |                     |          
+                          |                     |--6.34%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                          |                     |          |          
+                          |                     |           --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                          |                     |          
+                          |                      --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+                          |                                |          
+                          |                                 --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+                          |          
+                          |--14.65%--perf_profile::build_str_join_frame
+                          |          |          
+                          |          |--5.73%--0xffffffff84c00bb7
+                          |          |          |          
+                          |          |           --5.27%--0xffffffff8622811f
+                          |          |                     |          
+                          |          |                      --4.93%--0xffffffff84feb96b
+                          |          |                                0xffffffff853a5627
+                          |          |                                |          
+                          |          |                                 --4.75%--0xffffffff853a53ad
+                          |          |                                           |          
+                          |          |                                            --4.58%--0xffffffff853a4de7
+                          |          |                                                      |          
+                          |          |                                                       --3.45%--0xffffffff853a37ea
+                          |          |                                                                 |          
+                          |          |                                                                  --2.61%--0xffffffff853a33d2
+                          |          |                                                                            0xffffffff8541df1b
+                          |          |                                                                            |          
+                          |          |                                                                             --2.45%--0xffffffff8541a9e8
+                          |          |                                                                                       |          
+                          |          |                                                                                        --2.29%--0xffffffff853dda90
+                          |          |          
+                          |           --3.43%--__memmove_avx_unaligned_erms
+                          |                     |          
+                          |                      --2.31%--0xffffffff84c00bb7
+                          |                                |          
+                          |                                 --2.16%--0xffffffff8622811f
+                          |          
+                          |--10.86%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                          |          |          
+                          |          |--6.87%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |          |          
+                          |          |           --2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                          |          |          
+                          |           --2.21%--cfree@GLIBC_2.2.5
+                          |          
+                           --3.23%--cfree@GLIBC_2.2.5
+
+    99.87%     0.00%  [.] __libc_start_call_main                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |
+            ---main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               |          
+                --98.58%--perf_profile::main
+                          |          
+                          |--66.52%--fp_join::merge_dataframes_on_with_options
+                          |          |          
+                          |          |--43.70%--fp_join::merge_single_key_inner_unsorted
+                          |          |          |          
+                          |          |          |--27.85%--fp_join::build_single_key_inner_merge_output_with_selections
+                          |          |          |          |          
+                          |          |          |          |--6.12%--__memmove_avx_unaligned_erms
+                          |          |          |          |          
+                          |          |          |          |--5.83%--<fp_columnar::Column>::take_contiguous_range
+                          |          |          |          |          |          
+                          |          |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+                          |          |          |          |          
+                          |          |          |          |--5.07%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                          |          |          |          |          |          
+                          |          |          |          |           --3.49%--__libc_malloc2
+                          |          |          |          |                     |          
+                          |          |          |          |                      --3.33%--_int_malloc
+                          |          |          |          |                                |          
+                          |          |          |          |                                 --2.57%--malloc_consolidate
+                          |          |          |          |          
+                          |          |          |          |--2.70%--<fp_index::Index>::new_known_unique_int64_unit_range
+                          |          |          |          |          
+                          |          |          |          |--2.35%--__libc_malloc2
+                          |          |          |          |          _int_malloc
+                          |          |          |          |          
+                          |          |          |           --2.17%--__memcmp_avx2_movbe
+                          |          |          |          
+                          |          |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                          |          |          |          |          
+                          |          |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                          |          |          |                     <std::sys::sync::once::futex::Once>::call
+                          |          |          |          
+                          |          |          |--3.65%--__memmove_avx_unaligned_erms
+                          |          |          |          
+                          |          |           --2.84%--__memcmp_avx2_movbe
+                          |          |          
+                          |           --16.54%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                          |                     |          
+                          |                     |--6.34%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                          |                     |          |          
+                          |                     |           --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                          |                     |          
+                          |                      --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+                          |                                |          
+                          |                                 --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+                          |          
+                          |--14.65%--perf_profile::build_str_join_frame
+                          |          |          
+                          |          |--5.73%--0xffffffff84c00bb7
+                          |          |          |          
+                          |          |           --5.27%--0xffffffff8622811f
+                          |          |                     |          
+                          |          |                      --4.93%--0xffffffff84feb96b
+                          |          |                                0xffffffff853a5627
+                          |          |                                |          
+                          |          |                                 --4.75%--0xffffffff853a53ad
+                          |          |                                           |          
+                          |          |                                            --4.58%--0xffffffff853a4de7
+                          |          |                                                      |          
+                          |          |                                                       --3.45%--0xffffffff853a37ea
+                          |          |                                                                 |          
+                          |          |                                                                  --2.61%--0xffffffff853a33d2
+                          |          |                                                                            0xffffffff8541df1b
+                          |          |                                                                            |          
+                          |          |                                                                             --2.45%--0xffffffff8541a9e8
+                          |          |                                                                                       |          
+                          |          |                                                                                        --2.29%--0xffffffff853dda90
+                          |          |          
+                          |           --3.43%--__memmove_avx_unaligned_erms
+                          |                     |          
+                          |                      --2.31%--0xffffffff84c00bb7
+                          |                                |          
+                          |                                 --2.16%--0xffffffff8622811f
+                          |          
+                          |--10.86%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                          |          |          
+                          |          |--6.87%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |          |          
+                          |          |           --2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                          |          |          
+                          |           --2.21%--cfree@GLIBC_2.2.5
+                          |          
+                           --3.23%--cfree@GLIBC_2.2.5
+
+    99.87%     0.00%  [.] main                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               |          
+                --98.58%--perf_profile::main
+                          |          
+                          |--66.52%--fp_join::merge_dataframes_on_with_options
+                          |          |          
+                          |          |--43.70%--fp_join::merge_single_key_inner_unsorted
+                          |          |          |          
+                          |          |          |--27.85%--fp_join::build_single_key_inner_merge_output_with_selections
+                          |          |          |          |          
+                          |          |          |          |--6.12%--__memmove_avx_unaligned_erms
+                          |          |          |          |          
+                          |          |          |          |--5.83%--<fp_columnar::Column>::take_contiguous_range
+                          |          |          |          |          |          
+                          |          |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+                          |          |          |          |          
+                          |          |          |          |--5.07%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                          |          |          |          |          |          
+                          |          |          |          |           --3.49%--__libc_malloc2
+                          |          |          |          |                     |          
+                          |          |          |          |                      --3.33%--_int_malloc
+                          |          |          |          |                                |          
+                          |          |          |          |                                 --2.57%--malloc_consolidate
+                          |          |          |          |          
+                          |          |          |          |--2.70%--<fp_index::Index>::new_known_unique_int64_unit_range
+                          |          |          |          |          
+                          |          |          |          |--2.35%--__libc_malloc2
+                          |          |          |          |          _int_malloc
+                          |          |          |          |          
+                          |          |          |           --2.17%--__memcmp_avx2_movbe
+                          |          |          |          
+                          |          |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                          |          |          |          |          
+                          |          |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                          |          |          |                     <std::sys::sync::once::futex::Once>::call
+                          |          |          |          
+                          |          |          |--3.65%--__memmove_avx_unaligned_erms
+                          |          |          |          
+                          |          |           --2.84%--__memcmp_avx2_movbe
+                          |          |          
+                          |           --16.54%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                          |                     |          
+                          |                     |--6.34%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                          |                     |          |          
+                          |                     |           --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                          |                     |          
+                          |                      --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+                          |                                |          
+                          |                                 --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+                          |          
+                          |--14.65%--perf_profile::build_str_join_frame
+                          |          |          
+                          |          |--5.73%--0xffffffff84c00bb7
+                          |          |          |          
+                          |          |           --5.27%--0xffffffff8622811f
+                          |          |                     |          
+                          |          |                      --4.93%--0xffffffff84feb96b
+                          |          |                                0xffffffff853a5627
+                          |          |                                |          
+                          |          |                                 --4.75%--0xffffffff853a53ad
+                          |          |                                           |          
+                          |          |                                            --4.58%--0xffffffff853a4de7
+                          |          |                                                      |          
+                          |          |                                                       --3.45%--0xffffffff853a37ea
+                          |          |                                                                 |          
+                          |          |                                                                  --2.61%--0xffffffff853a33d2
+                          |          |                                                                            0xffffffff8541df1b
+                          |          |                                                                            |          
+                          |          |                                                                             --2.45%--0xffffffff8541a9e8
+                          |          |                                                                                       |          
+                          |          |                                                                                        --2.29%--0xffffffff853dda90
+                          |          |          
+                          |           --3.43%--__memmove_avx_unaligned_erms
+                          |                     |          
+                          |                      --2.31%--0xffffffff84c00bb7
+                          |                                |          
+                          |                                 --2.16%--0xffffffff8622811f
+                          |          
+                          |--10.86%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                          |          |          
+                          |          |--6.87%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |          |          
+                          |          |           --2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                          |          |          
+                          |           --2.21%--cfree@GLIBC_2.2.5
+                          |          
+                           --3.23%--cfree@GLIBC_2.2.5
+
+    99.87%     0.00%  [.] std::rt::lang_start_internal                                                                                                                                                                                                                                                                                                                                                    -      -            
+            |
+            ---std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               |          
+                --98.58%--perf_profile::main
+                          |          
+                          |--66.52%--fp_join::merge_dataframes_on_with_options
+                          |          |          
+                          |          |--43.70%--fp_join::merge_single_key_inner_unsorted
+                          |          |          |          
+                          |          |          |--27.85%--fp_join::build_single_key_inner_merge_output_with_selections
+                          |          |          |          |          
+                          |          |          |          |--6.12%--__memmove_avx_unaligned_erms
+                          |          |          |          |          
+                          |          |          |          |--5.83%--<fp_columnar::Column>::take_contiguous_range
+                          |          |          |          |          |          
+                          |          |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+                          |          |          |          |          
+                          |          |          |          |--5.07%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                          |          |          |          |          |          
+                          |          |          |          |           --3.49%--__libc_malloc2
+                          |          |          |          |                     |          
+                          |          |          |          |                      --3.33%--_int_malloc
+                          |          |          |          |                                |          
+                          |          |          |          |                                 --2.57%--malloc_consolidate
+                          |          |          |          |          
+                          |          |          |          |--2.70%--<fp_index::Index>::new_known_unique_int64_unit_range
+                          |          |          |          |          
+                          |          |          |          |--2.35%--__libc_malloc2
+                          |          |          |          |          _int_malloc
+                          |          |          |          |          
+                          |          |          |           --2.17%--__memcmp_avx2_movbe
+                          |          |          |          
+                          |          |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                          |          |          |          |          
+                          |          |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                          |          |          |                     <std::sys::sync::once::futex::Once>::call
+                          |          |          |          
+                          |          |          |--3.65%--__memmove_avx_unaligned_erms
+                          |          |          |          
+                          |          |           --2.84%--__memcmp_avx2_movbe
+                          |          |          
+                          |           --16.54%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                          |                     |          
+                          |                     |--6.34%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                          |                     |          |          
+                          |                     |           --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                          |                     |          
+                          |                      --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+                          |                                |          
+                          |                                 --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+                          |          
+                          |--14.65%--perf_profile::build_str_join_frame
+                          |          |          
+                          |          |--5.73%--0xffffffff84c00bb7
+                          |          |          |          
+                          |          |           --5.27%--0xffffffff8622811f
+                          |          |                     |          
+                          |          |                      --4.93%--0xffffffff84feb96b
+                          |          |                                0xffffffff853a5627
+                          |          |                                |          
+                          |          |                                 --4.75%--0xffffffff853a53ad
+                          |          |                                           |          
+                          |          |                                            --4.58%--0xffffffff853a4de7
+                          |          |                                                      |          
+                          |          |                                                       --3.45%--0xffffffff853a37ea
+                          |          |                                                                 |          
+                          |          |                                                                  --2.61%--0xffffffff853a33d2
+                          |          |                                                                            0xffffffff8541df1b
+                          |          |                                                                            |          
+                          |          |                                                                             --2.45%--0xffffffff8541a9e8
+                          |          |                                                                                       |          
+                          |          |                                                                                        --2.29%--0xffffffff853dda90
+                          |          |          
+                          |           --3.43%--__memmove_avx_unaligned_erms
+                          |                     |          
+                          |                      --2.31%--0xffffffff84c00bb7
+                          |                                |          
+                          |                                 --2.16%--0xffffffff8622811f
+                          |          
+                          |--10.86%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                          |          |          
+                          |          |--6.87%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |          |          
+                          |          |           --2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                          |          |          
+                          |           --2.21%--cfree@GLIBC_2.2.5
+                          |          
+                           --3.23%--cfree@GLIBC_2.2.5
+
+    99.87%     0.00%  [.] std::rt::lang_start::<()>::{closure#0}                                                                                                                                                                                                                                                                                                                                          -      -            
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               |          
+                --98.58%--perf_profile::main
+                          |          
+                          |--66.52%--fp_join::merge_dataframes_on_with_options
+                          |          |          
+                          |          |--43.70%--fp_join::merge_single_key_inner_unsorted
+                          |          |          |          
+                          |          |          |--27.85%--fp_join::build_single_key_inner_merge_output_with_selections
+                          |          |          |          |          
+                          |          |          |          |--6.12%--__memmove_avx_unaligned_erms
+                          |          |          |          |          
+                          |          |          |          |--5.83%--<fp_columnar::Column>::take_contiguous_range
+                          |          |          |          |          |          
+                          |          |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+                          |          |          |          |          
+                          |          |          |          |--5.07%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                          |          |          |          |          |          
+                          |          |          |          |           --3.49%--__libc_malloc2
+                          |          |          |          |                     |          
+                          |          |          |          |                      --3.33%--_int_malloc
+                          |          |          |          |                                |          
+                          |          |          |          |                                 --2.57%--malloc_consolidate
+                          |          |          |          |          
+                          |          |          |          |--2.70%--<fp_index::Index>::new_known_unique_int64_unit_range
+                          |          |          |          |          
+                          |          |          |          |--2.35%--__libc_malloc2
+                          |          |          |          |          _int_malloc
+                          |          |          |          |          
+                          |          |          |           --2.17%--__memcmp_avx2_movbe
+                          |          |          |          
+                          |          |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                          |          |          |          |          
+                          |          |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                          |          |          |                     <std::sys::sync::once::futex::Once>::call
+                          |          |          |          
+                          |          |          |--3.65%--__memmove_avx_unaligned_erms
+                          |          |          |          
+                          |          |           --2.84%--__memcmp_avx2_movbe
+                          |          |          
+                          |           --16.54%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                          |                     |          
+                          |                     |--6.34%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                          |                     |          |          
+                          |                     |           --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                          |                     |          
+                          |                      --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+                          |                                |          
+                          |                                 --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+                          |          
+                          |--14.65%--perf_profile::build_str_join_frame
+                          |          |          
+                          |          |--5.73%--0xffffffff84c00bb7
+                          |          |          |          
+                          |          |           --5.27%--0xffffffff8622811f
+                          |          |                     |          
+                          |          |                      --4.93%--0xffffffff84feb96b
+                          |          |                                0xffffffff853a5627
+                          |          |                                |          
+                          |          |                                 --4.75%--0xffffffff853a53ad
+                          |          |                                           |          
+                          |          |                                            --4.58%--0xffffffff853a4de7
+                          |          |                                                      |          
+                          |          |                                                       --3.45%--0xffffffff853a37ea
+                          |          |                                                                 |          
+                          |          |                                                                  --2.61%--0xffffffff853a33d2
+                          |          |                                                                            0xffffffff8541df1b
+                          |          |                                                                            |          
+                          |          |                                                                             --2.45%--0xffffffff8541a9e8
+                          |          |                                                                                       |          
+                          |          |                                                                                        --2.29%--0xffffffff853dda90
+                          |          |          
+                          |           --3.43%--__memmove_avx_unaligned_erms
+                          |                     |          
+                          |                      --2.31%--0xffffffff84c00bb7
+                          |                                |          
+                          |                                 --2.16%--0xffffffff8622811f
+                          |          
+                          |--10.86%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                          |          |          
+                          |          |--6.87%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |          |          
+                          |          |           --2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                          |          |          
+                          |           --2.21%--cfree@GLIBC_2.2.5
+                          |          
+                           --3.23%--cfree@GLIBC_2.2.5
+
+    99.87%     0.00%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>                                                                                                                                                                                                                                                                                                                   -      -            
+            |          
+             --98.58%--perf_profile::main
+                       |          
+                       |--66.52%--fp_join::merge_dataframes_on_with_options
+                       |          |          
+                       |          |--43.70%--fp_join::merge_single_key_inner_unsorted
+                       |          |          |          
+                       |          |          |--27.85%--fp_join::build_single_key_inner_merge_output_with_selections
+                       |          |          |          |          
+                       |          |          |          |--6.12%--__memmove_avx_unaligned_erms
+                       |          |          |          |          
+                       |          |          |          |--5.83%--<fp_columnar::Column>::take_contiguous_range
+                       |          |          |          |          |          
+                       |          |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+                       |          |          |          |          
+                       |          |          |          |--5.07%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                       |          |          |          |          |          
+                       |          |          |          |           --3.49%--__libc_malloc2
+                       |          |          |          |                     |          
+                       |          |          |          |                      --3.33%--_int_malloc
+                       |          |          |          |                                |          
+                       |          |          |          |                                 --2.57%--malloc_consolidate
+                       |          |          |          |          
+                       |          |          |          |--2.70%--<fp_index::Index>::new_known_unique_int64_unit_range
+                       |          |          |          |          
+                       |          |          |          |--2.35%--__libc_malloc2
+                       |          |          |          |          _int_malloc
+                       |          |          |          |          
+                       |          |          |           --2.17%--__memcmp_avx2_movbe
+                       |          |          |          
+                       |          |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                       |          |          |          |          
+                       |          |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                       |          |          |                     <std::sys::sync::once::futex::Once>::call
+                       |          |          |          
+                       |          |          |--3.65%--__memmove_avx_unaligned_erms
+                       |          |          |          
+                       |          |           --2.84%--__memcmp_avx2_movbe
+                       |          |          
+                       |           --16.54%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                       |                     |          
+                       |                     |--6.34%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                       |                     |          |          
+                       |                     |           --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                       |                     |          
+                       |                      --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+                       |                                |          
+                       |                                 --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+                       |          
+                       |--14.65%--perf_profile::build_str_join_frame
+                       |          |          
+                       |          |--5.73%--0xffffffff84c00bb7
+                       |          |          |          
+                       |          |           --5.27%--0xffffffff8622811f
+                       |          |                     |          
+                       |          |                      --4.93%--0xffffffff84feb96b
+                       |          |                                0xffffffff853a5627
+                       |          |                                |          
+                       |          |                                 --4.75%--0xffffffff853a53ad
+                       |          |                                           |          
+                       |          |                                            --4.58%--0xffffffff853a4de7
+                       |          |                                                      |          
+                       |          |                                                       --3.45%--0xffffffff853a37ea
+                       |          |                                                                 |          
+                       |          |                                                                  --2.61%--0xffffffff853a33d2
+                       |          |                                                                            0xffffffff8541df1b
+                       |          |                                                                            |          
+                       |          |                                                                             --2.45%--0xffffffff8541a9e8
+                       |          |                                                                                       |          
+                       |          |                                                                                        --2.29%--0xffffffff853dda90
+                       |          |          
+                       |           --3.43%--__memmove_avx_unaligned_erms
+                       |                     |          
+                       |                      --2.31%--0xffffffff84c00bb7
+                       |                                |          
+                       |                                 --2.16%--0xffffffff8622811f
+                       |          
+                       |--10.86%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                       |          |          
+                       |          |--6.87%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                       |          |          |          
+                       |          |           --2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                       |          |          
+                       |           --2.21%--cfree@GLIBC_2.2.5
+                       |          
+                        --3.23%--cfree@GLIBC_2.2.5
+
+    98.58%     0.79%  [.] perf_profile::main                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --97.78%--perf_profile::main
+                       |          
+                       |--65.73%--fp_join::merge_dataframes_on_with_options
+                       |          |          
+                       |          |--42.91%--fp_join::merge_single_key_inner_unsorted
+                       |          |          |          
+                       |          |          |--27.06%--fp_join::build_single_key_inner_merge_output_with_selections
+                       |          |          |          |          
+                       |          |          |          |--5.83%--<fp_columnar::Column>::take_contiguous_range
+                       |          |          |          |          |          
+                       |          |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+                       |          |          |          |          
+                       |          |          |          |--5.81%--__memmove_avx_unaligned_erms
+                       |          |          |          |          
+                       |          |          |          |--4.74%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                       |          |          |          |          |          
+                       |          |          |          |           --3.17%--__libc_malloc2
+                       |          |          |          |                     |          
+                       |          |          |          |                      --3.01%--_int_malloc
+                       |          |          |          |                                |          
+                       |          |          |          |                                 --2.41%--malloc_consolidate
+                       |          |          |          |          
+                       |          |          |          |--2.70%--<fp_index::Index>::new_known_unique_int64_unit_range
+                       |          |          |          |          
+                       |          |          |          |--2.19%--__libc_malloc2
+                       |          |          |          |          _int_malloc
+                       |          |          |          |          
+                       |          |          |           --2.17%--__memcmp_avx2_movbe
+                       |          |          |          
+                       |          |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                       |          |          |          |          
+                       |          |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                       |          |          |                     <std::sys::sync::once::futex::Once>::call
+                       |          |          |          
+                       |          |          |--3.65%--__memmove_avx_unaligned_erms
+                       |          |          |          
+                       |          |           --2.84%--__memcmp_avx2_movbe
+                       |          |          
+                       |           --16.54%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                       |                     |          
+                       |                     |--6.34%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                       |                     |          |          
+                       |                     |           --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                       |                     |          
+                       |                      --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+                       |                                |          
+                       |                                 --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+                       |          
+                       |--14.65%--perf_profile::build_str_join_frame
+                       |          |          
+                       |          |--5.73%--0xffffffff84c00bb7
+                       |          |          |          
+                       |          |           --5.27%--0xffffffff8622811f
+                       |          |                     |          
+                       |          |                      --4.93%--0xffffffff84feb96b
+                       |          |                                0xffffffff853a5627
+                       |          |                                |          
+                       |          |                                 --4.75%--0xffffffff853a53ad
+                       |          |                                           |          
+                       |          |                                            --4.58%--0xffffffff853a4de7
+                       |          |                                                      |          
+                       |          |                                                       --3.45%--0xffffffff853a37ea
+                       |          |                                                                 |          
+                       |          |                                                                  --2.61%--0xffffffff853a33d2
+                       |          |                                                                            0xffffffff8541df1b
+                       |          |                                                                            |          
+                       |          |                                                                             --2.45%--0xffffffff8541a9e8
+                       |          |                                                                                       |          
+                       |          |                                                                                        --2.29%--0xffffffff853dda90
+                       |          |          
+                       |           --3.43%--__memmove_avx_unaligned_erms
+                       |                     |          
+                       |                      --2.31%--0xffffffff84c00bb7
+                       |                                |          
+                       |                                 --2.16%--0xffffffff8622811f
+                       |          
+                       |--10.86%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                       |          |          
+                       |          |--6.87%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                       |          |          |          
+                       |          |           --2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                       |          |          
+                       |           --2.21%--cfree@GLIBC_2.2.5
+                       |          
+                        --3.23%--cfree@GLIBC_2.2.5
+
+    67.47%     2.80%  [.] fp_join::merge_dataframes_on_with_options                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+            |--64.67%--fp_join::merge_dataframes_on_with_options
+            |          |          
+            |          |--41.72%--fp_join::merge_single_key_inner_unsorted
+            |          |          |          
+            |          |          |--26.18%--fp_join::build_single_key_inner_merge_output_with_selections
+            |          |          |          |          
+            |          |          |          |--5.67%--<fp_columnar::Column>::take_contiguous_range
+            |          |          |          |          |          
+            |          |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+            |          |          |          |          
+            |          |          |          |--5.52%--__memmove_avx_unaligned_erms
+            |          |          |          |          
+            |          |          |          |--4.77%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |          |          |          |          |          
+            |          |          |          |           --3.19%--__libc_malloc2
+            |          |          |          |                     _int_malloc
+            |          |          |          |                     |          
+            |          |          |          |                      --2.43%--malloc_consolidate
+            |          |          |          |          
+            |          |          |          |--2.54%--<fp_index::Index>::new_known_unique_int64_unit_range
+            |          |          |          |          
+            |          |          |          |--2.20%--__libc_malloc2
+            |          |          |          |          _int_malloc
+            |          |          |          |          
+            |          |          |           --2.02%--__memcmp_avx2_movbe
+            |          |          |          
+            |          |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+            |          |          |          |          
+            |          |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+            |          |          |                     <std::sys::sync::once::futex::Once>::call
+            |          |          |          
+            |          |          |--3.49%--__memmove_avx_unaligned_erms
+            |          |          |          
+            |          |           --2.84%--__memcmp_avx2_movbe
+            |          |          
+            |           --16.36%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+            |                     |          
+            |                     |--6.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+            |                     |          
+            |                      --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+            |                                |          
+            |                                 --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+            |          
+             --2.80%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       |          
+                        --2.16%--fp_join::merge_dataframes_on_with_options
+
+    45.30%     3.50%  [.] fp_join::merge_single_key_inner_unsorted                                                                                                                                                                                                                                                                                                                                        -      -            
+            |          
+            |--41.80%--fp_join::merge_single_key_inner_unsorted
+            |          |          
+            |          |--27.05%--fp_join::build_single_key_inner_merge_output_with_selections
+            |          |          |          
+            |          |          |--6.10%--__memmove_avx_unaligned_erms
+            |          |          |          
+            |          |          |--5.67%--<fp_columnar::Column>::take_contiguous_range
+            |          |          |          |          
+            |          |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+            |          |          |          
+            |          |          |--4.92%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |          |          |          |          
+            |          |          |           --3.49%--__libc_malloc2
+            |          |          |                     |          
+            |          |          |                      --3.33%--_int_malloc
+            |          |          |                                |          
+            |          |          |                                 --2.57%--malloc_consolidate
+            |          |          |          
+            |          |          |--2.35%--__libc_malloc2
+            |          |          |          _int_malloc
+            |          |          |          
+            |          |          |--2.23%--<fp_index::Index>::new_known_unique_int64_unit_range
+            |          |          |          
+            |          |           --2.17%--__memcmp_avx2_movbe
+            |          |          
+            |          |--4.91%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+            |          |          |          
+            |          |           --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+            |          |                     <std::sys::sync::once::futex::Once>::call
+            |          |          
+            |          |--3.18%--__memmove_avx_unaligned_erms
+            |          |          
+            |           --2.84%--__memcmp_avx2_movbe
+            |          
+             --3.50%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       |          
+                        --2.20%--fp_join::merge_dataframes_on_with_options
+
+    36.55%     9.78%  [.] fp_join::build_single_key_inner_merge_output_with_selections                                                                                                                                                                                                                                                                                                                    -      -            
+            |          
+            |--26.77%--fp_join::build_single_key_inner_merge_output_with_selections
+            |          |          
+            |          |--6.12%--__memmove_avx_unaligned_erms
+            |          |          
+            |          |--5.67%--<fp_columnar::Column>::take_contiguous_range
+            |          |          |          
+            |          |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+            |          |          
+            |          |--4.90%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |          |          |          
+            |          |           --3.32%--__libc_malloc2
+            |          |                     |          
+            |          |                      --3.17%--_int_malloc
+            |          |                                |          
+            |          |                                 --2.41%--malloc_consolidate
+            |          |          
+            |          |--2.54%--<fp_index::Index>::new_known_unique_int64_unit_range
+            |          |          
+            |           --2.19%--__libc_malloc2
+            |                     _int_malloc
+            |          
+             --9.78%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       |          
+                        --9.62%--perf_profile::main
+                                  |          
+                                  |--6.47%--fp_join::merge_dataframes_on_with_options
+                                  |          |          
+                                  |           --3.58%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                                  |          
+                                   --2.37%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+
+    19.22%     6.42%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                                                                                    -      -            
+            |          
+            |--12.79%--__memmove_avx_unaligned_erms
+            |          
+             --6.42%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       |          
+                        --4.88%--fp_join::merge_dataframes_on_with_options
+                                  |          
+                                   --2.53%--fp_join::merge_single_key_inner_unsorted
+
+    18.83%     2.14%  [.] <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert                                                                                                                                                                                                                                                                                                     -      -            
+            |          
+            |--16.69%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+            |          |          
+            |          |--6.34%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+            |          |          |          
+            |          |           --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |          |          
+            |           --5.98%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+            |                     |          
+            |                      --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+            |          
+             --2.14%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+
+    14.65%     4.22%  [.] perf_profile::build_str_join_frame                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--10.43%--perf_profile::build_str_join_frame
+            |          |          
+            |          |--3.64%--0xffffffff84c00bb7
+            |          |          |          
+            |          |           --3.19%--0xffffffff8622811f
+            |          |                     |          
+            |          |                      --2.84%--0xffffffff84feb96b
+            |          |                                0xffffffff853a5627
+            |          |                                |          
+            |          |                                 --2.84%--0xffffffff853a53ad
+            |          |                                           |          
+            |          |                                            --2.67%--0xffffffff853a4de7
+            |          |          
+            |           --3.43%--__memmove_avx_unaligned_erms
+            |                     |          
+            |                      --2.31%--0xffffffff84c00bb7
+            |                                |          
+            |                                 --2.16%--0xffffffff8622811f
+            |          
+             --4.22%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       perf_profile::build_str_join_frame
+                       |          
+                        --2.09%--0xffffffff84c00bb7
+                                  0xffffffff8622811f
+                                  0xffffffff84feb96b
+                                  0xffffffff853a5627
+
+    12.23%     4.98%  [.] cfree@GLIBC_2.2.5                                                                                                                                                                                                                                                                                                                                                               -      -            
+            |          
+            |--7.25%--cfree@GLIBC_2.2.5
+            |          
+             --4.98%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       |          
+                        --4.82%--fp_join::merge_dataframes_on_with_options
+                                  |          
+                                   --4.66%--fp_join::merge_single_key_inner_unsorted
+                                             |          
+                                              --4.19%--fp_join::build_single_key_inner_merge_output_with_selections
+                                                        |          
+                                                         --2.27%--<fp_columnar::Column>::take_contiguous_range
+
+    11.95%     1.09%  [.] core::ptr::drop_in_place::<fp_join::MergedDataFrame>                                                                                                                                                                                                                                                                                                                            -      -            
+            |          
+             --10.86%--core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                       |          
+                       |--6.87%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                       |          |          
+                       |           --2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                       |          
+                        --2.21%--cfree@GLIBC_2.2.5
+
+    11.91%     5.17%  [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                                                                                                                             -      -            
+            |          
+            |--6.74%--__memcmp_avx2_movbe
+            |          
+             --5.17%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       |          
+                        --4.98%--perf_profile::main
+                                  |          
+                                   --4.04%--fp_join::merge_dataframes_on_with_options
+                                             |          
+                                              --2.07%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+
+    10.73%     5.66%  [.] malloc                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |          
+            |--5.66%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          perf_profile::main
+            |          |          
+            |           --4.33%--fp_join::merge_dataframes_on_with_options
+            |                     |          
+            |                      --2.91%--fp_join::merge_single_key_inner_unsorted
+            |          
+             --5.07%--malloc
+
+    10.28%     5.38%  [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert                                                                                                                                                                                                                                                                                  -      -            
+            |          
+            |--5.38%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          perf_profile::main
+            |          |          
+            |           --5.06%--fp_join::merge_dataframes_on_with_options
+            |                     |          
+            |                      --2.18%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+            |          
+             --4.90%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                       |          
+                        --3.49%--__libc_malloc2
+                                  |          
+                                   --3.33%--_int_malloc
+                                             |          
+                                              --2.57%--malloc_consolidate
+
+    10.17%     4.35%  [.] <fp_columnar::Column>::take_contiguous_range                                                                                                                                                                                                                                                                                                                                    -      -            
+            |          
+            |--5.83%--<fp_columnar::Column>::take_contiguous_range
+            |          |          
+            |           --2.51%--<fp_columnar::Column>::float64_arc_view_source
+            |          
+             --4.35%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       |          
+                        --4.19%--perf_profile::main
+                                  |          
+                                   --3.26%--fp_join::merge_dataframes_on_with_options
+
+     9.85%     4.17%  [.] _int_malloc                                                                                                                                                                                                                                                                                                                                                                     -      -            
+            |          
+            |--5.68%--_int_malloc
+            |          |          
+            |           --2.57%--malloc_consolidate
+            |          
+             --4.17%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       |          
+                        --4.02%--perf_profile::main
+                                  |          
+                                   --2.46%--fp_join::merge_dataframes_on_with_options
+                                             |          
+                                              --2.16%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+
+     8.72%     2.24%  [.] <hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>                                                                                                                                                                                                                                    -      -            
+            |          
+            |--6.48%--<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+            |          |          
+            |           --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+            |          
+             --2.24%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+
+     8.26%     1.75%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                                                                                                                                                                                                                                                                                 -      -            
+            |          
+             --6.51%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                       |          
+                        --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+
+     8.06%     0.00%  [.] 0xffffffff84c00bb7                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --7.45%--0xffffffff8622811f
+                       |          
+                        --6.79%--0xffffffff84feb96b
+                                  |          
+                                   --6.63%--0xffffffff853a5627
+                                             |          
+                                              --6.17%--0xffffffff853a53ad
+                                                        |          
+                                                         --5.98%--0xffffffff853a4de7
+                                                                   |          
+                                                                    --4.69%--0xffffffff853a37ea
+                                                                              |          
+                                                                               --3.71%--0xffffffff853a33d2
+                                                                                         0xffffffff8541df1b
+                                                                                         |          
+                                                                                          --3.09%--0xffffffff8541a9e8
+                                                                                                    |          
+                                                                                                     --2.93%--0xffffffff853dda90
+
+     7.94%     0.75%  [.] core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>                                                                                                                                                                                                                                                                -      -            
+            |          
+             --7.19%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                       |          
+                       |--2.61%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+                       |          
+                        --2.05%--core::ptr::drop_in_place::<fp_columnar::Column>
+
+     7.45%     0.16%  [.] 0xffffffff8622811f                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --7.29%--0xffffffff8622811f
+                       |          
+                        --6.63%--0xffffffff84feb96b
+                                  |          
+                                   --6.47%--0xffffffff853a5627
+                                             |          
+                                              --6.01%--0xffffffff853a53ad
+                                                        |          
+                                                         --5.82%--0xffffffff853a4de7
+                                                                   |          
+                                                                    --4.53%--0xffffffff853a37ea
+                                                                              |          
+                                                                               --3.55%--0xffffffff853a33d2
+                                                                                         0xffffffff8541df1b
+                                                                                         |          
+                                                                                          --2.93%--0xffffffff8541a9e8
+                                                                                                    |          
+                                                                                                     --2.93%--0xffffffff853dda90
+
+     7.30%     1.72%  [.] <std::sys::sync::once::futex::Once>::call                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+             --5.57%--<std::sys::sync::once::futex::Once>::call
+
+     6.79%     0.00%  [.] 0xffffffff84feb96b                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --6.63%--0xffffffff853a5627
+                       |          
+                        --6.17%--0xffffffff853a53ad
+                                  |          
+                                   --5.98%--0xffffffff853a4de7
+                                             |          
+                                              --4.69%--0xffffffff853a37ea
+                                                        |          
+                                                         --3.71%--0xffffffff853a33d2
+                                                                   0xffffffff8541df1b
+                                                                   |          
+                                                                    --3.09%--0xffffffff8541a9e8
+                                                                              |          
+                                                                               --2.93%--0xffffffff853dda90
+
+     6.63%     0.00%  [.] 0xffffffff853a5627                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --6.17%--0xffffffff853a53ad
+                       |          
+                        --5.98%--0xffffffff853a4de7
+                                  |          
+                                   --4.69%--0xffffffff853a37ea
+                                             |          
+                                              --3.71%--0xffffffff853a33d2
+                                                        0xffffffff8541df1b
+                                                        |          
+                                                         --3.09%--0xffffffff8541a9e8
+                                                                   |          
+                                                                    --2.93%--0xffffffff853dda90
+
+     6.59%     1.36%  [.] <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous                                                                                                                                                                                                                                                                                                                    -      -            
+            |          
+             --5.23%--<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                       |          
+                        --2.69%--<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                                  <std::sys::sync::once::futex::Once>::call
+
+     6.29%     0.46%  [.] __libc_malloc2                                                                                                                                                                                                                                                                                                                                                                  -      -            
+            |          
+             --5.83%--__libc_malloc2
+                       |          
+                        --5.68%--_int_malloc
+                                  |          
+                                   --2.57%--malloc_consolidate
+
+     6.17%     0.00%  [.] 0xffffffff853a53ad                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --5.98%--0xffffffff853a4de7
+                       |          
+                        --4.69%--0xffffffff853a37ea
+                                  |          
+                                   --3.71%--0xffffffff853a33d2
+                                             0xffffffff8541df1b
+                                             |          
+                                              --3.09%--0xffffffff8541a9e8
+                                                        |          
+                                                         --2.93%--0xffffffff853dda90
+
+     5.98%     0.00%  [.] 0xffffffff853a4de7                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --4.69%--0xffffffff853a37ea
+                       |          
+                        --3.71%--0xffffffff853a33d2
+                                  0xffffffff8541df1b
+                                  |          
+                                   --3.09%--0xffffffff8541a9e8
+                                             |          
+                                              --2.93%--0xffffffff853dda90
+
+     4.92%     2.33%  [.] <alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--2.59%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+            |          
+             --2.33%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       |          
+                        --2.16%--perf_profile::main
+                                  |          
+                                   --2.14%--fp_join::merge_dataframes_on_with_options
+                                             fp_join::merge_single_key_inner_unsorted
+
+     4.69%     0.00%  [.] 0xffffffff853a37ea                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --3.71%--0xffffffff853a33d2
+                       0xffffffff8541df1b
+                       |          
+                        --3.09%--0xffffffff8541a9e8
+                                  |          
+                                   --2.93%--0xffffffff853dda90
+
+     4.24%     2.24%  [.] fp_join::collect_join_key_columns                                                                                                                                                                                                                                                                                                                                               -      -            
+            |          
+             --2.24%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+
+     4.21%     1.69%  [.] <fp_columnar::Column>::float64_arc_view_source                                                                                                                                                                                                                                                                                                                                  -      -            
+            |          
+             --2.51%--<fp_columnar::Column>::float64_arc_view_source
+
+     3.71%     0.00%  [.] 0xffffffff853a33d2                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8541df1b
+               |          
+                --3.09%--0xffffffff8541a9e8
+                          |          
+                           --2.93%--0xffffffff853dda90
+
+     3.71%     0.00%  [.] 0xffffffff8541df1b                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --3.09%--0xffffffff8541a9e8
+                       |          
+                        --2.93%--0xffffffff853dda90
+
+     3.68%     1.26%  [.] <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>                                                                                                                                                                                                                                                                                                 -      -            
+            |          
+             --2.43%--<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+
+     3.68%     1.97%  [.] _int_free_chunk                                                                                                                                                                                                                                                                                                                                                                 -      -            
+     3.36%     0.79%  [.] malloc_consolidate                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --2.57%--malloc_consolidate
+
+     3.32%     1.24%  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                                                                                                                                                                                            -      -            
+            |          
+             --2.08%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+
+     3.32%     0.62%  [.] <fp_index::Index>::new_known_unique_int64_unit_range                                                                                                                                                                                                                                                                                                                            -      -            
+            |          
+             --2.70%--<fp_index::Index>::new_known_unique_int64_unit_range
+
+     3.25%     0.16%  [.] 0xffffffff8541a9e8                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --3.09%--0xffffffff8541a9e8
+                       |          
+                        --2.93%--0xffffffff853dda90
+
+     3.07%     0.93%  [.] core::ptr::drop_in_place::<fp_columnar::Column>                                                                                                                                                                                                                                                                                                                                 -      -            
+            |          
+             --2.14%--core::ptr::drop_in_place::<fp_columnar::Column>
+
+     2.93%     0.00%  [.] 0xffffffff853dda90                                                                                                                                                                                                                                                                                                                                                              -      -            
+     2.79%     1.62%  [k] 0xffffffff8621b2b7                                                                                                                                                                                                                                                                                                                                                              -      -            
+     2.69%     0.00%  [.] <std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>                                                                      -      -            
+            |
+            ---<std::sys::sync::once::futex::Once>::call
+
+     2.54%     2.38%  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -            
+            |          
+             --2.38%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_single_key_inner_unsorted
+                       <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                       <std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+                       <std::sys::sync::once::futex::Once>::call
+
+     2.07%     0.31%  [.] core::ptr::drop_in_place::<fp_index::Index>                                                                                                                                                                                                                                                                                                                                     -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

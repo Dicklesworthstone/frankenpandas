@@ -1,0 +1,31 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-base/release-perf/examples/perf_profile str_groupby_count 200000 100
+  Time (mean ± σ):     177.5 ms ±   5.0 ms    [User: 160.6 ms, System: 16.7 ms]
+  Range (min … max):   169.9 ms … 183.5 ms    8 runs
+
+Benchmark 2: /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-order/release-perf/examples/perf_profile str_groupby_count 200000 100
+  Time (mean ± σ):     148.1 ms ±   5.0 ms    [User: 130.3 ms, System: 17.6 ms]
+  Range (min … max):   138.8 ms … 155.7 ms    8 runs
+
+Benchmark 3: /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-base/release-perf/examples/perf_profile str_groupby_sum 200000 100
+  Time (mean ± σ):     184.5 ms ±   9.7 ms    [User: 165.8 ms, System: 18.4 ms]
+  Range (min … max):   169.0 ms … 196.3 ms    8 runs
+
+Benchmark 4: /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-order/release-perf/examples/perf_profile str_groupby_sum 200000 100
+  Time (mean ± σ):     163.0 ms ±   8.0 ms    [User: 147.0 ms, System: 15.7 ms]
+  Range (min … max):   154.4 ms … 179.1 ms    8 runs
+
+Benchmark 5: /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-base/release-perf/examples/perf_profile str_groupby_std 200000 100
+  Time (mean ± σ):     192.9 ms ±   8.6 ms    [User: 176.0 ms, System: 16.7 ms]
+  Range (min … max):   180.5 ms … 205.6 ms    8 runs
+
+Benchmark 6: /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-order/release-perf/examples/perf_profile str_groupby_std 200000 100
+  Time (mean ± σ):     176.6 ms ±   8.8 ms    [User: 159.0 ms, System: 17.1 ms]
+  Range (min … max):   160.6 ms … 187.8 ms    8 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-order/release-perf/examples/perf_profile str_groupby_count 200000 100 ran
+    1.10 ± 0.07 times faster than /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-order/release-perf/examples/perf_profile str_groupby_sum 200000 100
+    1.19 ± 0.07 times faster than /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-order/release-perf/examples/perf_profile str_groupby_std 200000 100
+    1.20 ± 0.05 times faster than /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-base/release-perf/examples/perf_profile str_groupby_count 200000 100
+    1.25 ± 0.08 times faster than /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-base/release-perf/examples/perf_profile str_groupby_sum 200000 100
+    1.30 ± 0.07 times faster than /data/projects/.scratch/cargo-target-lavenderstone-uza04100-rebased-base/release-perf/examples/perf_profile str_groupby_std 200000 100

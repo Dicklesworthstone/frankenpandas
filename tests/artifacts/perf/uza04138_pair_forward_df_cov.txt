@@ -1,0 +1,11 @@
+Benchmark 1: base_cov
+  Time (mean ± σ):     286.4 ms ±   8.7 ms    [User: 504.0 ms, System: 248.7 ms]
+  Range (min … max):   277.3 ms … 306.8 ms    10 runs
+ 
+Benchmark 2: candidate_cov
+  Time (mean ± σ):     283.5 ms ±   8.0 ms    [User: 568.5 ms, System: 243.9 ms]
+  Range (min … max):   271.8 ms … 295.7 ms    10 runs
+ 
+Summary
+  candidate_cov ran
+    1.01 ± 0.04 times faster than base_cov

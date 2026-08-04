@@ -1,0 +1,284 @@
+  [2m2026-06-15T05:13:02.510831Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1153651 at root@38.242.134.66 (4 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:02.840086Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenpandas-lavender-g2veb-20260615T0053 (hash: 5fe4f934bda66b06)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:02.840124Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 15 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:04.813286Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1153651...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:04.813352Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053 -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053 on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:08.287289Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3473ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:08.287352Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-bench -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-bench on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:10.279609Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1992ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:10.279679Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-columnar -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-columnar on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:12.390543Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2110ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:12.390621Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-conformance -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-conformance on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:14.706447Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2315ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:14.706512Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-expr -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-expr on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:16.680672Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1974ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:16.680737Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-frame -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-frame on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:18.767972Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2087ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:18.768040Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-frankentui -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-frankentui on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:20.754505Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1986ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:20.754572Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-groupby -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-groupby on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:22.624134Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1869ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:22.624213Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-index -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-index on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:24.588456Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1964ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:24.588555Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-io -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-io on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:26.526508Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1937ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:26.526585Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-join -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-join on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:28.408432Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1881ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:28.408502Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-python -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-python on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:30.344976Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1936ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:30.345041Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-runtime -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-runtime on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:32.238086Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1893ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:32.238169Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-types -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-types on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:34.171500Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1933ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:34.171570Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/frankenpandas -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/frankenpandas on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:36.112013Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1940ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:36.112042Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 7075 files, 4271171 bytes in 31290ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:40.582805Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo build -p fp-frame --profile release-perf --example bench_window_moments[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:13:40.582843Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.scratch/cargo-target-lavender-g2veb-candidate -> /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/.rch-target-vmi1153651-job-29884606035532534-1781500384813277507-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded block-buffer v0.12.0
+  Downloaded autocfg v1.5.0
+  Downloaded cfg-if v1.0.4
+  Downloaded aho-corasick v1.1.4
+  Downloaded siphasher v1.0.2
+  Downloaded digest v0.11.2
+  Downloaded crypto-common v0.2.1
+  Downloaded rustc-hash v2.1.2
+  Downloaded unicode-casefold v0.2.0
+  Downloaded tinyvec_macros v0.1.1
+  Downloaded cpufeatures v0.3.0
+  Downloaded equivalent v1.0.2
+  Downloaded itoa v1.0.18
+  Downloaded phf_shared v0.12.1
+  Downloaded quote v1.0.45
+  Downloaded zmij v1.0.21
+  Downloaded hybrid-array v0.4.10
+  Downloaded thiserror-impl v2.0.18
+  Downloaded phf v0.12.1
+  Downloaded sha2 v0.11.0
+  Downloaded thiserror v2.0.18
+  Downloaded tinyvec v1.11.0
+  Downloaded proc-macro2 v1.0.106
+  Downloaded serde_core v1.0.228
+  Downloaded serde_derive v1.0.228
+  Downloaded unicode-ident v1.0.24
+  Downloaded const-oid v0.10.2
+  Downloaded num-traits v0.2.19
+  Downloaded serde v1.0.228
+  Downloaded typenum v1.20.0
+  Downloaded indexmap v2.14.0
+  Downloaded memchr v2.8.0
+  Downloaded chrono v0.4.45
+  Downloaded hashbrown v0.17.0
+  Downloaded regex v1.12.3
+  Downloaded serde_json v1.0.150
+  Downloaded unicode-normalization v0.1.25
+  Downloaded syn v2.0.117
+  Downloaded regex-syntax v0.8.10
+  Downloaded ucd v0.1.1
+  Downloaded chrono-tz v0.10.4
+  Downloaded regex-automata v0.4.14
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling serde_core v1.0.228
+   Compiling thiserror v2.0.18
+   Compiling serde v1.0.228
+   Compiling typenum v1.20.0
+   Compiling autocfg v1.5.0
+   Compiling memchr v2.8.0
+   Compiling zmij v1.0.21
+   Compiling const-oid v0.10.2
+   Compiling hashbrown v0.17.0
+   Compiling siphasher v1.0.2
+   Compiling equivalent v1.0.2
+   Compiling rustc-hash v2.1.2
+   Compiling serde_json v1.0.150
+   Compiling itoa v1.0.18
+   Compiling cfg-if v1.0.4
+   Compiling num-traits v0.2.19
+   Compiling phf_shared v0.12.1
+   Compiling tinyvec_macros v0.1.1
+   Compiling chrono-tz v0.10.4
+   Compiling regex-syntax v0.8.10
+   Compiling cpufeatures v0.3.0
+   Compiling aho-corasick v1.1.4
+   Compiling tinyvec v1.11.0
+   Compiling phf v0.12.1
+   Compiling hybrid-array v0.4.10
+   Compiling unicode-casefold v0.2.0
+   Compiling ucd v0.1.1
+   Compiling syn v2.0.117
+   Compiling unicode-normalization v0.1.25
+   Compiling indexmap v2.14.0
+   Compiling chrono v0.4.45
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling regex-automata v0.4.14
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling regex v1.12.3
+   Compiling fp-types v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-types)
+   Compiling fp-runtime v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-runtime)
+   Compiling fp-columnar v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-columnar)
+   Compiling fp-index v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-index)
+   Compiling fp-frame v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/crates/fp-frame)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 4m 35s
+  [2m2026-06-15T05:18:19.156057Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 278573ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:18:19.156360Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:18:19.156380Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053 on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:18:21.501913Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2345ms (1 files, 1356 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:18:21.501952Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1356 bytes in 2345ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:18:21.502085Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenpandas-lavender-g2veb-20260615T0053/.rch-target-vmi1153651-job-29884606035532534-1781500384813277507-0 on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:18:33.761605Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 12259ms (559 files, 9145 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-15T05:18:33.761625Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 559 files, 9145 bytes in 12259ms[0m
+    [2;3mat[0m rch/src/hook.rs:6582 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1153651 (331.3s)

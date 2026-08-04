@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/lavender_uza04148_bins/perf_profile_candidate_shared_plan df_dot 100000 3
+  Time (mean ± σ):     231.4 ms ±   9.1 ms    [User: 131.4 ms, System: 99.7 ms]
+  Range (min … max):   218.0 ms … 244.9 ms    10 runs
+
+Benchmark 2: /data/projects/.scratch/lavender_uza04148_bins/perf_profile_base_ba0b4573 df_dot 100000 3
+  Time (mean ± σ):     233.3 ms ±   8.2 ms    [User: 130.2 ms, System: 102.8 ms]
+  Range (min … max):   222.0 ms … 246.7 ms    10 runs
+
+Summary
+  /data/projects/.scratch/lavender_uza04148_bins/perf_profile_candidate_shared_plan df_dot 100000 3 ran
+    1.01 ± 0.05 times faster than /data/projects/.scratch/lavender_uza04148_bins/perf_profile_base_ba0b4573 df_dot 100000 3

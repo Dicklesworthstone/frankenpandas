@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": ".rch-target-lavenderstone-dfdot-nan-base/release-perf/examples/perf_profile df_dot 100000 20",
+      "mean": 2.61989826178,
+      "stddev": 0.034127730167200526,
+      "median": 2.61763098558,
+      "user": 57.75016128,
+      "system": 10.41870924,
+      "min": 2.57462601758,
+      "max": 2.65666750958,
+      "times": [
+        2.64971815058,
+        2.57462601758,
+        2.65666750958,
+        2.60084864558,
+        2.61763098558
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": ".rch-target-lavenderstone-dfdot-nan-after/release-perf/examples/perf_profile df_dot 100000 20",
+      "mean": 2.56241554398,
+      "stddev": 0.04093412968629645,
+      "median": 2.5545649615799997,
+      "user": 62.551189879999995,
+      "system": 10.40358564,
+      "min": 2.52605791658,
+      "max": 2.62828429658,
+      "times": [
+        2.62828429658,
+        2.5545649615799997,
+        2.53227697058,
+        2.57089357458,
+        2.52605791658
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

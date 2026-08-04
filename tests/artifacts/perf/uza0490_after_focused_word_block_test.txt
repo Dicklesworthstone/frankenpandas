@@ -1,0 +1,272 @@
+  [2m2026-06-13T03:13:40.276214Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1227854 at root@109.123.245.77 (2 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:40.803052Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenpandas-uza0489-orangepeak-20260613 (hash: cc3f6ef2c888bf73)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:40.803144Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:42.514037Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1227854...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:42.514101Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613 -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613 on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:45.258181Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2744ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:45.258242Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-columnar -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-columnar on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:47.257610Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1999ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:47.257691Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-conformance -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-conformance on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:49.407654Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2149ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:49.407731Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-expr -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-expr on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:51.197395Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1789ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:51.197469Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:53.355859Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2158ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:53.355927Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frankentui -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frankentui on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:55.168188Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1812ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:55.168256Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-groupby -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-groupby on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:56.978685Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1810ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:56.978777Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-index -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-index on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:58.808070Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1829ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:13:58.808168Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-io -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-io on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:00.629474Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1821ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:00.629565Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-join -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-join on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:02.497785Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1868ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:02.497866Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-python -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-python on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:04.309845Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1811ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:04.309928Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-runtime -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-runtime on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:06.111234Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1801ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:06.111316Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-types -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-types on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:08.031340Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1920ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:08.031409Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/frankenpandas -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/frankenpandas on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:09.877281Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1845ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:09.877326Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 7055 files, 302973 bytes in 27356ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:14.150346Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo test -p fp-frame kendall_word_blocked_rank_counter_matches_fenwick_boundaries --lib -- --nocapture[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:14:14.150385Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.scratch/cargo-target-orangepeak-uza0490-test -> /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/.rch-target-vmi1227854-job-29884606035526704-1781320422514029376-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cfg-if v1.0.4
+  Downloaded cpufeatures v0.3.0
+  Downloaded block-buffer v0.12.0
+  Downloaded crypto-common v0.2.1
+  Downloaded phf_shared v0.12.1
+  Downloaded autocfg v1.5.0
+  Downloaded equivalent v1.0.2
+  Downloaded tinyvec_macros v0.1.1
+  Downloaded rustc-hash v2.1.2
+  Downloaded unicode-casefold v0.2.0
+  Downloaded itoa v1.0.18
+  Downloaded siphasher v1.0.2
+  Downloaded quote v1.0.45
+  Downloaded thiserror-impl v2.0.18
+  Downloaded phf v0.12.1
+  Downloaded zmij v1.0.21
+  Downloaded sha2 v0.11.0
+  Downloaded thiserror v2.0.18
+  Downloaded hybrid-array v0.4.10
+  Downloaded digest v0.11.2
+  Downloaded const-oid v0.10.2
+  Downloaded num-traits v0.2.19
+  Downloaded proc-macro2 v1.0.106
+  Downloaded serde_derive v1.0.228
+  Downloaded tinyvec v1.11.0
+  Downloaded unicode-ident v1.0.24
+  Downloaded serde_core v1.0.228
+  Downloaded memchr v2.8.0
+  Downloaded serde v1.0.228
+  Downloaded indexmap v2.14.0
+  Downloaded typenum v1.20.0
+  Downloaded aho-corasick v1.1.4
+  Downloaded chrono v0.4.45
+  Downloaded unicode-normalization v0.1.25
+  Downloaded regex v1.12.3
+  Downloaded serde_json v1.0.150
+  Downloaded hashbrown v0.17.0
+  Downloaded syn v2.0.117
+  Downloaded regex-syntax v0.8.10
+  Downloaded ucd v0.1.1
+  Downloaded regex-automata v0.4.14
+  Downloaded chrono-tz v0.10.4
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling serde_core v1.0.228
+   Compiling autocfg v1.5.0
+   Compiling thiserror v2.0.18
+   Compiling serde v1.0.228
+   Compiling typenum v1.20.0
+   Compiling memchr v2.8.0
+   Compiling zmij v1.0.21
+   Compiling hashbrown v0.17.0
+   Compiling rustc-hash v2.1.2
+   Compiling siphasher v1.0.2
+   Compiling const-oid v0.10.2
+   Compiling serde_json v1.0.150
+   Compiling num-traits v0.2.19
+   Compiling equivalent v1.0.2
+   Compiling phf_shared v0.12.1
+   Compiling aho-corasick v1.1.4
+   Compiling itoa v1.0.18
+   Compiling indexmap v2.14.0
+   Compiling cfg-if v1.0.4
+   Compiling regex-syntax v0.8.10
+   Compiling cpufeatures v0.3.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling hybrid-array v0.4.10
+   Compiling chrono-tz v0.10.4
+   Compiling tinyvec v1.11.0
+   Compiling syn v2.0.117
+   Compiling phf v0.12.1
+   Compiling ucd v0.1.1
+   Compiling unicode-casefold v0.2.0
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling chrono v0.4.45
+   Compiling unicode-normalization v0.1.25
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling regex-automata v0.4.14
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling regex v1.12.3
+   Compiling fp-types v0.1.0 (/data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-types)
+   Compiling fp-runtime v0.1.0 (/data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-runtime)
+   Compiling fp-columnar v0.1.0 (/data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-columnar)
+   Compiling fp-index v0.1.0 (/data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-index)
+   Compiling fp-frame v0.1.0 (/data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613/crates/fp-frame)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 50.18s
+     Running unittests src/lib.rs (.rch-target-vmi1227854-job-29884606035526704-1781320422514029376-0/debug/deps/fp_frame-499063227962f068)
+
+running 1 test
+test tests::kendall_word_blocked_rank_counter_matches_fenwick_boundaries ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2867 filtered out; finished in 0.00s
+
+  [2m2026-06-13T03:15:05.989780Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 51839ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:15:05.990167Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:15:05.990185Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenpandas-uza0489-orangepeak-20260613 on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:15:08.010158Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2019ms (1 files, 1456 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T03:15:08.010177Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1456 bytes in 2019ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1227854 (87.7s)

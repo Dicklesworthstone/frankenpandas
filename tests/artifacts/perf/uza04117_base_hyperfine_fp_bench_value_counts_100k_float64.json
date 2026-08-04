@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-lavenderstone-uza04117-base/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 100k --dtype float64 --json",
+      "mean": 0.30014827584,
+      "stddev": 0.009030026976562862,
+      "median": 0.29667570664,
+      "user": 0.16014837999999998,
+      "system": 0.19655018,
+      "min": 0.29001489914,
+      "max": 0.31721711414000003,
+      "times": [
+        0.29001489914,
+        0.29291162714,
+        0.29363400714,
+        0.30518438214,
+        0.30604182714,
+        0.29967467314,
+        0.30989527014,
+        0.29323221814,
+        0.29367674014,
+        0.31721711414000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

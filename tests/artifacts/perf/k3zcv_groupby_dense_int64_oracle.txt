@@ -1,0 +1,29 @@
+br-frankenpandas-k3zcv — oracle differential for fp-groupby dense Int64 aggregations
+====================================================================================
+
+Unlike the lazy-vs-materialized differentials (yfyb9/q70pn/2bgtq/59dk2), this is
+an INDEPENDENT-ORACLE property test: it compares the dense Int64-key groupby fast
+paths (groupby_sum 1432b615, groupby_count/min/max dense streaming) against a
+grouping computed by hand in the test, so it catches dense-path bugs even where
+no fast-vs-slow split exists.
+
+Harness (test fp-groupby: dense_int64_groupby_matches_handcomputed_oracle_k3zcv):
+deterministic seeded LCG (no rand crate, no mocks). For 1200 iterations it builds
+all-valid Int64 key + value Series (matching index => identity alignment; key
+range -2..2 to force multiple multi-row groups; value range -10..10) and asserts:
+
+  groupby_sum   -> index labels == sorted unique keys (BTreeMap ascending =
+                   pandas default), values == per-group sum
+  groupby_count -> values == per-group row count
+  groupby_min   -> values == per-group min
+  groupby_max   -> values == per-group max
+
+The reference is a std BTreeMap<i64, Vec<i64>> built directly from the raw rows.
+
+Result: PASS (1 passed; 1200 iterations × 4 aggregations). The dense Int64
+groupby paths match the independent oracle exactly.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-groupby dense_int64_groupby_matches_handcomputed_oracle_k3zcv -> 1 passed
+  cargo test -p fp-groupby (full)  -> 72 passed, 0 failed
+  ubs crates/fp-groupby/src/lib.rs -> 0 critical

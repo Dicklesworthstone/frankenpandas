@@ -1,0 +1,41 @@
+br-frankenpandas-2jibm — Series::hasnans validity-mask short-circuit
+====================================================================
+
+Problem: Series::hasnans (fp-frame/src/lib.rs ~13419) was
+  self.column.values().iter().any(|v| v.is_missing())
+— it materialized the whole Vec<Scalar> (boxing every element) and ran a
+per-element is_missing() enum dispatch, even though missing-ness for most dtypes
+is captured entirely by the column's validity mask.
+
+Fix (bit-identical, additive):
+  1. if !self.column.validity().all() => return true  (a null slot is always
+     missing; no materialization, for ANY dtype).
+  2. all-valid AND dtype in {Int64, Bool, Utf8} => false. These dtypes have NO
+     in-band NaN/NaT/sentinel representation, so all-valid means no missing.
+  3. all other dtypes — Float64 (NaN), Datetime64 / Timedelta64 (NaT sentinel),
+     Categorical / Sparse / Interval / Period — DEFER to the original Scalar
+     path, preserving exact pandas NaN/NaT semantics (sacred).
+
+Why bit-identical:
+  - case 1: a validity-false slot materializes to a Null scalar whose
+    is_missing() is true, so the reference any() is also true.
+  - case 2: an all-valid Int64/Bool/Utf8 column yields only non-missing typed
+    scalars (no NaN/NaT possible), so the reference any() is false.
+  - case 3: identical code path.
+
+Avoids Vec<Scalar> materialization for the common all-valid integer/bool/string
+case and for every null-bearing column (any dtype).
+
+New test series_hasnans_validity_short_circuit_equivalence_2jibm asserts
+hasnans() == values().any(is_missing) (the reference) across 9 cases: all-valid
+Int64/Bool/Utf8, null-bearing Int64/Utf8, all-valid + null-bearing Float64, and
+all-valid + NaT-bearing Datetime64.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-frame series_hasnans  -> 4 passed
+  cargo test -p fp-frame (full)          -> all passed, 0 failed
+  ubs crates/fp-frame/src/lib.rs         -> no finding references the changed
+                                            lines (~13419-13434); the ~626
+                                            whole-file criticals are the
+                                            pre-existing FP inventory (yavyk /
+                                            crates/fp-frame/UBS_TRIAGE.md).

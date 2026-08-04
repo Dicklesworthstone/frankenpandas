@@ -1,0 +1,99 @@
+{
+  "schema_version": "v3",
+  "timestamp": "2026-06-19T05:57:55.629919+00:00",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.0",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle"
+    }
+  },
+  "parameters": {
+    "sizes": [
+      "1M"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "strings"
+    ],
+    "cv_threshold": 5.0,
+    "min_iterations": 10,
+    "warmup_iterations": 3
+  },
+  "results": [
+    {
+      "workload": "str_value_counts",
+      "category": "strings",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 8922.51,
+        "p95_us": 10016.46,
+        "p99_us": 11968.15,
+        "mean_us": 9168.11,
+        "stddev_us": 753.5,
+        "cv_pct": 8.22,
+        "throughput_rows_sec": 112076049,
+        "iterations": 25,
+        "valid": false
+      },
+      "pandas": {
+        "p50_us": 42758.41,
+        "p95_us": 47560.67,
+        "p99_us": 48155.22,
+        "mean_us": 44396.94,
+        "stddev_us": 2215.24,
+        "cv_pct": 4.99,
+        "throughput_rows_sec": 23387213,
+        "iterations": 11,
+        "valid": true
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    },
+    {
+      "workload": "str_groupby_sum",
+      "category": "strings",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 5726.96,
+        "p95_us": 5822.03,
+        "p99_us": 5904.94,
+        "mean_us": 5735.86,
+        "stddev_us": 58.05,
+        "cv_pct": 1.01,
+        "throughput_rows_sec": 174612740,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 26870.03,
+        "p95_us": 30456.2,
+        "p99_us": 42989.53,
+        "mean_us": 27502.18,
+        "stddev_us": 2754.19,
+        "cv_pct": 10.01,
+        "throughput_rows_sec": 37216183,
+        "iterations": 100,
+        "valid": false
+      },
+      "ratio": null,
+      "verdict": "DROPPED_HIGH_CV"
+    }
+  ],
+  "summary": {
+    "total_workloads": 2,
+    "valid_workloads": 0,
+    "dropped_high_cv": 2,
+    "category_scores": {},
+    "weighted_score": 1.3,
+    "claim_validated": false
+  }
+}

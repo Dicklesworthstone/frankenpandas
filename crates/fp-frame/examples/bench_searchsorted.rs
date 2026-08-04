@@ -9,10 +9,11 @@
 //! sorted input (the documented precondition); a sortedness guard falls back
 //! to the exact linear scan for unsorted input so behavior is unchanged.
 
+use std::time::Instant;
+
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::Scalar;
-use std::time::Instant;
 
 fn s_i64(vals: Vec<i64>) -> Series {
     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
@@ -88,10 +89,7 @@ fn golden() -> String {
 
     // UNSORTED input: must fall back to the exact linear-scan behavior.
     let uns = s_i64(vec![30, 10, 40, 20, 20]);
-    let un_needles: Vec<Scalar> = vec![5, 20, 35, 40]
-        .into_iter()
-        .map(Scalar::Int64)
-        .collect();
+    let un_needles: Vec<Scalar> = vec![5, 20, 35, 40].into_iter().map(Scalar::Int64).collect();
     out.push_str(&format!(
         "unsorted_left={:?}\n",
         uns.searchsorted_values(&un_needles, "left").unwrap()
@@ -116,7 +114,8 @@ fn golden() -> String {
     ));
     out.push_str(&format!(
         "single_missing_right={}\n",
-        fs.searchsorted(&Scalar::Float64(f64::NAN), "right").unwrap()
+        fs.searchsorted(&Scalar::Float64(f64::NAN), "right")
+            .unwrap()
     ));
 
     out

@@ -1,0 +1,39 @@
+br-frankenpandas-e8vzt — Typed Float64 fast path for Column.fillna
+==================================================================
+
+eydcr family. Column::fillna (fp-columnar; Series/DataFrame.fillna delegate to
+it per column) materialized Vec<Scalar>, cloned per element, and rebuilt via
+Self::new revalidation even for typed Float64.
+
+LEVER (one): when the column is Float64 and the (dtype-cast) fill value is a
+finite f64, read raw f64 + validity via Column::as_f64_slice_with_validity and
+fill every missing slot with the fill into an all-valid typed buffer, emitting
+via Column::from_f64_values.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-5; loaded):
+  DataFrame.fillna(0.0):  47    ->  3.8  = 12.4x
+
+SCORE: 12.4x >> 2.0 PASS.
+
+ISOMORPHISM (per-element select; no arithmetic):
+  - Present slot (validity set AND datum not NaN — a valid-bit NaN is treated as
+    missing by Scalar::is_missing, matching the general `if v.is_missing()`
+    check): keeps its f64, a present Float64.
+  - Missing slot: takes the finite fill `fv`, a present Float64 — exactly the
+    general path's `cast_fill.clone()`.
+  - Every result is finite, so from_f64_values yields an all-valid column, exactly
+    what Self::new derives from the all-Float64-finite scalar vector.
+  - Gated to Float64 dtype + a finite Float64 fill (a NaN/non-Float64 fill keeps
+    the Scalar path, where fill-with-missing semantics still apply). The Null-dtype
+    branch above is untouched.
+  - Golden sha256 (gap_hunt golden: the full elementwise family + fillna of a
+    nullable frame with two finite constants and an all-valid no-op, n=5000 x4)
+    UNCHANGED before/after:
+      b5c804f7c12884b6838ada23decb2840eea87ff7ea9fbf6535463bdb54eaedb1
+
+GATES (rch + local):
+  cargo check  -p fp-columnar: OK
+  cargo clippy -p fp-columnar: clean
+  cargo test   -p fp-columnar: 392 passed
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

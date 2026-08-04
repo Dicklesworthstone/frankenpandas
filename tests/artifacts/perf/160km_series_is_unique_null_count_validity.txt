@@ -1,0 +1,30 @@
+br-frankenpandas-160km — Series::is_unique null_count via validity mask
+=======================================================================
+
+Problem: Series::is_unique (fp-frame/src/lib.rs ~7968) computed
+  null_count = self.column.values().iter().filter(|v| v.is_missing()).count()
+— a full Vec<Scalar> materialization pass — IN ADDITION to the self.nunique()
+call it already makes. Two materialization passes for one predicate.
+
+Fix (bit-identical, additive): derive null_count from the validity mask for
+dtypes whose missing-ness is captured entirely by it:
+  null_count = len - validity.count_valid()   for Int64 / Bool / Utf8
+Every other dtype (Float64 NaN, Datetime64 / Timedelta64 NaT sentinel,
+Categorical / Sparse / Interval / Period) keeps the exact Scalar scan, preserving
+NaN/NaT semantics. For Int64/Bool/Utf8 there is no in-band missing value, so
+values().filter(is_missing).count() == count of validity-false slots ==
+len - count_valid() — bit-identical. Removes one of the two materialization
+passes for the common typed case; the is_unique contract (nunique() ==
+total_non_null && null_count <= 1) is unchanged.
+
+New test series_is_unique_null_count_validity_path_160km covers Int64/Bool/Utf8
+(unique, duplicate, one-null-ok, two-nulls-dup) and the deferred Float64 NaN /
+Datetime64 NaT paths.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-frame series_is_unique -> 8 passed
+  cargo test -p fp-frame (full)           -> all passed, 0 failed
+  ubs crates/fp-frame/src/lib.rs          -> no finding references the changed
+                                             lines; the ~626 whole-file criticals
+                                             are the documented FP inventory
+                                             (yavyk / UBS_TRIAGE.md).

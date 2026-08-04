@@ -1,0 +1,9 @@
+Series.value_counts string byte-span FxHash tally (vcstr)
+Golden bit-identical: str_value_counts sha256 1df8fe11385c9451 before==after.
+A/B min-of-5 @200k (card 1000): 7.852 -> 2.974 ms/iter = 2.64x.
+Tests: fp-frame 2830 (incl 32 value_counts) green.
+Lever: value_counts on an all-valid contiguous-Utf8 column tallies raw &[u8] spans with FxHash
+(first-seen order) instead of materializing n Scalar::Utf8 + wrapping ScalarKey + std-HashMap SipHash.
+Per-distinct Scalar::Utf8 built once on first sight. Bit-identical: same first-seen order (row
+iteration), same counts, same stable desc sort + Scalar::Utf8 labels. as_utf8_contiguous is all-valid
+(no missing to skip). Falls back to ScalarKey path for non-contiguous / nullable / non-string.

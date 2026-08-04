@@ -1,0 +1,280 @@
+{
+  "lever": "br-frankenpandas-l4vzc contiguous-Utf8 lazy transpose view arm",
+  "date": "2026-07-22",
+  "agent": "DustySummit (cc pane 2)",
+  "substrate": "ONE binary, env-gated arms (FP_TV_NO_UTF8=1 = pre-lever eager fallback; gate removed before commit), interleaved C->O->C2 per block, 7 blocks, taskset -c 2, p50-of-25-iters per invocation, median across blocks; workload df_transpose_materialize, dtype utf8 (all-valid contiguous-Utf8 columns, value_XXXXXXXXXXXXXXXX strings)",
+  "binary_sha256": "e50d52e8b1e31248a56d44120b3bbd035f08de6c094ec15956a87b1435dc8048",
+  "primary_run_cv_valid_100k": {
+    "blocks": 7,
+    "core": "2",
+    "workload": "df_transpose_materialize",
+    "dtype": "utf8",
+    "sizes": {
+      "100k": {
+        "candidate_p50_us": 1355.519,
+        "orig_eager_p50_us": 94644.561,
+        "candidate2_p50_us": 1323.828,
+        "cv_pct": {
+          "C": 3.96,
+          "O": 2.8,
+          "C2": 4.25
+        },
+        "ratio_orig_over_candidate": 69.8216,
+        "null_ratio_c_over_c2": 1.0239,
+        "raw_p50s": {
+          "C": [
+            1334.138,
+            1360.387,
+            1406.415,
+            1332.184,
+            1355.519,
+            1337.474,
+            1481.387
+          ],
+          "O": [
+            101285.563,
+            94510.627,
+            94898.552,
+            93091.939,
+            94644.561,
+            94248.711,
+            95610.121
+          ],
+          "C2": [
+            1466.869,
+            1310.654,
+            1303.9,
+            1322.406,
+            1380.886,
+            1323.828,
+            1343.365
+          ]
+        }
+      },
+      "10k": {
+        "candidate_p50_us": 125.257,
+        "orig_eager_p50_us": 5402.376,
+        "candidate2_p50_us": 125.678,
+        "cv_pct": {
+          "C": 1.2,
+          "O": 35.48,
+          "C2": 8.49
+        },
+        "ratio_orig_over_candidate": 43.1303,
+        "null_ratio_c_over_c2": 0.9967,
+        "raw_p50s": {
+          "C": [
+            125.227,
+            124.747,
+            124.886,
+            125.257,
+            128.54399999999998,
+            125.35700000000001,
+            127.71200000000002
+          ],
+          "O": [
+            11472.588,
+            5193.481,
+            5402.376,
+            5177.9310000000005,
+            5388.49,
+            7090.995999999999,
+            5637.131
+          ],
+          "C2": [
+            128.444,
+            125.678,
+            125.478,
+            128.253,
+            124.476,
+            155.344,
+            125.568
+          ]
+        }
+      }
+    }
+  },
+  "earlier_runs_load_spiked": {
+    "note": "runs 1-2 had per-arm CV spikes from peer compile storms (load avg 9-28); medians agree with the primary across all three runs: 100k 72.01/68.64/69.82x, 10k 46.98/43.51/43.13x. 10k eager arm retains one spiked block in every run (CV 35-113pct) - 10k ratio is reported as a three-run agreement, not a CV-valid single row.",
+    "run1": {
+      "blocks": 7,
+      "core": "2",
+      "workload": "df_transpose_materialize",
+      "dtype": "utf8",
+      "sizes": {
+        "100k": {
+          "candidate_p50_us": 1334.298,
+          "orig_eager_p50_us": 96086.168,
+          "candidate2_p50_us": 1355.218,
+          "cv_pct": {
+            "C": 1.56,
+            "O": 10.78,
+            "C2": 102.78
+          },
+          "ratio_orig_over_candidate": 72.0125,
+          "null_ratio_c_over_c2": 0.9846,
+          "raw_p50s": {
+            "C": [
+              1322.2749999999999,
+              1378.8229999999999,
+              1326.093,
+              1329.809,
+              1334.298,
+              1362.1309999999999,
+              1346.632
+            ],
+            "O": [
+              115115.29,
+              119001.514,
+              93769.777,
+              94249.74699999999,
+              105410.534,
+              92265.849,
+              96086.168
+            ],
+            "C2": [
+              1355.218,
+              1418.999,
+              1354.2459999999999,
+              2773.836,
+              1324.309,
+              1291.176,
+              8404.224
+            ]
+          }
+        },
+        "10k": {
+          "candidate_p50_us": 128.374,
+          "orig_eager_p50_us": 6030.486,
+          "candidate2_p50_us": 125.117,
+          "cv_pct": {
+            "C": 22.95,
+            "O": 112.53,
+            "C2": 2.08
+          },
+          "ratio_orig_over_candidate": 46.9759,
+          "null_ratio_c_over_c2": 1.026,
+          "raw_p50s": {
+            "C": [
+              128.76399999999998,
+              124.62599999999999,
+              124.897,
+              128.453,
+              128.374,
+              124.706,
+              210.659
+            ],
+            "O": [
+              5044.387,
+              46241.905,
+              5850.755,
+              6030.486,
+              43001.767,
+              4912.658,
+              7047.493
+            ],
+            "C2": [
+              125.117,
+              124.55600000000001,
+              127.792,
+              131.67,
+              124.83700000000002,
+              124.776,
+              125.15700000000001
+            ]
+          }
+        }
+      }
+    },
+    "run2": {
+      "blocks": 7,
+      "core": "2",
+      "workload": "df_transpose_materialize",
+      "dtype": "utf8",
+      "sizes": {
+        "100k": {
+          "candidate_p50_us": 1357.652,
+          "orig_eager_p50_us": 93193.578,
+          "candidate2_p50_us": 1339.7179999999998,
+          "cv_pct": {
+            "C": 6.2,
+            "O": 1.59,
+            "C2": 1.51
+          },
+          "ratio_orig_over_candidate": 68.6432,
+          "null_ratio_c_over_c2": 1.0134,
+          "raw_p50s": {
+            "C": [
+              1295.785,
+              1400.885,
+              1357.652,
+              1341.3319999999999,
+              1464.925,
+              1526.052,
+              1300.9950000000001
+            ],
+            "O": [
+              96806.38399999999,
+              93193.578,
+              92247.53600000001,
+              92732.074,
+              93744.193,
+              93637.791,
+              93155.628
+            ],
+            "C2": [
+              1339.7179999999998,
+              1321.394,
+              1367.802,
+              1329.87,
+              1327.9959999999999,
+              1372.3509999999999,
+              1355.539
+            ]
+          }
+        },
+        "10k": {
+          "candidate_p50_us": 125.077,
+          "orig_eager_p50_us": 5441.911,
+          "candidate2_p50_us": 125.50800000000001,
+          "cv_pct": {
+            "C": 1.52,
+            "O": 39.36,
+            "C2": 1.93
+          },
+          "ratio_orig_over_candidate": 43.5085,
+          "null_ratio_c_over_c2": 0.9966,
+          "raw_p50s": {
+            "C": [
+              124.436,
+              128.483,
+              124.84700000000001,
+              128.093,
+              124.637,
+              125.077,
+              128.353
+            ],
+            "O": [
+              6659.759,
+              4935.031,
+              10833.887999999999,
+              5115.212,
+              5441.911,
+              11188.9,
+              5126.915
+            ],
+            "C2": [
+              131.519,
+              125.027,
+              124.82600000000001,
+              128.343,
+              125.50800000000001,
+              125.227,
+              126.27999999999999
+            ]
+          }
+        }
+      }
+    }
+  }
+}

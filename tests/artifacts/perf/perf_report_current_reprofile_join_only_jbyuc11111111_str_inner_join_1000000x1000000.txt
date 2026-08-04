@@ -1,0 +1,302 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 600  of event 'cycles:P'
+# Event count (approx.): 4726970530
+#
+# Overhead  Command       Shared Object     Symbol                                                                                                                                                                                                                                                                                                                                                                              IPC   [IPC Coverage]
+# ........  ............  ................  ..................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    10.59%  perf_profile  libc.so.6         [.] _int_malloc                                                                                                                                                                                                                                                                                                                                                                     -      -
+            |
+            |--2.93%--__memcmp_avx2_movbe
+            |          |
+            |          |--0.62%--0
+            |          |
+            |           --0.52%--0xfec5000002d2820f
+            |
+            |--1.39%--_int_malloc
+            |          __libc_malloc2
+            |          |
+            |          |--0.70%--fp_join::build_single_key_inner_merge_output_with_selections
+            |          |
+            |           --0.69%--fp_join::merge_single_key_inner_unsorted
+            |
+            |--1.32%--__memmove_avx_unaligned_erms
+            |          |
+            |           --0.61%--0x2
+            |
+             --0.98%--fp_join::build_single_key_inner_merge_output_with_selections
+
+     9.27%  perf_profile  libc.so.6         [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                                                                                                                             -      -
+            |
+            |--1.07%--malloc_consolidate
+            |          _int_malloc
+            |          __libc_malloc2
+            |          fp_join::merge_single_key_inner_unsorted
+            |
+            |--1.05%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+            |
+            |--0.87%--fp_join::utf8_span_lower_bound
+            |
+            |--0.85%--__memcmp_avx2_movbe
+            |
+            |--0.53%--fp_join::merge_single_key_inner_unsorted
+            |
+            |--0.51%--fp_join::merge_dataframes_on_with_options
+            |
+             --0.51%--cfree@GLIBC_2.2.5
+
+     8.76%  perf_profile  perf_profile      [.] fp_join::build_single_key_inner_merge_output_with_selections                                                                                                                                                                                                                                                                                                                    -      -
+            |
+            |--2.10%--__memcmp_avx2_movbe
+            |
+            |--0.89%--fp_join::utf8_span_lower_bound
+            |
+            |--0.88%--_int_malloc
+            |          __libc_malloc2
+            |          |
+            |           --0.53%--fp_join::merge_single_key_inner_unsorted
+            |
+            |--0.53%--<std::sys::sync::once::futex::Once>::call
+            |
+             --0.53%--__memmove_avx_unaligned_erms
+
+     7.40%  perf_profile  perf_profile      [.] fp_join::utf8_span_lower_bound                                                                                                                                                                                                                                                                                                                                                  -      -
+            |
+            |--1.45%--malloc_consolidate
+            |          |
+            |          |--0.82%--_int_malloc
+            |          |          __libc_malloc2
+            |          |          fp_join::merge_single_key_inner_unsorted
+            |          |
+            |           --0.63%--_int_free_maybe_consolidate
+            |                     _int_free_chunk
+            |                     <alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+            |                     0
+            |
+            |--0.81%--_int_malloc
+            |          __libc_malloc2
+            |
+            |--0.70%--__memmove_avx_unaligned_erms
+            |          |
+            |           --0.53%--0x7ffe336c8a80
+            |
+            |--0.68%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |
+            |--0.67%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+            |
+             --0.66%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                       0xfec5000002d2820f
+
+     4.56%  perf_profile  libc.so.6         [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                                                                                    -      -
+            |
+            |--1.60%--__memcmp_avx2_movbe
+            |          |
+            |           --0.71%--0xfec5000002d2820f
+            |
+            |--0.66%--__memmove_avx_unaligned_erms
+            |
+             --0.55%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+
+     3.42%  perf_profile  perf_profile      [.] fp_join::insert_merged_output_column                                                                                                                                                                                                                                                                                                                                            -      -
+            |
+            |--0.88%--__memcmp_avx2_movbe
+            |
+             --0.76%--fp_join::build_single_key_inner_merge_output_with_selections
+
+     2.93%  perf_profile  perf_profile      [.] fp_join::merge_single_key_inner_unsorted                                                                                                                                                                                                                                                                                                                                        -      -
+            |
+            |--0.82%--__memmove_avx_unaligned_erms
+            |
+             --0.53%--_int_malloc
+                       __libc_malloc2
+
+     2.79%  perf_profile  perf_profile      [.] fp_join::merge_dataframes_on_with_options                                                                                                                                                                                                                                                                                                                                       -      -
+            |
+            |--0.68%--__memmove_avx_unaligned_erms
+            |
+             --0.52%--_int_malloc
+                       __libc_malloc2
+                       fp_join::insert_merged_output_column
+
+     2.70%  perf_profile  libc.so.6         [.] cfree@GLIBC_2.2.5                                                                                                                                                                                                                                                                                                                                                               -      -
+            |
+            |--0.83%--__memcmp_avx2_movbe
+            |
+             --0.53%--_int_malloc
+                       __libc_malloc2
+
+     2.64%  perf_profile  libc.so.6         [.] _int_free_merge_chunk                                                                                                                                                                                                                                                                                                                                                           -      -
+     2.58%  perf_profile  perf_profile      [.] fp_join::column_name_lookup_contains                                                                                                                                                                                                                                                                                                                                            -      -
+            |
+            |--0.98%--__memcmp_avx2_movbe
+            |
+             --0.53%--fp_join::utf8_span_lower_bound
+
+     2.26%  perf_profile  libc.so.6         [.] _int_free_chunk                                                                                                                                                                                                                                                                                                                                                                 -      -
+            |
+             --0.88%--__memmove_avx_unaligned_erms
+
+     2.07%  perf_profile  libc.so.6         [.] unlink_chunk.isra.0                                                                                                                                                                                                                                                                                                                                                             -      -
+     1.85%  perf_profile  libc.so.6         [.] malloc                                                                                                                                                                                                                                                                                                                                                                          -      -
+            |
+             --0.54%--__memmove_avx_unaligned_erms
+
+     1.81%  perf_profile  perf_profile      [.] perf_profile::build_str_join_frame                                                                                                                                                                                                                                                                                                                                              -      -
+            |
+            |--1.09%--perf_profile::build_str_join_frame
+            |
+             --0.54%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       perf_profile::build_str_join_frame
+
+     1.73%  perf_profile  libc.so.6         [.] malloc_consolidate                                                                                                                                                                                                                                                                                                                                                              -      -
+     1.57%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -
+            |
+            |--0.87%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |
+             --0.70%--__memcmp_avx2_movbe
+
+     1.56%  perf_profile  perf_profile      [.] <alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next                                                                                                                                                                                                                                                                              -      -
+     1.48%  perf_profile  perf_profile      [.] <std::sys::sync::once::futex::Once>::call                                                                                                                                                                                                                                                                                                                                       -      -
+            |
+             --0.80%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                       0xfec5000002d2820f
+
+     1.44%  perf_profile  perf_profile      [.] core::ptr::drop_in_place::<fp_join::MergedDataFrame>                                                                                                                                                                                                                                                                                                                            -      -
+            |
+             --0.70%--__memmove_avx_unaligned_erms
+
+     1.37%  perf_profile  libc.so.6         [.] __libc_malloc2                                                                                                                                                                                                                                                                                                                                                                  -      -
+     1.26%  perf_profile  perf_profile      [.] <core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<&alloc::string::String>, fp_join::build_single_key_inner_merge_output_with_selections::{closure#2}> as core::iter::traits::iterator::Iterator>::next                                                                                                                                                       -      -
+            |
+             --0.56%--__memcmp_avx2_movbe
+
+     1.25%  perf_profile  perf_profile      [.] fp_join::collect_join_key_columns                                                                                                                                                                                                                                                                                                                                               -      -
+     1.19%  perf_profile  perf_profile      [.] <fp_columnar::Column>::take_contiguous_range                                                                                                                                                                                                                                                                                                                                    -      -
+            |
+             --0.50%--__memcmp_avx2_movbe
+
+     1.13%  perf_profile  perf_profile      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                                                                                                                                                                                                                                                                                 -      -
+     1.12%  perf_profile  [unknown]         [k] 0xffffffff8621b2b7                                                                                                                                                                                                                                                                                                                                                              -      -
+            |
+             --0.71%--0xffffffff84c01199
+
+     1.10%  perf_profile  perf_profile      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                                                                                                                                                                                            -      -
+     1.04%  perf_profile  libc.so.6         [.] _int_free_maybe_consolidate                                                                                                                                                                                                                                                                                                                                                     -      -
+     1.01%  perf_profile  perf_profile      [.] <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert                                                                                                                                                                                                                                                                                                     -      -
+     0.92%  perf_profile  perf_profile      [.] core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>                                                                                                                                                                                                                                                                -      -
+     0.87%  perf_profile  perf_profile      [.] <fp_columnar::Column>::float64_arc_view_source                                                                                                                                                                                                                                                                                                                                  -      -
+     0.81%  perf_profile  perf_profile      [.] <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>                                                                                                                                                                                                                                                                                                 -      -
+     0.73%  perf_profile  perf_profile      [.] <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous                                                                                                                                                                                                                                                                                                                    -      -
+     0.73%  perf_profile  perf_profile      [.] <fp_columnar::Column>::as_strictly_increasing_utf8_contiguous                                                                                                                                                                                                                                                                                                                   -      -
+     0.72%  perf_profile  perf_profile      [.] fp_join::ensure_merge_suffixes_for_overlaps                                                                                                                                                                                                                                                                                                                                     -      -
+     0.71%  perf_profile  perf_profile      [.] core::ptr::drop_in_place::<fp_index::Index>                                                                                                                                                                                                                                                                                                                                     -      -
+     0.62%  perf_profile  [unknown]         [k] 0xffffffff85458f99                                                                                                                                                                                                                                                                                                                                                              -      -
+            |
+            ---perf_profile::build_str_join_frame
+
+     0.57%  perf_profile  perf_profile      [.] <hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>                                                                                                                                                                                                                                    -      -
+     0.55%  perf_profile  perf_profile      [.] perf_profile::main                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.55%  perf_profile  [unknown]         [k] 0xffffffff84c01192                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.50%  perf_profile  perf_profile      [.] <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<std::sync::once_lock::OnceLock<bool>>::try_insert::{closure#0}>::{closure#0}, !>                                                                                                                                                                                      -      -
+     0.41%  perf_profile  libc.so.6         [.] __memset_avx2_unaligned_erms                                                                                                                                                                                                                                                                                                                                                    -      -
+     0.36%  perf_profile  perf_profile      [.] <alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>::drop_slow                                                                                                                                                                                                                                                                                                            -      -
+     0.36%  perf_profile  perf_profile      [.] <fp_columnar::Column>::as_i64_slice                                                                                                                                                                                                                                                                                                                                             -      -
+     0.35%  perf_profile  libc.so.6         [.] alloc_perturb                                                                                                                                                                                                                                                                                                                                                                   -      -
+     0.34%  perf_profile  perf_profile      [.] <std::sync::once_lock::OnceLock<fp_index::SortOrder>>::initialize::<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::get_or_init<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::try_insert::{closure#0}>::{closure#0}, !>                                                                                                                                         -      -
+     0.29%  perf_profile  [unknown]         [k] 0xffffffff84c0117a                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.25%  perf_profile  [unknown]         [k] 0xffffffff853439a6                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.22%  perf_profile  [unknown]         [k] 0xffffffff853a4eff                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.21%  perf_profile  [unknown]         [k] 0xffffffff853bb56d                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.20%  perf_profile  [unknown]         [k] 0xffffffff853d7e8a                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.19%  perf_profile  perf_profile      [.] fp_join::build_single_key_dense_i64_inner_merge_output                                                                                                                                                                                                                                                                                                                          -      -
+     0.19%  perf_profile  [unknown]         [k] 0xffffffff85341525                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.19%  perf_profile  [unknown]         [k] 0xffffffff853d7e8f                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853d43cd                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff85455438                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853d2967                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::initialize<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::get_or_init<<std::sync::once_lock::OnceLock<fp_index::SortOrder>>::try_insert::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}                                                                     -      -
+     0.18%  perf_profile  perf_profile      [.] <fp_columnar::Column>::as_f64_slice                                                                                                                                                                                                                                                                                                                                             -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853d7e8c                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff84d04104                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  perf_profile      [.] <fp_columnar::Column>::from_f64_values                                                                                                                                                                                                                                                                                                                                          -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff85342072                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853d7e86                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff85452a61                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}                                                                                                       -      -
+     0.18%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<std::sync::once_lock::OnceLock<bool>>::try_insert::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}                                                                                                                  -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff85458f9e                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff85392d17                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.17%  perf_profile  [unknown]         [k] 0xffffffff853a4e56                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.17%  perf_profile  [unknown]         [k] 0xffffffff84c00005                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.17%  perf_profile  [unknown]         [k] 0xffffffff86223c8e                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.17%  perf_profile  perf_profile      [.] <fp_columnar::Column>::as_fixed_width_strictly_increasing_utf8_contiguous                                                                                                                                                                                                                                                                                                       -      -
+     0.17%  perf_profile  [unknown]         [k] 0xffffffff84d04109                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.17%  perf_profile  perf_profile      [.] <fp_index::Index>::new_known_unique_int64_unit_range                                                                                                                                                                                                                                                                                                                            -      -
+     0.17%  perf_profile  perf_profile      [.] <fp_columnar::Column>::utf8_arc_view_source                                                                                                                                                                                                                                                                                                                                     -      -
+     0.16%  perf_profile  perf_profile      [.] core::ptr::drop_in_place::<core::option::Option<fp_columnar::ColumnData>>                                                                                                                                                                                                                                                                                                       -      -
+     0.14%  perf_profile  perf_profile      [.] <alloc::raw_vec::RawVecInner>::finish_grow                                                                                                                                                                                                                                                                                                                                      -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8621b866                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8507e659                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff862280ca                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff853bb7b6                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85457561                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8621c6a9                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850cd880                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff857bfc46                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f8c9d1                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85123f60                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff84d04109                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86227695                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300fd8                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8623a4fc                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86228993                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff852fe66f                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcb                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2c3                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d280                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d285                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2bc                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d286                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2cc                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d289                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff84f337e6                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d285                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2cc                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f337e6                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcd                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b65                                                                                                                                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2d4                                                                                                                                                                                                                                                                                                                                                              -      -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

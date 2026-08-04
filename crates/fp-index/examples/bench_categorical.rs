@@ -6,8 +6,9 @@
 //! membership hot paths (with_categories / from_values / set_categories /
 //! add_categories / remove_categories).
 
-use fp_index::CategoricalIndex;
 use std::time::Instant;
+
+use fp_index::CategoricalIndex;
 
 fn fmt_err<T>(r: &Result<T, fp_index::IndexError>) -> String {
     match r {
@@ -26,11 +27,8 @@ fn golden() -> String {
     let ci = CategoricalIndex::with_categories(labels.clone(), cats.clone(), false).unwrap();
     out.push_str(&format!("wc_ok cats={:?}\n", ci.categories()));
     // with_categories: error (label not present)
-    let bad = CategoricalIndex::with_categories(
-        vec!["zzz".into(), "c1".into()],
-        cats.clone(),
-        false,
-    );
+    let bad =
+        CategoricalIndex::with_categories(vec!["zzz".into(), "c1".into()], cats.clone(), false);
     out.push_str(&format!("wc_err {}\n", fmt_err(&bad)));
 
     // from_values: first-seen categories order
@@ -38,7 +36,11 @@ fn golden() -> String {
         vec!["b".into(), "a".into(), "b".into(), "c".into(), "a".into()],
         true,
     );
-    out.push_str(&format!("fv cats={:?} ordered={}\n", fv.categories(), fv.ordered()));
+    out.push_str(&format!(
+        "fv cats={:?} ordered={}\n",
+        fv.categories(),
+        fv.ordered()
+    ));
 
     // set_categories: ok (superset)
     let mut sc_cats = cats.clone();
@@ -46,7 +48,10 @@ fn golden() -> String {
     out.push_str(&format!("sc_ok {}\n", fmt_err(&ci.set_categories(sc_cats))));
     // set_categories: error (drops c0 which is in use)
     let drop_cats: Vec<String> = (1..8).map(|i| format!("c{i}")).collect();
-    out.push_str(&format!("sc_err {}\n", fmt_err(&ci.set_categories(drop_cats))));
+    out.push_str(&format!(
+        "sc_err {}\n",
+        fmt_err(&ci.set_categories(drop_cats))
+    ));
 
     // add_categories: ok + error(already present)
     out.push_str(&format!(
@@ -59,7 +64,8 @@ fn golden() -> String {
     ));
 
     // remove_categories: ok (unused) + error(in use) + error(not a category)
-    let ci2 = CategoricalIndex::with_categories(labels.clone(), sc_cats_for_remove(), false).unwrap();
+    let ci2 =
+        CategoricalIndex::with_categories(labels.clone(), sc_cats_for_remove(), false).unwrap();
     out.push_str(&format!(
         "rm_ok {}\n",
         fmt_err(&ci2.remove_categories(&["c8".into()]))

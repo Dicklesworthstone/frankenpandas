@@ -1,0 +1,43 @@
+br-frankenpandas-c6yf1 — Typed extraction + O(n) order-stats for DataFrame.describe
+===================================================================================
+
+eydcr fifth-wave probe (DataFrame reductions): describe 43ms — and NOT helped by the
+quantile quickselect (zjc5z) because describe has its own code path. Per column it
+materialized col.values() Scalars into a Vec<f64>, then FULL-SORTED (O(n log n)) to
+read min, max, and the 25/50/75 percentiles.
+
+LEVER (one cohesive typed describe, same family as the quantile quickselect):
+  1. Typed Float64 extraction from the f64 + validity slices (no Vec<Scalar>
+     materialization), in index order so the sum/mean/var folds are byte-identical.
+  2. Order statistics via O(n) selection instead of the full sort: min/max are
+     folds; the three percentiles reuse quantile_select (select_nth_unstable).
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-5; loaded):
+  DataFrame.describe:  43  ->  14.8  = 2.9x
+
+SCORE: 2.9x >= 2.0 PASS.
+
+ISOMORPHISM:
+  - count/sum/mean/var are unchanged formulas over `nums` collected in the same
+    index order (typed extraction collects a value iff its materialized Scalar is
+    Float64(finite) — validity set AND datum not NaN — exactly the prior
+    `!is_missing && to_f64.is_ok()` filter), so they are byte-identical.
+  - min/max: for finite, non-negative-zero data the extreme value is unique-valued,
+    so the partial_cmp folds equal sorted[0]/sorted[n-1]; the three percentiles via
+    quantile_select equal sort + percentile_linear (proven in zjc5z).
+  - -0.0/0.0 ties are equal under partial_cmp but bit-distinct, so an unstable
+    select / a fold could pick a different signed zero than the stable sort — any
+    negative zero present routes the WHOLE order-statistics block to the exact
+    sort + sorted[0]/[n-1] + percentile_linear path. NaN never reaches here
+    (filtered during extraction). Int64 columns keep the same path (their f64s are
+    extracted identically; as_f64_slice_with_validity is None so the Scalar loop
+    runs, then the shared stats code).
+  - Golden sha256 (gap_hunt golden: full elementwise/reduction family + describe
+    over an all-valid frame and a nullable frame, n=5000 x4) UNCHANGED:
+      1cf4443726ec2aa1dd7598da10b6310552835a7e240d00eb8f34763b8ba0bfb2
+
+GATES (rch + local):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 0 failures

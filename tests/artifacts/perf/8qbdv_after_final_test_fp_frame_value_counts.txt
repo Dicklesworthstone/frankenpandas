@@ -1,0 +1,98 @@
+[RCH] local (no admissible workers: insufficient_slots=2,hard_preflight=10)
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling fp-frame v0.1.0 (/data/projects/.scratch/frankenpandas-lavenderstone-uza04115-closeout-20260613/crates/fp-frame)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.25s
+     Running unittests src/lib.rs (/data/projects/.scratch/cargo-target-lavenderstone-8qbdv-tests/debug/deps/fp_frame-499063227962f068)
+
+running 33 tests
+test test_select_columns_perf_76e1fd::value_counts_dense_timing_vs_hashmap ... ignored, timing benchmark; run with --ignored --nocapture on the rch VM
+test tests::dataframe_groupby_value_counts_preserves_descending_count_sort ... ok
+test tests::df_value_counts_basic ... ok
+test tests::dataframe_value_counts_preserves_count_descending_sort ... ok
+test tests::dataframe_value_counts_golden_basic ... ok
+test tests::df_value_counts_map_differs_from_row_value_counts ... ok
+test tests::df_value_counts_map_one_series_per_column ... ok
+test tests::series_value_counts_all_missing_returns_empty ... ok
+test tests::groupby_value_counts ... ok
+test tests::series_value_counts_ascending ... ok
+test tests::df_value_counts_merges_negative_zero_and_zero ... ok
+test tests::series_value_counts_bins_basic ... ok
+test tests::series_value_counts_bool_labels_use_python_style_strings ... ok
+test tests::series_value_counts_categorical_dropna_false_adds_missing_bucket ... ok
+test tests::series_value_counts_categorical_sort_false_preserves_category_order ... ok
+test tests::series_value_counts_categorical_includes_unused_categories ... ok
+test tests::series_value_counts_golden_basic ... ok
+test tests::series_value_counts_include_na ... ok
+test tests::series_value_counts_keeps_distinct_null_kinds_joeff_phase2 ... ok
+test tests::series_value_counts_null_bucket_at_first_seen_position_joeff ... ok
+test tests::series_value_counts_preserves_first_seen_order_for_ties ... ok
+test tests::series_value_counts_preserves_first_seen_order_for_ties_after_o_n_fix ... ok
+test tests::series_value_counts_sets_index_name_to_series_name_nvglo ... ok
+test tests::series_value_counts_sorts_desc_and_drops_missing ... ok
+test tests::series_value_counts_with_options_normalize ... ok
+test tests::series_value_counts_with_options_normalize_excludes_missing_from_denominator ... ok
+test tests::test_value_counts_subset ... ok
+test tests::value_counts_golden_basic ... ok
+test tests::test_series_groupby_value_counts_aggregate_nt65g7 ... ok
+test tests::series_value_counts_handles_many_unique_values_fast ... ok
+test tests::dataframe_groupby_value_counts_uses_o_n_hashmap_per_group ... ok
+test test_select_columns_perf_76e1fd::value_counts_dense_matches_reference ... ok
+test tests::dataframe_value_counts_hashmap_perf_regression_guard ... ok
+
+test result: ok. 32 passed; 0 failed; 1 ignored; 0 measured; 2853 filtered out; finished in 0.01s
+

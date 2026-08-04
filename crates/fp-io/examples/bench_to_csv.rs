@@ -6,13 +6,13 @@
 //! (O(N·C·log C)); resolving the column refs once before the loop makes it
 //! O(N·C). Output is byte-identical.
 
+use std::{collections::BTreeMap, time::Instant};
+
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::{Index, IndexLabel};
 use fp_io::write_csv_string;
 use fp_types::{NullKind, Scalar};
-use std::collections::BTreeMap;
-use std::time::Instant;
 
 fn frame(n_rows: usize, n_cols: usize, salt: i64) -> DataFrame {
     let labels: Vec<IndexLabel> = (0..n_rows as i64).map(IndexLabel::Int64).collect();
@@ -94,5 +94,8 @@ fn main() {
     let d = t.elapsed();
     std::hint::black_box(s.len());
 
-    println!("TIMING rows=40000 cols=60 to_csv={:.3}ms", d.as_secs_f64() * 1e3);
+    println!(
+        "TIMING rows=40000 cols=60 to_csv={:.3}ms",
+        d.as_secs_f64() * 1e3
+    );
 }

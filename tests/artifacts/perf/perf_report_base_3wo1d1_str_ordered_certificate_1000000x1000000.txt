@@ -1,0 +1,141 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 54  of event 'cycles:P'
+# Event count (approx.): 16889835
+#
+# Overhead  Command     Shared Object     Symbol                                                                                                                                                                                                                                                                                                                    
+# ........  ..........  ................  ..........................................................................................................................................................................................................................................................................................................................
+#
+    25.74%  join-bench  join-bench        [.] <fp_columnar::Column>::from_f64_values
+            |
+            ---<fp_columnar::Column>::from_f64_values
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+    18.59%  join-bench  [unknown]         [k] 0xffffffff8622811f
+            |
+            ---0xffffffff84fea947
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+    17.91%  join-bench  [unknown]         [k] 0xffffffff85104b37
+            |
+            ---0xffffffff84c01199
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+    14.95%  join-bench  join-bench        [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes
+               join_bench::merge_once
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+    11.70%  join-bench  [unknown]         [k] 0xffffffff8620c700
+            |
+            ---0xffffffff854c0993
+               0xffffffff854c0aa0
+               0xffffffff8554993a
+               0xffffffff8554a125
+               0xffffffff8554a23e
+               0xffffffff854bf814
+               0xffffffff854bfb94
+               0xffffffff8547b8e0
+               0xffffffff8547b988
+               0xffffffff84f2561d
+               0xffffffff86220551
+               0xffffffff84c0012b
+               llseek@GLIBC_2.2.5
+               fclose@@GLIBC_2.2.5
+               pthread_getattr_np@@GLIBC_2.32
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     9.73%  join-bench  [unknown]         [k] 0xffffffff853da491
+            |
+            ---0xffffffff853a3790
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.45%  join-bench  join-bench        [.] join_bench::build_ordered_utf8_frame
+     0.13%  join-bench  libc.so.6         [.] __memmove_avx_unaligned_erms
+     0.13%  join-bench  [unknown]         [k] 0xffffffff86239bc7
+     0.12%  join-bench  [unknown]         [k] 0xffffffff857c0244
+     0.12%  join-bench  [unknown]         [k] 0xffffffff861f66c4
+     0.12%  join-bench  [unknown]         [k] 0xffffffff853a4e56
+     0.10%  join-bench  libc.so.6         [.] __memcmp_avx2_movbe
+     0.10%  join-bench  [unknown]         [k] 0xffffffff853f1ff8
+     0.09%  perf-exec   [unknown]         [k] 0xffffffff8548bf28
+     0.01%  join-bench  [unknown]         [k] 0xffffffff8530d2bc
+     0.01%  join-bench  [unknown]         [k] 0xffffffff8530d2c3
+     0.00%  join-bench  [unknown]         [k] 0xffffffff84fdedcb
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d280
+     0.00%  join-bench  [unknown]         [k] 0xffffffff85300b69
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d285
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d286
+     0.00%  join-bench  [unknown]         [k] 0xffffffff850c2906
+     0.00%  join-bench  [unknown]         [k] 0xffffffff85104b20
+     0.00%  join-bench  [unknown]         [k] 0xffffffff85300b60
+     0.00%  join-bench  [unknown]         [k] 0xffffffff85300b65
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d2cc
+     0.00%  perf-exec   [unknown]         [k] 0xffffffff85300b65
+     0.00%  perf-exec   [unknown]         [k] 0xffffffff8530d280
+     0.00%  perf-exec   [unknown]         [k] 0xffffffff8530d2c3
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

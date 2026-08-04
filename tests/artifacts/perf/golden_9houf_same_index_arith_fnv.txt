@@ -1,0 +1,9 @@
+# br-frankenpandas-9houf golden: aligned_binary_f64_same_positions output digest
+# (f64 bits + per-row validity, FNV-1a64) at n=100000, before==after.
+add      ce1f207031ac262e
+sub      a4d7b3136b8d1285
+mul      06348b3433a34fe8
+div      72b9e6b279eecef3
+mod      a4d7af5e77c2a75f
+pow      830a3101d8cc86a4
+floordiv 23f86c13ec6d2f98

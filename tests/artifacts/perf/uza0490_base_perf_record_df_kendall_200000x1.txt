@@ -1,0 +1,20 @@
+  [2m2026-06-13T03:00:15.652225Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: perf record -g --call-graph fp -o tests/artifacts/perf/uza0490_base_perf_df_kendall_200000x1.data -- /data/projects/.scratch/cargo-target-orangepeak-uza0490-base/release-perf/examples/perf_profile df_kendall 200000 1[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Missing support for build id in kernel mmap events.
+Disable this warning with --no-buildid-mmap
+Error:
+Access to performance monitoring and observability operations is limited.
+Consider adjusting /proc/sys/kernel/perf_event_paranoid setting to open
+access to performance monitoring and observability operations for processes
+without CAP_PERFMON, CAP_SYS_PTRACE or CAP_SYS_ADMIN Linux capability.
+More information can be found at 'Perf events and tool security' document:
+https://www.kernel.org/doc/html/latest/admin-guide/perf-security.html
+perf_event_paranoid setting is 4:
+  -1: Allow use of (almost) all events by all users
+      Ignore mlock limit after perf_event_mlock_kb without CAP_IPC_LOCK
+>= 0: Disallow raw and ftrace function tracepoint access
+>= 1: Disallow CPU event access
+>= 2: Disallow kernel profiling
+To make the adjusted perf_event_paranoid setting permanent preserve it
+in /etc/sysctl.conf (e.g. kernel.perf_event_paranoid = <setting>)

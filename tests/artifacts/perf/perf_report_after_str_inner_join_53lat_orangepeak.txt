@@ -1,0 +1,214 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 850  of event 'cycles:P'
+# Event count (approx.): 13000196135
+#
+# Overhead  Symbol                                                                                                                                                                                Shared Object     IPC   [IPC Coverage]
+# ........  ....................................................................................................................................................................................  ................  ....................
+#
+    39.91%  [.] __memcmp_avx2_movbe                                                                                                                                                               libc.so.6         -      -
+            |
+            |--19.78%--__memcmp_avx2_movbe
+            |          |
+            |          |--16.77%--fp_join::merge_single_key_inner_unsorted
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          perf_profile::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main@@GLIBC_2.34
+            |          |          _start
+            |          |
+            |           --3.01%--fp_join::merge_dataframes_on_with_options
+            |                     perf_profile::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |                     std::rt::lang_start::<()>::{closure#0}
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |
+            |--13.93%--fp_join::strictly_increasing_utf8_key_spans
+            |          fp_join::merge_single_key_inner_unsorted
+            |          fp_join::merge_dataframes_on_with_options
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --6.19%--fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+    27.61%  [.] fp_join::merge_single_key_inner_unsorted                                                                                                                                          perf_profile      -      -
+            |
+            |--17.96%--fp_join::merge_single_key_inner_unsorted
+            |          fp_join::merge_dataframes_on_with_options
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --9.50%--__memcmp_avx2_movbe
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+    22.73%  [.] fp_join::strictly_increasing_utf8_key_spans                                                                                                                                       perf_profile      -      -
+            |
+            |--14.67%--__memcmp_avx2_movbe
+            |          fp_join::merge_single_key_inner_unsorted
+            |          fp_join::merge_dataframes_on_with_options
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --8.05%--fp_join::strictly_increasing_utf8_key_spans
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     4.40%  [.] <fp_columnar::Column>::take_positions                                                                                                                                             perf_profile      -      -
+            |
+            |--3.59%--<fp_columnar::Column>::take_positions
+            |          fp_join::build_single_key_inner_merge_output
+            |          fp_join::merge_single_key_inner_unsorted
+            |          fp_join::merge_dataframes_on_with_options
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.81%--__memmove_avx_unaligned_erms
+                       fp_join::build_single_key_inner_merge_output
+                       fp_join::merge_single_key_inner_unsorted
+                       fp_join::merge_dataframes_on_with_options
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     0.53%  [.] <alloc::string::String as core::fmt::Write>::write_char                                                                                                                           perf_profile      -      -
+     0.52%  [.] core::fmt::write                                                                                                                                                                  perf_profile      -      -
+     0.37%  [.] perf_profile::build_str_join_frame                                                                                                                                                perf_profile      -      -
+     0.33%  [.] core::ptr::drop_in_place::<fp_index::Index>                                                                                                                                       perf_profile      -      -
+     0.33%  [k] 0xffffffff8621b2b7                                                                                                                                                                [unknown]         -      -
+     0.32%  [k] 0xffffffff84c001bd                                                                                                                                                                [unknown]         -      -
+     0.21%  [k] 0xffffffff853a4e56                                                                                                                                                                [unknown]         -      -
+     0.19%  [.] <core::fmt::Formatter>::pad_integral                                                                                                                                              perf_profile      -      -
+     0.17%  [.] <hashbrown::raw::RawTable<(&alloc::string::String, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&alloc::string::String, (), std::hash::random::RandomState>::{closure#0}>  perf_profile      -      -
+     0.17%  [k] 0xffffffff85392d17                                                                                                                                                                [unknown]         -      -
+     0.17%  [k] 0xffffffff85452de1                                                                                                                                                                [unknown]         -      -
+     0.16%  [k] 0xffffffff85452a65                                                                                                                                                                [unknown]         -      -
+     0.16%  [k] 0xffffffff8547e8b1                                                                                                                                                                [unknown]         -      -
+     0.16%  [k] 0xffffffff84fd0b40                                                                                                                                                                [unknown]         -      -
+     0.16%  [k] 0xffffffff84d04104                                                                                                                                                                [unknown]         -      -
+     0.16%  [k] 0xffffffff854c0f86                                                                                                                                                                [unknown]         -      -
+     0.16%  [k] 0xffffffff86229e6b                                                                                                                                                                [unknown]         -      -
+     0.16%  [k] 0xffffffff85300d60                                                                                                                                                                [unknown]         -      -
+     0.16%  [k] 0xffffffff862251d0                                                                                                                                                                [unknown]         -      -
+     0.16%  [k] 0xffffffff8539b8ec                                                                                                                                                                [unknown]         -      -
+     0.15%  [k] 0xffffffff8556b0fc                                                                                                                                                                [unknown]         -      -
+     0.15%  [k] 0xffffffff8530926d                                                                                                                                                                [unknown]         -      -
+     0.14%  [k] 0xffffffff853a5545                                                                                                                                                                [unknown]         -      -
+     0.13%  [k] 0xffffffff862252e9                                                                                                                                                                [unknown]         -      -
+     0.01%  [k] 0xffffffff8508817a                                                                                                                                                                [unknown]         -      -
+     0.01%  [k] 0xffffffff853a3872                                                                                                                                                                [unknown]         -      -
+     0.01%  [k] 0xffffffff84feb8a1                                                                                                                                                                [unknown]         -      -
+     0.01%  [.] <alloc::string::String as core::fmt::Write>::write_str                                                                                                                            perf_profile      -      -
+     0.00%  [.] __wcpncpy_ifunc                                                                                                                                                                   libc.so.6         -      -
+     0.00%  [k] 0xffffffff862280ab                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff853a4de7                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff84c01192                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff84f8c9d1                                                                                                                                                                [unknown]         -      -
+     0.00%  [.] <usize as core::fmt::LowerHex>::fmt                                                                                                                                               perf_profile      -      -
+     0.00%  [k] 0xffffffff84c01248                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8621c6a9                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85124022                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85089c26                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85138691                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff84c015a2                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530c3f3                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff853029ee                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff84c01221                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff853d434d                                                                                                                                                                [unknown]         -      -
+     0.00%  [.] <std::path::Components as core::iter::traits::double_ended::DoubleEndedIterator>::next_back                                                                                       perf_profile      -      -
+     0.00%  [k] 0xffffffff85473750                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85393ee3                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85452a07                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85326407                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d2bc                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d2c3                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff84fdedcb                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d280                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d285                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d2cc                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85300b80                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d286                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85300b65                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85300b66                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff84fdedcd                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d289                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d29f                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff84f32f8e                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85300b60                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85300b69                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85300b70                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85300b79                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff85300b7c                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d28b                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d28c                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d2af                                                                                                                                                                [unknown]         -      -
+     0.00%  [k] 0xffffffff8530d2d4                                                                                                                                                                [unknown]         -      -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

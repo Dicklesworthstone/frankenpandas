@@ -9,7 +9,7 @@
 use fp_expr::DataFrameExprExt;
 use fp_frame::{DataFrame, Series};
 use fp_join::DataFrameMergeExt;
-use fp_types::Scalar;
+use fp_types::{DType, Scalar};
 
 /// Build a sample "trades" dataset as CSV text.
 fn sample_trades_csv() -> &'static str {
@@ -101,15 +101,25 @@ fn e2e_step2_to_datetime() {
     let parsed = fp_frame::to_datetime(&date_col_series).expect("to_datetime failed");
     assert_eq!(parsed.len(), 8);
 
-    // All dates should be normalized to "YYYY-MM-DD 00:00:00" format.
-    assert!(
-        matches!(parsed.values()[0], Scalar::Utf8(_)),
-        "expected Utf8 datetime string"
+    // pandas `to_datetime` yields a typed `datetime64[ns]` column (not object
+    // strings), so the result is a `Datetime64` column of nanosecond epochs.
+    assert_eq!(
+        parsed.dtype(),
+        DType::Datetime64,
+        "to_datetime yields datetime64[ns], matching pandas"
     );
-    if let Scalar::Utf8(s) = &parsed.values()[0] {
-        assert!(s.starts_with("2024-01-15"), "expected 2024-01-15, got: {s}");
-        assert!(s.contains("00:00:00"), "expected time component, got: {s}");
-    }
+    let first = &parsed.values()[0];
+    assert!(
+        matches!(first, Scalar::Datetime64(_)),
+        "expected typed Datetime64, got: {first:?}"
+    );
+    // First trade date is 2024-01-15; pandas normalizes a bare date to midnight
+    // UTC. `pd.Timestamp('2024-01-15').value == 1_705_276_800_000_000_000`.
+    assert_eq!(
+        *first,
+        Scalar::Datetime64(1_705_276_800_000_000_000),
+        "expected 2024-01-15 00:00:00 (1705276800s * 1e9 nanos)"
+    );
 }
 
 // ── Step 3: Query filter ─────────────────────────────────────────────

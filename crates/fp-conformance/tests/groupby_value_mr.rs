@@ -8,13 +8,14 @@
 //! It guards the values that the typed-columnar gather (fi6zx) and the FxHash
 //! group-key map (a14692e0) feed into.
 
+use std::collections::BTreeMap;
+
 use fp_frame::Series;
-use fp_groupby::{groupby_sum, GroupByOptions};
+use fp_groupby::{GroupByOptions, groupby_sum};
 use fp_index::IndexLabel;
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
 use proptest::prelude::*;
-use std::collections::BTreeMap;
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]

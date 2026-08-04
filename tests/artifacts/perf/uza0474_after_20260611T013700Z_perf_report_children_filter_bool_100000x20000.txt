@@ -1,0 +1,905 @@
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles:P'
+# Event count (approx.): 4560212243
+#
+# Children      Self  Symbol                                                                                                                                                                                                                                                                          Shared Object         IPC   [IPC Coverage]
+# ........  ........  ..............................................................................................................................................................................................................................................................................  ....................  ....................
+#
+    99.96%     0.00%  [.] _start                                                                                                                                                                                                                                                                      perf_profile          -      -
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               |
+                --99.88%--std::rt::lang_start::<()>::{closure#0}
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                          perf_profile::main
+                          |
+                          |--95.85%--<fp_frame::DataFrame>::loc_bool
+                          |          |
+                          |          |--1.96%--<fp_frame::DataFrame>::new_with_axes
+                          |          |
+                          |           --0.97%--__memcmp_avx2_movbe
+                          |
+                          |--2.57%--perf_profile::build_numeric_frame
+                          |          |
+                          |           --2.13%--<fp_columnar::Column>::from_values
+                          |                     |
+                          |                     |--1.40%--__memmove_avx_unaligned_erms
+                          |                     |          |
+                          |                     |           --1.04%--0xffffffff84c00bb7
+                          |                     |                     |
+                          |                     |                      --1.04%--0xffffffff8622811f
+                          |                     |                                |
+                          |                     |                                 --0.95%--0xffffffff84feb96b
+                          |                     |                                           0xffffffff853a5627
+                          |                     |                                           |
+                          |                     |                                            --0.86%--0xffffffff853a53ad
+                          |                     |                                                      0xffffffff853a4de7
+                          |                     |                                                      |
+                          |                     |                                                       --0.79%--0xffffffff853a37ea
+                          |                     |                                                                 |
+                          |                     |                                                                  --0.53%--0xffffffff853a33d2
+                          |                     |                                                                            0xffffffff8541df1b
+                          |                     |                                                                            0xffffffff8541a9e8
+                          |                     |
+                          |                      --0.71%--<fp_columnar::Column>::new
+                          |
+                           --0.88%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                                     |
+                                      --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+    99.96%     0.00%  [.] __libc_start_main@@GLIBC_2.34                                                                                                                                                                                                                                               libc.so.6             -      -
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               |
+                --99.88%--std::rt::lang_start::<()>::{closure#0}
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                          perf_profile::main
+                          |
+                          |--95.85%--<fp_frame::DataFrame>::loc_bool
+                          |          |
+                          |          |--1.96%--<fp_frame::DataFrame>::new_with_axes
+                          |          |
+                          |           --0.97%--__memcmp_avx2_movbe
+                          |
+                          |--2.57%--perf_profile::build_numeric_frame
+                          |          |
+                          |           --2.13%--<fp_columnar::Column>::from_values
+                          |                     |
+                          |                     |--1.40%--__memmove_avx_unaligned_erms
+                          |                     |          |
+                          |                     |           --1.04%--0xffffffff84c00bb7
+                          |                     |                     |
+                          |                     |                      --1.04%--0xffffffff8622811f
+                          |                     |                                |
+                          |                     |                                 --0.95%--0xffffffff84feb96b
+                          |                     |                                           0xffffffff853a5627
+                          |                     |                                           |
+                          |                     |                                            --0.86%--0xffffffff853a53ad
+                          |                     |                                                      0xffffffff853a4de7
+                          |                     |                                                      |
+                          |                     |                                                       --0.79%--0xffffffff853a37ea
+                          |                     |                                                                 |
+                          |                     |                                                                  --0.53%--0xffffffff853a33d2
+                          |                     |                                                                            0xffffffff8541df1b
+                          |                     |                                                                            0xffffffff8541a9e8
+                          |                     |
+                          |                      --0.71%--<fp_columnar::Column>::new
+                          |
+                           --0.88%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                                     |
+                                      --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+    99.96%     0.00%  [.] __libc_start_call_main                                                                                                                                                                                                                                                      libc.so.6             -      -
+            |
+            ---main
+               std::rt::lang_start_internal
+               |
+                --99.88%--std::rt::lang_start::<()>::{closure#0}
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                          perf_profile::main
+                          |
+                          |--95.85%--<fp_frame::DataFrame>::loc_bool
+                          |          |
+                          |          |--1.96%--<fp_frame::DataFrame>::new_with_axes
+                          |          |
+                          |           --0.97%--__memcmp_avx2_movbe
+                          |
+                          |--2.57%--perf_profile::build_numeric_frame
+                          |          |
+                          |           --2.13%--<fp_columnar::Column>::from_values
+                          |                     |
+                          |                     |--1.40%--__memmove_avx_unaligned_erms
+                          |                     |          |
+                          |                     |           --1.04%--0xffffffff84c00bb7
+                          |                     |                     |
+                          |                     |                      --1.04%--0xffffffff8622811f
+                          |                     |                                |
+                          |                     |                                 --0.95%--0xffffffff84feb96b
+                          |                     |                                           0xffffffff853a5627
+                          |                     |                                           |
+                          |                     |                                            --0.86%--0xffffffff853a53ad
+                          |                     |                                                      0xffffffff853a4de7
+                          |                     |                                                      |
+                          |                     |                                                       --0.79%--0xffffffff853a37ea
+                          |                     |                                                                 |
+                          |                     |                                                                  --0.53%--0xffffffff853a33d2
+                          |                     |                                                                            0xffffffff8541df1b
+                          |                     |                                                                            0xffffffff8541a9e8
+                          |                     |
+                          |                      --0.71%--<fp_columnar::Column>::new
+                          |
+                           --0.88%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                                     |
+                                      --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+    99.96%     0.00%  [.] main                                                                                                                                                                                                                                                                        perf_profile          -      -
+            |
+            ---std::rt::lang_start_internal
+               |
+                --99.88%--std::rt::lang_start::<()>::{closure#0}
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                          perf_profile::main
+                          |
+                          |--95.85%--<fp_frame::DataFrame>::loc_bool
+                          |          |
+                          |          |--1.96%--<fp_frame::DataFrame>::new_with_axes
+                          |          |
+                          |           --0.97%--__memcmp_avx2_movbe
+                          |
+                          |--2.57%--perf_profile::build_numeric_frame
+                          |          |
+                          |           --2.13%--<fp_columnar::Column>::from_values
+                          |                     |
+                          |                     |--1.40%--__memmove_avx_unaligned_erms
+                          |                     |          |
+                          |                     |           --1.04%--0xffffffff84c00bb7
+                          |                     |                     |
+                          |                     |                      --1.04%--0xffffffff8622811f
+                          |                     |                                |
+                          |                     |                                 --0.95%--0xffffffff84feb96b
+                          |                     |                                           0xffffffff853a5627
+                          |                     |                                           |
+                          |                     |                                            --0.86%--0xffffffff853a53ad
+                          |                     |                                                      0xffffffff853a4de7
+                          |                     |                                                      |
+                          |                     |                                                       --0.79%--0xffffffff853a37ea
+                          |                     |                                                                 |
+                          |                     |                                                                  --0.53%--0xffffffff853a33d2
+                          |                     |                                                                            0xffffffff8541df1b
+                          |                     |                                                                            0xffffffff8541a9e8
+                          |                     |
+                          |                      --0.71%--<fp_columnar::Column>::new
+                          |
+                           --0.88%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                                     |
+                                      --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+    99.96%     0.00%  [.] std::rt::lang_start_internal                                                                                                                                                                                                                                                perf_profile          -      -
+            |
+             --99.88%--std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       |
+                       |--95.85%--<fp_frame::DataFrame>::loc_bool
+                       |          |
+                       |          |--1.96%--<fp_frame::DataFrame>::new_with_axes
+                       |          |
+                       |           --0.97%--__memcmp_avx2_movbe
+                       |
+                       |--2.57%--perf_profile::build_numeric_frame
+                       |          |
+                       |           --2.13%--<fp_columnar::Column>::from_values
+                       |                     |
+                       |                     |--1.40%--__memmove_avx_unaligned_erms
+                       |                     |          |
+                       |                     |           --1.04%--0xffffffff84c00bb7
+                       |                     |                     |
+                       |                     |                      --1.04%--0xffffffff8622811f
+                       |                     |                                |
+                       |                     |                                 --0.95%--0xffffffff84feb96b
+                       |                     |                                           0xffffffff853a5627
+                       |                     |                                           |
+                       |                     |                                            --0.86%--0xffffffff853a53ad
+                       |                     |                                                      0xffffffff853a4de7
+                       |                     |                                                      |
+                       |                     |                                                       --0.79%--0xffffffff853a37ea
+                       |                     |                                                                 |
+                       |                     |                                                                  --0.53%--0xffffffff853a33d2
+                       |                     |                                                                            0xffffffff8541df1b
+                       |                     |                                                                            0xffffffff8541a9e8
+                       |                     |
+                       |                      --0.71%--<fp_columnar::Column>::new
+                       |
+                        --0.88%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                                  |
+                                   --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+    99.88%     0.00%  [.] std::rt::lang_start::<()>::{closure#0}                                                                                                                                                                                                                                      perf_profile          -      -
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--95.85%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.96%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --0.97%--__memcmp_avx2_movbe
+               |
+               |--2.57%--perf_profile::build_numeric_frame
+               |          |
+               |           --2.13%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--1.40%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --1.04%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --1.04%--0xffffffff8622811f
+               |                     |                                |
+               |                     |                                 --0.95%--0xffffffff84feb96b
+               |                     |                                           0xffffffff853a5627
+               |                     |                                           |
+               |                     |                                            --0.86%--0xffffffff853a53ad
+               |                     |                                                      0xffffffff853a4de7
+               |                     |                                                      |
+               |                     |                                                       --0.79%--0xffffffff853a37ea
+               |                     |                                                                 |
+               |                     |                                                                  --0.53%--0xffffffff853a33d2
+               |                     |                                                                            0xffffffff8541df1b
+               |                     |                                                                            0xffffffff8541a9e8
+               |                     |
+               |                      --0.71%--<fp_columnar::Column>::new
+               |
+                --0.88%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                           --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+    99.88%     0.00%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>                                                                                                                                                                                                               perf_profile          -      -
+            |
+            ---perf_profile::main
+               |
+               |--95.85%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.96%--<fp_frame::DataFrame>::new_with_axes
+               |          |
+               |           --0.97%--__memcmp_avx2_movbe
+               |
+               |--2.57%--perf_profile::build_numeric_frame
+               |          |
+               |           --2.13%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--1.40%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --1.04%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --1.04%--0xffffffff8622811f
+               |                     |                                |
+               |                     |                                 --0.95%--0xffffffff84feb96b
+               |                     |                                           0xffffffff853a5627
+               |                     |                                           |
+               |                     |                                            --0.86%--0xffffffff853a53ad
+               |                     |                                                      0xffffffff853a4de7
+               |                     |                                                      |
+               |                     |                                                       --0.79%--0xffffffff853a37ea
+               |                     |                                                                 |
+               |                     |                                                                  --0.53%--0xffffffff853a33d2
+               |                     |                                                                            0xffffffff8541df1b
+               |                     |                                                                            0xffffffff8541a9e8
+               |                     |
+               |                      --0.71%--<fp_columnar::Column>::new
+               |
+                --0.88%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                           --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+    99.88%     0.00%  [.] perf_profile::main                                                                                                                                                                                                                                                          perf_profile          -      -
+            |
+            |--95.85%--<fp_frame::DataFrame>::loc_bool
+            |          |
+            |          |--1.96%--<fp_frame::DataFrame>::new_with_axes
+            |          |
+            |           --0.97%--__memcmp_avx2_movbe
+            |
+            |--2.57%--perf_profile::build_numeric_frame
+            |          |
+            |           --2.13%--<fp_columnar::Column>::from_values
+            |                     |
+            |                     |--1.40%--__memmove_avx_unaligned_erms
+            |                     |          |
+            |                     |           --1.04%--0xffffffff84c00bb7
+            |                     |                     |
+            |                     |                      --1.04%--0xffffffff8622811f
+            |                     |                                |
+            |                     |                                 --0.95%--0xffffffff84feb96b
+            |                     |                                           0xffffffff853a5627
+            |                     |                                           |
+            |                     |                                            --0.86%--0xffffffff853a53ad
+            |                     |                                                      0xffffffff853a4de7
+            |                     |                                                      |
+            |                     |                                                       --0.79%--0xffffffff853a37ea
+            |                     |                                                                 |
+            |                     |                                                                  --0.53%--0xffffffff853a33d2
+            |                     |                                                                            0xffffffff8541df1b
+            |                     |                                                                            0xffffffff8541a9e8
+            |                     |
+            |                      --0.71%--<fp_columnar::Column>::new
+            |
+             --0.88%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                       |
+                        --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+    96.25%    92.32%  [.] <fp_frame::DataFrame>::loc_bool                                                                                                                                                                                                                                             perf_profile          -      -
+            |
+            |--92.32%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          perf_profile::main
+            |          |
+            |           --91.92%--<fp_frame::DataFrame>::loc_bool
+            |                     |
+            |                      --0.61%--__memcmp_avx2_movbe
+            |
+             --3.93%--<fp_frame::DataFrame>::loc_bool
+                       |
+                        --1.51%--<fp_frame::DataFrame>::new_with_axes
+
+     2.57%     0.17%  [.] perf_profile::build_numeric_frame                                                                                                                                                                                                                                           perf_profile          -      -
+            |
+             --2.40%--perf_profile::build_numeric_frame
+                       |
+                        --2.13%--<fp_columnar::Column>::from_values
+                                  |
+                                  |--1.40%--__memmove_avx_unaligned_erms
+                                  |          |
+                                  |           --1.04%--0xffffffff84c00bb7
+                                  |                     |
+                                  |                      --1.04%--0xffffffff8622811f
+                                  |                                |
+                                  |                                 --0.95%--0xffffffff84feb96b
+                                  |                                           0xffffffff853a5627
+                                  |                                           |
+                                  |                                            --0.86%--0xffffffff853a53ad
+                                  |                                                      0xffffffff853a4de7
+                                  |                                                      |
+                                  |                                                       --0.79%--0xffffffff853a37ea
+                                  |                                                                 |
+                                  |                                                                  --0.53%--0xffffffff853a33d2
+                                  |                                                                            0xffffffff8541df1b
+                                  |                                                                            0xffffffff8541a9e8
+                                  |
+                                   --0.71%--<fp_columnar::Column>::new
+
+     2.43%     0.52%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                libc.so.6             -      -
+            |
+            |--1.91%--__memmove_avx_unaligned_erms
+            |          |
+            |           --0.79%--0xffffffff84c00bb7
+            |                     |
+            |                      --0.79%--0xffffffff8622811f
+            |                                |
+            |                                 --0.70%--0xffffffff84feb96b
+            |                                           0xffffffff853a5627
+            |                                           |
+            |                                            --0.61%--0xffffffff853a53ad
+            |                                                      0xffffffff853a4de7
+            |                                                      |
+            |                                                       --0.53%--0xffffffff853a37ea
+            |
+             --0.52%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+
+     2.23%     0.45%  [.] <fp_frame::DataFrame>::new_with_axes                                                                                                                                                                                                                                        perf_profile          -      -
+            |
+             --1.77%--<fp_frame::DataFrame>::new_with_axes
+
+     2.13%     0.00%  [.] <fp_columnar::Column>::from_values                                                                                                                                                                                                                                          perf_profile          -      -
+            |
+            |--1.40%--__memmove_avx_unaligned_erms
+            |          |
+            |           --1.04%--0xffffffff84c00bb7
+            |                     |
+            |                      --1.04%--0xffffffff8622811f
+            |                                |
+            |                                 --0.95%--0xffffffff84feb96b
+            |                                           0xffffffff853a5627
+            |                                           |
+            |                                            --0.86%--0xffffffff853a53ad
+            |                                                      0xffffffff853a4de7
+            |                                                      |
+            |                                                       --0.79%--0xffffffff853a37ea
+            |                                                                 |
+            |                                                                  --0.53%--0xffffffff853a33d2
+            |                                                                            0xffffffff8541df1b
+            |                                                                            0xffffffff8541a9e8
+            |
+             --0.71%--<fp_columnar::Column>::new
+
+     1.96%     0.99%  [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                         libc.so.6             -      -
+            |
+            |--0.99%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          perf_profile::main
+            |          |
+            |           --0.72%--<fp_frame::DataFrame>::loc_bool
+            |
+             --0.97%--__memcmp_avx2_movbe
+
+     1.52%     0.00%  [.] 0xffffffff84c00bb7                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+             --1.52%--0xffffffff8622811f
+                       |
+                        --1.43%--0xffffffff84feb96b
+                                  0xffffffff853a5627
+                                  |
+                                   --1.34%--0xffffffff853a53ad
+                                             0xffffffff853a4de7
+                                             |
+                                              --1.16%--0xffffffff853a37ea
+                                                        |
+                                                         --0.81%--0xffffffff853a33d2
+                                                                   0xffffffff8541df1b
+                                                                   0xffffffff8541a9e8
+                                                                   |
+                                                                    --0.68%--0xffffffff853dda90
+
+     1.52%     0.00%  [.] 0xffffffff8622811f                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+             --1.43%--0xffffffff84feb96b
+                       0xffffffff853a5627
+                       |
+                        --1.34%--0xffffffff853a53ad
+                                  0xffffffff853a4de7
+                                  |
+                                   --1.16%--0xffffffff853a37ea
+                                             |
+                                              --0.81%--0xffffffff853a33d2
+                                                        0xffffffff8541df1b
+                                                        0xffffffff8541a9e8
+                                                        |
+                                                         --0.68%--0xffffffff853dda90
+
+     1.43%     0.00%  [.] 0xffffffff84feb96b                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+            ---0xffffffff853a5627
+               |
+                --1.34%--0xffffffff853a53ad
+                          0xffffffff853a4de7
+                          |
+                           --1.16%--0xffffffff853a37ea
+                                     |
+                                      --0.81%--0xffffffff853a33d2
+                                                0xffffffff8541df1b
+                                                0xffffffff8541a9e8
+                                                |
+                                                 --0.68%--0xffffffff853dda90
+
+     1.43%     0.00%  [.] 0xffffffff853a5627                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+             --1.34%--0xffffffff853a53ad
+                       0xffffffff853a4de7
+                       |
+                        --1.16%--0xffffffff853a37ea
+                                  |
+                                   --0.81%--0xffffffff853a33d2
+                                             0xffffffff8541df1b
+                                             0xffffffff8541a9e8
+                                             |
+                                              --0.68%--0xffffffff853dda90
+
+     1.34%     0.00%  [.] 0xffffffff853a53ad                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+            ---0xffffffff853a4de7
+               |
+                --1.16%--0xffffffff853a37ea
+                          |
+                           --0.81%--0xffffffff853a33d2
+                                     0xffffffff8541df1b
+                                     0xffffffff8541a9e8
+                                     |
+                                      --0.68%--0xffffffff853dda90
+
+     1.34%     0.00%  [.] 0xffffffff853a4de7                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+             --1.16%--0xffffffff853a37ea
+                       |
+                        --0.81%--0xffffffff853a33d2
+                                  0xffffffff8541df1b
+                                  0xffffffff8541a9e8
+                                  |
+                                   --0.68%--0xffffffff853dda90
+
+     1.16%     0.00%  [.] 0xffffffff853a37ea                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+             --0.81%--0xffffffff853a33d2
+                       0xffffffff8541df1b
+                       0xffffffff8541a9e8
+                       |
+                        --0.68%--0xffffffff853dda90
+
+     0.88%     0.00%  [.] core::ptr::drop_in_place::<fp_frame::DataFrame>                                                                                                                                                                                                                             perf_profile          -      -
+            |
+             --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+     0.81%     0.00%  [.] 0xffffffff853a33d2                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+            ---0xffffffff8541df1b
+               0xffffffff8541a9e8
+               |
+                --0.68%--0xffffffff853dda90
+
+     0.81%     0.00%  [.] 0xffffffff8541df1b                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+            ---0xffffffff8541a9e8
+               |
+                --0.68%--0xffffffff853dda90
+
+     0.81%     0.00%  [.] 0xffffffff8541a9e8                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+             --0.68%--0xffffffff853dda90
+
+     0.80%     0.36%  [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert                                                                                                                                                                              perf_profile          -      -
+     0.71%     0.00%  [.] <fp_columnar::Column>::new                                                                                                                                                                                                                                                  perf_profile          -      -
+     0.70%     0.09%  [.] core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>                                                                                                                                                            perf_profile          -      -
+            |
+             --0.61%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+
+     0.68%     0.00%  [.] 0xffffffff853dda90                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.62%     0.27%  [.] _int_malloc                                                                                                                                                                                                                                                                 libc.so.6             -      -
+     0.62%     0.36%  [.] <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert                                                                                                                                                                                                 perf_profile          -      -
+     0.60%     0.22%  [.] 0xffffffff8621b2b7                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.54%     0.18%  [.] <core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Keys<alloc::string::String, fp_columnar::Column>, <fp_frame::DataFrame>::normalize_column_order::{closure#0}>> as core::iter::traits::iterator::Iterator>::next  perf_profile          -      -
+     0.53%     0.27%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                                                                                                                                                                             perf_profile          -      -
+     0.53%     0.00%  [k] 0xffffffff84c0012b                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+             --0.53%--0xffffffff86220551
+
+     0.53%     0.00%  [k] 0xffffffff86220551                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.52%     0.00%  [.] 0xffffffff853cc7f5                                                                                                                                                                                                                                                          [unknown]             -      -
+            |
+            ---0xffffffff853cb02c
+
+     0.52%     0.00%  [.] 0xffffffff853cb02c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.46%     0.09%  [.] 0xffffffff853dc6c9                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.45%     0.09%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>                                                                                                                                                                                               perf_profile          -      -
+     0.45%     0.17%  [.] <fp_columnar::ColumnData>::from_scalars                                                                                                                                                                                                                                     perf_profile          -      -
+     0.44%     0.00%  [.] __libc_malloc2                                                                                                                                                                                                                                                              libc.so.6             -      -
+     0.44%     0.09%  [.] _int_free_chunk                                                                                                                                                                                                                                                             libc.so.6             -      -
+     0.44%     0.00%  [.] 0xffffffff84c00f0b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.36%     0.00%  [.] cfree@GLIBC_2.2.5                                                                                                                                                                                                                                                           libc.so.6             -      -
+     0.35%     0.00%  [.] systrim.constprop.0                                                                                                                                                                                                                                                         libc.so.6             -      -
+     0.35%     0.00%  [.] __default_morecore@GLIBC_2.2.5                                                                                                                                                                                                                                              libc.so.6             -      -
+     0.35%     0.00%  [.] __brk                                                                                                                                                                                                                                                                       libc.so.6             -      -
+     0.35%     0.00%  [.] 0xffffffff84f24dda                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.35%     0.00%  [.] 0xffffffff853ab362                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.35%     0.00%  [.] 0xffffffff853ab2c0                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.35%     0.00%  [.] 0xffffffff84fc4bc8                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.35%     0.00%  [.] 0xffffffff85139f5d                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.35%     0.00%  [.] 0xffffffff85139003                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.31%     0.00%  [.] 0xffffffff84c00b90                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.29%     0.29%  [k] 0xffffffff84c01192                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.27%     0.00%  [.] 0xffffffff853a33ec                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.27%     0.00%  [.] malloc_consolidate                                                                                                                                                                                                                                                          libc.so.6             -      -
+     0.27%     0.00%  [.] 0xffffffff853c9794                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.27%     0.00%  [.] 0xffffffff853ae78e                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.27%     0.00%  [.] 0xffffffff853adcca                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.27%     0.00%  [.] 0xffffffff853fc79e                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.27%     0.00%  [.] 0xffffffff853436a3                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.26%     0.09%  [.] core::ptr::drop_in_place::<fp_columnar::Column>                                                                                                                                                                                                                             perf_profile          -      -
+     0.26%     0.18%  [.] core::ptr::drop_in_place::<fp_index::Index>                                                                                                                                                                                                                                 perf_profile          -      -
+     0.26%     0.00%  [.] 0xffffffff86227724                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.26%     0.00%  [.] 0xffffffff851524f6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.26%     0.00%  [.] 0xffffffff85137e40                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.25%     0.00%  [.] 0xffffffff853c9742                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.25%     0.00%  [.] 0xffffffff8539cea1                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.25%     0.00%  [.] 0xffffffff8539cd76                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.25%     0.00%  [.] 0xffffffff8539cb30                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.25%     0.00%  [.] 0xffffffff8539c594                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.25%     0.00%  [.] 0xffffffff8539c06e                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.18%     0.09%  [.] 0xffffffff84d04109                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.18%     0.00%  [.] 0xffffffff853432f8                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.18%     0.09%  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                                                                                        perf_profile          -      -
+     0.17%     0.00%  [k] 0xffffffff853ceac8                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.17%     0.00%  [k] 0xffffffff853cc961                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.17%     0.00%  [.] __munmap                                                                                                                                                                                                                                                                    libc.so.6             -      -
+     0.17%     0.00%  [.] 0xffffffff84f24dad                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.17%     0.00%  [.] 0xffffffff853aa42b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.17%     0.00%  [.] 0xffffffff8539b7d0                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.14%     0.14%  [k] 0xffffffff8517f741                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.13%     0.00%  [.] 0xffffffff853ddae0                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.13%     0.00%  [.] 0xffffffff84c01199                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.12%     0.00%  [.] 0xffffffff853dc362                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.11%     0.11%  [k] 0xffffffff853a514a                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.11%     0.00%  [.] 0xffffffff853a3872                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.11%     0.00%  [.] 0xffffffff853b8472                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.10%     0.10%  [k] 0xffffffff850875bf                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.10%     0.00%  [.] 0xffffffff85079cec                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.10%     0.00%  [.] 0xffffffff8530cd7a                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.10%     0.00%  [.] 0xffffffff8530938d                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.10%     0.00%  [.] 0xffffffff85309238                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.10%     0.00%  [.] 0xffffffff84f33175                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff86223c8e                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff8545547b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff853dc432                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff853da487                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff853d8d81                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff8510f1dd                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff853dc396                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff84c01248                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff85458faf                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff854578cd                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff853fc708                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff853433ce                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff85079d0c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff850919bc                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff85091594                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff8507fd8f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff850b2bf1                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] <alloc::vec::Vec<alloc::string::String> as core::clone::Clone>::clone                                                                                                                                                                                                       perf_profile          -      -
+     0.09%     0.09%  [k] 0xffffffff86225225                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff86227729                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff85021e6e                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff85021a80                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff8502171f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff85091286                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff850815d7                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff850cd87a                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff85452a65                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff853a5068                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff853433e6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff853410ca                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [.] malloc                                                                                                                                                                                                                                                                      libc.so.6             -      -
+     0.09%     0.09%  [k] 0xffffffff85452a08                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff8545544c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff86227775                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff8539ba10                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff853bbce5                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff8622777a                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff85152482                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff8513cefe                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff84fc3dfc                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff853b8465                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff84feb92c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff85392dd3                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [.] <alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow                                                                                                                                                                                                                           perf_profile          -      -
+     0.09%     0.09%  [k] 0xffffffff853a37ce                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.00%  [.] 0xffffffff85458fa1                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff853a381f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.09%     0.09%  [k] 0xffffffff85922900                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.08%     0.08%  [k] 0xffffffff85452a61                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.08%     0.08%  [k] 0xffffffff8539b906                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.08%     0.00%  [.] <alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>::drop_slow                                                                                                                                                                                                        perf_profile          -      -
+     0.08%     0.08%  [.] unlink_chunk.isra.0                                                                                                                                                                                                                                                         libc.so.6             -      -
+     0.08%     0.08%  [.] <fp_columnar::Column>::take_affine_all_valid_float64_positions                                                                                                                                                                                                              perf_profile          -      -
+     0.08%     0.08%  [k] 0xffffffff85104b2e                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.08%     0.00%  [.] 0xffffffff853a3437                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.08%     0.00%  [.] 0xffffffff85404a1a                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.08%     0.00%  [.] 0xffffffff857c0267                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.07%     0.07%  [k] 0xffffffff85157b84                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.07%     0.00%  [.] 0xffffffff85079cb1                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.07%     0.00%  [.] 0xffffffff85089c35                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.07%     0.00%  [.] 0xffffffff8507e5fa                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.07%     0.00%  [.] 0xffffffff853a36ca                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.07%     0.07%  [k] 0xffffffff861f67be                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.07%     0.07%  [k] 0xffffffff853f4b65                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.07%     0.00%  [.] pthread_getattr_np@@GLIBC_2.32                                                                                                                                                                                                                                              libc.so.6             -      -
+     0.07%     0.00%  [.] __getdelim                                                                                                                                                                                                                                                                  libc.so.6             -      -
+     0.07%     0.00%  [.] __read_nocancel                                                                                                                                                                                                                                                             libc.so.6             -      -
+     0.07%     0.00%  [.] 0xffffffff84c001c4                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.04%     0.00%  [.] _dl_start_user                                                                                                                                                                                                                                                              ld-linux-x86-64.so.2  -      -
+     0.04%     0.00%  [.] _dl_start                                                                                                                                                                                                                                                                   ld-linux-x86-64.so.2  -      -
+     0.04%     0.00%  [.] _dl_sysdep_start                                                                                                                                                                                                                                                            ld-linux-x86-64.so.2  -      -
+     0.04%     0.00%  [.] dl_main                                                                                                                                                                                                                                                                     ld-linux-x86-64.so.2  -      -
+     0.03%     0.03%  [k] 0xffffffff8621b866                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.03%     0.00%  [.] _dl_relocate_object                                                                                                                                                                                                                                                         ld-linux-x86-64.so.2  -      -
+     0.03%     0.00%  [.] _dl_relocate_object_no_relro                                                                                                                                                                                                                                                ld-linux-x86-64.so.2  -      -
+     0.03%     0.00%  [.] 0xffffffff84c01690                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.01%     0.01%  [k] 0xffffffff84d0410b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.01%     0.01%  [.] fp_types::infer_dtype                                                                                                                                                                                                                                                       perf_profile          -      -
+     0.01%     0.00%  [.] _dl_map_object_deps                                                                                                                                                                                                                                                         ld-linux-x86-64.so.2  -      -
+     0.01%     0.00%  [.] _dl_catch_exception                                                                                                                                                                                                                                                         ld-linux-x86-64.so.2  -      -
+     0.01%     0.00%  [.] openaux                                                                                                                                                                                                                                                                     ld-linux-x86-64.so.2  -      -
+     0.01%     0.00%  [.] _dl_map_new_object                                                                                                                                                                                                                                                          ld-linux-x86-64.so.2  -      -
+     0.01%     0.00%  [.] __GI___open64_nocancel                                                                                                                                                                                                                                                      ld-linux-x86-64.so.2  -      -
+     0.01%     0.00%  [.] 0xffffffff84f25032                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.01%     0.00%  [.] 0xffffffff8547a93f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.01%     0.00%  [.] 0xffffffff8547a407                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.01%     0.00%  [.] 0xffffffff854990f4                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.01%     0.00%  [.] 0xffffffff85498e93                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.01%     0.01%  [k] 0xffffffff8541df05                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.01%     0.00%  [.] 0xffffffff853a3406                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0x000072cb334f878b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff84f25398                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8548bea9                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8548bbf7                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8548a03a                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85489f2c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85489bec                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff851a2ef0                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] open_verify.constprop.0                                                                                                                                                                                                                                                     ld-linux-x86-64.so.2  -      -
+     0.00%     0.00%  [.] 0xffffffff85492b44                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff851a2f82                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8519f6d4                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85699a08                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854c1125                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff855fd93f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff855f5502                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85387e3f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff855297e4                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85528bc4                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85528955                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff853aa3f0                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff853cc772                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff853ca832                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff84c00f4b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85343924                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8621c6a9                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] core::ptr::drop_in_place::<fp_index::Index>                                                                                                                                                                                                                                 perf_profile          -      -
+     0.00%     0.00%  [.] 0xffffffff86228a44                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff86228a43                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] _start                                                                                                                                                                                                                                                                      ld-linux-x86-64.so.2  -      -
+     0.00%     0.00%  [.] _dl_load_cache_lookup                                                                                                                                                                                                                                                       ld-linux-x86-64.so.2  -      -
+     0.00%     0.00%  [.] _dl_sysdep_read_whole_file                                                                                                                                                                                                                                                  ld-linux-x86-64.so.2  -      -
+     0.00%     0.00%  [.] 0xffffffff85492ab8                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85479e7b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854f235a                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854f0fa2                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854f0ade                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854f06e7                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff853eeba2                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff86220691                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff851241b0                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8504d972                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85480f75                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85480d4d                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854a668b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854a596b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff853a3957                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff853bb5d6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff853b9650                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85452e0f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff855290b9                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85072c35                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854f62ec                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854f2f47                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff850bf837                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff850b6871                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854ffc9d                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854fdb02                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85079ada                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85079602                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85078cd8                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85071679                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8508a9ce                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8507e659                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff86227465                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8548c49f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8548c3d1                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8505bfbf                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff862289ac                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85326b38                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff86228929                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8622884d                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8622f445                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff853267c9                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8621c6a7                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8622f947                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8506d6df                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff86228130                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff84c0188e                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85313869                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85314705                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85124022                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff84f8cacc                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff84f8c9d6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff853136ae                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff86227734                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85312e70                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8622899c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85326769                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85123fbd                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff86228993                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85123f76                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8531294d                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff862206af                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8620a0eb                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854f6207                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8620a0e7                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8621f945                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8548c37d                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85317605                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff853141e6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85312c49                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85314676                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8506d72f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8501366d                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff84fee4bd                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530d2c3                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85124c10                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff853f221f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854582eb                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8510f1e6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff84f2b8d5                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530d2bc                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530a963                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff84f330ff                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff84f32f97                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85312e7b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530d280                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff84fdedcb                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8622fbbf                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530d285                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530d384                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff850c2842                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85124d3c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff851a2ab6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8519f3fe                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff85313a57                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8548f9b6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff854a65b8                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff853f2116                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff852fe615                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff852ff1c5                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530d2cc                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff84d04104                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8506d59b                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8530a9ae                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8530d39c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8530d3a4                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff853136b2                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8531386a                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8620a0c7                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8620a0f0                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff84f337e6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530d29c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530d289                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff8530d28c                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [k] 0xffffffff84f337e9                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8622898e                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8510f1e4                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff852ff1c6                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8530aa69                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff853129b8                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85312df9                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff853146a5                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff85456a4d                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8620a0e3                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8622897f                                                                                                                                                                                                                                                          [unknown]             -      -
+     0.00%     0.00%  [.] 0xffffffff8622f477                                                                                                                                                                                                                                                          [unknown]             -      -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

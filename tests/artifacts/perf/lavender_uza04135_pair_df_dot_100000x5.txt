@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-next-base/release-perf/examples/perf_profile df_dot 100000 5
+  Time (mean ± σ):     662.9 ms ±  11.2 ms    [User: 15196.4 ms, System: 676.7 ms]
+  Range (min … max):   642.7 ms … 681.7 ms    16 runs
+
+Benchmark 2: /data/projects/.scratch/cargo-target-lavender-uza04134-after/release-perf/examples/perf_profile df_dot 100000 5
+  Time (mean ± σ):     603.7 ms ±  11.0 ms    [User: 12496.7 ms, System: 665.4 ms]
+  Range (min … max):   589.7 ms … 627.2 ms    16 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-lavender-uza04134-after/release-perf/examples/perf_profile df_dot 100000 5 ran
+    1.10 ± 0.03 times faster than /data/projects/.scratch/cargo-target-lavender-next-base/release-perf/examples/perf_profile df_dot 100000 5

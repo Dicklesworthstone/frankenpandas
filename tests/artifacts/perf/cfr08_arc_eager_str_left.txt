@@ -1,0 +1,40 @@
+br-frankenpandas-cfr08 — COW/Arc-shared ScalarValues::Eager backing (O(1) Column clone)
+=========================================================================================
+
+LEVER (one): ScalarValues::Eager(Vec<Scalar>) -> Eager(Arc<[Scalar]>).
+Column::clone of a Scalar-backed (Eager) column now shares the Arc in O(1)
+instead of deep-copying every Scalar (per-String malloc for Utf8). The kept
+(identity) Utf8 lanes of a left join clone their value columns -> now zero-copy.
+Backing is immutable after construction (ScalarValues exposes only &[Scalar]
+via Deref; no &mut / IndexMut / push path; every "mutation" rebuilds the whole
+`values` field), so the share is observationally a deep copy. No Arc::make_mut
+needed. 6 sites, all in fp-columnar/src/lib.rs (enum, from_vec, deserialize;
+as_slice/len/clone unchanged via deref coercion + Arc::clone).
+
+BENCH (perf_profile, release-perf, n=100000, 100 iters/run, ms/iter, min-of-5):
+  str_left_join : baseline 24.406  ->  after 7.635   = 3.20x   (worst-after 9.99 vs best-base 24.4 = 2.44x)
+  str_outer_join: baseline 41.657  ->  after 38.030  = ~1.10x  (NEUTRAL — both sides null-introduce;
+                  bottleneck is reindex_by_positions null gather, not kept-lane clone)
+  inner_join    : ~2.4ms (unchanged, no regression)
+  str_inner_join: ~0.21ms (unchanged, no regression)
+
+SCORE: str_left 3.2x >= 2.0 PASS.
+
+ISOMORPHISM:
+  - Ordering preserved: yes — Arc<[Scalar]> holds identical Scalars in identical
+    order; as_slice()/Deref returns the same &[Scalar].
+  - Floating-point: identical — Scalars byte-copied once at from_vec; shared reads
+    return identical bytes; no value transformation.
+  - Mutation safety: no &mut backing exists; share can never observe a write.
+  - Golden sha256 (perf_profile golden, n=5000) UNCHANGED before/after:
+      str_left_join  995b9ca366dacc4d808be3f5b99d027fd0b7d8f6adffd2ff9f91a43e92628006
+      str_outer_join 72546ef6396c90dd2a9a33b8da723079a5db22d449a7607ded73287b9818741c
+      inner_join     be7d17114e5a2a88607bdc65228751789e208ebbd9ac2f5d0c616cdf64e641f1
+
+GATES (rch, crate-scoped):
+  cargo check  -p fp-columnar: OK
+  cargo clippy -p fp-columnar: clean
+  cargo test   -p fp-columnar: 386 passed
+  cargo test   -p fp-frame   : 2830 passed
+  cargo test   -p fp-join    : 113 passed
+  cargo test   -p fp-conformance: all green

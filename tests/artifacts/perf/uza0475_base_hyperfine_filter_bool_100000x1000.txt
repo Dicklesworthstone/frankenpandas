@@ -1,0 +1,6 @@
+  [2m2026-06-11T02:26:19.490346Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 3 --runs 10 --export-json tests/artifacts/perf/uza0475_base_hyperfine_filter_bool_100000x1000.json '/data/projects/.scratch/cargo-target-orangepeak-uza0475-base/release-perf/examples/perf_profile filter_bool 100000 1000'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza0475-base/release-perf/examples/perf_profile filter_bool 100000 1000
+  Time (mean ± σ):      96.3 ms ±   6.2 ms    [User: 69.6 ms, System: 26.3 ms]
+  Range (min … max):    86.9 ms … 104.3 ms    10 runs

@@ -1,0 +1,36 @@
+br-frankenpandas-ya1po — metamorphic cardinality harness for fp-join Int64 joins
+================================================================================
+
+Joins are the most correctness-critical perf code (dense/direct-address Int64
+fast paths: left 524e3566, right b1b4816a, outer 9dd94d0b, inner d45a291c,
+ordered 87fd7094/bcddc11d/fc9096e4). A full-output oracle would be ordering-
+sensitive (false-failure risk), but ROW-COUNT cardinality is an ordering-
+independent invariant that catches missed matches, spurious matches, and wrong
+many-to-many cross-product handling.
+
+Harness (test fp-join: int64_join_row_count_matches_cardinality_invariant_ya1po):
+deterministic seeded LCG (no rand crate, no mocks). For 1500 iterations it builds
+random left/right DataFrames with an Int64 key column "k" (range 0..3, so
+many-to-many duplicate-key joins are common) plus a payload column, and asserts
+merge_dataframes(...).row_count equals the pandas-standard cardinality per join
+type:
+
+  Inner: sum_k  Lc[k] * Rc[k]
+  Left:  sum_k  Lc[k] * max(1, Rc[k])
+  Right: sum_k  Rc[k] * max(1, Lc[k])
+  Outer: sum over union(keys) of  (Lc*Rc if both sides present, else Lc + Rc)
+
+where Lc/Rc are per-key row counts of the left/right frames.
+
+Result: PASS (1 passed; 1500 iterations × 4 join types). The dense/direct-address
+Int64 join fast paths produce the correct row cardinality for inner/left/right/
+outer, including many-to-many duplicate keys and one-sided keys.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-join int64_join_row_count_matches_cardinality_invariant_ya1po -> 1 passed
+  cargo test -p fp-join (full)   -> exit 0 (all passed, 0 failed)
+  ubs crates/fp-join/src/lib.rs  -> 3 pre-existing cat-8 "secret/token comparison"
+                                    false positives (the same dtype/value == heuristic
+                                    documented in fp-frame UBS_TRIAGE.md); NONE
+                                    reference the new test lines (8912-8987). The
+                                    test is additive and adds no criticals.

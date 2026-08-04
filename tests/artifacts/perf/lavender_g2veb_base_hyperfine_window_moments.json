@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-lavender-g2veb-baseline/release-perf/examples/bench_window_moments",
+      "mean": 0.33719571104,
+      "stddev": 0.00929738016882769,
+      "median": 0.33531466264,
+      "user": 0.3336225399999999,
+      "system": 0.00282274,
+      "min": 0.32778155764,
+      "max": 0.34750761764,
+      "times": [
+        0.32778155764,
+        0.34750761764,
+        0.34625420264,
+        0.32912051464,
+        0.33531466264
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+head=2a12c5334b4c909e81fdf23d1e7c58fa507b2417
+binary=/data/projects/.scratch/cargo-target-lavenderstone-agent-route/release-perf/examples/perf_profile
+built_with_rch_artifact=tests/artifacts/perf/lavenderstone_agent_route_build_perf_profile.txt
+
+## df_dot 100000 5
+perf_profile: scenario=df_dot n=100000 iters=5
+perf_profile: done 5 iters in 0.592s (118.401 ms/iter), sink=500000
+
+## csv_parse_dates_dt_year 100000 5
+perf_profile: scenario=csv_parse_dates_dt_year n=100000 iters=5
+perf_profile: done 5 iters in 0.318s (63.675 ms/iter), sink=500000
+
+## str_outer_join 100000 5
+perf_profile: scenario=str_outer_join n=100000 iters=5
+perf_profile: done 5 iters in 0.199s (39.726 ms/iter), sink=750000
+
+## str_left_join 100000 5
+perf_profile: scenario=str_left_join n=100000 iters=5
+perf_profile: done 5 iters in 0.161s (32.255 ms/iter), sink=500000
+
+## df_corr 100000 5
+perf_profile: scenario=df_corr n=100000 iters=5
+perf_profile: done 5 iters in 0.283s (56.562 ms/iter), sink=320
+
+## df_cov 100000 5
+perf_profile: scenario=df_cov n=100000 iters=5
+perf_profile: done 5 iters in 0.305s (60.997 ms/iter), sink=320
+
+## df_spearman 100000 3
+perf_profile: scenario=df_spearman n=100000 iters=3
+perf_profile: done 3 iters in 0.119s (39.532 ms/iter), sink=192
+
+## df_kendall 50000 1
+perf_profile: scenario=df_kendall n=50000 iters=1
+perf_profile: done 1 iters in 0.041s (40.651 ms/iter), sink=32
+
+## str_sort_chain 100000 10
+perf_profile: scenario=str_sort_chain n=100000 iters=10
+perf_profile: done 10 iters in 0.141s (14.078 ms/iter), sink=1000000
+
+## str_value_counts 500000 50
+perf_profile: scenario=str_value_counts n=500000 iters=50
+perf_profile: done 50 iters in 0.307s (6.136 ms/iter), sink=50000
+
+## groupby_transform_median 100000 5
+perf_profile: scenario=groupby_transform_median n=100000 iters=5
+perf_profile: done 5 iters in 0.026s (5.287 ms/iter), sink=500000
+
+## groupby_transform_std 100000 5
+perf_profile: scenario=groupby_transform_std n=100000 iters=5
+perf_profile: done 5 iters in 0.030s (5.924 ms/iter), sink=500000
+
+## str_groupby_sum 100000 5
+perf_profile: scenario=str_groupby_sum n=100000 iters=5
+perf_profile: done 5 iters in 0.013s (2.580 ms/iter), sink=320
+
+## str_groupby_count_lowcard 100000 5
+perf_profile: scenario=str_groupby_count_lowcard n=100000 iters=5
+perf_profile: done 5 iters in 0.013s (2.655 ms/iter), sink=320
+
+## inner_join 100000 5
+perf_profile: scenario=inner_join n=100000 iters=5
+perf_profile: done 5 iters in 0.039s (7.720 ms/iter), sink=97656800
+
+## left_join 500000 20
+perf_profile: scenario=left_join n=500000 iters=20
+perf_profile: done 20 iters in 0.126s (6.314 ms/iter), sink=4887813760

@@ -1,0 +1,438 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+#
+# Total Lost Samples: 0
+#
+# Samples: 616  of event 'cycles:P'
+# Event count (approx.): 2115477214
+#
+# Overhead  Command       Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                                    
+# ........  ............  ....................  ..........................................................................................................................................................................................................................................................................................................................................................................
+#
+    46.29%  perf_profile  perf_profile          [.] fp_join::build_dense_cycle_outer_run_tape
+            |          
+            |--25.90%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          
+            |          |--4.48%--spec_next<usize> (inlined)
+            |          |          next<usize> (inlined)
+            |          |          |          
+            |          |          |--2.24%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          |          fp_join::merge_dataframes_on_with_options
+            |          |          |          fp_join::merge_dataframes
+            |          |          |          merge_dataframes_on (inlined)
+            |          |          |          merge_dataframes (inlined)
+            |          |          |          perf_profile::main
+            |          |          |          
+            |          |           --2.24%--append_dense_cycle_positions (inlined)
+            |          |                     fp_join::build_dense_cycle_outer_run_tape
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--4.26%--push<usize, alloc::alloc::Global> (inlined)
+            |          |          |          
+            |          |          |--3.01%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          |          fp_join::merge_dataframes_on_with_options
+            |          |          |          fp_join::merge_dataframes
+            |          |          |          merge_dataframes_on (inlined)
+            |          |          |          merge_dataframes (inlined)
+            |          |          |          perf_profile::main
+            |          |          |          
+            |          |           --1.25%--append_dense_cycle_positions (inlined)
+            |          |                     fp_join::build_dense_cycle_outer_run_tape
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--3.81%--push_mut<usize, alloc::alloc::Global> (inlined)
+            |          |          push<usize, alloc::alloc::Global> (inlined)
+            |          |          |          
+            |          |          |--2.19%--append_dense_cycle_positions (inlined)
+            |          |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          |          fp_join::merge_dataframes_on_with_options
+            |          |          |          fp_join::merge_dataframes
+            |          |          |          merge_dataframes_on (inlined)
+            |          |          |          merge_dataframes (inlined)
+            |          |          |          perf_profile::main
+            |          |          |          
+            |          |           --1.62%--fp_join::build_dense_cycle_outer_run_tape
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--3.63%--ptr<alloc::alloc::Global, usize> (inlined)
+            |          |          ptr<usize, alloc::alloc::Global> (inlined)
+            |          |          as_mut_ptr<usize, alloc::alloc::Global> (inlined)
+            |          |          push_mut<usize, alloc::alloc::Global> (inlined)
+            |          |          push<usize, alloc::alloc::Global> (inlined)
+            |          |          |          
+            |          |          |--1.98%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          |          fp_join::merge_dataframes_on_with_options
+            |          |          |          fp_join::merge_dataframes
+            |          |          |          merge_dataframes_on (inlined)
+            |          |          |          merge_dataframes (inlined)
+            |          |          |          perf_profile::main
+            |          |          |          
+            |          |           --1.65%--append_dense_cycle_positions (inlined)
+            |          |                     build_dense_cycle_outer_run_tape (inlined)
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--2.90%--fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.76%--{closure#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>> (inlined)
+            |          |          {closure#0}<(usize, usize), alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>>> (inlined)
+            |          |          fold<core::iter::sources::repeat_n::RepeatN<(usize, usize)>, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize), alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>>>> (inlined)
+            |          |          for_each<core::iter::sources::repeat_n::RepeatN<(usize, usize)>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>>> (inlined)
+            |          |          extend_trusted<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>> (inlined)
+            |          |          spec_extend<(usize, usize), core::iter::sources::repeat_n::RepeatN<(usize, usize)>, alloc::alloc::Global> (inlined)
+            |          |          extend<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>> (inlined)
+            |          |          |          
+            |          |          |--1.15%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          |          fp_join::merge_dataframes_on_with_options
+            |          |          |          fp_join::merge_dataframes
+            |          |          |          merge_dataframes_on (inlined)
+            |          |          |          merge_dataframes (inlined)
+            |          |          |          perf_profile::main
+            |          |          |          
+            |          |           --0.61%--build_dense_cycle_outer_run_tape (inlined)
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--1.47%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.28%--{closure#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>> (inlined)
+            |          |          {closure#0}<usize, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>>> (inlined)
+            |          |          fold<core::iter::sources::repeat_n::RepeatN<usize>, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<usize, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>>>> (inlined)
+            |          |          for_each<core::iter::sources::repeat_n::RepeatN<usize>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>>> (inlined)
+            |          |          extend_trusted<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>> (inlined)
+            |          |          spec_extend<usize, core::iter::sources::repeat_n::RepeatN<usize>, alloc::alloc::Global> (inlined)
+            |          |          extend<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>> (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.01%--forward_unchecked (inlined)
+            |          |          spec_next<usize> (inlined)
+            |          |          next<usize> (inlined)
+            |          |          append_dense_cycle_positions (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--0.58%--next<usize> (inlined)
+            |          |          fold<core::iter::sources::repeat_n::RepeatN<usize>, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<usize, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>>>> (inlined)
+            |          |          for_each<core::iter::sources::repeat_n::RepeatN<usize>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>>> (inlined)
+            |          |          extend_trusted<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>> (inlined)
+            |          |          spec_extend<usize, core::iter::sources::repeat_n::RepeatN<usize>, alloc::alloc::Global> (inlined)
+            |          |          extend<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>> (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --0.57%--next<(usize, usize)> (inlined)
+            |                     fold<core::iter::sources::repeat_n::RepeatN<(usize, usize)>, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize), alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>>>> (inlined)
+            |                     for_each<core::iter::sources::repeat_n::RepeatN<(usize, usize)>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>>> (inlined)
+            |                     extend_trusted<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>> (inlined)
+            |                     spec_extend<(usize, usize), core::iter::sources::repeat_n::RepeatN<(usize, usize)>, alloc::alloc::Global> (inlined)
+            |                     extend<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>> (inlined)
+            |                     fp_join::build_dense_cycle_outer_run_tape
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--9.32%--push_mut<usize, alloc::alloc::Global> (inlined)
+            |          push<usize, alloc::alloc::Global> (inlined)
+            |          |          
+            |          |--6.00%--append_dense_cycle_positions (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --3.32%--fp_join::build_dense_cycle_outer_run_tape
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--7.03%--write<(usize, usize)> (inlined)
+            |          {closure#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>> (inlined)
+            |          {closure#0}<(usize, usize), alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>>> (inlined)
+            |          fold<core::iter::sources::repeat_n::RepeatN<(usize, usize)>, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize), alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>>>> (inlined)
+            |          for_each<core::iter::sources::repeat_n::RepeatN<(usize, usize)>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>>> (inlined)
+            |          extend_trusted<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>> (inlined)
+            |          spec_extend<(usize, usize), core::iter::sources::repeat_n::RepeatN<(usize, usize)>, alloc::alloc::Global> (inlined)
+            |          extend<(usize, usize), alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<(usize, usize)>> (inlined)
+            |          |          
+            |          |--6.07%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --0.96%--build_dense_cycle_outer_run_tape (inlined)
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--1.81%--write<usize> (inlined)
+            |          {closure#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>> (inlined)
+            |          {closure#0}<usize, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>>> (inlined)
+            |          fold<core::iter::sources::repeat_n::RepeatN<usize>, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<usize, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>>>> (inlined)
+            |          for_each<core::iter::sources::repeat_n::RepeatN<usize>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>>> (inlined)
+            |          extend_trusted<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>> (inlined)
+            |          spec_extend<usize, core::iter::sources::repeat_n::RepeatN<usize>, alloc::alloc::Global> (inlined)
+            |          extend<usize, alloc::alloc::Global, core::iter::sources::repeat_n::RepeatN<usize>> (inlined)
+            |          fp_join::build_dense_cycle_outer_run_tape
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          fp_join::merge_dataframes_on_with_options
+            |          fp_join::merge_dataframes
+            |          merge_dataframes_on (inlined)
+            |          merge_dataframes (inlined)
+            |          perf_profile::main
+            |          
+             --1.58%--lt (inlined)
+                       spec_next<usize> (inlined)
+                       next<usize> (inlined)
+                       fp_join::build_dense_cycle_outer_run_tape
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+    38.60%  perf_profile  libc.so.6             [.] __memmove_avx_unaligned_erms
+            |          
+            |--37.85%--__memcpy_avx_unaligned_erms (inlined)
+            |          |          
+            |          |--23.14%--<alloc::sync::Arc<[usize]> as core::convert::From<alloc::vec::Vec<usize>>>::from
+            |          |          from<usize, alloc::alloc::Global> (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--13.85%--<alloc::sync::Arc<[(usize, usize)]> as core::convert::From<alloc::vec::Vec<(usize, usize)>>>::from
+            |          |          from<(usize, usize), alloc::alloc::Global> (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --0.66%--<alloc::sync::Arc<[bool]> as core::convert::From<alloc::vec::Vec<bool>>>::from
+            |                     from<bool, alloc::alloc::Global> (inlined)
+            |                     fp_join::build_dense_cycle_outer_run_tape
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+             --0.61%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+
+     1.67%  perf_profile  perf_profile          [.] <fp_columnar::Column>::new
+            |          
+             --0.96%--<fp_columnar::Column>::new
+
+     1.18%  perf_profile  [unknown]             [k] 0xffffffff84c01192
+     0.85%  perf_profile  perf_profile          [.] <fp_columnar::ValidityMask>::from_values
+     0.81%  perf_profile  perf_profile          [.] perf_profile::build_join_frame_offset
+            |
+            ---0xffffffff8621b2b7
+               0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+
+     0.62%  perf_profile  perf_profile          [.] fp_types::infer_dtype
+            |
+            ---fp_types::infer_dtype
+
+     0.40%  perf_profile  [unknown]             [k] 0xffffffff85452e3d
+     0.39%  perf_profile  [unknown]             [k] 0xffffffff85123f6d
+     0.38%  perf_profile  perf_profile          [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Int64DenseCycleWitness>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Int64DenseCycleWitness>>>::get_or_init<<fp_columnar::Column>::int64_dense_cycle_witness::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.26%  perf_profile  [unknown]             [k] 0xffffffff853a4f08
+     0.25%  perf_profile  [unknown]             [k] 0xffffffff853413ac
+     0.24%  perf_profile  libc.so.6             [.] _int_malloc
+     0.23%  perf_profile  perf_profile          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.21%  perf_profile  [unknown]             [k] 0xffffffff8621b2b7
+     0.21%  perf_profile  perf_profile          [.] <fp_columnar::ColumnData>::from_scalars
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff84d04109
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff862287f5
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff8620314e
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff853a572b
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff84f88cf9
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff86228774
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff853a37ea
+     0.20%  perf_profile  perf_profile          [.] fp_join::merge_dataframes
+     0.20%  perf_profile  libc.so.6             [.] malloc
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff853a53ad
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff853d43cc
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff84fef489
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff854551dd
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff853a341a
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff85456df9
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff853d257a
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff85452a69
+     0.20%  perf_profile  [unknown]             [k] 0xffffffff86228147
+     0.19%  perf_profile  perf_profile          [.] fp_join::build_single_key_dense_i64_outer_merge_output
+     0.19%  perf_profile  [unknown]             [k] 0xffffffff8541df05
+     0.19%  perf_profile  [unknown]             [k] 0xffffffff86228859
+     0.19%  perf_profile  [unknown]             [k] 0xffffffff85452a65
+     0.19%  perf_profile  [unknown]             [k] 0xffffffff853dc432
+     0.19%  perf_profile  [unknown]             [k] 0xffffffff853bb569
+     0.18%  perf_profile  [unknown]             [k] 0xffffffff86228130
+     0.18%  perf_profile  [unknown]             [k] 0xffffffff861f67fe
+     0.18%  perf_profile  [unknown]             [k] 0xffffffff853a514a
+     0.18%  perf_profile  [unknown]             [k] 0xffffffff85452de1
+     0.18%  perf_profile  [unknown]             [k] 0xffffffff86228854
+     0.17%  perf_profile  [unknown]             [k] 0xffffffff853b83a2
+     0.17%  perf_profile  [unknown]             [k] 0xffffffff8541df2a
+     0.17%  perf_profile  [unknown]             [k] 0xffffffff85452a61
+     0.17%  perf_profile  [unknown]             [k] 0xffffffff853d2567
+     0.17%  perf_profile  [unknown]             [k] 0xffffffff8507f074
+     0.17%  perf_profile  [unknown]             [k] 0xffffffff84c001bd
+     0.16%  perf_profile  [unknown]             [k] 0xffffffff853d7e9a
+     0.16%  perf_profile  [unknown]             [k] 0xffffffff853b8136
+     0.16%  perf_profile  [unknown]             [k] 0xffffffff85458fdc
+     0.14%  perf_profile  [unknown]             [k] 0xffffffff853a52bc
+     0.07%  perf_profile  [unknown]             [k] 0xffffffff853b81fa
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff8539ed89
+     0.02%  perf_profile  [unknown]             [k] 0xffffffff853dc38f
+     0.01%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_relocate_object_no_relro
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862280cd
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86229b48
+     0.00%  perf_profile  libc.so.6             [.] _int_free_merge_chunk
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8510f1dd
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff84f33607
+     0.00%  perf_profile  libc.so.6             [.] __memcmp_avx2_movbe
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0188e
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85110caa
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0185b
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8622f947
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8506d5c6
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8621c6a9
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8622898e
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85456a19
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d280
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff86227da0
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228550
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86224b76
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f88cf7
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2bc
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84d0410b
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcb
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b66
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2c3
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b43
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d280
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2bc
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2c3
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f337e5
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b80
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d285
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d286
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d29c
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228551
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

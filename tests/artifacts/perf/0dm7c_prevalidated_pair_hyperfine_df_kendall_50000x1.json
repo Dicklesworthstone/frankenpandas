@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-0dm7c-base/release-perf/examples/perf_profile df_kendall 50000 1",
+      "mean": 0.16758278100000004,
+      "stddev": 0.0034008162014375638,
+      "median": 0.16790336960000002,
+      "user": 0.92731096,
+      "system": 0.08768487999999999,
+      "min": 0.16303204460000004,
+      "max": 0.1715869766,
+      "times": [
+        0.1715869766,
+        0.16552883360000004,
+        0.16986268060000004,
+        0.16303204460000004,
+        0.16790336960000002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-0dm7c-after-prevalidated/release-perf/examples/perf_profile df_kendall 50000 1",
+      "mean": 0.168686582,
+      "stddev": 0.0012117932664042945,
+      "median": 0.1688721146,
+      "user": 1.01442476,
+      "system": 0.09033848,
+      "min": 0.1674711426,
+      "max": 0.1703734186,
+      "times": [
+        0.1688721146,
+        0.1674711426,
+        0.1675516246,
+        0.1703734186,
+        0.16916460960000002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

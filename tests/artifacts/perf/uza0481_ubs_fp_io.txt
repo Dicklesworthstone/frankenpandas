@@ -1,0 +1,619 @@
+ℹ Preparing shadow workspace for 1 specified file(s)
+ℹ Scanning shadow workspace at /data/tmp/tmp.PFJMNJQ9yN/files_scan
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝              ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗                ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝                ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗              ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝              ║
+║                                                                              ║
+║  ██████╗ ██╗   ██╗ ██████╗         __       __                               ║
+║  ██╔══██╗██║   ██║██╔════╝         \ `-'"-'` /                               ║
+║  ██████╔╝██║   ██║██║  ███╗        / \_   _/ \                               ║
+║  ██╔══██╗██║   ██║██║   ██║        |  d\_/b  |                               ║
+║  ██████╔╝╚██████╔╝╚██████╔╝       .'\   V   /'.                              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝        /   '-...-'   \                            ║
+║                                  | /         \ |                             ║
+║                                  \/\         /\/                             ║
+║                                  ==(||)---(||)==                             ║
+║                                                                              ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗              ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗             ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝             ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗             ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║             ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝                  ║
+║                                                                              ║
+║   JS / TS • PYTHON • C / C++ • RUST • GO • JAVA • RUBY                       ║
+║   SWIFT • C# • ELIXIR                                                        ║
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.3.2  2026-06-11 18:07:28
+Project: /data/projects/frankenpandas
+Format:  text
+Detected: rust
+Scanning rust...
+Finished rust (68s)
+
+──────── rust ────────
+
+╔═══════════════════════════════════════════════════════════════════╗ 
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║ 
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║ 
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║ 
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║ 
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║ 
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║ 
+║                                            /\                     ║ 
+║  ██████╗ ██╗   ██╗ ██████╗                ( /   @ @    ()         ║ 
+║  ██╔══██╗██║   ██║██╔════╝                 \  __| |__  /          ║ 
+║  ██████╔╝██║   ██║██║  ███╗                 -/   "   \-           ║ 
+║  ██╔══██╗██║   ██║██║   ██║                /-|       |-\          ║ 
+║  ██████╔╝╚██████╔╝╚██████╔╝               / /-\     /-\ \         ║ 
+║  ╚═════╝  ╚═════╝  ╚═════╝                 / /-`---'-\\ \          ║ 
+║                                             /         \           ║ 
+║                                                                   ║ 
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║ 
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║ 
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║ 
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║ 
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║ 
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║ 
+║                                                                   ║ 
+║  Rust module • ownership sanity, unsafe & async spotlights        ║ 
+║  UBS module: rust • cargo-aware targeting, low-noise caching      ║ 
+║  ASCII homage: Ferris crab (ASCII Art Archive)                    ║ 
+║  Run standalone: modules/ubs-rust.sh --help                       ║ 
+║                                                                   ║ 
+║  Night Owl QA                                                     ║ 
+║  “We see bugs before you do.”                                     ║ 
+╚═══════════════════════════════════════════════════════════════════╝ 
+                                                                      
+
+Project:  /data/projects/frankenpandas
+Started:  2026-06-11 18:07:28
+Files:    1 source files (rs)
+
+✓ ast-grep available (ast-grep) - full AST analysis enabled
+✓ cargo detected
+  ✓ clippy available
+  ✓ rustfmt available
+  ✓ cargo-audit available
+  ✓ cargo-deny available
+  ⚠ cargo-udeps not installed
+  ⚠ cargo-outdated not installed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OWNERSHIP & ERROR HANDLING MACROS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unwrap/expect, panic/unreachable/todo/unimplemented, dbg/println
+Panic-prone and debug macros frequently leak into production and cause crashes
+
+• unwrap()/expect() usage
+  ⚠ Warning (3659 found)
+    Potential panics via unwrap/expect
+    Prefer `?` or match to propagate/handle errors
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:14952 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L14952)
+              let v = frame.column("price").unwrap().values()[0].clone();
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:14979 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L14979)
+              let v = frame.column("v").unwrap().values()[0].clone();
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15194 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L15194)
+              let ints = frame.column("ints").unwrap();
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15197 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L15197)
+              let floats = frame.column("floats").unwrap();
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15200 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L15200)
+              let strings = frame.column("strings").unwrap();
+
+• panic!/unreachable!/todo!/unimplemented!
+  🔥 CRITICAL (8 found)
+    panic! macro(s) present
+    Avoid panic! in library code
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:28973 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L28973)
+                  _ => panic!("column dtype diverged for token {token:?}"),
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:29080 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L29080)
+                  CsvTypedColumnValues::Int64(_) => panic!("expected Float64 column"),
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:29225 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L29225)
+                              _ => panic!("column {idx} dtype diverged"),
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:29229 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L29229)
+                  (expected, actual) => panic!(
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:29230 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L29230)
+                      "merge outcome diverged: reference some={} actual some={}",
+  ⚠ Warning (6 found)
+    unreachable! may panic if reached
+    Double-check logic
+
+• dbg!/println!/eprintln!
+  ℹ Info (22 found)
+    eprintln! found - prefer logging
+
+• Guard clauses that still unwrap later
+  ✓ OK No guard/unwrap mismatches detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. UNSAFE & MEMORY OPERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unsafe blocks, transmute/uninitialized/zeroed/forget, raw ffi hazards
+These patterns may introduce UB, memory leaks, or hard-to-debug crashes
+
+• unsafe { ... } blocks
+  ✓ OK No unsafe blocks detected
+
+• transmute, uninitialized, zeroed, assume_init, forget
+
+• CStr::from_bytes_with_nul_unchecked
+
+• get_unchecked / from_utf8_unchecked / from_raw_parts
+
+• Unsafe Send/Sync impls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CONCURRENCY & ASYNC PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Arc<Mutex>, Rc<RefCell>, blocking ops in async, await-in-loop, spawn misuse
+Concurrency misuse leads to deadlocks, head-of-line blocking, and performance issues
+
+• Arc<Mutex<..>> / Rc<RefCell<..>> / RwLock
+
+• Mutex::lock().unwrap()/expect()
+
+• await inside loops (sequentialism)
+
+• Blocking ops inside async (thread::sleep, std::fs)
+
+• block_on within async context
+
+• std::thread::spawn within async
+
+• tokio::spawn usage (heuristic for detached tasks)
+
+• Async error path coverage
+  ✓ OK No tokio::spawn usage detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. NUMERIC & FLOATING-POINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: float equality, division/modulo by variable, potential overflow hints
+Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
+
+• Floating-point equality comparisons
+  ℹ Info (9 found)
+    Float equality/inequality check
+    Consider epsilon comparisons
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:1787 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L1787)
+              || scaled.fract().to_bits() != 0.0f64.to_bits()
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2266 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L2266)
+                  } else if value.fract() == 0.0 {
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:6622 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L6622)
+                  } else if v.fract() == 0.0 && *v >= i64::MIN as f64 && *v <= i64::MAX as f64 {
+
+• Division/modulo by variable (verify non-zero)
+  ℹ Info (99 found)
+    Division by variables - guard zero divisors
+  ℹ Info (7 found)
+    Modulo by variables - guard zero divisors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. COLLECTIONS & ITERATORS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: clone in loops, collect then iterate, nth(0), length checks
+Iterator misuse often leads to unnecessary allocations or slow paths
+
+• clone() occurrences & clone() in loops
+  ℹ Info (168 found)
+    clone() usages - audit for necessity
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:491 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L491)
+                  Ok(specs.clone())
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:545 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L545)
+              na_values: options.na_values.clone(),
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:548 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L548)
+              index_col: options.index_col.clone(),
+  ⚠ Warning (66 found)
+    clone() inside loops - potential perf hit
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:491 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L491)
+      Ok(specs.clone())
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:545 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L545)
+      na_values: options.na_values.clone(),
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:548 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L548)
+      index_col: options.index_col.clone(),
+
+• collect::<Vec<_>>() then for
+  ℹ Info (149 found)
+    collect::<Vec<_>>() usage - consider streaming
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:1971 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L1971)
+          let headers = frame
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:1972 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L1972)
+              .column_names()
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:1973 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L1973)
+              .into_iter()
+
+• nth(0) → next()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. STRING & ALLOCATION SMELLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: needless allocations, format!(literal), to_owned().to_string()
+Unnecessary allocations and conversions reduce performance
+
+• to_owned().to_string() chain
+
+• format!("literal") with no placeholders
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FILESYSTEM & PROCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: blocking std::fs in async, process::Command usage heuristics
+I/O misuse or command construction from untrusted input can be risky
+
+• std::fs usage (general inventory)
+  ℹ Info (66 found)
+    std::fs operations present - consider async equivalents where applicable
+
+• std::process::Command usage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SECURITY FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TLS verification disabled, weak hash algos, security-sensitive non-crypto randomness, timing-unsafe secret comparisons, JWT verification bypasses, shell command injection, request-derived response headers/open redirects/host-header absolute URLs/outbound URLs/SQL/regex, unbounded request body reads, credentialed CORS, HTTP URLs, secrets
+Security misconfigurations can lead to credential leaks, command injection, and MITM attacks
+
+• Weak hash algorithms (MD5/SHA1)
+  ✓ OK No MD5/SHA1 found
+
+• TLS verification disabled
+
+• Security-sensitive non-crypto randomness
+  ✓ OK No security-sensitive non-crypto randomness detected
+
+• Secret/token comparisons without timing-safe equality
+  🔥 CRITICAL (14 found)
+    Secret, signature, or token compared with ==/!=
+    Use subtle::ConstantTimeEq, ring::constant_time::verify_slices_are_equal, crypto_memcmp, or a reviewed constant-time helper for bearer tokens, HMACs, CSRF values, reset secrets, API keys, and signatures
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:915 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L915)
+      let relative_newline = data[end..].iter().position(|byte| *byte == b'
+')?;
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:956 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L956)
+      Some(b'
+') if data.get(idx + 1).copied() != Some(b'
+') => return None,
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2707 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L2707)
+      if !(first == '_' || first.is_ascii_alphabetic()) {
+
+• JWT decode, validation bypass, or missing claim binding
+  ✓ OK No JWT decode/validation bypass patterns detected
+
+• Shell command execution through -c/-lc
+  ✓ OK No shell -c/-lc Command usage detected
+
+• Command::new executable from untrusted-looking value
+
+• Path join/push with untrusted-looking segment
+  ⚠ Warning (1 found)
+    Path join/push with untrusted-looking segment
+    Reject absolute paths and '..' components; canonicalize and verify the result stays under the intended root
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:11334 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L11334)
+      out.push(name);
+
+• Archive entry paths joined into extraction destination
+
+• Predictable temp-file writes
+  ⚠ Warning (22 found)
+    Predictable temp-file write race
+    Use tempfile::NamedTempFile/tempfile::Builder or OpenOptions::create_new(true) with unpredictable names
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:4622 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L4622)
+      std::fs::write(path, content)?;
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:4766 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L4766)
+      std::fs::write(path, content)?;
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:4782 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L4782)
+      std::fs::write(path, content)?;
+
+• Request-derived open redirects
+  ✓ OK No request-derived open redirect sinks detected
+
+• Host header used for absolute URL construction
+  ✓ OK No Host-header-derived absolute URL construction detected
+
+• Request-derived response headers
+  ✓ OK No request-derived response header values detected
+
+• Request-derived outbound HTTP URLs
+  ✓ OK No request-derived outbound HTTP URL sinks detected
+
+• Request-derived SQL construction
+  ✓ OK No request-derived SQL construction sinks detected
+
+• Request-controlled regex patterns
+  ✓ OK No request-controlled regex compilation detected
+
+• Unbounded request body reads
+  ✓ OK No unbounded request body reads detected
+
+• CORS credential policy
+  ✓ OK No unsafe CORS credential policy detected
+
+• Plain http:// URLs
+
+• Hardcoded secrets/credentials
+  ✓ OK No hardcoded secrets detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. CODE QUALITY MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TODO, FIXME, HACK, NOTE
+Technical debt markers indicate incomplete or problematic code
+  ✓ OK No TODO/FIXME/HACK markers found
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. MODULE & VISIBILITY ISSUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pub use wildcards, glob imports, re-exports
+Overly broad visibility complicates API stability and encapsulation
+
+• Wildcard imports (use crate::* or ::*)
+  ℹ Info (5 found)
+    Wildcard imports found; prefer explicit names
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:9614 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L9614)
+              use mysql::prelude::*;
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:9653 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L9653)
+              use mysql::prelude::*;
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:9663 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L9663)
+              use mysql::prelude::*;
+
+• pub use re-exports (inventory)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS & BENCHES HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: ignored tests, todo! in tests, println!/dbg! in tests
+Ensure tests do not hide failures or produce noisy output
+
+• #[ignore] tests
+
+• todo!/unimplemented! in tests
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. LINTS & STYLE (fmt/clippy)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo fmt -- --check, cargo clippy
+Formatter and lints help maintain consistent style and catch many issues
+  ✓ OK Formatting is clean
+  ✓ OK No clippy warnings/errors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. BUILD HEALTH (check/test)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo check, cargo test --no-run
+Ensures the project compiles and tests build
+  ✓ OK cargo check clean
+  ✓ OK Tests build clean
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. DEPENDENCY HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo audit, cargo deny check, cargo udeps, cargo outdated
+Keeps dependencies safe, minimal, and up-to-date
+  ✓ OK No known advisories (cargo-audit)
+  ✓ OK cargo-deny clean
+  ℹ Info (1 found)
+    cargo-udeps not installed; skipping unused dep scan
+  ℹ Info (1 found)
+    cargo-outdated not installed; skipping update report
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. API MISUSE (COMMON)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: nth(0), DefaultHasher, expect_err/unwrap_err, Option::unwrap_or_default in hot paths
+Common footguns and readability hazards
+
+• std::collections::hash_map::DefaultHasher
+
+• unwrap_err()/expect_err() usage inventory
+  ℹ Info (128 found)
+    unwrap_err/expect_err present - ensure test-only or justified
+
+• Option::unwrap_or_default inventory
+  ℹ Info (15 found)
+    unwrap_or_default present - validate default semantics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. DOMAIN-SPECIFIC HEURISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: reqwest builder, SQL string concatenation (heuristic), serde_json::from_str without context
+Domain patterns that often hint at bugs
+
+• reqwest::ClientBuilder inventory
+
+• serde_json::from_str without error context (heuristic)
+  ℹ Info (2 found)
+    serde_json::from_str uses - ensure error context and validation
+
+• SQL string concatenation (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. AST-GREP RULE PACK FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ℹ Info (0 found)
+    AST rule pack staged
+    Run with --format=sarif to emit SARIF from the rule pack
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. META STATISTICS & INVENTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: crate counts, bin/lib targets, feature flags (Cargo.toml heuristic)
+High-level view of the project layout
+
+• Cargo.toml features (heuristic count)
+  ℹ Info (1 found)
+    No Cargo.toml at project root (workspace? set PROJECT_DIR accordingly)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+19. RESOURCE LIFECYCLE CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: std::thread::spawn without join, tokio::spawn without await, TcpStream without shutdown
+Rust relies on explicit joins/shutdowns even with RAII—leaks create zombie work
+
+• Resource lifecycle correlation
+  ✓ OK All tracked resource acquisitions have matching cleanups
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+20. ASYNC LOCKING ACROSS AWAIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: locks acquired in async fns and potentially held across await
+Holding locks across await can deadlock, starve tasks, and cause latency spikes; std::sync locks can block executor threads
+
+• std::sync lock usage inside async fn (blocking risk)
+  ✓ OK No obvious std::sync lock usage inside async fns
+
+• Potential std::sync guard held across await (heuristic)
+
+• Potential async lock guard held across await (tokio/async locks heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+21. PANIC SURFACES & UNWINDING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: assert macros, direct indexing, unreachable_unchecked/unwrap_unchecked, panic/unwrap inside Drop
+Panics in destructors or UB hints can crash/abort in subtle ways; these can slip past linting depending on cfg/features
+
+• assert!/assert_eq!/assert_ne! inventory
+  ⚠ Warning (1643 found)
+    assert! macros present (panic surface)
+    If these are runtime invariants, consider explicit error handling; ensure not reachable by untrusted input
+
+• unreachable_unchecked / unwrap_unchecked
+
+• direct indexing / slicing panic surfaces
+  ⚠ Warning (74 found)
+    Direct indexing/slicing may panic
+    Use get()/get_mut(), checked ranges, or prior bounds checks when indexes can come from input
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:524 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L524)
+                      chars[start..real_end].iter().collect()
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:777 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L777)
+              let magnitude = mantissa as f64 / FUSED_DECIMAL_POW10[frac_digits];
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:915 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L915)
+                  let relative_newline = data[end..].iter().position(|byte| *byte == b'
+')?;
+
+• panic!/unwrap/expect inside Drop
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+22. SUSPICIOUS CASTS & TRUNCATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pervasive `as` casts, try_into().unwrap, numeric narrowing patterns
+`as` casts can silently truncate or change sign; conversion panics may be missed in uncommon input paths
+
+• `as` cast inventory
+  ℹ Info (52 found)
+    `as` casts present (possible truncation/sign bugs)
+    Prefer TryFrom/TryInto for correctness or document invariants
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:7306 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L7306)
+                      .write_string(0, data_col_offset + col_idx as u16, name.as_str())
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:7329 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L7329)
+                          data_col_offset + col_idx as u16,
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:3409 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L3409)
+              let subsec = (ns.rem_euclid(1_000_000_000)) as u32;
+
+• len()/count() narrowed via `as`
+
+• try_into().unwrap()/expect() (panic on conversion failure)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+23. PARSING & VALIDATION ROBUSTNESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: parse/from_str/env-var unwraps, decode unwraps, missing error context
+Parsing and decoding failures often happen in prod on edge inputs; unwrap/expect turns them into panics
+
+• parse::<T>().unwrap()/expect()
+
+• serde/toml deserialization unwrap()/expect()
+  ⚠ Warning (8 found)
+    serde/toml deserialization unwrap/expect
+    Add context, validation, and schema checks; avoid panics on malformed data
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:16143 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L16143)
+              let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:16182 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L16182)
+                  serde_json::from_str(&write_json_string(&frame, JsonOrient::Columns).unwrap()).unwrap();
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:16186 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L16186)
+                  serde_json::from_str(&write_json_string(&frame, JsonOrient::Index).unwrap()).unwrap();
+
+• env::var(...).unwrap()/expect()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+24. PERF/DoS HOTSPOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: regex compilation in loops, chars().nth(n), format!/allocations in loops
+Some perf pitfalls become DoS risks on large inputs or hot paths; these often evade linting in non-bench builds
+
+• Regex::new occurrences and in-loop compilation
+  ✓ OK No regex::Regex::new detected
+
+• chars().nth(n)/nth_back(n) (O(n))
+
+• format!/to_string/allocations inside loops (heuristic)
+  ⚠ Warning (255 found)
+    String allocation inside loop
+    Consider preallocating buffers, using write!, or restructuring to reduce allocations
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:431 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L431)
+      "cannot infer fixed-width colspecs from empty input".to_owned(),
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:469 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L469)
+      "cannot infer fixed-width colspecs from whitespace-only input".to_owned(),
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:481 (https://github.com/Dicklesworthstone/frankenpandas/blob/7d0b2f830aca61aa49d2f7a930f0dc4d30fcb812/crates/fp-io/src/lib.rs#L481)
+      "You must specify only one of 'widths' and 'colspecs'".to_owned(),
+
+═══════════════════════════════════════════════════════════════════════════
+                    🎯 SCAN COMPLETE 🎯                                  
+═══════════════════════════════════════════════════════════════════════════
+
+Summary Statistics:
+  Files scanned:    1
+  Critical issues:  22
+  Warning issues:   5734
+  Info items:       725
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+  These cause crashes, security vulnerabilities, or data corruption
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+  Code quality improvements and best practices
+
+Scan completed at: 2026-06-11 18:08:36
+
+Tip: Run with -v/--verbose for more code samples per finding.
+Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt
+
+
+──────── Combined Summary ────────
+Files: 1
+Critical: 22
+Warning: 5734
+Info: 725

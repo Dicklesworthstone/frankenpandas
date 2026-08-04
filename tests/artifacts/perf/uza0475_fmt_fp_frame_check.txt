@@ -1,0 +1,609 @@
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_dropna.rs:12:
+ //! GATHER-bound: the cost is filter_rows building the kept-row output frame
+ //! (take_positions per column, already typed), not the missing detection.
+
+-use std::collections::BTreeMap;
+-use std::hint::black_box;
+-use std::time::Instant;
++use std::{collections::BTreeMap, hint::black_box, time::Instant};
+
+ use fp_columnar::Column;
+ use fp_frame::DataFrame;
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_dropna.rs:26:
+     let mut order = Vec::new();
+     for c in 0..6 {
+         let name = format!("i{c}");
+-        map.insert(name.clone(), Column::from_i64_values((0..n as i64).collect()));
++        map.insert(
++            name.clone(),
++            Column::from_i64_values((0..n as i64).collect()),
++        );
+         order.push(name);
+     }
+     let name = "s".to_string();
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_dropna.rs:54:
+
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
++    let n: usize = args
++        .get(1)
++        .and_then(|s| s.parse().ok())
++        .unwrap_or(1_000_000);
+     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+     let df = build(n);
+
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_groupby_shift.rs:8:
+ //! digest of the full output (incl. group-boundary nulls) so the two runs prove
+ //! bit-identicality.
+
+-use std::hint::black_box;
+-use std::time::Instant;
++use std::{hint::black_box, time::Instant};
+
+ use fp_columnar::Column;
+ use fp_frame::Series;
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_groupby_shift.rs:18:
+
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
++    let n: usize = args
++        .get(1)
++        .and_then(|s| s.parse().ok())
++        .unwrap_or(1_000_000);
+     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+     let groups = 100usize;
+
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_groupby_shift.rs:25:
+     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+     let keys: Vec<i64> = (0..n).map(|i| (i % groups) as i64).collect();
+-    let vals: Vec<f64> = (0..n).map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.25).collect();
++    let vals: Vec<f64> = (0..n)
++        .map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.25)
++        .collect();
+     let value = Series::new(
+         "v".to_string(),
+         Index::new(labels.clone()),
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_rolling_var.rs:114:
+                     f64::NAN
+                 } else {
+                     let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+-                    (nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+-                        / (nums.len() - 1) as f64)
++                    (nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nums.len() - 1) as f64)
+                         .sqrt()
+                 }
+             }
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_rolling_var.rs:204:
+             for (g, w) in got_vals.iter().zip(want.iter()) {
+                 let matches = match g {
+                     Scalar::Null(_) => w.is_nan() && mp_eff > 0, // min_periods-null sentinel
+-                    Scalar::Float64(f) => {
+-                        f.to_bits() == w.to_bits() || (f.is_nan() && w.is_nan())
+-                    }
++                    Scalar::Float64(f) => f.to_bits() == w.to_bits() || (f.is_nan() && w.is_nan()),
+                     _ => false,
+                 };
+                 if !matches {
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_rolling_var.rs:220:
+         } else {
+             bad += 1;
+             if bad <= 3 {
+-                eprintln!("MISMATCH n={n} w={window} mp={mp:?} c={center} agg={}", agg_name(a));
++                eprintln!(
++                    "MISMATCH n={n} w={window} mp={mp:?} c={center} agg={}",
++                    agg_name(a)
++                );
+             }
+         }
+     }
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_to_numpy.rs:5:
+ //!
+ //! Run: cargo run -p fp-frame --example bench_to_numpy --release
+
+-use std::collections::BTreeMap;
+-use std::hint::black_box;
+-use std::time::Instant;
++use std::{collections::BTreeMap, hint::black_box, time::Instant};
+
+ use fp_columnar::Column;
+ use fp_frame::DataFrame;
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_to_numpy.rs:31:
+     let mut cols = BTreeMap::new();
+     let mut order = Vec::new();
+     for c in 0..6 {
+-        let v: Vec<f64> = (0..n).map(|i| ((i as u64).wrapping_mul(2654435761 + c) % 100000) as f64 * 0.125).collect();
++        let v: Vec<f64> = (0..n)
++            .map(|i| ((i as u64).wrapping_mul(2654435761 + c) % 100000) as f64 * 0.125)
++            .collect();
+         let name = format!("f{c}");
+         cols.insert(name.clone(), Column::from_f64_values(v));
+         order.push(name);
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_to_numpy.rs:38:
+     }
+     for c in 0..2 {
+-        let v: Vec<i64> = (0..n as i64).map(|i| i.wrapping_mul(31 + c) % 9973).collect();
++        let v: Vec<i64> = (0..n as i64)
++            .map(|i| i.wrapping_mul(31 + c) % 9973)
++            .collect();
+         let name = format!("i{c}");
+         cols.insert(name.clone(), Column::from_i64_values(v));
+         order.push(name);
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_to_numpy.rs:46:
+ }
+
+ fn main() {
+-    let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(500_000);
+-    let iters: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(20);
++    let n: usize = std::env::args()
++        .nth(1)
++        .and_then(|s| s.parse().ok())
++        .unwrap_or(500_000);
++    let iters: usize = std::env::args()
++        .nth(2)
++        .and_then(|s| s.parse().ok())
++        .unwrap_or(20);
+
+     let small = build(37);
+     println!("GOLDEN_FNV {:016x}", fnv_f64(&small.to_numpy()));
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/bench_to_numpy.rs:61:
+         sink = sink.wrapping_add(m.len());
+     }
+     let d = t.elapsed();
+-    println!("TIMING n={n} iters={iters} per_iter={:.3}ms sink={sink}", d.as_secs_f64() * 1e3 / iters as f64);
++    println!(
++        "TIMING n={n} iters={iters} per_iter={:.3}ms sink={sink}",
++        d.as_secs_f64() * 1e3 / iters as f64
++    );
+ }
+
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/examples/corr_parity_dump.rs:5:
+ //!
+ //! Run: cargo run -p fp-frame --example corr_parity_dump --release
+
+-use std::io::Write;
++use std::{collections::BTreeMap, io::Write};
+
+-use fp_frame::DataFrame;
+ use fp_columnar::Column;
++use fp_frame::DataFrame;
+ use fp_index::{Index, IndexLabel};
+ use fp_types::Scalar;
+-use std::collections::BTreeMap;
+
+ fn splitmix_unit(i: usize, c: usize) -> f64 {
+     // Identical to perf_profile::build_corr_frame.
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:24893:
+     let chars: Vec<char> = s.chars().collect();
+     let len = chars.len() as i64;
+     let resolve = |i: i64| -> usize {
+-        if i < 0 { (len + i).max(0) as usize } else { i.min(len) as usize }
++        if i < 0 {
++            (len + i).max(0) as usize
++        } else {
++            i.min(len) as usize
++        }
+     };
+     let lo = resolve(start);
+     let hi = match end {
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:24904:
+         return -1;
+     }
+     let slice: String = chars[lo..hi].iter().collect();
+-    let found = if reverse { slice.rfind(sub) } else { slice.find(sub) };
++    let found = if reverse {
++        slice.rfind(sub)
++    } else {
++        slice.find(sub)
++    };
+     match found {
+         Some(byte_pos) => lo as i64 + slice[..byte_pos].chars().count() as i64,
+         None => -1,
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:28246:
+     /// Matches `pd.Series.dt.is_quarter_start`.
+     pub fn is_quarter_start(&self) -> Result<Series, FrameError> {
+         if self.is_typed_datetime() {
+-            return self.extract_component_typed_bool(|ts| ts.is_quarter_start(), self.series.name());
++            return self
++                .extract_component_typed_bool(|ts| ts.is_quarter_start(), self.series.name());
+         }
+         self.extract_component(
+             |s| {
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:30801:
+     let floats: Vec<Option<f64>> = series
+         .values()
+         .iter()
+-        .map(|v| if v.is_missing() { None } else { v.to_f64().ok() })
++        .map(|v| {
++            if v.is_missing() {
++                None
++            } else {
++                v.to_f64().ok()
++            }
++        })
+         .collect();
+
+     let valid: Vec<f64> = floats.iter().filter_map(|v| *v).collect();
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:30899:
+     let floats: Vec<Option<f64>> = series
+         .values()
+         .iter()
+-        .map(|v| if v.is_missing() { None } else { v.to_f64().ok() })
++        .map(|v| {
++            if v.is_missing() {
++                None
++            } else {
++                v.to_f64().ok()
++            }
++        })
+         .collect();
+
+     let mut valid: Vec<f64> = floats.iter().filter_map(|v| *v).collect();
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:36978:
+                 Scalar::Float64(Self::quantile_select(&mut nums, q))
+             })
+         })?;
+-        let labels: Vec<IndexLabel> =
+-            allowed.iter().map(|name| IndexLabel::Utf8(name.clone())).collect();
++        let labels: Vec<IndexLabel> = allowed
++            .iter()
++            .map(|name| IndexLabel::Utf8(name.clone()))
++            .collect();
+         Series::from_values(format!("{q}"), labels, values)
+     }
+
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:38053:
+                 for _ in 0..worker_count {
+                     let next = &next;
+                     let rank_one = &rank_one;
+-                    handles.push(scope.spawn(move || -> Result<Vec<(String, Column)>, FrameError> {
+-                        let mut out = Vec::new();
+-                        loop {
+-                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+-                            if i >= self.column_order.len() {
+-                                break;
++                    handles.push(scope.spawn(
++                        move || -> Result<Vec<(String, Column)>, FrameError> {
++                            let mut out = Vec::new();
++                            loop {
++                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                                if i >= self.column_order.len() {
++                                    break;
++                                }
++                                out.push(rank_one(&self.column_order[i])?);
+                             }
+-                            out.push(rank_one(&self.column_order[i])?);
+-                        }
+-                        Ok(out)
+-                    }));
++                            Ok(out)
++                        },
++                    ));
+                 }
+                 let mut ranked_cols = BTreeMap::new();
+                 for handle in handles {
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:38070:
+-                    let worker_out = handle
+-                        .join()
+-                        .map_err(|_| {
+-                            FrameError::CompatibilityRejected("rank worker thread panicked".into())
+-                        })??;
++                    let worker_out = handle.join().map_err(|_| {
++                        FrameError::CompatibilityRejected("rank worker thread panicked".into())
++                    })??;
+                     ranked_cols.extend(worker_out);
+                 }
+                 Ok(ranked_cols)
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:43551:
+         // count is independent, so spread the columns across par_map_columns
+         // scope workers. Bit-identical — identical per-column typed/hashed arms,
+         // reassembled in column_order.
+-        let values: Vec<Scalar> = self
+-            .par_map_columns(&self.column_order, |n| {
+-                let col = &self.columns[n];
+-                // Typed Float64 fast path (br-frankenpandas-zl16n): dedup the
+-                // present values straight from the f64 + validity slices into an
+-                // Fx-hashed set of normalized bits, skipping the col.values()
+-                // Vec<Scalar> materialization and the ScalarKey SipHash map.
+-                // Bit-identical to scalar_key_skip_missing's Float64 arm: a present
+-                // slot is validity-set AND datum-not-NaN (Float64(NaN)/Null are
+-                // missing), keyed by FloatBits of the -0.0->+0.0 normalized datum;
+-                // every other slot is a missing value (one shared bucket, counted
+-                // iff !dropna).
+-                if let Some((data, validity)) = col.as_f64_slice_with_validity() {
+-                    let mut seen: FxHashSet<u64> = FxHashSet::default();
+-                    let mut missing_seen = false;
+-                    for (i, &v) in data.iter().enumerate() {
+-                        if validity.get(i) && !v.is_nan() {
+-                            let normalized = if v == 0.0 { 0.0 } else { v };
+-                            seen.insert(normalized.to_bits());
+-                        } else if !dropna {
+-                            missing_seen = true;
+-                        }
++        let values: Vec<Scalar> = self.par_map_columns(&self.column_order, |n| {
++            let col = &self.columns[n];
++            // Typed Float64 fast path (br-frankenpandas-zl16n): dedup the
++            // present values straight from the f64 + validity slices into an
++            // Fx-hashed set of normalized bits, skipping the col.values()
++            // Vec<Scalar> materialization and the ScalarKey SipHash map.
++            // Bit-identical to scalar_key_skip_missing's Float64 arm: a present
++            // slot is validity-set AND datum-not-NaN (Float64(NaN)/Null are
++            // missing), keyed by FloatBits of the -0.0->+0.0 normalized datum;
++            // every other slot is a missing value (one shared bucket, counted
++            // iff !dropna).
++            if let Some((data, validity)) = col.as_f64_slice_with_validity() {
++                let mut seen: FxHashSet<u64> = FxHashSet::default();
++                let mut missing_seen = false;
++                for (i, &v) in data.iter().enumerate() {
++                    if validity.get(i) && !v.is_nan() {
++                        let normalized = if v == 0.0 { 0.0 } else { v };
++                        seen.insert(normalized.to_bits());
++                    } else if !dropna {
++                        missing_seen = true;
+                     }
+-                    return Ok(Scalar::Int64((seen.len() + usize::from(missing_seen)) as i64));
+                 }
+-                // Hash-free direct-address fast path (br-frankenpandas-zf96l):
+-                // an all-valid bounded-range Int64 column counts distinct via a
+-                // dense seen-bit table (same helper Series::nunique uses), skipping
+-                // the col.values() materialization + ScalarKey SipHash. All-valid
+-                // (as_i64_slice) => no missing, so dropna is moot and the distinct
+-                // count is bit-identical to the HashMap distinct count.
+-                if let Some(data) = col.as_i64_slice()
+-                    && let Some((min, range)) = i64_dense_histogram_range(data)
+-                {
+-                    let mut seen_slot = vec![false; range];
+-                    let mut distinct = 0usize;
+-                    for &v in data {
+-                        let slot = (v as i128 - min as i128) as usize;
+-                        if !seen_slot[slot] {
+-                            seen_slot[slot] = true;
+-                            distinct += 1;
+-                        }
++                return Ok(Scalar::Int64(
++                    (seen.len() + usize::from(missing_seen)) as i64,
++                ));
++            }
++            // Hash-free direct-address fast path (br-frankenpandas-zf96l):
++            // an all-valid bounded-range Int64 column counts distinct via a
++            // dense seen-bit table (same helper Series::nunique uses), skipping
++            // the col.values() materialization + ScalarKey SipHash. All-valid
++            // (as_i64_slice) => no missing, so dropna is moot and the distinct
++            // count is bit-identical to the HashMap distinct count.
++            if let Some(data) = col.as_i64_slice()
++                && let Some((min, range)) = i64_dense_histogram_range(data)
++            {
++                let mut seen_slot = vec![false; range];
++                let mut distinct = 0usize;
++                for &v in data {
++                    let slot = (v as i128 - min as i128) as usize;
++                    if !seen_slot[slot] {
++                        seen_slot[slot] = true;
++                        distinct += 1;
+                     }
+-                    return Ok(Scalar::Int64(distinct as i64));
+                 }
+-                let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
+-                let mut missing_seen = false;
+-                for v in col.values() {
+-                    if v.is_missing() {
+-                        if dropna {
+-                            continue;
+-                        }
+-                        missing_seen = true;
++                return Ok(Scalar::Int64(distinct as i64));
++            }
++            let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
++            let mut missing_seen = false;
++            for v in col.values() {
++                if v.is_missing() {
++                    if dropna {
+                         continue;
+                     }
+-                    if let Some(key) = scalar_key_skip_missing(v) {
+-                        seen.insert(key, ());
+-                    }
++                    missing_seen = true;
++                    continue;
+                 }
+-                Ok(Scalar::Int64((seen.len() + usize::from(missing_seen)) as i64))
+-            })?;
++                if let Some(key) = scalar_key_skip_missing(v) {
++                    seen.insert(key, ());
++                }
++            }
++            Ok(Scalar::Int64(
++                (seen.len() + usize::from(missing_seen)) as i64,
++            ))
++        })?;
+         Series::from_values("nunique".to_string(), labels, values)
+     }
+
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:44050:
+                     let next = &next;
+                     let mode_one = &mode_one;
+                     let selected = &selected_columns;
+-                    handles.push(
+-                        scope.spawn(move || -> Result<Vec<(usize, String, Series)>, FrameError> {
++                    handles.push(scope.spawn(
++                        move || -> Result<Vec<(usize, String, Series)>, FrameError> {
+                             let mut out = Vec::new();
+                             loop {
+                                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:44062:
+                                 out.push((i, name, modes));
+                             }
+                             Ok(out)
+-                        }),
+-                    );
++                        },
++                    ));
+                 }
+                 let mut slots: Vec<Option<(String, Series)>> = (0..ncols).map(|_| None).collect();
+                 for handle in handles {
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:44225:
+         const PAR_MIN_VALUES: usize = 16_384;
+
+         let ncols = names.len();
+-        let worker_count = if ncols >= PAR_MIN_COLS
+-            && ncols.saturating_mul(self.len()) >= PAR_MIN_VALUES
+-        {
+-            std::thread::available_parallelism()
+-                .map_or(1, std::num::NonZeroUsize::get)
+-                .min(ncols)
+-        } else {
+-            1
+-        };
++        let worker_count =
++            if ncols >= PAR_MIN_COLS && ncols.saturating_mul(self.len()) >= PAR_MIN_VALUES {
++                std::thread::available_parallelism()
++                    .map_or(1, std::num::NonZeroUsize::get)
++                    .min(ncols)
++            } else {
++                1
++            };
+
+         if worker_count < 2 {
+             return names.iter().map(|name| f(name)).collect();
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:44316:
+                 }
+             })
+         })?;
+-        let labels: Vec<IndexLabel> =
+-            allowed.iter().map(|name| IndexLabel::Utf8(name.clone())).collect();
++        let labels: Vec<IndexLabel> = allowed
++            .iter()
++            .map(|name| IndexLabel::Utf8(name.clone()))
++            .collect();
+         Series::from_values(func.to_string(), labels, values)
+     }
+
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:44356:
+                 }
+             })
+         })?;
+-        let labels: Vec<IndexLabel> =
+-            allowed.iter().map(|name| IndexLabel::Utf8(name.clone())).collect();
++        let labels: Vec<IndexLabel> = allowed
++            .iter()
++            .map(|name| IndexLabel::Utf8(name.clone()))
++            .collect();
+         Series::from_values(func.to_string(), labels, values)
+     }
+
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:44510:
+                 .iter()
+                 .filter_map(|&col_name| {
+                     let v = &self.columns[col_name].values()[row_idx];
+-                    if v.is_missing() { None } else { v.to_f64().ok() }
++                    if v.is_missing() {
++                        None
++                    } else {
++                        v.to_f64().ok()
++                    }
+                 })
+                 .collect();
+             if row_vals.is_empty() {
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:45606:
+     /// mapping column name -> decimals. Columns absent from the map are left
+     /// UNCHANGED (pandas only rounds the listed columns); a listed non-numeric
+     /// column is also left unchanged (rounding is a no-op on object dtype).
+-    pub fn round_columns(
+-        &self,
+-        decimals: &BTreeMap<String, i32>,
+-    ) -> Result<Self, FrameError> {
++    pub fn round_columns(&self, decimals: &BTreeMap<String, i32>) -> Result<Self, FrameError> {
+         let mut result_cols = BTreeMap::new();
+         for name in &self.column_order {
+             let col = &self.columns[name];
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:46641:
+             if computed.iter().all(Option::is_some) {
+                 let mut result_cols = BTreeMap::new();
+                 for (name, column) in self.column_order.iter().zip(computed) {
+-                    result_cols
+-                        .insert(name.clone(), column.expect("all columns checked is_some"));
++                    result_cols.insert(name.clone(), column.expect("all columns checked is_some"));
+                 }
+                 return Ok(Self {
+                     columns: result_cols,
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:76965:
+         decimals.insert("a".to_string(), 1);
+         decimals.insert("b".to_string(), 2);
+         let result = df.round_columns(&decimals).unwrap();
+-        assert_eq!(result.column("a").unwrap().values()[0], Scalar::Float64(1.2));
+-        assert_eq!(result.column("b").unwrap().values()[0], Scalar::Float64(5.68));
++        assert_eq!(
++            result.column("a").unwrap().values()[0],
++            Scalar::Float64(1.2)
++        );
++        assert_eq!(
++            result.column("b").unwrap().values()[0],
++            Scalar::Float64(5.68)
++        );
+         // 'c' not in the map -> unchanged.
+-        assert_eq!(result.column("c").unwrap().values()[0], Scalar::Float64(9.8765));
++        assert_eq!(
++            result.column("c").unwrap().values()[0],
++            Scalar::Float64(9.8765)
++        );
+     }
+
+     // --- DataFrame to_csv/to_json tests ---
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:78573:
+         // "abcabcabc".find("abc", 1) == 3  (search starts at index 1)
+         assert_eq!(one(&s.str().find_with_bounds("abc", 1, None).unwrap()), 3);
+         // .find("abc", 1, 5) -> s[1:5]="bcab", no "abc" -> -1
+-        assert_eq!(one(&s.str().find_with_bounds("abc", 1, Some(5)).unwrap()), -1);
++        assert_eq!(
++            one(&s.str().find_with_bounds("abc", 1, Some(5)).unwrap()),
++            -1
++        );
+         // negative start: .find("abc", -3) -> from index 6 -> 6
+         assert_eq!(one(&s.str().find_with_bounds("abc", -3, None).unwrap()), 6);
+         // start past len clamps: .find("abc", 100) -> -1
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:78580:
+-        assert_eq!(one(&s.str().find_with_bounds("abc", 100, None).unwrap()), -1);
++        assert_eq!(
++            one(&s.str().find_with_bounds("abc", 100, None).unwrap()),
++            -1
++        );
+         // empty sub at start position: .find("", 4) -> 4
+         assert_eq!(one(&s.str().find_with_bounds("", 4, None).unwrap()), 4);
+
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:78584:
+         // rfind: last "abc" overall is at 6.
+         assert_eq!(one(&s.str().rfind_with_bounds("abc", 0, None).unwrap()), 6);
+         // rfind within s[0:6]="abcabc" -> last "abc" at 3.
+-        assert_eq!(one(&s.str().rfind_with_bounds("abc", 0, Some(6)).unwrap()), 3);
++        assert_eq!(
++            one(&s.str().rfind_with_bounds("abc", 0, Some(6)).unwrap()),
++            3
++        );
+
+         // Char-based (not byte): a multibyte prefix shifts the index by chars.
+         let s2 = Series::from_values(
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:78655:
+         // negative start: index("abc", -3) == 6
+         assert_eq!(one(&s.str().index_with_bounds("abc", -3, None).unwrap()), 6);
+         // rindex within s[0:6] -> 3
+-        assert_eq!(one(&s.str().rindex_with_bounds("abc", 0, Some(6)).unwrap()), 3);
++        assert_eq!(
++            one(&s.str().rindex_with_bounds("abc", 0, Some(6)).unwrap()),
++            3
++        );
+         // not found in the slice -> raises (Python ValueError)
+         let err = s.str().index_with_bounds("abc", 1, Some(5)).unwrap_err();
+         assert!(err.to_string().contains("substring not found"));
+Diff in /data/projects/.scratch/frankenpandas-orangepeak-current-after-uza04-74/crates/fp-frame/src/lib.rs:85743:
+             &["a", "b", "c"],
+             vec![
+                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(f64::NAN)]),
+-                ("b", vec![Scalar::Float64(f64::NAN), Scalar::Float64(f64::NAN)]),
++                (
++                    "b",
++                    vec![Scalar::Float64(f64::NAN), Scalar::Float64(f64::NAN)],
++                ),
+                 ("c", vec![Scalar::Float64(2.0), Scalar::Float64(f64::NAN)]),
+             ],
+         )

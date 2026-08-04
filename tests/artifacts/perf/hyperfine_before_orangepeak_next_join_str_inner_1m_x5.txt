@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-next-join-baseline/release-perf/examples/perf_profile str_inner_join 1000000 5
+  Time (mean ± σ):     135.6 ms ±   5.9 ms    [User: 63.1 ms, System: 71.7 ms]
+  Range (min … max):   126.8 ms … 146.1 ms    10 runs
+ 

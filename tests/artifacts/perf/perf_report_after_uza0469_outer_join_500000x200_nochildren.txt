@@ -1,0 +1,270 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 841  of event 'cycles:P'
+# Event count (approx.): 3085754121
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                                                                                      IPC   [IPC Coverage]
+# ........  ..........................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    54.06%  [.] fp_join::build_dense_cycle_outer_run_tape                                                                                                                                                                                                                                                                                                                               -      -            
+            |          
+            |--34.36%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          
+            |          |--5.53%--push<usize, alloc::alloc::Global> (inlined)
+            |          |          |          
+            |          |          |--2.81%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          |          fp_join::merge_dataframes_on_with_options
+            |          |          |          fp_join::merge_dataframes
+            |          |          |          merge_dataframes_on (inlined)
+            |          |          |          merge_dataframes (inlined)
+            |          |          |          perf_profile::main
+            |          |          |          
+            |          |           --2.30%--append_dense_cycle_positions (inlined)
+            |          |                     fp_join::build_dense_cycle_outer_run_tape
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--4.75%--push<bool, alloc::alloc::Global> (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--3.58%--push_mut<usize, alloc::alloc::Global> (inlined)
+            |          |          push<usize, alloc::alloc::Global> (inlined)
+            |          |          |          
+            |          |           --2.88%--fp_join::build_dense_cycle_outer_run_tape
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--3.27%--spec_next<usize> (inlined)
+            |          |          next<usize> (inlined)
+            |          |          |          
+            |          |          |--1.76%--append_dense_cycle_positions (inlined)
+            |          |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          |          fp_join::merge_dataframes_on_with_options
+            |          |          |          fp_join::merge_dataframes
+            |          |          |          merge_dataframes_on (inlined)
+            |          |          |          merge_dataframes (inlined)
+            |          |          |          perf_profile::main
+            |          |          |          
+            |          |           --1.51%--fp_join::build_dense_cycle_outer_run_tape
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--2.86%--fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--2.69%--push_mut<(usize, usize), alloc::alloc::Global> (inlined)
+            |          |          push<(usize, usize), alloc::alloc::Global> (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--2.44%--ptr<alloc::alloc::Global, usize> (inlined)
+            |          |          ptr<usize, alloc::alloc::Global> (inlined)
+            |          |          as_mut_ptr<usize, alloc::alloc::Global> (inlined)
+            |          |          push_mut<usize, alloc::alloc::Global> (inlined)
+            |          |          push<usize, alloc::alloc::Global> (inlined)
+            |          |          |          
+            |          |           --1.90%--fp_join::build_dense_cycle_outer_run_tape
+            |          |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |                     fp_join::merge_dataframes_on_with_options
+            |          |                     fp_join::merge_dataframes
+            |          |                     merge_dataframes_on (inlined)
+            |          |                     merge_dataframes (inlined)
+            |          |                     perf_profile::main
+            |          |          
+            |          |--2.32%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.60%--push<(usize, usize), alloc::alloc::Global> (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.36%--push_mut<bool, alloc::alloc::Global> (inlined)
+            |          |          push<bool, alloc::alloc::Global> (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |          |--1.10%--forward_unchecked (inlined)
+            |          |          spec_next<usize> (inlined)
+            |          |          next<usize> (inlined)
+            |          |          append_dense_cycle_positions (inlined)
+            |          |          fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --0.96%--append_dense_cycle_positions (inlined)
+            |                     fp_join::build_dense_cycle_outer_run_tape
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--8.25%--push_mut<usize, alloc::alloc::Global> (inlined)
+            |          push<usize, alloc::alloc::Global> (inlined)
+            |          |          
+            |          |--6.74%--fp_join::build_dense_cycle_outer_run_tape
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          merge_dataframes_on (inlined)
+            |          |          merge_dataframes (inlined)
+            |          |          perf_profile::main
+            |          |          
+            |           --1.51%--append_dense_cycle_positions (inlined)
+            |                     fp_join::build_dense_cycle_outer_run_tape
+            |                     fp_join::build_single_key_dense_i64_outer_merge_output
+            |                     fp_join::merge_dataframes_on_with_options
+            |                     fp_join::merge_dataframes
+            |                     merge_dataframes_on (inlined)
+            |                     merge_dataframes (inlined)
+            |                     perf_profile::main
+            |          
+            |--3.63%--push_mut<bool, alloc::alloc::Global> (inlined)
+            |          push<bool, alloc::alloc::Global> (inlined)
+            |          fp_join::build_dense_cycle_outer_run_tape
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          fp_join::merge_dataframes_on_with_options
+            |          fp_join::merge_dataframes
+            |          merge_dataframes_on (inlined)
+            |          merge_dataframes (inlined)
+            |          perf_profile::main
+            |          
+            |--2.63%--push_mut<(usize, usize), alloc::alloc::Global> (inlined)
+            |          push<(usize, usize), alloc::alloc::Global> (inlined)
+            |          fp_join::build_dense_cycle_outer_run_tape
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          fp_join::merge_dataframes_on_with_options
+            |          fp_join::merge_dataframes
+            |          merge_dataframes_on (inlined)
+            |          merge_dataframes (inlined)
+            |          perf_profile::main
+            |          
+            |--1.18%--write<(usize, usize)> (inlined)
+            |          push_mut<(usize, usize), alloc::alloc::Global> (inlined)
+            |          push<(usize, usize), alloc::alloc::Global> (inlined)
+            |          fp_join::build_dense_cycle_outer_run_tape
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          fp_join::merge_dataframes_on_with_options
+            |          fp_join::merge_dataframes
+            |          merge_dataframes_on (inlined)
+            |          merge_dataframes (inlined)
+            |          perf_profile::main
+            |          
+            |--1.01%--lt (inlined)
+            |          spec_next<usize> (inlined)
+            |          next<usize> (inlined)
+            |          fp_join::build_dense_cycle_outer_run_tape
+            |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          fp_join::merge_dataframes_on_with_options
+            |          fp_join::merge_dataframes
+            |          merge_dataframes_on (inlined)
+            |          merge_dataframes (inlined)
+            |          perf_profile::main
+            |          
+             --0.96%--add<(usize, usize)> (inlined)
+                       push_mut<(usize, usize), alloc::alloc::Global> (inlined)
+                       push<(usize, usize), alloc::alloc::Global> (inlined)
+                       fp_join::build_dense_cycle_outer_run_tape
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       merge_dataframes_on (inlined)
+                       merge_dataframes (inlined)
+                       perf_profile::main
+
+    35.66%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                                                                            -      -            
+            |          
+             --35.52%--__memcpy_avx_unaligned_erms (inlined)
+                       |          
+                       |--21.98%--<alloc::sync::Arc<[usize]> as core::convert::From<alloc::vec::Vec<usize>>>::from
+                       |          from<usize, alloc::alloc::Global> (inlined)
+                       |          fp_join::build_dense_cycle_outer_run_tape
+                       |          fp_join::build_single_key_dense_i64_outer_merge_output
+                       |          fp_join::merge_dataframes_on_with_options
+                       |          fp_join::merge_dataframes
+                       |          merge_dataframes_on (inlined)
+                       |          merge_dataframes (inlined)
+                       |          perf_profile::main
+                       |          
+                       |--12.05%--<alloc::sync::Arc<[(usize, usize)]> as core::convert::From<alloc::vec::Vec<(usize, usize)>>>::from
+                       |          from<(usize, usize), alloc::alloc::Global> (inlined)
+                       |          fp_join::build_dense_cycle_outer_run_tape
+                       |          fp_join::build_single_key_dense_i64_outer_merge_output
+                       |          fp_join::merge_dataframes_on_with_options
+                       |          fp_join::merge_dataframes
+                       |          merge_dataframes_on (inlined)
+                       |          merge_dataframes (inlined)
+                       |          perf_profile::main
+                       |          
+                        --1.35%--<alloc::sync::Arc<[bool]> as core::convert::From<alloc::vec::Vec<bool>>>::from
+                                  from<bool, alloc::alloc::Global> (inlined)
+                                  fp_join::build_dense_cycle_outer_run_tape
+                                  fp_join::build_single_key_dense_i64_outer_merge_output
+                                  fp_join::merge_dataframes_on_with_options
+                                  fp_join::merge_dataframes
+                                  merge_dataframes_on (inlined)
+                                  merge_dataframes (inlined)
+                                  perf_profile::main
+
+     1.38%  [.] <fp_columnar::Column>::new                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --0.83%--<fp_columnar::Column>::new
+
+     0.79%  [k] 0xffffffff84c01192                                                                                                                                                                                                                                                                                                                                                      -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

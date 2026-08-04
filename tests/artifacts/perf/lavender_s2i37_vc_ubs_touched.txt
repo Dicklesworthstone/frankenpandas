@@ -1,0 +1,56 @@
+ℹ Preparing shadow workspace for 2 specified file(s)
+ℹ Scanning shadow workspace at /data/tmp/tmp.ZYOuDA9wz2/files_scan
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝              ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗                ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝                ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗              ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝              ║
+║                                                                              ║
+║  ██████╗ ██╗   ██╗ ██████╗         __       __                               ║
+║  ██╔══██╗██║   ██║██╔════╝         \ `-'"-'` /                               ║
+║  ██████╔╝██║   ██║██║  ███╗        / \_   _/ \                               ║
+║  ██╔══██╗██║   ██║██║   ██║        |  d\_/b  |                               ║
+║  ██████╔╝╚██████╔╝╚██████╔╝       .'\   V   /'.                              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝        /   '-...-'   \                            ║
+║                                  | /         \ |                             ║
+║                                  \/\         /\/                             ║
+║                                  ==(||)---(||)==                             ║
+║                                                                              ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗              ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗             ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝             ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗             ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║             ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝                  ║
+║                                                                              ║
+║   JS / TS • PYTHON • C / C++ • RUST • GO • JAVA • RUBY                       ║
+║   SWIFT • C# • ELIXIR                                                        ║
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.3.2  2026-06-15 22:44:34
+Project: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z
+Format:  text
+Detected: rust
+Scanning rust...
+
+UBS validation note:
+The changed-file UBS run was terminated after more than five minutes without
+findings output. Process inspection showed it stuck in the Rust module's
+ast-grep unwrap scan over the two-file shadow workspace:
+  ast-grep run --pattern $X.unwrap() -l rust /data/tmp/tmp.ZYOuDA9wz2/files_scan
+
+Other validation for this lever:
+  cargo fmt -p fp-frame -p fp-conformance --check: PASS
+  cargo test -p fp-frame series_value_counts_nullable_float_open_addressed_tally_s2i37: PASS
+  cargo check -p fp-frame --all-targets: PASS
+  cargo check -p fp-conformance --example perf_profile: PASS
+  cargo clippy -p fp-frame --all-targets -- -D warnings: PASS
+  cargo clippy -p fp-conformance --example perf_profile -- -D warnings: PASS

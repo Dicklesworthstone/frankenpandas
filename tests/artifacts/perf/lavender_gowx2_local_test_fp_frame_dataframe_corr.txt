@@ -1,0 +1,116 @@
+warning: /data/projects/frankenpandas/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.20.0
+   Compiling hybrid-array v0.4.10
+   Compiling memchr v2.8.0
+   Compiling thiserror v2.0.18
+   Compiling serde v1.0.228
+   Compiling num-traits v0.2.19
+   Compiling crypto-common v0.2.1
+   Compiling block-buffer v0.12.0
+   Compiling siphasher v1.0.2
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.0
+   Compiling const-oid v0.10.2
+   Compiling rustc-hash v2.1.2
+   Compiling fp-types v0.1.0 (/data/projects/frankenpandas/crates/fp-types)
+   Compiling digest v0.11.2
+   Compiling indexmap v2.14.0
+   Compiling phf_shared v0.12.1
+   Compiling chrono v0.4.45
+   Compiling zmij v1.0.21
+   Compiling aho-corasick v1.1.4
+   Compiling cfg-if v1.0.4
+   Compiling cpufeatures v0.3.0
+   Compiling regex-syntax v0.8.10
+   Compiling tinyvec_macros v0.1.1
+   Compiling itoa v1.0.18
+   Compiling serde_json v1.0.150
+   Compiling tinyvec v1.11.0
+   Compiling regex-automata v0.4.14
+   Compiling sha2 v0.11.0
+   Compiling phf v0.12.1
+   Compiling chrono-tz v0.10.4
+   Compiling fp-runtime v0.1.0 (/data/projects/frankenpandas/crates/fp-runtime)
+   Compiling regex v1.12.3
+   Compiling unicode-normalization v0.1.25
+   Compiling fp-index v0.1.0 (/data/projects/frankenpandas/crates/fp-index)
+   Compiling fp-columnar v0.1.0 (/data/projects/frankenpandas/crates/fp-columnar)
+   Compiling ucd v0.1.1
+   Compiling unicode-casefold v0.2.0
+   Compiling fp-frame v0.1.0 (/data/projects/frankenpandas/crates/fp-frame)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 26s
+     Running unittests src/lib.rs (/data/projects/.scratch/cargo-target-lavender-gowx2-local/debug/deps/fp_frame-499063227962f068)
+
+running 13 tests
+test tests::dataframe_corr_min_periods_sufficient ... ok
+test tests::dataframe_corr_cov_large_offset_no_cancellation_dnz2a ... ok
+test tests::dataframe_corr_golden_basic ... ok
+test tests::dataframe_corr_basic ... ok
+test tests::dataframe_corr_spearman ... ok
+test tests::dataframe_corrwith_axis0 ... ok
+test tests::dataframe_corr_kendall_dense_path_preserves_order_and_values ... ok
+test tests::dataframe_corrwith_axis1_rejects_shared_timedelta_columns ... ok
+test tests::dataframe_corrwith_axis1 ... ok
+test tests::dataframe_corrwith_golden_basic ... ok
+test tests::rolling_dataframe_corr_with_golden_basic ... ok
+test tests::dataframe_corr_min_periods_insufficient ... ok
+test tests::dataframe_corr_numeric_only_includes_bool_and_skips_utf8 ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 2895 filtered out; finished in 0.00s
+

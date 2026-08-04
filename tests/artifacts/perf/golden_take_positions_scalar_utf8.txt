@@ -1,0 +1,12 @@
+Column::take_positions — Scalar-backed all-valid Utf8 contiguous-gather branch
+Bit-identical (before==after) goldens @5000:
+  str_series_take (shuffled): bec9e5bbb5402155...
+  str_series_sort:            637c2c8b0680315b... (unchanged)
+  str_sort:                   fe9ebaaac8077c5d... (unchanged, contiguous path)
+  str_filter:                 2dd0a491c15a0e24... (unchanged, contiguous path)
+Isolated A/B (min-of-5):
+  str_series_take shuffled @200k (30 iters): before 1.160s -> after 0.645s = 1.80x
+  str_series_sort         @200k (20 iters): before 1.121s -> after 0.753s = 1.49x
+  (@1M the byte-copy/scatter floor dominates: take 1.54x, sort 1.25x)
+Structural win: removes the per-row String heap-alloc class from every
+Scalar-backed all-valid Utf8 gather (take/iloc/drop/sort_values/reindex).

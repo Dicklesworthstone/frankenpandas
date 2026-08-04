@@ -26,7 +26,7 @@ jobs:
       RUSTDOCFLAGS: "-Zsanitizer=thread"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain

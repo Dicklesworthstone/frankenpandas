@@ -1,0 +1,61 @@
+{
+  "schema": "directional_same_driver_v1",
+  "decision": "KEEP",
+  "classification": "directional only: canonical all-online-CPU quiescence preflight failed closed on thinkstation1 and threadripperje",
+  "source_commit": "47ad0a4d7832c1a8b38df2661a9581c833ff55e4",
+  "workload": "dataframe_ops/sort_values_multi/10M/float64",
+  "host": {
+    "hostname": "threadripperje",
+    "cpu": "AMD Ryzen Threadripper PRO 5995WX 64-Cores",
+    "physical_cores": 64,
+    "logical_threads": 128,
+    "affinity": "0-63",
+    "runtime_isa": ["sse2", "avx", "avx2", "fma", "bmi1", "bmi2", "aes", "vaes"]
+  },
+  "candidate": {
+    "elf_sha256": "f07988412d2e9b90cc853eee19441978d4b4fa5f691cddec3be7810351b1b735",
+    "elf_bytes": 76001744,
+    "build_worker": "vmi1227854",
+    "p50_us": 341859.30,
+    "p95_us": 355690.30,
+    "p99_us": 359146.75,
+    "cv_pct": 2.07,
+    "operation_threads": 64,
+    "null_median": 0.990625,
+    "checksum": "4957dea0fe3e2ed1"
+  },
+  "reference": {
+    "elf_sha256": "e196423454b9f6cf0a4d284668833b092fc3275277e2794f762d2080eeabf484",
+    "elf_bytes": 75912896,
+    "build_worker": "vmi1227854",
+    "p50_us": 3083410.57,
+    "p95_us": 3198124.09,
+    "p99_us": 3223695.52,
+    "cv_pct": 1.60,
+    "operation_threads": 1,
+    "null_median": 1.000829,
+    "checksum": "4957dea0fe3e2ed1"
+  },
+  "pandas": {
+    "version": "2.2.3",
+    "python_elf_sha256": "34f3f446f5e1dac82d603c7b4519823eb098d3361ed517ebe9fcad1e68d06bbb",
+    "distribution_sha256": "bc82fc75b88d683dac9346e5067f35d72fce509564447d76d6f867d5e1825bbe",
+    "p50_us": 18578384.77,
+    "p95_us": 18749214.08,
+    "p99_us": 18778316.84,
+    "cv_pct": 0.47,
+    "operation_threads": 1,
+    "null_median": 0.998510
+  },
+  "candidate_vs_reference": {
+    "ratio": 9.019531,
+    "median_ratio_ci_95": [8.91814692, 9.09871870],
+    "corrected_null_gate": "pass"
+  },
+  "candidate_vs_pandas": {
+    "ratio": 54.345,
+    "median_ratio_ci_95": [53.74994065, 54.83863851],
+    "corrected_null_gate": "pass"
+  },
+  "harness_sha256": "c98d2d3af9daa6b086dde6682e365d42fc0068c45623f5cd3c3ab54c5ff6b4a6"
+}

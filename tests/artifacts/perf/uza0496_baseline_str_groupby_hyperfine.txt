@@ -1,0 +1,26 @@
+Benchmark 1: /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_count 200000 6
+  Time (mean ± σ):     236.8 ms ±  43.4 ms    [User: 284.9 ms, System: 76.4 ms]
+  Range (min … max):   198.0 ms … 304.9 ms    8 runs
+ 
+Benchmark 2: /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_sum 200000 6
+  Time (mean ± σ):     189.1 ms ±  11.3 ms    [User: 242.4 ms, System: 71.9 ms]
+  Range (min … max):   173.1 ms … 209.8 ms    8 runs
+ 
+Benchmark 3: /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_std 200000 6
+  Time (mean ± σ):     289.4 ms ±  13.3 ms    [User: 268.4 ms, System: 105.8 ms]
+  Range (min … max):   276.1 ms … 318.1 ms    8 runs
+ 
+Benchmark 4: /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_count_lowcard 200000 20
+  Time (mean ± σ):      99.8 ms ±  10.7 ms    [User: 77.1 ms, System: 13.0 ms]
+  Range (min … max):    79.0 ms … 110.3 ms    8 runs
+ 
+Benchmark 5: /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_sum_lowcard 200000 20
+  Time (mean ± σ):     100.7 ms ±   6.1 ms    [User: 80.7 ms, System: 11.8 ms]
+  Range (min … max):    92.4 ms … 109.2 ms    8 runs
+ 
+Summary
+  /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_count_lowcard 200000 20 ran
+    1.01 ± 0.12 times faster than /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_sum_lowcard 200000 20
+    1.90 ± 0.23 times faster than /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_sum 200000 6
+    2.37 ± 0.50 times faster than /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_count 200000 6
+    2.90 ± 0.34 times faster than /data/projects/.scratch/frankenpandas-lavenderstone-opt-current-20260613/.rch-target-uza0496-base/release-perf/examples/perf_profile str_groupby_std 200000 6

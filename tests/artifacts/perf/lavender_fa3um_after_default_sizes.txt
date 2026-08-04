@@ -1,0 +1,5 @@
+14:Usage:
+15:    python benches/vs_pandas_harness.py --category io --sizes 100k
+16:    python benches/vs_pandas_harness.py --all --sizes 10k,100k,1M
+392:         "--size", size, "--dtype", dtype, "--json"],
+493:    parser.add_argument("--sizes", default="10k,100k,1M",

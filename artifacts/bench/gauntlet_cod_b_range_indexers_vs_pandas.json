@@ -1,0 +1,63 @@
+{
+  "bead": "br-frankenpandas-29u49",
+  "scenario": "RangeIndex miss-heavy vectorized indexers",
+  "pandas_version": "2.2.3",
+  "numpy_version": "2.4.3",
+  "host": "thinkstation1",
+  "target_dir": "/data/projects/.rch-targets/frankenpandas-cod-b",
+  "policy": "ratio_vs_pandas = pandas_median / fp_current_median; >1 means FrankenPandas faster. Rows with pandas_cv_pct > 5 are diagnostics, not accepted keep/loss rows.",
+  "rows": [
+    {
+      "workload": "get_indexer_miss_heavy",
+      "size": 100000,
+      "fp_current_median_us": 1344.2696007575757,
+      "fp_legacy_model_median_us": 5138.623464957265,
+      "pandas_median_us": 1109.6685,
+      "pandas_cv_pct": 2.9589957171539094,
+      "ratio_vs_pandas_pandas_div_fp": 0.8254806174108497,
+      "speedup_vs_legacy_model": 3.822613754012845,
+      "verdict": "SLOWER_THAN_PANDAS",
+      "criterion_current_path": "/data/projects/.rch-targets/frankenpandas-cod-b/criterion/range_index_indexers/current_get_indexer_miss_heavy/100000/new/estimates.json",
+      "criterion_legacy_path": "/data/projects/.rch-targets/frankenpandas-cod-b/criterion/range_index_indexers/legacy_get_loc_loop_miss_heavy/100000/new/estimates.json"
+    },
+    {
+      "workload": "get_indexer_miss_heavy",
+      "size": 1000000,
+      "fp_current_median_us": 10744.03768030303,
+      "fp_legacy_model_median_us": 49907.30675,
+      "pandas_median_us": 16434.924,
+      "pandas_cv_pct": 5.398450113425094,
+      "ratio_vs_pandas_pandas_div_fp": 1.5296785518660299,
+      "speedup_vs_legacy_model": 4.645116504151388,
+      "verdict": "DROPPED_HIGH_CV",
+      "criterion_current_path": "/data/projects/.rch-targets/frankenpandas-cod-b/criterion/range_index_indexers/current_get_indexer_miss_heavy/1000000/new/estimates.json",
+      "criterion_legacy_path": "/data/projects/.rch-targets/frankenpandas-cod-b/criterion/range_index_indexers/legacy_get_loc_loop_miss_heavy/1000000/new/estimates.json"
+    },
+    {
+      "workload": "reindex_all_miss",
+      "size": 100000,
+      "fp_current_median_us": 1150.1863958333336,
+      "fp_legacy_model_median_us": 5340.6174,
+      "pandas_median_us": 989.605,
+      "pandas_cv_pct": 2.337765191132627,
+      "ratio_vs_pandas_pandas_div_fp": 0.8603866326231506,
+      "speedup_vs_legacy_model": 4.643262534965573,
+      "verdict": "SLOWER_THAN_PANDAS",
+      "criterion_current_path": "/data/projects/.rch-targets/frankenpandas-cod-b/criterion/range_index_indexers/current_reindex_all_miss/100000/new/estimates.json",
+      "criterion_legacy_path": "/data/projects/.rch-targets/frankenpandas-cod-b/criterion/range_index_indexers/legacy_get_loc_reindex_all_miss/100000/new/estimates.json"
+    },
+    {
+      "workload": "reindex_all_miss",
+      "size": 1000000,
+      "fp_current_median_us": 12284.732359375,
+      "fp_legacy_model_median_us": 50447.32966666667,
+      "pandas_median_us": 13126.574,
+      "pandas_cv_pct": 4.977443891206493,
+      "ratio_vs_pandas_pandas_div_fp": 1.0685274710101889,
+      "speedup_vs_legacy_model": 4.106506205498907,
+      "verdict": "NEUTRAL_VS_PANDAS",
+      "criterion_current_path": "/data/projects/.rch-targets/frankenpandas-cod-b/criterion/range_index_indexers/current_reindex_all_miss/1000000/new/estimates.json",
+      "criterion_legacy_path": "/data/projects/.rch-targets/frankenpandas-cod-b/criterion/range_index_indexers/legacy_get_loc_reindex_all_miss/1000000/new/estimates.json"
+    }
+  ]
+}

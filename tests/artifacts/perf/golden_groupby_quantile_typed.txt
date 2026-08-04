@@ -1,0 +1,9 @@
+groupby quantile typed per-group quickselect (gqcsr)
+Golden bit-identical: groupby_quantile sha256 fd3c2a8e0eed72f4 before==after.
+A/B min-of-5 @200k (build_transform_frame, 100 groups): 15.529 -> 6.076 ms/iter = 2.56x.
+Tests: fp-frame 2830 (incl 30 quantile) green; clippy clean.
+Lever: DataFrameGroupBy.quantile (+ SeriesGroupBy.quantile) for all-valid non-nullable Float64/Int64
+gather each group's finite values into ONE reused f64 buffer + quickselect (group_nanquantile_f64)
+instead of cloning a per-group Vec<Scalar> + per-element to_f64 in fp_types::nanquantile. Bit-identical:
+group_nanquantile_f64 mirrors nanquantile's numeric arm exactly (collect_finite + lo-th select +
+lo_val+(hi_val-lo_val)*weight). Timedelta/nullable/non-numeric keep the Scalar path.

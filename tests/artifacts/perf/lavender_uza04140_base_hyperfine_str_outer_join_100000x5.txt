@@ -1,0 +1,3 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-uza04140-base/release-perf/examples/perf_profile str_outer_join 100000 5
+  Time (mean ± σ):     228.8 ms ±   8.3 ms    [User: 216.8 ms, System: 103.7 ms]
+  Range (min … max):   217.7 ms … 245.7 ms    12 runs

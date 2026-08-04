@@ -1,0 +1,14 @@
+  [2m2026-06-15T01:01:02.719162Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 2 --runs 16 --export-json tests/artifacts/perf/lavender_uza04136_pair_reversed_df_dot_100000x5.json '/data/projects/.scratch/cargo-target-lavender-uza04136-after/release-perf/examples/perf_profile df_dot 100000 5' '/data/projects/.scratch/cargo-target-lavender-next-f00fdb65/release-perf/examples/perf_profile df_dot 100000 5'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-uza04136-after/release-perf/examples/perf_profile df_dot 100000 5
+  Time (mean ± σ):     615.4 ms ±  14.6 ms    [User: 12052.0 ms, System: 637.3 ms]
+  Range (min … max):   591.9 ms … 645.1 ms    16 runs
+
+Benchmark 2: /data/projects/.scratch/cargo-target-lavender-next-f00fdb65/release-perf/examples/perf_profile df_dot 100000 5
+  Time (mean ± σ):     636.9 ms ±  24.7 ms    [User: 12140.0 ms, System: 661.8 ms]
+  Range (min … max):   607.0 ms … 689.6 ms    16 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-lavender-uza04136-after/release-perf/examples/perf_profile df_dot 100000 5 ran
+    1.03 ± 0.05 times faster than /data/projects/.scratch/cargo-target-lavender-next-f00fdb65/release-perf/examples/perf_profile df_dot 100000 5

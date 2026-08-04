@@ -1,0 +1,35 @@
+2026-06-14T01:17:19-04:00
+commit 0f2e89991a44633e19718a7da3952e23e411a1c5
+=== df_dot 100000 5 ===
+perf_profile: scenario=df_dot n=100000 iters=5
+perf_profile: done 5 iters in 0.616s (123.154 ms/iter), sink=500000
+=== csv_read 100000 5 ===
+perf_profile: scenario=csv_read n=100000 iters=5
+perf_profile: done 5 iters in 0.061s (12.139 ms/iter), sink=500000
+=== csv_read_options 100000 5 ===
+perf_profile: scenario=csv_read_options n=100000 iters=5
+perf_profile: done 5 iters in 0.064s (12.758 ms/iter), sink=500000
+=== csv_read_no_na_filter 100000 5 ===
+perf_profile: scenario=csv_read_no_na_filter n=100000 iters=5
+perf_profile: done 5 iters in 0.058s (11.672 ms/iter), sink=500000
+=== series_add_align 100000 50 ===
+perf_profile: scenario=series_add_align n=100000 iters=50
+perf_profile: done 50 iters in 0.043s (0.853 ms/iter), sink=5000050
+=== series_add_same 100000 100 ===
+perf_profile: scenario=series_add_same n=100000 iters=100
+perf_profile: done 100 iters in 0.015s (0.152 ms/iter), sink=10000000
+=== left_join 500000 5 ===
+perf_profile: scenario=left_join n=500000 iters=5
+perf_profile: done 5 iters in 0.075s (15.063 ms/iter), sink=1221953440
+=== outer_join 500000 5 ===
+perf_profile: scenario=outer_join n=500000 iters=5
+perf_profile: done 5 iters in 0.061s (12.187 ms/iter), sink=1223202880
+=== str_value_counts 500000 50 ===
+perf_profile: scenario=str_value_counts n=500000 iters=50
+perf_profile: done 50 iters in 0.324s (6.475 ms/iter), sink=50000
+=== str_factorize 500000 50 ===
+perf_profile: scenario=str_factorize n=500000 iters=50
+perf_profile: done 50 iters in 0.084s (1.673 ms/iter), sink=25021200
+=== str_duplicated 500000 50 ===
+perf_profile: scenario=str_duplicated n=500000 iters=50
+perf_profile: done 50 iters in 0.420s (8.394 ms/iter), sink=25000000

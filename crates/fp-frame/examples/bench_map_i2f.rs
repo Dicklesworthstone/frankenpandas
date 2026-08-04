@@ -1,0 +1,34 @@
+//! Series.map(Int64->Float64 dict). Run: -- 2000000 20
+use std::time::Instant;
+
+use fp_frame::Series;
+use fp_index::IndexLabel;
+use fp_types::Scalar;
+fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let card: i64 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+    let it: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(12);
+    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let s = Series::from_values(
+        "c",
+        labels,
+        (0..n)
+            .map(|i| Scalar::Int64(((i as i64).wrapping_mul(2654435761) >> 13) % card))
+            .collect(),
+    )
+    .unwrap();
+    let mapping: Vec<(Scalar, Scalar)> = (0..card)
+        .map(|k| (Scalar::Int64(k), Scalar::Float64(k as f64 * 1.5)))
+        .collect();
+    let mut best = u128::MAX;
+    for _ in 0..it {
+        let t = Instant::now();
+        std::hint::black_box(s.map(&mapping).unwrap());
+        let e = t.elapsed().as_nanos();
+        if e < best {
+            best = e;
+        }
+    }
+    println!("map_i2f n={n} card={card}: best={best}ns");
+}

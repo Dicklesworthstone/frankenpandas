@@ -5,26 +5,52 @@
   "operation": "csv_read_frame",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "1dd484d323e003b29a4ce69adc65ce99fa6b0136906481ae704b7ef1e35afcf5",
+    "generated_at": "2026-06-14T09:06:50Z"
   },
-  "csv_parse_date_combinations": [["date", "time"]],
+  "csv_parse_date_combinations": [
+    [
+      "date",
+      "time"
+    ]
+  ],
   "csv_input": "date,time,value\n2024-01-15,10:30:00,1\n2024-01-16,11:45:30,2\n",
   "expected_frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
     "columns": {
       "date_time": [
-        { "kind": "utf8", "value": "2024-01-15 10:30:00" },
-        { "kind": "utf8", "value": "2024-01-16 11:45:30" }
+        {
+          "kind": "datetime64",
+          "value": 1705314600000000000
+        },
+        {
+          "kind": "datetime64",
+          "value": 1705405530000000000
+        }
       ],
       "value": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        }
       ]
     },
-    "column_order": ["date_time", "value"],
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+    "column_order": [
+      "date_time",
+      "value"
     ]
   }
 }

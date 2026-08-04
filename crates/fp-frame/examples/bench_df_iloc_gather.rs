@@ -7,12 +7,12 @@
 //! Column::take_positions keeps the contiguous Int64/Float64 buffer. Output is
 //! bit-identical (values, dtype, negative/duplicate indices, NaN).
 
+use std::{collections::BTreeMap, time::Instant};
+
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::{Index, IndexLabel};
 use fp_types::Scalar;
-use std::collections::BTreeMap;
-use std::time::Instant;
 
 fn frame(labels: Vec<i64>, a: Vec<i64>, b: Vec<Scalar>) -> DataFrame {
     let idx = Index::new(labels.into_iter().map(IndexLabel::Int64).collect());
@@ -49,10 +49,16 @@ fn golden() -> String {
     );
 
     // iloc: reorder + negative + duplicate
-    out.push_str(&format!("iloc={}\n", dump(&df.iloc(&[4, 0, -1, 2, 2]).unwrap())));
+    out.push_str(&format!(
+        "iloc={}\n",
+        dump(&df.iloc(&[4, 0, -1, 2, 2]).unwrap())
+    ));
     out.push_str(&format!("iloc_oob_err={}\n", df.iloc(&[99]).is_err()));
     // take axis=0
-    out.push_str(&format!("take={}\n", dump(&df.take(&[3, 1, 0], 0).unwrap())));
+    out.push_str(&format!(
+        "take={}\n",
+        dump(&df.take(&[3, 1, 0], 0).unwrap())
+    ));
     out.push_str(&format!("take_oob_err={}\n", df.take(&[99], 0).is_err()));
     // sample deterministic (fixed seed)
     out.push_str(&format!(
@@ -75,7 +81,9 @@ fn main() {
     let mut x: u64 = 0xabcd_1234;
     let pos: Vec<i64> = (0..n)
         .map(|_| {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (x >> 16) as i64 % (n as i64)
         })
         .collect();

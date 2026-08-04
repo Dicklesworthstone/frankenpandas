@@ -1,0 +1,14 @@
+  [2m2026-06-13T00:51:55.612449Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 1 --runs 5 --export-json tests/artifacts/perf/0dm7c_prevalidated_pair_hyperfine_df_kendall_50000x1.json '/data/projects/.scratch/cargo-target-orangepeak-0dm7c-base/release-perf/examples/perf_profile df_kendall 50000 1' '/data/projects/.scratch/cargo-target-orangepeak-0dm7c-after-prevalidated/release-perf/examples/perf_profile df_kendall 50000 1'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-0dm7c-base/release-perf/examples/perf_profile df_kendall 50000 1
+  Time (mean ± σ):     167.6 ms ±   3.4 ms    [User: 927.3 ms, System: 87.7 ms]
+  Range (min … max):   163.0 ms … 171.6 ms    5 runs
+
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-0dm7c-after-prevalidated/release-perf/examples/perf_profile df_kendall 50000 1
+  Time (mean ± σ):     168.7 ms ±   1.2 ms    [User: 1014.4 ms, System: 90.3 ms]
+  Range (min … max):   167.5 ms … 170.4 ms    5 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-0dm7c-base/release-perf/examples/perf_profile df_kendall 50000 1 ran
+    1.01 ± 0.02 times faster than /data/projects/.scratch/cargo-target-orangepeak-0dm7c-after-prevalidated/release-perf/examples/perf_profile df_kendall 50000 1

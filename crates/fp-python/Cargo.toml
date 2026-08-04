@@ -3,7 +3,6 @@ name = "fp-python"
 description = "PyO3 Python bindings for FrankenPandas — import frankenpandas from Python"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -17,12 +16,18 @@ name = "frankenpandas"
 crate-type = ["cdylib"]
 
 [dependencies]
-fp-columnar = { path = "../fp-columnar" }
-fp-frame = { path = "../fp-frame" }
-fp-index = { path = "../fp-index" }
-fp-io = { path = "../fp-io", default-features = false, features = ["sql-sqlite"] }
-fp-types = { path = "../fp-types" }
+fp-columnar = { path = "../fp-columnar", version = "0.2.0" }
+fp-frame = { path = "../fp-frame", version = "0.2.0" }
+fp-index = { path = "../fp-index", version = "0.2.0" }
+fp-join = { path = "../fp-join", version = "0.2.0" }
+fp-io = { path = "../fp-io", version = "0.2.0", default-features = false, features = ["sql-sqlite"] }
+fp-types = { path = "../fp-types", version = "0.2.0" }
+mimalloc = { workspace = true }
 pyo3 = { workspace = true }
+
+[features]
+default = ["lazy-transpose-view"]
+lazy-transpose-view = ["fp-frame/lazy-transpose-view"]
 
 [package.metadata.docs.rs]
 all-features = true

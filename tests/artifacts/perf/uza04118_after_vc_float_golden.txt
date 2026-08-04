@@ -1,0 +1,4 @@
+normalize: 3.5=Float64(0.5) 2.0=Float64(0.3333333333333333) 1.0=Float64(0.16666666666666666) | first_label_kind=Some(Float64(OrderedF64(3.5)))
+dropna_false: 3.5=Int64(3) 2.0=Int64(2) 1.0=Int64(1) | first_label_kind=Some(Float64(OrderedF64(3.5)))
+sort_false: 1.0=Int64(1) 2.0=Int64(2) 3.5=Int64(3) | first_label_kind=Some(Float64(OrderedF64(1.0)))
+ascending: 1.0=Int64(1) 2.0=Int64(2) 3.5=Int64(3) | first_label_kind=Some(Float64(OrderedF64(1.0)))

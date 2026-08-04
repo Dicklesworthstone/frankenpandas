@@ -1,0 +1,185 @@
+{
+  "schema_version": "trj-thread-sweep-v1",
+  "campaign": "perf-campaign-20260725",
+  "bead": "br-frankenpandas-4p7o3",
+  "date": "2026-07-29",
+  "question": "How do live pandas 2.2.3 and FrankenPandas scale on partitionable 1M/10M-row operations across the target machine's full logical-CPU range?",
+  "host": {
+    "host_identity": "threadripperje",
+    "target_alias": "trj",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5995WX 64-Cores",
+    "physical_cores": 64,
+    "logical_threads": 128,
+    "threads_per_core": 2,
+    "ram_bytes": 536069869568,
+    "numa_nodes": 1,
+    "kernel": "6.17.0-41-generic",
+    "runtime_detected_isa_features": [
+      "sse2",
+      "avx",
+      "avx2",
+      "fma",
+      "bmi1",
+      "bmi2",
+      "aes",
+      "vaes"
+    ],
+    "runtime_absent_isa_features": [
+      "avx512f"
+    ],
+    "cpu_governor": "performance",
+    "smt_active": true
+  },
+  "thread_contract": {
+    "requested_thread_counts": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64,
+      128
+    ],
+    "affinity_or_cpuset": "taskset contiguous logical CPU IDs 0 through requested_thread_count-1",
+    "operation_thread_probe": "peak CPU-time-active process workers during an untimed probe of the exact operation",
+    "pandas_operation_threads_actually_used": 1,
+    "note": "Requested affinity is not treated as actual operation parallelism; every result carries both."
+  },
+  "measurement_contract": {
+    "sizes": [
+      "1M",
+      "10M"
+    ],
+    "dtype": "float64",
+    "paired_rounds_per_engine": 25,
+    "raw_samples_per_engine": 50,
+    "warmup_iterations": 3,
+    "same_invocation_incumbent": true,
+    "gate": "median_bootstrap_ci",
+    "decidability_margin": 2.0,
+    "cv_role": "provenance_only",
+    "canonical_raw_files": 32,
+    "canonical_result_rows": 64,
+    "contract_valid_result_rows": 64
+  },
+  "provenance": {
+    "frankenpandas": {
+      "version": "0.1.2",
+      "profile": "release-perf",
+      "executable": {
+        "sha256": "50e9e4001486513763eca3fe4a7904f24ec94b849fd1d28b18b7937e29888fad",
+        "bytes": 73636568,
+        "path_on_trj": "/data/projects/frankenpandas-thread-sweep/target/release-perf/fp-bench"
+      }
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "python_executable": {
+        "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+        "bytes": 6894448,
+        "path": "/usr/bin/python3.13"
+      },
+      "artifact": {
+        "sha256": "80c4fc7efcc4d8deabf0faf971a49013556a22109ae402df6913962a577d227e",
+        "bytes": 70670271,
+        "files": 2922
+      }
+    },
+    "harness_sources": [
+      {
+        "scope": "groupby_mean_float64",
+        "git_sha": "74e03efb8a1125f3be9d57a01d8b400bcd7fddd3",
+        "sha256": "def6b0fc6d037d59da8ce71b5d535911cc7f9cf15dcec62ab042e1c3b43d52b3",
+        "bytes": 86832
+      },
+      {
+        "scope": "df_abs, join_inner, sort_values_single",
+        "git_sha": "5bea1c5d26a6601297d9c9f11fd14b720c072d49",
+        "sha256": "5d170c9bbdbf3a1f99de04ed69f869d2a1a12b0f12f64e1c3fd297601f3ea07f",
+        "bytes": 87059
+      }
+    ]
+  },
+  "array_order": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128
+  ],
+  "sweeps": {
+    "groupby_mean_float64": {
+      "category": "groupby",
+      "frankenpandas_actual_threads_1M": [1, 1, 1, 1, 1, 1, 1, 1],
+      "frankenpandas_actual_threads_10M": [1, 1, 1, 1, 1, 1, 1, 1],
+      "frankenpandas_p50_us_1M": [2164.78, 2157.94, 2162.46, 2459.81, 2169.21, 2200.05, 2494.03, 2164.78],
+      "pandas_p50_us_1M": [8596.31, 9367.58, 8658.37, 9434.48, 8637.12, 8820.97, 9923.21, 8720.76],
+      "pandas_over_frankenpandas_ratio_1M": [3.971, 4.341, 4.004, 3.835, 3.982, 4.009, 3.979, 4.028],
+      "verdict_1M": ["FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER"],
+      "frankenpandas_p50_us_10M": [24340.48, 24291.41, 26575.23, 24445.10, 24569.97, 25811.13, 24513.58, 24424.70],
+      "pandas_p50_us_10M": [82833.75, 83722.50, 84182.79, 84893.97, 83283.85, 83573.26, 83057.25, 83976.63],
+      "pandas_over_frankenpandas_ratio_10M": [3.403, 3.447, 3.168, 3.473, 3.390, 3.238, 3.388, 3.438],
+      "verdict_10M": ["FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER"],
+      "shape": "flat: both engines remained serial"
+    },
+    "df_abs": {
+      "category": "dataframe_ops",
+      "frankenpandas_actual_threads_1M": [1, 2, 4, 8, 10, 10, 10, 10],
+      "frankenpandas_actual_threads_10M": [1, 2, 4, 8, 10, 10, 10, 10],
+      "frankenpandas_p50_us_1M": [4292.49, 3910.89, 3916.25, 4050.23, 2231.57, 2600.68, 3026.43, 3075.65],
+      "pandas_p50_us_1M": [7134.46, 6401.00, 7229.26, 7140.81, 7223.73, 7139.28, 7183.11, 7274.73],
+      "pandas_over_frankenpandas_ratio_1M": [1.662, 1.637, 1.846, 1.763, 3.237, 2.745, 2.373, 2.365],
+      "verdict_1M": ["FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER"],
+      "frankenpandas_p50_us_10M": [47090.16, 43249.64, 43863.02, 44844.53, 30094.65, 19709.75, 20526.35, 19482.47],
+      "pandas_p50_us_10M": [67469.41, 66628.11, 67444.92, 67477.36, 67740.69, 67504.69, 68506.46, 68901.91],
+      "pandas_over_frankenpandas_ratio_10M": [1.433, 1.541, 1.538, 1.505, 2.251, 3.425, 3.337, 3.537],
+      "verdict_10M": ["FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER"],
+      "shape": "scales to the 10-column ceiling; pandas remains serial"
+    },
+    "join_inner": {
+      "category": "joins",
+      "frankenpandas_actual_threads_1M": [1, 2, 3, 3, 3, 3, 3, 3],
+      "frankenpandas_actual_threads_10M": [1, 2, 3, 3, 3, 3, 3, 3],
+      "frankenpandas_p50_us_1M": [2746.19, 2692.43, 2560.41, 2568.46, 4466.71, 5962.94, 5113.20, 6616.97],
+      "pandas_p50_us_1M": [21490.06, 20908.92, 20915.60, 20914.05, 20934.20, 21164.45, 21492.58, 21224.70],
+      "pandas_over_frankenpandas_ratio_1M": [7.825, 7.766, 8.169, 8.143, 4.687, 3.549, 4.203, 3.208],
+      "verdict_1M": ["FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER"],
+      "frankenpandas_p50_us_10M": [36486.63, 35578.28, 34728.69, 36797.19, 47192.42, 54603.17, 57828.96, 60499.87],
+      "pandas_p50_us_10M": [135421.16, 137470.83, 134523.41, 133852.55, 133783.88, 134494.61, 135539.20, 149791.64],
+      "pandas_over_frankenpandas_ratio_10M": [3.712, 3.864, 3.874, 3.638, 2.835, 2.463, 2.344, 2.476],
+      "verdict_10M": ["FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER"],
+      "shape": "three-worker ceiling; best at the four-CPU same-L3 cap and degrades when placement can cross L3 domains"
+    },
+    "sort_values_single": {
+      "category": "dataframe_ops",
+      "frankenpandas_actual_threads_1M": [1, 2, 4, 8, 10, 10, 10, 10],
+      "frankenpandas_actual_threads_10M": [1, 2, 4, 8, 10, 10, 10, 10],
+      "frankenpandas_p50_us_1M": [58836.44, 43994.49, 43936.22, 43713.90, 38610.89, 35296.19, 35754.72, 37431.76],
+      "pandas_p50_us_1M": [66515.69, 66757.45, 66660.20, 65486.87, 66542.83, 68178.92, 67135.46, 69734.38],
+      "pandas_over_frankenpandas_ratio_1M": [1.131, 1.517, 1.517, 1.498, 1.723, 1.932, 1.878, 1.863],
+      "verdict_1M": ["FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER"],
+      "frankenpandas_p50_us_10M": [1581088.32, 1202890.87, 1058522.63, 1026704.97, 925640.73, 919015.75, 924547.74, 1383717.14],
+      "pandas_p50_us_10M": [1216418.84, 1205479.47, 1210069.12, 1214621.69, 1223919.89, 1216526.50, 1231832.25, 1273882.01],
+      "pandas_over_frankenpandas_ratio_10M": [0.769, 1.002, 1.143, 1.183, 1.322, 1.324, 1.332, 0.921],
+      "verdict_10M": ["SLOWER", "NULL_UNDECIDABLE", "FASTER", "FASTER", "FASTER", "FASTER", "FASTER", "SLOWER"],
+      "shape": "crosses from loss through parity to a modest win, saturates at 10 column-gather workers, then regresses under the 128-thread SMT-wide cpuset"
+    }
+  },
+  "findings": [
+    "groupby_mean_float64 has no operation-level thread scaling in this fixture; the prior 19.486x worker result does not reproduce on trj, where the 16-cell ratio range is 3.168x to 4.341x",
+    "df_abs compounds the incumbent advantage at 10M from 1.433x at one thread to 3.537x at the 128-thread cpuset while using only 10 workers",
+    "join_inner is already decisive at 1M, peaking at 8.169x with a four-CPU same-L3 cpuset, but high-cap placement erases much of the advantage",
+    "sort_values_single at 10M is 0.769x at one thread, 1.002x and NULL_UNDECIDABLE at two, peaks at a 1.332x ratio under the 64-CPU cap, and falls to a decidable 0.921x loss under the 128-thread cpuset",
+    "No tested operation used more than 10 workers; requested affinity alone would have materially overstated real parallelism"
+  ],
+  "raw_artifact_directories": [
+    "tests/artifacts/perf/cod_trj_5995wx_groupby_thread_sweep_20260729/raw",
+    "tests/artifacts/perf/cod_trj_5995wx_df_abs_thread_sweep_20260729/raw",
+    "tests/artifacts/perf/cod_trj_5995wx_join_inner_thread_sweep_20260729/raw",
+    "tests/artifacts/perf/cod_trj_5995wx_sort_values_thread_sweep_20260729/raw"
+  ]
+}

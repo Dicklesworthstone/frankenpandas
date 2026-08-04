@@ -1,0 +1,2 @@
+perf_profile: scenario=str_series_sort n=100000 iters=10
+perf_profile: done 10 iters in 0.155s (15.511 ms/iter), sink=1000000

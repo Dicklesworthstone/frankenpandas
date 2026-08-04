@@ -1,0 +1,1046 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 10541883393
+#
+# Overhead  Command          Shared Object           Symbol
+# ........  ...............  ......................  .......................................................................................................................................................................................................................................................................................................................................................
+#
+    11.33%  high_ram_perf_b  high_ram_perf_baseline  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |
+            |--4.41%--<fp_frame::DataFrameGroupBy>::aggregate_named_func
+            |          high_ram_perf_baseline::run_groupby::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+            |--3.66%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<fp_frame::ScalarKey>>
+            |          |
+            |           --3.28%--<hashbrown::map::HashMap<alloc::vec::Vec<fp_frame::ScalarKey>, alloc::vec::Vec<usize>, std::hash::random::RandomState>>::insert
+            |                     <fp_frame::DataFrameGroupBy>::build_groups
+            |                     <fp_frame::DataFrameGroupBy>::aggregate_named_func
+            |                     high_ram_perf_baseline::run_groupby::{closure#0}
+            |                     high_ram_perf_baseline::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |                     std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |
+            |--1.66%--<hashbrown::map::HashMap<alloc::vec::Vec<fp_frame::ScalarKey>, alloc::vec::Vec<usize>, std::hash::random::RandomState>>::insert
+            |          |
+            |           --1.62%--<fp_frame::DataFrameGroupBy>::build_groups
+            |                     <fp_frame::DataFrameGroupBy>::aggregate_named_func
+            |                     high_ram_perf_baseline::run_groupby::{closure#0}
+            |                     high_ram_perf_baseline::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |                     std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |
+             --0.60%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+
+     7.35%  high_ram_perf_b  high_ram_perf_baseline  [.] fp_io::write_csv_string_with_options
+            |
+            |--3.50%--fp_io::write_csv_string_with_options
+            |          high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+            |--1.01%--<usize>::_fmt_inner
+            |          |
+            |           --0.98%--<i64 as core::fmt::Display>::fmt
+            |                     core::fmt::write
+            |                     fp_io::write_csv_string_with_options
+            |                     high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+            |                     high_ram_perf_baseline::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |                     std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |
+            |--0.79%--trunc
+            |          high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.67%--core::fmt::write
+                       |
+                        --0.52%--fp_io::write_csv_string_with_options
+                                  high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+                                  high_ram_perf_baseline::main
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                                  std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                                  std::rt::lang_start_internal
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     4.72%  high_ram_perf_b  libc.so.6               [.] malloc_consolidate
+            |
+            |--3.95%--malloc_consolidate
+            |          _int_free_maybe_consolidate
+            |          _int_free_chunk
+            |          <fp_frame::DataFrameGroupBy>::aggregate_named_func
+            |          high_ram_perf_baseline::run_groupby::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.77%--unlink_chunk.isra.0
+                       |
+                        --0.73%--malloc_consolidate
+                                  _int_free_maybe_consolidate
+                                  _int_free_chunk
+                                  <fp_frame::DataFrameGroupBy>::aggregate_named_func
+                                  high_ram_perf_baseline::run_groupby::{closure#0}
+                                  high_ram_perf_baseline::main
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                                  std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                                  std::rt::lang_start_internal
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     4.00%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_types::Scalar>::to_f64
+            |
+            |--1.59%--high_ram_perf_baseline::checksum_frame
+            |          |
+            |           --1.10%--high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+            |                     high_ram_perf_baseline::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |                     std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |
+            |--1.42%--<fp_types::Scalar>::to_f64
+            |          |
+            |           --0.67%--high_ram_perf_baseline::checksum_frame
+            |                     |
+            |                      --0.55%--high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+            |                                high_ram_perf_baseline::main
+            |                                std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |                                std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |                                std::rt::lang_start_internal
+            |                                main
+            |                                __libc_start_call_main
+            |                                __libc_start_main@@GLIBC_2.34
+            |                                _start
+            |
+             --0.55%--high_ram_perf_baseline::run_alignment::{closure#0}
+                       high_ram_perf_baseline::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     3.69%  high_ram_perf_b  high_ram_perf_baseline  [.] <usize>::_fmt_inner
+            |
+            |--1.09%--fp_io::write_csv_string_with_options
+            |          high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.97%--<usize>::_fmt_inner
+                       |
+                        --0.93%--<i64 as core::fmt::Display>::fmt
+                                  core::fmt::write
+                                  fp_io::write_csv_string_with_options
+                                  high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+                                  high_ram_perf_baseline::main
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                                  std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                                  std::rt::lang_start_internal
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     3.57%  high_ram_perf_b  high_ram_perf_baseline  [.] core::fmt::write
+            |
+            |--1.35%--fp_io::write_csv_string_with_options
+            |          high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.72%--<usize>::_fmt_inner
+                       <i64 as core::fmt::Display>::fmt
+                       core::fmt::write
+                       fp_io::write_csv_string_with_options
+                       high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+                       high_ram_perf_baseline::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     3.37%  high_ram_perf_b  libc.so.6               [.] cfree@GLIBC_2.2.5
+            |
+            |--2.51%--cfree@GLIBC_2.2.5
+            |          |
+            |           --2.44%--<fp_frame::DataFrameGroupBy>::aggregate_named_func
+            |                     high_ram_perf_baseline::run_groupby::{closure#0}
+            |                     high_ram_perf_baseline::main
+            |                     std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |                     std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |                     std::rt::lang_start_internal
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |
+             --0.74%--_int_free_chunk
+                       |
+                        --0.62%--core::ptr::drop_in_place::<std::collections::hash::map::HashMap<alloc::vec::Vec<fp_frame::ScalarKey>, alloc::vec::Vec<usize>>>
+                                  <fp_frame::DataFrameGroupBy>::aggregate_named_func
+                                  high_ram_perf_baseline::run_groupby::{closure#0}
+                                  high_ram_perf_baseline::main
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                                  std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                                  std::rt::lang_start_internal
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     2.80%  high_ram_perf_b  [unknown]               [k] 0xffffffff8621b2b7
+            |
+            |--0.83%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          <std::sys::sync::once::futex::Once>::call
+            |          <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#1}>::{closure#0}, !>
+            |          <fp_columnar::ScalarValues>::as_slice
+            |          high_ram_perf_baseline::checksum_frame
+            |          high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.50%--0xffffffff84c01199
+
+     2.55%  high_ram_perf_b  high_ram_perf_baseline  [.] <core::fmt::Formatter>::pad_integral
+            |
+            |--1.07%--fp_io::write_csv_string_with_options
+            |          high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.65%--<usize>::_fmt_inner
+                       <i64 as core::fmt::Display>::fmt
+                       core::fmt::write
+                       fp_io::write_csv_string_with_options
+                       high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+                       high_ram_perf_baseline::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     2.35%  high_ram_perf_b  libc.so.6               [.] _int_malloc
+            |
+             --0.51%--_int_malloc
+
+     2.35%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c01192
+            |
+             --1.15%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       |
+                        --0.56%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#3}>::{closure#0}, !>::{closure#0}>::{closure#0}
+                                  <std::sys::sync::once::futex::Once>::call
+                                  <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#3}>::{closure#0}, !>
+                                  <fp_columnar::ScalarValues>::as_slice
+                                  high_ram_perf_baseline::checksum_frame
+                                  high_ram_perf_baseline::run_filter::{closure#2}
+                                  high_ram_perf_baseline::main
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                                  std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                                  std::rt::lang_start_internal
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     2.30%  high_ram_perf_b  libc.so.6               [.] _int_free_chunk
+            |
+            |--1.59%--cfree@GLIBC_2.2.5
+            |          <fp_frame::DataFrameGroupBy>::aggregate_named_func
+            |          high_ram_perf_baseline::run_groupby::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.62%--_int_free_chunk
+
+     2.12%  high_ram_perf_b  high_ram_perf_baseline  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<fp_frame::ScalarKey>>
+            |
+            |--1.25%--<fp_frame::DataFrameGroupBy>::aggregate_named_func
+            |          high_ram_perf_baseline::run_groupby::{closure#0}
+            |          high_ram_perf_baseline::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --0.57%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<fp_frame::ScalarKey>>
+
+     1.95%  high_ram_perf_b  high_ram_perf_baseline  [.] core::ptr::drop_in_place::<fp_columnar::Column>
+            |
+             --1.91%--core::ptr::drop_in_place::<fp_columnar::Column>
+                       |
+                        --1.82%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                                  |
+                                   --1.78%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                                             |
+                                             |--1.24%--high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+                                             |          high_ram_perf_baseline::main
+                                             |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                                             |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                                             |          std::rt::lang_start_internal
+                                             |          main
+                                             |          __libc_start_call_main
+                                             |          __libc_start_main@@GLIBC_2.34
+                                             |          _start
+                                             |
+                                              --0.51%--high_ram_perf_baseline::run_filter::{closure#2}
+                                                        high_ram_perf_baseline::main
+                                                        std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                                                        std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                                                        std::rt::lang_start_internal
+                                                        main
+                                                        __libc_start_call_main
+                                                        __libc_start_main@@GLIBC_2.34
+                                                        _start
+
+     1.94%  high_ram_perf_b  high_ram_perf_baseline  [.] <alloc::string::String as core::fmt::Write>::write_str
+            |
+             --0.62%--fp_io::write_csv_string_with_options
+                       high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+                       high_ram_perf_baseline::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.84%  high_ram_perf_b  high_ram_perf_baseline  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |
+             --0.87%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+                       <std::sys::sync::once::futex::Once>::call
+                       <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#1}>::{closure#0}, !>
+                       <fp_columnar::ScalarValues>::as_slice
+                       high_ram_perf_baseline::checksum_frame
+                       |
+                        --0.83%--high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+                                  high_ram_perf_baseline::main
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                                  std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                                  std::rt::lang_start_internal
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     1.73%  high_ram_perf_b  high_ram_perf_baseline  [.] <i64 as core::fmt::Display>::fmt
+            |
+             --0.55%--<usize>::_fmt_inner
+                       <i64 as core::fmt::Display>::fmt
+                       core::fmt::write
+                       fp_io::write_csv_string_with_options
+                       high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+                       high_ram_perf_baseline::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.61%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_frame::DataFrameGroupBy>::aggregate_named_func
+            |
+             --1.35%--<fp_frame::DataFrameGroupBy>::aggregate_named_func
+                       high_ram_perf_baseline::run_groupby::{closure#0}
+                       high_ram_perf_baseline::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.39%  high_ram_perf_b  high_ram_perf_baseline  [.] high_ram_perf_baseline::checksum_frame
+            |
+            |--0.77%--<fp_types::Scalar>::to_f64
+            |          |
+            |           --0.51%--high_ram_perf_baseline::checksum_frame
+            |
+             --0.62%--high_ram_perf_baseline::checksum_frame
+
+     1.14%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_columnar::ScalarValues>::expand_strided_float64
+     1.04%  high_ram_perf_b  high_ram_perf_baseline  [.] <hashbrown::map::HashMap<alloc::vec::Vec<fp_frame::ScalarKey>, alloc::vec::Vec<usize>, std::hash::random::RandomState>>::insert
+            |
+             --0.50%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<fp_frame::ScalarKey>>
+                       <hashbrown::map::HashMap<alloc::vec::Vec<fp_frame::ScalarKey>, alloc::vec::Vec<usize>, std::hash::random::RandomState>>::insert
+                       <fp_frame::DataFrameGroupBy>::build_groups
+                       <fp_frame::DataFrameGroupBy>::aggregate_named_func
+                       high_ram_perf_baseline::run_groupby::{closure#0}
+                       high_ram_perf_baseline::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.00%  high_ram_perf_b  high_ram_perf_baseline  [.] <core::fmt::Formatter>::pad_integral::write_prefix
+     1.00%  high_ram_perf_b  libc.so.6               [.] __memmove_avx_unaligned_erms
+     0.80%  high_ram_perf_b  [unknown]               [k] 0xffffffff84d0410b
+     0.73%  high_ram_perf_b  libc.so.6               [.] unlink_chunk.isra.0
+     0.70%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_frame::DataFrameGroupBy>::build_groups
+     0.67%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452a65
+            |
+             --0.50%--0xffffffff8539b7d0
+                       0xffffffff8539c06e
+                       0xffffffff8539c594
+                       0xffffffff8539cb30
+                       0xffffffff8539cd76
+                       0xffffffff8539cea1
+                       0xffffffff853c9742
+                       0xffffffff853cb02c
+                       0xffffffff853cc7f5
+                       0xffffffff853ab2c0
+                       0xffffffff853ab362
+                       0xffffffff84f24dda
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __brk
+                       __default_morecore@GLIBC_2.2.5
+                       systrim.constprop.0
+                       _int_free_chunk
+
+     0.66%  high_ram_perf_b  libc.so.6               [.] __memcmp_avx2_movbe
+            |
+             --0.62%--__memcmp_avx2_movbe
+                       high_ram_perf_baseline::run_csv_roundtrip::{closure#0}
+                       high_ram_perf_baseline::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     0.66%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452a61
+     0.62%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_frame::ScalarKey as core::hash::Hash>::hash::<std::hash::random::DefaultHasher>
+     0.52%  high_ram_perf_b  high_ram_perf_baseline  [.] trunc
+     0.51%  high_ram_perf_b  high_ram_perf_baseline  [.] core::ptr::drop_in_place::<std::collections::hash::map::HashMap<alloc::vec::Vec<fp_frame::ScalarKey>, alloc::vec::Vec<usize>>>
+     0.50%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c01248
+     0.45%  high_ram_perf_b  libc.so.6               [.] __libc_malloc2
+     0.44%  high_ram_perf_b  high_ram_perf_baseline  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>>::initialize<<std::sync::once_lock::OnceLock<alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>>::get_or_init<<fp_index::IndexLabels>::as_slice::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.44%  high_ram_perf_b  high_ram_perf_baseline  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#3}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.39%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_frame::DataFrameGroupBy>::group_key_label
+     0.39%  high_ram_perf_b  [unknown]               [k] 0xffffffff84d04109
+     0.35%  high_ram_perf_b  high_ram_perf_baseline  [.] high_ram_perf_baseline::run_join::{closure#0}
+     0.32%  high_ram_perf_b  high_ram_perf_baseline  [.] <alloc::sync::Arc<alloc::vec::Vec<fp_index::IndexLabel>>>::drop_slow
+     0.30%  high_ram_perf_b  high_ram_perf_baseline  [.] fp_frame::scalar_key_cmp
+     0.30%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_columnar::Column>::from_values
+     0.29%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c00b90
+     0.29%  high_ram_perf_b  high_ram_perf_baseline  [.] fp_io::parse_simple_numeric_csv_chunk
+     0.28%  high_ram_perf_b  libc.so.6               [.] malloc
+     0.27%  high_ram_perf_b  high_ram_perf_baseline  [.] <alloc::raw_vec::RawVecInner>::finish_grow
+     0.27%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452a69
+     0.27%  high_ram_perf_b  [unknown]               [k] 0xffffffff84d04104
+     0.24%  high_ram_perf_b  high_ram_perf_baseline  [.] core::slice::sort::stable::drift::sort::<alloc::vec::Vec<fp_frame::ScalarKey>, <[alloc::vec::Vec<fp_frame::ScalarKey>]>::sort_by<<fp_frame::DataFrameGroupBy>::build_groups::{closure#0}>::{closure#0}>
+     0.24%  high_ram_perf_b  high_ram_perf_baseline  [.] <alloc::vec::Vec<fp_frame::ScalarKey> as core::cmp::PartialEq>::eq
+     0.24%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4e56
+     0.24%  high_ram_perf_b  [unknown]               [k] 0xffffffff853432f8
+     0.21%  high_ram_perf_b  high_ram_perf_baseline  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.20%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a37ea
+     0.19%  high_ram_perf_b  high_ram_perf_baseline  [.] <alloc::raw_vec::RawVec<usize>>::grow_one
+     0.19%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452e38
+     0.19%  high_ram_perf_b  high_ram_perf_baseline  [.] fp_frame::update_i64_decimal
+     0.17%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3437
+     0.16%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_columnar::Column>::from_f64_values
+     0.16%  high_ram_perf_b  high_ram_perf_baseline  [.] high_ram_perf_baseline::run_alignment::{closure#0}
+     0.16%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_columnar::Column>::new
+     0.16%  high_ram_perf_b  [unknown]               [k] 0xffffffff85455446
+     0.15%  high_ram_perf_b  [unknown]               [k] 0xffffffff85341ffb
+     0.15%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452ccf
+     0.14%  high_ram_perf_b  high_ram_perf_baseline  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#4}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.14%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541df1b
+     0.14%  high_ram_perf_b  [unknown]               [k] 0xffffffff86223c8e
+     0.13%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d71e0
+     0.12%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_columnar::ScalarValues>::as_slice
+     0.12%  high_ram_perf_b  [unknown]               [k] 0xffffffff857c023f
+     0.12%  high_ram_perf_b  [unknown]               [k] 0xffffffff854049f5
+     0.12%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392d17
+     0.12%  high_ram_perf_b  [unknown]               [k] 0xffffffff8539a82f
+     0.12%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d9108
+     0.11%  high_ram_perf_b  libc.so.6               [.] alloc_perturb
+     0.11%  high_ram_perf_b  high_ram_perf_baseline  [.] sha2::sha256::x86_sha::compress
+     0.11%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_columnar::Column>::aligned_binary_f64_int64_unit_ranges
+     0.11%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d90b1
+     0.11%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dc6c9
+     0.11%  high_ram_perf_b  [unknown]               [k] 0xffffffff86228131
+     0.11%  high_ram_perf_b  [unknown]               [k] 0xffffffff862287f5
+     0.11%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_columnar::Column>::nan_aware_validity
+     0.11%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452965
+     0.10%  high_ram_perf_b  [unknown]               [k] 0xffffffff8539b7bc
+     0.10%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d7d8d
+     0.10%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4de7
+     0.09%  high_ram_perf_b  [unknown]               [k] 0xffffffff85404a1a
+     0.09%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b9653
+     0.09%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541df05
+     0.09%  high_ram_perf_b  [unknown]               [k] 0xffffffff85342072
+     0.09%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dda06
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b8472
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff862287df
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853437b6
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85455557
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff854578d1
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a5627
+     0.08%  high_ram_perf_b  high_ram_perf_baseline  [.] fp_join::merge_single_key_inner_unsorted
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85395f6c
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c00bb7
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff84feb802
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4d3b
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d9574
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534112b
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a37a0
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff8539c06e
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff8544f976
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85104b37
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dc268
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d43d3
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853fc708
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff84feb944
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3963
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d7e8f
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff86228a46
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452de9
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b8393
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85123fb4
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dda3b
+     0.08%  high_ram_perf_b  libc.so.6               [.] __memset_avx2_unaligned_erms
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392d4f
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853bb5d6
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85458fb6
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541aa19
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85342161
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85123f6d
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4ee9
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392d37
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b9650
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392d84
+     0.08%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a5707
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d9114
+     0.07%  high_ram_perf_b  high_ram_perf_baseline  [.] high_ram_perf_baseline::build_numeric_frame
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff853fc753
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff853ddb37
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff8536ba45
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d71e9
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff86228133
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff862280cd
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff85456e2d
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff854578a4
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff8536ba5b
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff85458fb2
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b811c
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff859228fb
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff8622882b
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dc6eb
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d256b
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b8390
+     0.07%  high_ram_perf_b  [unknown]               [k] 0xffffffff85458fe5
+     0.06%  high_ram_perf_b  [unknown]               [k] 0xffffffff85341372
+     0.06%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452c7f
+     0.06%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c00005
+     0.06%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392de1
+     0.06%  high_ram_perf_b  [unknown]               [k] 0xffffffff85458fdc
+     0.06%  high_ram_perf_b  high_ram_perf_baseline  [.] high_ram_perf_baseline::main
+     0.06%  high_ram_perf_b  [unknown]               [k] 0xffffffff86228147
+     0.06%  high_ram_perf_b  high_ram_perf_baseline  [.] <std::sys::sync::once::futex::Once>::call
+     0.06%  high_ram_perf_b  [unknown]               [k] 0xffffffff85458faf
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff8623a353
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a37ed
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392d43
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff857c02ad
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4c6b
+     0.05%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_columnar::ValidityMask>::from_values
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452dc3
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff85138885
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d43e0
+     0.05%  high_ram_perf_b  high_ram_perf_baseline  [.] <fp_columnar::binary_f64_apply::{closure#0} as core::ops::function::FnOnce<(f64, f64)>>::call_once
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff853db066
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452e42
+     0.05%  high_ram_perf_b  [unknown]               [k] 0xffffffff857c0249
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a395e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541deff
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85456e3a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3ae4
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85342133
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452969
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854049fa
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854578c9
+     0.04%  high_ram_perf_b  libc.so.6               [.] __brk
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8536ba15
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541df20
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8510f1f0
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84feb972
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff857c023a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8545558d
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541a7cf
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8517f74f
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a5723
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84feb82a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8621b2b9
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a568a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c01698
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84f82185
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854554e6
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392d40
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854552a7
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dadc1
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85455231
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a5733
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534151e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a33ec
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8539b8dc
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853db073
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853414e8
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dd923
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534327b
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85455106
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8622814d
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85394553
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8510f1e6
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c00ba1
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dda70
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452ddc
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4fa3
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452e2a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4c6e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853ce071
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854529d4
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8536b5d0
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dda90
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853bbce1
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392d3b
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84fea900
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dda47
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853da48e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3ad4
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a5545
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85343698
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452966
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853439ec
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b819e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8583bed0
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534141d
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8539ba13
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8536b95a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853bb618
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853436a6
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452de1
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff861f65ae
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d8e7c
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff86228a43
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853414fb
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a37ce
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854578a8
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d43d5
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff862280ca
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a33d2
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541a995
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff86228854
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a36de
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534390b
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dda9c
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541df27
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84feb935
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dc2c7
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d43da
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c00b93
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85341015
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84fea9f9
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853ce22b
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d7e86
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452e44
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b810e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8539b8ec
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff859228e8
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534391c
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff861f65b7
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853da48b
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8536ba48
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d9186
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853437b1
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3795
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4c62
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dd915
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3847
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85455447
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853da482
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854554df
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a514a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8583bed3
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8510f1f4
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853fc70c
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4d33
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d715e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85104b3a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff857c02ab
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853442bf
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85341142
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff861f67cc
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff851a000e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452a08
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85052907
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4f47
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b8139
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b81f0
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3879
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a33da
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452a0a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d43e3
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853974df
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452a1b
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85080fa4
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85341133
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8622811f
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85394550
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8623a506
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541df4e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8507fd8f
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853414f7
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85342003
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a570c
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a5716
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b81da
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85343448
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534134a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853bbce5
+     0.04%  high_ram_perf_b  high_ram_perf_baseline  [.] <alloc::raw_vec::RawVecInner>::finish_grow
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853439f4
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8539c072
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853fc72a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3827
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff861f6604
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff851524d5
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85341324
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a5130
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85341121
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853bb60a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452cab
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c015ea
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853bb565
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d43d1
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853ab258
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b8136
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85698fa6
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dc42d
+     0.04%  high_ram_perf_b  high_ram_perf_baseline  [.] high_ram_perf_baseline::build_join_frame
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853fc79e
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d43ca
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d9105
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85104b41
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8545630f
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452e3d
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4efc
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85458fa4
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854578da
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452caa
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541a8a2
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853ddbce
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392d57
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541a965
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c01690
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c01150
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452de6
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85302a11
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c00b99
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a37a5
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a563d
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534212c
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84feb953
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d8db2
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c00ba9
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85458fd3
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff861f66a1
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452cc6
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853433d7
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b8129
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff84febaa9
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854529b0
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541a9f6
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392dcf
+     0.04%  high_ram_perf_b  high_ram_perf_baseline  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::string::String>>::initialize<<std::sync::once_lock::OnceLock<alloc::string::String>>::get_or_init<<fp_index::Index>::semantic_labels_fingerprint_with<fp_frame::semantic_index_labels_fingerprint>::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff850528f5
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8507fd38
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff8583c1bd
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853bb5d9
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a342a
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a33d5
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff854552ab
+     0.04%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a562d
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d2320
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff861f65c6
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534359a
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4e1b
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d2574
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff854552bc
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a511c
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d911a
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541a9e8
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff861f67f5
+     0.03%  high_ram_perf_b  libc.so.6               [.] _int_free_maybe_consolidate
+     0.03%  high_ram_perf_b  high_ram_perf_baseline  [.] fp_frame::semantic_index_labels_fingerprint_for_index
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b81f7
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff85343815
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff8536b943
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff85088605
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff84fea905
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392d4c
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853437ba
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853db076
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff850915a8
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff85404a45
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff8536ba57
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff861f678c
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a38b9
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff8623ba6a
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff86228852
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dda14
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff8539ba1b
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff86228130
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff85455438
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d95aa
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff85393ee6
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541dd22
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dd916
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff85104b40
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff853d24f8
+     0.03%  high_ram_perf_b  [unknown]               [k] 0xffffffff8583bf08
+     0.02%  high_ram_perf_b  [unknown]               [k] 0xffffffff853437a4
+     0.02%  high_ram_perf_b  [unknown]               [k] 0xffffffff8510f7e9
+     0.02%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a50c0
+     0.01%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b84eb
+     0.01%  high_ram_perf_b  [unknown]               [k] 0xffffffff8541a974
+     0.01%  high_ram_perf_b  [unknown]               [k] 0xffffffff853f183d
+     0.01%  high_ram_perf_b  [unknown]               [k] 0xffffffff85080faf
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3957
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84feb8c8
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a53ad
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853974cc
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85392dd3
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85404a34
+     0.00%  high_ram_perf_b  ld-linux-x86-64.so.2    [.] dl_main
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530c30a
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85452960
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84fef48b
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a56a7
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85341fcb
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff850868a4
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff850cdaa4
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff851a2229
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff86201bc3
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8534146f
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84f8c9d1
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dd9e4
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853b8105
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a56ff
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8502d0d9
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8517f742
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c001bd
+     0.00%  high_ram_perf_b  libc.so.6               [.] pthread_getaffinity_np@GLIBC_2.3.4
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a562a
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a4df4
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a3adf
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff850ccfbd
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853aceed
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff851a0563
+     0.00%  high_ram_perf_b  libc.so.6               [.] __libc_calloc
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853a384c
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8544f979
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8545554a
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff857c0296
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853974f9
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c0188e
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84fea96b
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8544ec0b
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84f87bc0
+     0.00%  high_ram_perf_b  libc.so.6               [.] __printf_buffer
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853dd9f7
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8513a07c
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c0185b
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d2c3
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d2bc
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8621c6a9
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8506d57c
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d280
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8622871b
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8502fe87
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84fdedcb
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85393b90
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85068090
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff853263ad
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85456a16
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d393
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8621c6a7
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff862289ac
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85162285
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8622f445
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff862252e9
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85305819
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8622f485
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84f90ff9
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85326766
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d285
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff852fe686
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85326531
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85300fd8
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8519f426
+     0.00%  perf-exec        [unknown]               [k] 0xffffffff84c0186b
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c01884
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84c01871
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d2cc
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85124d3c
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff86224bcf
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8622768d
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8548f9b9
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff86224b7e
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85300b65
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85300b66
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85300b80
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d286
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84fdedcd
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85300b69
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d29c
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff862251d0
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84f3375a
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff84f34139
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85104b2d
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8510f1d0
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8510f1dd
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85300b60
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff85300b78
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d289
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d298
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d29f
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d2af
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d2d4
+     0.00%  high_ram_perf_b  [unknown]               [k] 0xffffffff8530d398
+     0.00%  perf-exec        [unknown]               [k] 0xffffffff8530d285
+     0.00%  perf-exec        [unknown]               [k] 0xffffffff8530d2c3
+     0.00%  perf-exec        [unknown]               [k] 0xffffffff862251d0
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

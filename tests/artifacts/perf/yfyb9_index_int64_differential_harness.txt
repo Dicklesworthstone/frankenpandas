@@ -1,0 +1,34 @@
+br-frankenpandas-yfyb9 — differential harness for fp-index Int64 fast paths
+===========================================================================
+
+Motivation: the swarm rapidly added ~13 Int64/affine fast paths to fp-index
+Index methods — min/max (uza04.151), argmin/argmax (ikbh9), is_monotonic_*
+(k9tlb), nunique (a55d8), dtype/inferred_type/is_integer (gzi1i), memory_usage
+(bqfj0), item (0633o), searchsorted (ymhb6), asof (1851g/4jr8s), insert
+(uza04.152), delete (uza04.150), groupby (xk18v). Each had unit tests but no
+cross-cutting differential guard.
+
+Harness (test fp-index: int64_index_fast_paths_match_materialized_fallback_yfyb9):
+deterministic seeded LCG (no rand crate, no mocks). For the SAME i64 sequence it
+builds two representations and asserts every fast-pathed method agrees:
+  - LAZY:        Index::from_i64_values(..) / new_known_unique_int64_affine_range
+                 => the typed/affine FAST PATH
+  - MATERIALIZED: Index::new(IndexLabel::Int64 ..) => the FALLBACK path
+    (Index::new never populates int64_typed and the fast-path guards
+    short-circuit before calling int64_view, so it reliably stays on the
+    labels.iter() fallback).
+
+Coverage: 2500 typed iterations (len 0..12, value range -4..4 for ties/dups,
+1/3 forced-sorted) + 1500 affine iterations (random start, non-zero step in
+-3..3, len 0..9). Methods compared: len, min, max, argmin, argmax,
+is_monotonic_increasing/decreasing, nunique, is_unique, has_duplicates, hasnans,
+inferred_type, dtype, is_integer, is_numeric.
+
+Result: PASS (1 passed; 4000 iterations × 15 method checks). No divergence — every
+fast path agrees with the materialized fallback. The harness now guards the whole
+fp-index Int64 fast-path family against future regression.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-index int64_index_fast_paths_match_materialized_fallback_yfyb9 -> 1 passed
+  cargo test -p fp-index (full)  -> all passed, 0 failed
+  ubs crates/fp-index/src/lib.rs -> 0 critical

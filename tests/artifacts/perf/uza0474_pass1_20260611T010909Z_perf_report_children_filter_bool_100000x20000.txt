@@ -1,0 +1,1685 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 8581932185
+#
+# Children      Self  Shared Object         Symbol                                                                                                                                                                                                                                                                          IPC   [IPC Coverage]
+# ........  ........  ....................  ..............................................................................................................................................................................................................................................................................  ....................
+#
+    99.96%     0.00%  perf_profile          [.] _start                                                                                                                                                                                                                                                                      -      -
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--97.94%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.13%--<fp_frame::DataFrame>::new_with_axes
+               |          |          |
+               |          |          |--0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+               |          |          |          |
+               |          |          |           --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+               |          |          |
+               |          |          |--0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |           --0.13%--__libc_malloc2
+               |          |                     _int_malloc
+               |          |
+               |          |--0.36%--0xffffffff84c00f0b
+               |          |          |
+               |          |          |--0.19%--0xffffffff86227724
+               |          |          |          0xffffffff84fc4bc8
+               |          |          |          0xffffffff85139f5d
+               |          |          |          |
+               |          |          |           --0.10%--0xffffffff85139003
+               |          |          |
+               |          |           --0.17%--0xffffffff86227729
+               |          |                     0xffffffff85021e6e
+               |          |                     0xffffffff85021a80
+               |          |                     0xffffffff8502171f
+               |          |                     0xffffffff85091286
+               |          |
+               |          |--0.23%--__libc_malloc2
+               |          |          _int_malloc
+               |          |          |
+               |          |           --0.18%--malloc_consolidate
+               |          |
+               |          |--0.18%--__memcmp_avx2_movbe
+               |          |
+               |          |--0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+               |          |
+               |          |--0.14%--<fp_index::Index>::set_names
+               |          |
+               |           --0.11%--0xffffffff84c00f4b
+               |                     |
+               |                      --0.11%--0xffffffff86227465
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --0.11%--0xffffffff86228929
+               |                                           |
+               |                                            --0.11%--0xffffffff8622f947
+               |
+               |--1.17%--perf_profile::build_numeric_frame
+               |          |
+               |           --0.99%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--0.56%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --0.34%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --0.29%--0xffffffff8622811f
+               |                     |                                0xffffffff84feb96b
+               |                     |                                0xffffffff853a5627
+               |                     |                                0xffffffff853a53ad
+               |                     |                                0xffffffff853a4de7
+               |                     |                                |
+               |                     |                                 --0.23%--0xffffffff853a37ea
+               |                     |                                           0xffffffff853a33d2
+               |                     |                                           0xffffffff8541df1b
+               |                     |                                           |
+               |                     |                                            --0.17%--0xffffffff8541a9e8
+               |                     |                                                      |
+               |                     |                                                       --0.17%--0xffffffff853dda90
+               |                     |                                                                 |
+               |                     |                                                                  --0.13%--0xffffffff853dc6c9
+               |                     |
+               |                      --0.38%--<fp_columnar::Column>::new
+               |
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                          |--0.39%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |
+                          |           --0.24%--_int_free_chunk
+                          |                     |
+                          |                      --0.18%--systrim.constprop.0
+                          |                                __default_morecore@GLIBC_2.2.5
+                          |                                __brk
+                          |                                0xffffffff84c0012b
+                          |                                0xffffffff86220551
+                          |                                0xffffffff84f24dda
+                          |                                0xffffffff853ab362
+                          |                                0xffffffff853ab2c0
+                          |                                0xffffffff853cc7f5
+                          |                                0xffffffff853cb02c
+                          |
+                           --0.19%--core::ptr::drop_in_place::<fp_index::Index>
+
+    99.96%     0.00%  libc.so.6             [.] __libc_start_main@@GLIBC_2.34                                                                                                                                                                                                                                               -      -
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--97.94%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.13%--<fp_frame::DataFrame>::new_with_axes
+               |          |          |
+               |          |          |--0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+               |          |          |          |
+               |          |          |           --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+               |          |          |
+               |          |          |--0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |           --0.13%--__libc_malloc2
+               |          |                     _int_malloc
+               |          |
+               |          |--0.36%--0xffffffff84c00f0b
+               |          |          |
+               |          |          |--0.19%--0xffffffff86227724
+               |          |          |          0xffffffff84fc4bc8
+               |          |          |          0xffffffff85139f5d
+               |          |          |          |
+               |          |          |           --0.10%--0xffffffff85139003
+               |          |          |
+               |          |           --0.17%--0xffffffff86227729
+               |          |                     0xffffffff85021e6e
+               |          |                     0xffffffff85021a80
+               |          |                     0xffffffff8502171f
+               |          |                     0xffffffff85091286
+               |          |
+               |          |--0.23%--__libc_malloc2
+               |          |          _int_malloc
+               |          |          |
+               |          |           --0.18%--malloc_consolidate
+               |          |
+               |          |--0.18%--__memcmp_avx2_movbe
+               |          |
+               |          |--0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+               |          |
+               |          |--0.14%--<fp_index::Index>::set_names
+               |          |
+               |           --0.11%--0xffffffff84c00f4b
+               |                     |
+               |                      --0.11%--0xffffffff86227465
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --0.11%--0xffffffff86228929
+               |                                           |
+               |                                            --0.11%--0xffffffff8622f947
+               |
+               |--1.17%--perf_profile::build_numeric_frame
+               |          |
+               |           --0.99%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--0.56%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --0.34%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --0.29%--0xffffffff8622811f
+               |                     |                                0xffffffff84feb96b
+               |                     |                                0xffffffff853a5627
+               |                     |                                0xffffffff853a53ad
+               |                     |                                0xffffffff853a4de7
+               |                     |                                |
+               |                     |                                 --0.23%--0xffffffff853a37ea
+               |                     |                                           0xffffffff853a33d2
+               |                     |                                           0xffffffff8541df1b
+               |                     |                                           |
+               |                     |                                            --0.17%--0xffffffff8541a9e8
+               |                     |                                                      |
+               |                     |                                                       --0.17%--0xffffffff853dda90
+               |                     |                                                                 |
+               |                     |                                                                  --0.13%--0xffffffff853dc6c9
+               |                     |
+               |                      --0.38%--<fp_columnar::Column>::new
+               |
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                          |--0.39%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |
+                          |           --0.24%--_int_free_chunk
+                          |                     |
+                          |                      --0.18%--systrim.constprop.0
+                          |                                __default_morecore@GLIBC_2.2.5
+                          |                                __brk
+                          |                                0xffffffff84c0012b
+                          |                                0xffffffff86220551
+                          |                                0xffffffff84f24dda
+                          |                                0xffffffff853ab362
+                          |                                0xffffffff853ab2c0
+                          |                                0xffffffff853cc7f5
+                          |                                0xffffffff853cb02c
+                          |
+                           --0.19%--core::ptr::drop_in_place::<fp_index::Index>
+
+    99.96%     0.00%  libc.so.6             [.] __libc_start_call_main                                                                                                                                                                                                                                                      -      -
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--97.94%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.13%--<fp_frame::DataFrame>::new_with_axes
+               |          |          |
+               |          |          |--0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+               |          |          |          |
+               |          |          |           --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+               |          |          |
+               |          |          |--0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |           --0.13%--__libc_malloc2
+               |          |                     _int_malloc
+               |          |
+               |          |--0.36%--0xffffffff84c00f0b
+               |          |          |
+               |          |          |--0.19%--0xffffffff86227724
+               |          |          |          0xffffffff84fc4bc8
+               |          |          |          0xffffffff85139f5d
+               |          |          |          |
+               |          |          |           --0.10%--0xffffffff85139003
+               |          |          |
+               |          |           --0.17%--0xffffffff86227729
+               |          |                     0xffffffff85021e6e
+               |          |                     0xffffffff85021a80
+               |          |                     0xffffffff8502171f
+               |          |                     0xffffffff85091286
+               |          |
+               |          |--0.23%--__libc_malloc2
+               |          |          _int_malloc
+               |          |          |
+               |          |           --0.18%--malloc_consolidate
+               |          |
+               |          |--0.18%--__memcmp_avx2_movbe
+               |          |
+               |          |--0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+               |          |
+               |          |--0.14%--<fp_index::Index>::set_names
+               |          |
+               |           --0.11%--0xffffffff84c00f4b
+               |                     |
+               |                      --0.11%--0xffffffff86227465
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --0.11%--0xffffffff86228929
+               |                                           |
+               |                                            --0.11%--0xffffffff8622f947
+               |
+               |--1.17%--perf_profile::build_numeric_frame
+               |          |
+               |           --0.99%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--0.56%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --0.34%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --0.29%--0xffffffff8622811f
+               |                     |                                0xffffffff84feb96b
+               |                     |                                0xffffffff853a5627
+               |                     |                                0xffffffff853a53ad
+               |                     |                                0xffffffff853a4de7
+               |                     |                                |
+               |                     |                                 --0.23%--0xffffffff853a37ea
+               |                     |                                           0xffffffff853a33d2
+               |                     |                                           0xffffffff8541df1b
+               |                     |                                           |
+               |                     |                                            --0.17%--0xffffffff8541a9e8
+               |                     |                                                      |
+               |                     |                                                       --0.17%--0xffffffff853dda90
+               |                     |                                                                 |
+               |                     |                                                                  --0.13%--0xffffffff853dc6c9
+               |                     |
+               |                      --0.38%--<fp_columnar::Column>::new
+               |
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                          |--0.39%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |
+                          |           --0.24%--_int_free_chunk
+                          |                     |
+                          |                      --0.18%--systrim.constprop.0
+                          |                                __default_morecore@GLIBC_2.2.5
+                          |                                __brk
+                          |                                0xffffffff84c0012b
+                          |                                0xffffffff86220551
+                          |                                0xffffffff84f24dda
+                          |                                0xffffffff853ab362
+                          |                                0xffffffff853ab2c0
+                          |                                0xffffffff853cc7f5
+                          |                                0xffffffff853cb02c
+                          |
+                           --0.19%--core::ptr::drop_in_place::<fp_index::Index>
+
+    99.96%     0.00%  perf_profile          [.] main                                                                                                                                                                                                                                                                        -      -
+            |
+            ---main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--97.94%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.13%--<fp_frame::DataFrame>::new_with_axes
+               |          |          |
+               |          |          |--0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+               |          |          |          |
+               |          |          |           --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+               |          |          |
+               |          |          |--0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |           --0.13%--__libc_malloc2
+               |          |                     _int_malloc
+               |          |
+               |          |--0.36%--0xffffffff84c00f0b
+               |          |          |
+               |          |          |--0.19%--0xffffffff86227724
+               |          |          |          0xffffffff84fc4bc8
+               |          |          |          0xffffffff85139f5d
+               |          |          |          |
+               |          |          |           --0.10%--0xffffffff85139003
+               |          |          |
+               |          |           --0.17%--0xffffffff86227729
+               |          |                     0xffffffff85021e6e
+               |          |                     0xffffffff85021a80
+               |          |                     0xffffffff8502171f
+               |          |                     0xffffffff85091286
+               |          |
+               |          |--0.23%--__libc_malloc2
+               |          |          _int_malloc
+               |          |          |
+               |          |           --0.18%--malloc_consolidate
+               |          |
+               |          |--0.18%--__memcmp_avx2_movbe
+               |          |
+               |          |--0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+               |          |
+               |          |--0.14%--<fp_index::Index>::set_names
+               |          |
+               |           --0.11%--0xffffffff84c00f4b
+               |                     |
+               |                      --0.11%--0xffffffff86227465
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --0.11%--0xffffffff86228929
+               |                                           |
+               |                                            --0.11%--0xffffffff8622f947
+               |
+               |--1.17%--perf_profile::build_numeric_frame
+               |          |
+               |           --0.99%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--0.56%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --0.34%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --0.29%--0xffffffff8622811f
+               |                     |                                0xffffffff84feb96b
+               |                     |                                0xffffffff853a5627
+               |                     |                                0xffffffff853a53ad
+               |                     |                                0xffffffff853a4de7
+               |                     |                                |
+               |                     |                                 --0.23%--0xffffffff853a37ea
+               |                     |                                           0xffffffff853a33d2
+               |                     |                                           0xffffffff8541df1b
+               |                     |                                           |
+               |                     |                                            --0.17%--0xffffffff8541a9e8
+               |                     |                                                      |
+               |                     |                                                       --0.17%--0xffffffff853dda90
+               |                     |                                                                 |
+               |                     |                                                                  --0.13%--0xffffffff853dc6c9
+               |                     |
+               |                      --0.38%--<fp_columnar::Column>::new
+               |
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                          |--0.39%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |
+                          |           --0.24%--_int_free_chunk
+                          |                     |
+                          |                      --0.18%--systrim.constprop.0
+                          |                                __default_morecore@GLIBC_2.2.5
+                          |                                __brk
+                          |                                0xffffffff84c0012b
+                          |                                0xffffffff86220551
+                          |                                0xffffffff84f24dda
+                          |                                0xffffffff853ab362
+                          |                                0xffffffff853ab2c0
+                          |                                0xffffffff853cc7f5
+                          |                                0xffffffff853cb02c
+                          |
+                           --0.19%--core::ptr::drop_in_place::<fp_index::Index>
+
+    99.96%     0.00%  perf_profile          [.] std::rt::lang_start_internal                                                                                                                                                                                                                                                -      -
+            |
+            ---std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--97.94%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.13%--<fp_frame::DataFrame>::new_with_axes
+               |          |          |
+               |          |          |--0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+               |          |          |          |
+               |          |          |           --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+               |          |          |
+               |          |          |--0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |           --0.13%--__libc_malloc2
+               |          |                     _int_malloc
+               |          |
+               |          |--0.36%--0xffffffff84c00f0b
+               |          |          |
+               |          |          |--0.19%--0xffffffff86227724
+               |          |          |          0xffffffff84fc4bc8
+               |          |          |          0xffffffff85139f5d
+               |          |          |          |
+               |          |          |           --0.10%--0xffffffff85139003
+               |          |          |
+               |          |           --0.17%--0xffffffff86227729
+               |          |                     0xffffffff85021e6e
+               |          |                     0xffffffff85021a80
+               |          |                     0xffffffff8502171f
+               |          |                     0xffffffff85091286
+               |          |
+               |          |--0.23%--__libc_malloc2
+               |          |          _int_malloc
+               |          |          |
+               |          |           --0.18%--malloc_consolidate
+               |          |
+               |          |--0.18%--__memcmp_avx2_movbe
+               |          |
+               |          |--0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+               |          |
+               |          |--0.14%--<fp_index::Index>::set_names
+               |          |
+               |           --0.11%--0xffffffff84c00f4b
+               |                     |
+               |                      --0.11%--0xffffffff86227465
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --0.11%--0xffffffff86228929
+               |                                           |
+               |                                            --0.11%--0xffffffff8622f947
+               |
+               |--1.17%--perf_profile::build_numeric_frame
+               |          |
+               |           --0.99%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--0.56%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --0.34%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --0.29%--0xffffffff8622811f
+               |                     |                                0xffffffff84feb96b
+               |                     |                                0xffffffff853a5627
+               |                     |                                0xffffffff853a53ad
+               |                     |                                0xffffffff853a4de7
+               |                     |                                |
+               |                     |                                 --0.23%--0xffffffff853a37ea
+               |                     |                                           0xffffffff853a33d2
+               |                     |                                           0xffffffff8541df1b
+               |                     |                                           |
+               |                     |                                            --0.17%--0xffffffff8541a9e8
+               |                     |                                                      |
+               |                     |                                                       --0.17%--0xffffffff853dda90
+               |                     |                                                                 |
+               |                     |                                                                  --0.13%--0xffffffff853dc6c9
+               |                     |
+               |                      --0.38%--<fp_columnar::Column>::new
+               |
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                          |--0.39%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |
+                          |           --0.24%--_int_free_chunk
+                          |                     |
+                          |                      --0.18%--systrim.constprop.0
+                          |                                __default_morecore@GLIBC_2.2.5
+                          |                                __brk
+                          |                                0xffffffff84c0012b
+                          |                                0xffffffff86220551
+                          |                                0xffffffff84f24dda
+                          |                                0xffffffff853ab362
+                          |                                0xffffffff853ab2c0
+                          |                                0xffffffff853cc7f5
+                          |                                0xffffffff853cb02c
+                          |
+                           --0.19%--core::ptr::drop_in_place::<fp_index::Index>
+
+    99.96%     0.00%  perf_profile          [.] std::rt::lang_start::<()>::{closure#0}                                                                                                                                                                                                                                      -      -
+            |
+            ---std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--97.94%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.13%--<fp_frame::DataFrame>::new_with_axes
+               |          |          |
+               |          |          |--0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+               |          |          |          |
+               |          |          |           --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+               |          |          |
+               |          |          |--0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |           --0.13%--__libc_malloc2
+               |          |                     _int_malloc
+               |          |
+               |          |--0.36%--0xffffffff84c00f0b
+               |          |          |
+               |          |          |--0.19%--0xffffffff86227724
+               |          |          |          0xffffffff84fc4bc8
+               |          |          |          0xffffffff85139f5d
+               |          |          |          |
+               |          |          |           --0.10%--0xffffffff85139003
+               |          |          |
+               |          |           --0.17%--0xffffffff86227729
+               |          |                     0xffffffff85021e6e
+               |          |                     0xffffffff85021a80
+               |          |                     0xffffffff8502171f
+               |          |                     0xffffffff85091286
+               |          |
+               |          |--0.23%--__libc_malloc2
+               |          |          _int_malloc
+               |          |          |
+               |          |           --0.18%--malloc_consolidate
+               |          |
+               |          |--0.18%--__memcmp_avx2_movbe
+               |          |
+               |          |--0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+               |          |
+               |          |--0.14%--<fp_index::Index>::set_names
+               |          |
+               |           --0.11%--0xffffffff84c00f4b
+               |                     |
+               |                      --0.11%--0xffffffff86227465
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --0.11%--0xffffffff86228929
+               |                                           |
+               |                                            --0.11%--0xffffffff8622f947
+               |
+               |--1.17%--perf_profile::build_numeric_frame
+               |          |
+               |           --0.99%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--0.56%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --0.34%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --0.29%--0xffffffff8622811f
+               |                     |                                0xffffffff84feb96b
+               |                     |                                0xffffffff853a5627
+               |                     |                                0xffffffff853a53ad
+               |                     |                                0xffffffff853a4de7
+               |                     |                                |
+               |                     |                                 --0.23%--0xffffffff853a37ea
+               |                     |                                           0xffffffff853a33d2
+               |                     |                                           0xffffffff8541df1b
+               |                     |                                           |
+               |                     |                                            --0.17%--0xffffffff8541a9e8
+               |                     |                                                      |
+               |                     |                                                       --0.17%--0xffffffff853dda90
+               |                     |                                                                 |
+               |                     |                                                                  --0.13%--0xffffffff853dc6c9
+               |                     |
+               |                      --0.38%--<fp_columnar::Column>::new
+               |
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                          |--0.39%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |
+                          |           --0.24%--_int_free_chunk
+                          |                     |
+                          |                      --0.18%--systrim.constprop.0
+                          |                                __default_morecore@GLIBC_2.2.5
+                          |                                __brk
+                          |                                0xffffffff84c0012b
+                          |                                0xffffffff86220551
+                          |                                0xffffffff84f24dda
+                          |                                0xffffffff853ab362
+                          |                                0xffffffff853ab2c0
+                          |                                0xffffffff853cc7f5
+                          |                                0xffffffff853cb02c
+                          |
+                           --0.19%--core::ptr::drop_in_place::<fp_index::Index>
+
+    99.96%     0.00%  perf_profile          [.] std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>                                                                                                                                                                                                               -      -
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--97.94%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.13%--<fp_frame::DataFrame>::new_with_axes
+               |          |          |
+               |          |          |--0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+               |          |          |          |
+               |          |          |           --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+               |          |          |
+               |          |          |--0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |           --0.13%--__libc_malloc2
+               |          |                     _int_malloc
+               |          |
+               |          |--0.36%--0xffffffff84c00f0b
+               |          |          |
+               |          |          |--0.19%--0xffffffff86227724
+               |          |          |          0xffffffff84fc4bc8
+               |          |          |          0xffffffff85139f5d
+               |          |          |          |
+               |          |          |           --0.10%--0xffffffff85139003
+               |          |          |
+               |          |           --0.17%--0xffffffff86227729
+               |          |                     0xffffffff85021e6e
+               |          |                     0xffffffff85021a80
+               |          |                     0xffffffff8502171f
+               |          |                     0xffffffff85091286
+               |          |
+               |          |--0.23%--__libc_malloc2
+               |          |          _int_malloc
+               |          |          |
+               |          |           --0.18%--malloc_consolidate
+               |          |
+               |          |--0.18%--__memcmp_avx2_movbe
+               |          |
+               |          |--0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+               |          |
+               |          |--0.14%--<fp_index::Index>::set_names
+               |          |
+               |           --0.11%--0xffffffff84c00f4b
+               |                     |
+               |                      --0.11%--0xffffffff86227465
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --0.11%--0xffffffff86228929
+               |                                           |
+               |                                            --0.11%--0xffffffff8622f947
+               |
+               |--1.17%--perf_profile::build_numeric_frame
+               |          |
+               |           --0.99%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--0.56%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --0.34%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --0.29%--0xffffffff8622811f
+               |                     |                                0xffffffff84feb96b
+               |                     |                                0xffffffff853a5627
+               |                     |                                0xffffffff853a53ad
+               |                     |                                0xffffffff853a4de7
+               |                     |                                |
+               |                     |                                 --0.23%--0xffffffff853a37ea
+               |                     |                                           0xffffffff853a33d2
+               |                     |                                           0xffffffff8541df1b
+               |                     |                                           |
+               |                     |                                            --0.17%--0xffffffff8541a9e8
+               |                     |                                                      |
+               |                     |                                                       --0.17%--0xffffffff853dda90
+               |                     |                                                                 |
+               |                     |                                                                  --0.13%--0xffffffff853dc6c9
+               |                     |
+               |                      --0.38%--<fp_columnar::Column>::new
+               |
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                          |--0.39%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |
+                          |           --0.24%--_int_free_chunk
+                          |                     |
+                          |                      --0.18%--systrim.constprop.0
+                          |                                __default_morecore@GLIBC_2.2.5
+                          |                                __brk
+                          |                                0xffffffff84c0012b
+                          |                                0xffffffff86220551
+                          |                                0xffffffff84f24dda
+                          |                                0xffffffff853ab362
+                          |                                0xffffffff853ab2c0
+                          |                                0xffffffff853cc7f5
+                          |                                0xffffffff853cb02c
+                          |
+                           --0.19%--core::ptr::drop_in_place::<fp_index::Index>
+
+    99.96%     0.00%  perf_profile          [.] perf_profile::main                                                                                                                                                                                                                                                          -      -
+            |
+            ---perf_profile::main
+               |
+               |--97.94%--<fp_frame::DataFrame>::loc_bool
+               |          |
+               |          |--1.13%--<fp_frame::DataFrame>::new_with_axes
+               |          |          |
+               |          |          |--0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+               |          |          |          |
+               |          |          |           --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+               |          |          |
+               |          |          |--0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+               |          |          |
+               |          |           --0.13%--__libc_malloc2
+               |          |                     _int_malloc
+               |          |
+               |          |--0.36%--0xffffffff84c00f0b
+               |          |          |
+               |          |          |--0.19%--0xffffffff86227724
+               |          |          |          0xffffffff84fc4bc8
+               |          |          |          0xffffffff85139f5d
+               |          |          |          |
+               |          |          |           --0.10%--0xffffffff85139003
+               |          |          |
+               |          |           --0.17%--0xffffffff86227729
+               |          |                     0xffffffff85021e6e
+               |          |                     0xffffffff85021a80
+               |          |                     0xffffffff8502171f
+               |          |                     0xffffffff85091286
+               |          |
+               |          |--0.23%--__libc_malloc2
+               |          |          _int_malloc
+               |          |          |
+               |          |           --0.18%--malloc_consolidate
+               |          |
+               |          |--0.18%--__memcmp_avx2_movbe
+               |          |
+               |          |--0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+               |          |
+               |          |--0.14%--<fp_index::Index>::set_names
+               |          |
+               |           --0.11%--0xffffffff84c00f4b
+               |                     |
+               |                      --0.11%--0xffffffff86227465
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --0.11%--0xffffffff86228929
+               |                                           |
+               |                                            --0.11%--0xffffffff8622f947
+               |
+               |--1.17%--perf_profile::build_numeric_frame
+               |          |
+               |           --0.99%--<fp_columnar::Column>::from_values
+               |                     |
+               |                     |--0.56%--__memmove_avx_unaligned_erms
+               |                     |          |
+               |                     |           --0.34%--0xffffffff84c00bb7
+               |                     |                     |
+               |                     |                      --0.29%--0xffffffff8622811f
+               |                     |                                0xffffffff84feb96b
+               |                     |                                0xffffffff853a5627
+               |                     |                                0xffffffff853a53ad
+               |                     |                                0xffffffff853a4de7
+               |                     |                                |
+               |                     |                                 --0.23%--0xffffffff853a37ea
+               |                     |                                           0xffffffff853a33d2
+               |                     |                                           0xffffffff8541df1b
+               |                     |                                           |
+               |                     |                                            --0.17%--0xffffffff8541a9e8
+               |                     |                                                      |
+               |                     |                                                       --0.17%--0xffffffff853dda90
+               |                     |                                                                 |
+               |                     |                                                                  --0.13%--0xffffffff853dc6c9
+               |                     |
+               |                      --0.38%--<fp_columnar::Column>::new
+               |
+                --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                          |
+                          |--0.39%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          |          |
+                          |           --0.24%--_int_free_chunk
+                          |                     |
+                          |                      --0.18%--systrim.constprop.0
+                          |                                __default_morecore@GLIBC_2.2.5
+                          |                                __brk
+                          |                                0xffffffff84c0012b
+                          |                                0xffffffff86220551
+                          |                                0xffffffff84f24dda
+                          |                                0xffffffff853ab362
+                          |                                0xffffffff853ab2c0
+                          |                                0xffffffff853cc7f5
+                          |                                0xffffffff853cb02c
+                          |
+                           --0.19%--core::ptr::drop_in_place::<fp_index::Index>
+
+    98.08%    95.25%  perf_profile          [.] <fp_frame::DataFrame>::loc_bool                                                                                                                                                                                                                                             -      -
+            |
+            |--95.25%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          perf_profile::main
+            |          |
+            |           --95.11%--<fp_frame::DataFrame>::loc_bool
+            |                     |
+            |                      --0.23%--__libc_malloc2
+            |                                _int_malloc
+            |                                |
+            |                                 --0.18%--malloc_consolidate
+            |
+             --2.83%--<fp_frame::DataFrame>::loc_bool
+                       |
+                       |--1.08%--<fp_frame::DataFrame>::new_with_axes
+                       |          |
+                       |          |--0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                       |          |          |
+                       |          |           --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                       |          |
+                       |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+                       |          |
+                       |           --0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+                       |
+                       |--0.32%--0xffffffff84c00f0b
+                       |          |
+                       |          |--0.17%--0xffffffff86227729
+                       |          |          0xffffffff85021e6e
+                       |          |          0xffffffff85021a80
+                       |          |          0xffffffff8502171f
+                       |          |          0xffffffff85091286
+                       |          |
+                       |           --0.15%--0xffffffff86227724
+                       |                     0xffffffff84fc4bc8
+                       |                     0xffffffff85139f5d
+                       |                     |
+                       |                      --0.10%--0xffffffff85139003
+                       |
+                       |--0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                       |
+                        --0.14%--<fp_index::Index>::set_names
+
+     1.32%     0.39%  perf_profile          [.] <fp_frame::DataFrame>::new_with_axes                                                                                                                                                                                                                                        -      -
+            |
+            |--0.93%--<fp_frame::DataFrame>::new_with_axes
+            |          |
+            |          |--0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+            |          |
+            |          |--0.14%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+            |          |
+            |          |--0.14%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+            |          |
+            |           --0.13%--__libc_malloc2
+            |                     _int_malloc
+            |
+             --0.39%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       |
+                        --0.30%--<fp_frame::DataFrame>::loc_bool
+                                  |
+                                   --0.21%--<fp_frame::DataFrame>::new_with_axes
+                                             |
+                                              --0.16%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                                                        <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+
+     1.17%     0.08%  perf_profile          [.] perf_profile::build_numeric_frame                                                                                                                                                                                                                                           -      -
+            |
+             --1.09%--perf_profile::build_numeric_frame
+                       |
+                        --0.99%--<fp_columnar::Column>::from_values
+                                  |
+                                  |--0.56%--__memmove_avx_unaligned_erms
+                                  |          |
+                                  |           --0.34%--0xffffffff84c00bb7
+                                  |                     |
+                                  |                      --0.29%--0xffffffff8622811f
+                                  |                                0xffffffff84feb96b
+                                  |                                0xffffffff853a5627
+                                  |                                0xffffffff853a53ad
+                                  |                                0xffffffff853a4de7
+                                  |                                |
+                                  |                                 --0.23%--0xffffffff853a37ea
+                                  |                                           0xffffffff853a33d2
+                                  |                                           0xffffffff8541df1b
+                                  |                                           |
+                                  |                                            --0.17%--0xffffffff8541a9e8
+                                  |                                                      |
+                                  |                                                       --0.17%--0xffffffff853dda90
+                                  |                                                                 |
+                                  |                                                                  --0.13%--0xffffffff853dc6c9
+                                  |
+                                   --0.38%--<fp_columnar::Column>::new
+
+     0.99%     0.00%  perf_profile          [.] <fp_columnar::Column>::from_values                                                                                                                                                                                                                                          -      -
+            |
+            ---<fp_columnar::Column>::from_values
+               |
+               |--0.56%--__memmove_avx_unaligned_erms
+               |          |
+               |           --0.34%--0xffffffff84c00bb7
+               |                     |
+               |                      --0.29%--0xffffffff8622811f
+               |                                0xffffffff84feb96b
+               |                                0xffffffff853a5627
+               |                                0xffffffff853a53ad
+               |                                0xffffffff853a4de7
+               |                                |
+               |                                 --0.23%--0xffffffff853a37ea
+               |                                           0xffffffff853a33d2
+               |                                           0xffffffff8541df1b
+               |                                           |
+               |                                            --0.17%--0xffffffff8541a9e8
+               |                                                      |
+               |                                                       --0.17%--0xffffffff853dda90
+               |                                                                 |
+               |                                                                  --0.13%--0xffffffff853dc6c9
+               |
+                --0.38%--<fp_columnar::Column>::new
+
+     0.87%     0.09%  libc.so.6             [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                -      -
+            |
+             --0.78%--__memmove_avx_unaligned_erms
+                       |
+                        --0.34%--0xffffffff84c00bb7
+                                  |
+                                   --0.29%--0xffffffff8622811f
+                                             |
+                                              --0.29%--0xffffffff84feb96b
+                                                        0xffffffff853a5627
+                                                        0xffffffff853a53ad
+                                                        0xffffffff853a4de7
+                                                        |
+                                                         --0.23%--0xffffffff853a37ea
+                                                                   0xffffffff853a33d2
+                                                                   0xffffffff8541df1b
+                                                                   |
+                                                                    --0.17%--0xffffffff8541a9e8
+                                                                              |
+                                                                               --0.17%--0xffffffff853dda90
+                                                                                         |
+                                                                                          --0.13%--0xffffffff853dc6c9
+
+     0.83%     0.37%  libc.so.6             [.] _int_malloc                                                                                                                                                                                                                                                                 -      -
+            |
+            |--0.46%--_int_malloc
+            |          |
+            |           --0.18%--malloc_consolidate
+            |
+             --0.37%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       |
+                        --0.27%--<fp_frame::DataFrame>::loc_bool
+                                  |
+                                   --0.13%--<fp_frame::DataFrame>::new_with_axes
+
+     0.67%     0.04%  perf_profile          [.] core::ptr::drop_in_place::<fp_frame::DataFrame>                                                                                                                                                                                                                             -      -
+            |
+             --0.63%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+                       |
+                       |--0.39%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                       |          |
+                       |           --0.24%--_int_free_chunk
+                       |                     |
+                       |                      --0.18%--systrim.constprop.0
+                       |                                __default_morecore@GLIBC_2.2.5
+                       |                                __brk
+                       |                                0xffffffff84c0012b
+                       |                                0xffffffff86220551
+                       |                                0xffffffff84f24dda
+                       |                                0xffffffff853ab362
+                       |                                0xffffffff853ab2c0
+                       |                                0xffffffff853cc7f5
+                       |                                0xffffffff853cb02c
+                       |
+                        --0.19%--core::ptr::drop_in_place::<fp_index::Index>
+
+     0.52%     0.18%  libc.so.6             [.] _int_free_chunk                                                                                                                                                                                                                                                             -      -
+            |
+            |--0.33%--_int_free_chunk
+            |          |
+            |           --0.18%--systrim.constprop.0
+            |                     __default_morecore@GLIBC_2.2.5
+            |                     __brk
+            |                     0xffffffff84c0012b
+            |                     0xffffffff86220551
+            |                     0xffffffff84f24dda
+            |                     0xffffffff853ab362
+            |                     0xffffffff853ab2c0
+            |                     0xffffffff853cc7f5
+            |                     0xffffffff853cb02c
+            |
+             --0.18%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       <fp_frame::DataFrame>::loc_bool
+
+     0.51%     0.00%  [unknown]             [.] 0xffffffff84c00bb7                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff84c00bb7
+               |
+                --0.47%--0xffffffff8622811f
+                          |
+                           --0.47%--0xffffffff84feb96b
+                                     0xffffffff853a5627
+                                     0xffffffff853a53ad
+                                     |
+                                      --0.43%--0xffffffff853a4de7
+                                                |
+                                                 --0.37%--0xffffffff853a37ea
+                                                           |
+                                                            --0.32%--0xffffffff853a33d2
+                                                                      0xffffffff8541df1b
+                                                                      |
+                                                                       --0.26%--0xffffffff8541a9e8
+                                                                                 |
+                                                                                  --0.26%--0xffffffff853dda90
+                                                                                            |
+                                                                                             --0.22%--0xffffffff853dc6c9
+                                                                                                       |
+                                                                                                        --0.18%--0xffffffff8621b2b7
+
+     0.50%     0.00%  libc.so.6             [.] __libc_malloc2                                                                                                                                                                                                                                                              -      -
+            |
+            ---__libc_malloc2
+               _int_malloc
+               |
+                --0.18%--malloc_consolidate
+
+     0.50%     0.23%  libc.so.6             [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                         -      -
+            |
+            |--0.27%--__memcmp_avx2_movbe
+            |
+             --0.23%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       <fp_frame::DataFrame>::loc_bool
+                       <fp_frame::DataFrame>::new_with_axes
+
+     0.47%     0.00%  [unknown]             [.] 0xffffffff8622811f                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff8622811f
+               |
+                --0.47%--0xffffffff84feb96b
+                          0xffffffff853a5627
+                          0xffffffff853a53ad
+                          |
+                           --0.43%--0xffffffff853a4de7
+                                     |
+                                      --0.37%--0xffffffff853a37ea
+                                                |
+                                                 --0.32%--0xffffffff853a33d2
+                                                           0xffffffff8541df1b
+                                                           |
+                                                            --0.26%--0xffffffff8541a9e8
+                                                                      |
+                                                                       --0.26%--0xffffffff853dda90
+                                                                                 |
+                                                                                  --0.22%--0xffffffff853dc6c9
+                                                                                            |
+                                                                                             --0.18%--0xffffffff8621b2b7
+
+     0.47%     0.00%  [unknown]             [.] 0xffffffff84feb96b                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               |
+                --0.43%--0xffffffff853a4de7
+                          |
+                           --0.37%--0xffffffff853a37ea
+                                     |
+                                      --0.32%--0xffffffff853a33d2
+                                                0xffffffff8541df1b
+                                                |
+                                                 --0.26%--0xffffffff8541a9e8
+                                                           |
+                                                            --0.26%--0xffffffff853dda90
+                                                                      |
+                                                                       --0.22%--0xffffffff853dc6c9
+                                                                                 |
+                                                                                  --0.18%--0xffffffff8621b2b7
+
+     0.47%     0.00%  [unknown]             [.] 0xffffffff853a5627                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853a5627
+               0xffffffff853a53ad
+               |
+                --0.43%--0xffffffff853a4de7
+                          |
+                           --0.37%--0xffffffff853a37ea
+                                     |
+                                      --0.32%--0xffffffff853a33d2
+                                                0xffffffff8541df1b
+                                                |
+                                                 --0.26%--0xffffffff8541a9e8
+                                                           |
+                                                            --0.26%--0xffffffff853dda90
+                                                                      |
+                                                                       --0.22%--0xffffffff853dc6c9
+                                                                                 |
+                                                                                  --0.18%--0xffffffff8621b2b7
+
+     0.47%     0.00%  [unknown]             [.] 0xffffffff853a53ad                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853a53ad
+               |
+                --0.43%--0xffffffff853a4de7
+                          |
+                           --0.37%--0xffffffff853a37ea
+                                     |
+                                      --0.32%--0xffffffff853a33d2
+                                                0xffffffff8541df1b
+                                                |
+                                                 --0.26%--0xffffffff8541a9e8
+                                                           |
+                                                            --0.26%--0xffffffff853dda90
+                                                                      |
+                                                                       --0.22%--0xffffffff853dc6c9
+                                                                                 |
+                                                                                  --0.18%--0xffffffff8621b2b7
+
+     0.43%     0.14%  perf_profile          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                                                                                                                                                                             -      -
+            |
+            |--0.30%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+            |
+             --0.14%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+
+     0.43%     0.29%  perf_profile          [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert                                                                                                                                                                              -      -
+            |
+            |--0.29%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          perf_profile::main
+            |          <fp_frame::DataFrame>::loc_bool
+            |          |
+            |           --0.16%--<fp_frame::DataFrame>::new_with_axes
+            |
+             --0.14%--<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+
+     0.43%     0.00%  [unknown]             [.] 0xffffffff853a4de7                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853a4de7
+               |
+                --0.37%--0xffffffff853a37ea
+                          |
+                           --0.32%--0xffffffff853a33d2
+                                     0xffffffff8541df1b
+                                     |
+                                      --0.26%--0xffffffff8541a9e8
+                                                |
+                                                 --0.26%--0xffffffff853dda90
+                                                           |
+                                                            --0.22%--0xffffffff853dc6c9
+                                                                      |
+                                                                       --0.18%--0xffffffff8621b2b7
+
+     0.42%     0.14%  libc.so.6             [.] malloc_consolidate                                                                                                                                                                                                                                                          -      -
+            |
+            |--0.28%--malloc_consolidate
+            |
+             --0.14%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       <fp_frame::DataFrame>::loc_bool
+
+     0.40%     0.18%  perf_profile          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                                                                                        -      -
+            |
+            |--0.22%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |
+             --0.18%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       <fp_frame::DataFrame>::loc_bool
+                       |
+                        --0.14%--<fp_frame::DataFrame>::new_with_axes
+                                  <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+
+     0.39%     0.00%  perf_profile          [.] core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>                                                                                                                                                            -      -
+            |
+            ---core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |
+                --0.24%--_int_free_chunk
+                          |
+                           --0.18%--systrim.constprop.0
+                                     __default_morecore@GLIBC_2.2.5
+                                     __brk
+                                     0xffffffff84c0012b
+                                     0xffffffff86220551
+                                     0xffffffff84f24dda
+                                     0xffffffff853ab362
+                                     0xffffffff853ab2c0
+                                     0xffffffff853cc7f5
+                                     0xffffffff853cb02c
+
+     0.38%     0.14%  perf_profile          [.] <fp_columnar::Column>::new                                                                                                                                                                                                                                                  -      -
+            |
+            |--0.25%--<fp_columnar::Column>::new
+            |
+             --0.14%--_start
+                       __libc_start_main@@GLIBC_2.34
+                       __libc_start_call_main
+                       main
+                       std::rt::lang_start_internal
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       perf_profile::main
+                       perf_profile::build_numeric_frame
+                       <fp_columnar::Column>::from_values
+                       <fp_columnar::Column>::new
+
+     0.37%     0.00%  [unknown]             [.] 0xffffffff853a37ea                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853a37ea
+               |
+                --0.32%--0xffffffff853a33d2
+                          0xffffffff8541df1b
+                          |
+                           --0.26%--0xffffffff8541a9e8
+                                     |
+                                      --0.26%--0xffffffff853dda90
+                                                |
+                                                 --0.22%--0xffffffff853dc6c9
+                                                           |
+                                                            --0.18%--0xffffffff8621b2b7
+
+     0.36%     0.00%  [unknown]             [.] 0xffffffff84c00f0b                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff84c00f0b
+               |
+               |--0.19%--0xffffffff86227724
+               |          0xffffffff84fc4bc8
+               |          0xffffffff85139f5d
+               |          |
+               |           --0.10%--0xffffffff85139003
+               |
+                --0.17%--0xffffffff86227729
+                          0xffffffff85021e6e
+                          0xffffffff85021a80
+                          0xffffffff8502171f
+                          0xffffffff85091286
+
+     0.36%     0.06%  perf_profile          [.] <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert                                                                                                                                                                                                 -      -
+            |
+             --0.30%--<hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+                       |
+                        --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+
+     0.33%     0.00%  [unknown]             [.] 0xffffffff8541df1b                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff8541df1b
+               |
+                --0.26%--0xffffffff8541a9e8
+                          |
+                           --0.26%--0xffffffff853dda90
+                                     |
+                                      --0.22%--0xffffffff853dc6c9
+                                                |
+                                                 --0.18%--0xffffffff8621b2b7
+
+     0.32%     0.00%  [unknown]             [.] 0xffffffff853a33d2                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853a33d2
+               0xffffffff8541df1b
+               |
+                --0.26%--0xffffffff8541a9e8
+                          |
+                           --0.26%--0xffffffff853dda90
+                                     |
+                                      --0.22%--0xffffffff853dc6c9
+                                                |
+                                                 --0.18%--0xffffffff8621b2b7
+
+     0.32%     0.00%  [unknown]             [k] 0xffffffff84c0012b                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff84c0012b
+               0xffffffff86220551
+               |
+                --0.22%--0xffffffff84f24dda
+                          0xffffffff853ab362
+                          |
+                           --0.18%--0xffffffff853ab2c0
+                                     0xffffffff853cc7f5
+                                     0xffffffff853cb02c
+
+     0.32%     0.00%  [unknown]             [k] 0xffffffff86220551                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff86220551
+               |
+                --0.22%--0xffffffff84f24dda
+                          0xffffffff853ab362
+                          |
+                           --0.18%--0xffffffff853ab2c0
+                                     0xffffffff853cc7f5
+                                     0xffffffff853cb02c
+
+     0.30%     0.04%  [unknown]             [.] 0xffffffff8541a9e8                                                                                                                                                                                                                                                          -      -
+            |
+             --0.26%--0xffffffff8541a9e8
+                       |
+                        --0.26%--0xffffffff853dda90
+                                  |
+                                   --0.22%--0xffffffff853dc6c9
+                                             |
+                                              --0.18%--0xffffffff8621b2b7
+
+     0.27%     0.09%  [unknown]             [.] 0xffffffff8621b2b7                                                                                                                                                                                                                                                          -      -
+            |
+             --0.18%--0xffffffff8621b2b7
+
+     0.27%     0.00%  [unknown]             [.] 0xffffffff853cc7f5                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853cc7f5
+               0xffffffff853cb02c
+               |
+               |--0.14%--0xffffffff853c9742
+               |          0xffffffff8539cea1
+               |          0xffffffff8539cd76
+               |          0xffffffff8539cb30
+               |          0xffffffff8539c594
+               |          0xffffffff8539c06e
+               |
+                --0.14%--0xffffffff853c9794
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc79e
+
+     0.27%     0.00%  [unknown]             [.] 0xffffffff853cb02c                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853cb02c
+               |
+               |--0.14%--0xffffffff853c9742
+               |          0xffffffff8539cea1
+               |          0xffffffff8539cd76
+               |          0xffffffff8539cb30
+               |          0xffffffff8539c594
+               |          0xffffffff8539c06e
+               |
+                --0.14%--0xffffffff853c9794
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc79e
+
+     0.26%     0.00%  [unknown]             [.] 0xffffffff853dda90                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853dda90
+               |
+                --0.22%--0xffffffff853dc6c9
+                          |
+                           --0.18%--0xffffffff8621b2b7
+
+     0.26%     0.10%  perf_profile          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>                                                                                                                                                                                               -      -
+            |
+             --0.16%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+
+     0.22%     0.00%  libc.so.6             [.] __default_morecore@GLIBC_2.2.5                                                                                                                                                                                                                                              -      -
+            |
+            ---__default_morecore@GLIBC_2.2.5
+               __brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               |
+                --0.18%--0xffffffff853ab2c0
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+
+     0.22%     0.00%  libc.so.6             [.] __brk                                                                                                                                                                                                                                                                       -      -
+            |
+            ---__brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               |
+                --0.18%--0xffffffff853ab2c0
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+
+     0.22%     0.00%  [unknown]             [.] 0xffffffff84f24dda                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff84f24dda
+               0xffffffff853ab362
+               |
+                --0.18%--0xffffffff853ab2c0
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+
+     0.22%     0.00%  [unknown]             [.] 0xffffffff853ab362                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853ab362
+               |
+                --0.18%--0xffffffff853ab2c0
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+
+     0.22%     0.00%  [unknown]             [.] 0xffffffff853dc6c9                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853dc6c9
+               |
+                --0.18%--0xffffffff8621b2b7
+
+     0.20%     0.00%  [unknown]             [.] 0xffffffff86228a43                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff86228a43
+               |
+                --0.16%--0xffffffff86228929
+                          |
+                           --0.16%--0xffffffff8622f947
+
+     0.20%     0.09%  perf_profile          [.] <alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next                                                                                                                                                                          -      -
+            |
+             --0.11%--<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column>>::dying_next
+
+     0.19%     0.00%  [unknown]             [.] 0xffffffff86227724                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff86227724
+               0xffffffff84fc4bc8
+               0xffffffff85139f5d
+               |
+                --0.10%--0xffffffff85139003
+
+     0.19%     0.00%  [unknown]             [.] 0xffffffff84fc4bc8                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff84fc4bc8
+               0xffffffff85139f5d
+               |
+                --0.10%--0xffffffff85139003
+
+     0.19%     0.00%  [unknown]             [.] 0xffffffff85139f5d                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff85139f5d
+               |
+                --0.10%--0xffffffff85139003
+
+     0.19%     0.05%  libc.so.6             [.] cfree@GLIBC_2.2.5                                                                                                                                                                                                                                                           -      -
+            |
+             --0.14%--cfree@GLIBC_2.2.5
+
+     0.19%     0.00%  perf_profile          [.] core::ptr::drop_in_place::<fp_index::Index>                                                                                                                                                                                                                                 -      -
+            |
+            ---core::ptr::drop_in_place::<fp_index::Index>
+
+     0.18%     0.09%  libc.so.6             [.] malloc                                                                                                                                                                                                                                                                      -      -
+     0.18%     0.00%  libc.so.6             [.] systrim.constprop.0                                                                                                                                                                                                                                                         -      -
+            |
+            ---systrim.constprop.0
+               __default_morecore@GLIBC_2.2.5
+               __brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     0.18%     0.00%  [unknown]             [.] 0xffffffff853ab2c0                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     0.17%     0.00%  [unknown]             [.] 0xffffffff86227729                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff86227729
+               0xffffffff85021e6e
+               0xffffffff85021a80
+               0xffffffff8502171f
+               0xffffffff85091286
+
+     0.17%     0.00%  [unknown]             [.] 0xffffffff85021e6e                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff85021e6e
+               0xffffffff85021a80
+               0xffffffff8502171f
+               0xffffffff85091286
+
+     0.17%     0.00%  [unknown]             [.] 0xffffffff85021a80                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff85021a80
+               0xffffffff8502171f
+               0xffffffff85091286
+
+     0.17%     0.00%  [unknown]             [.] 0xffffffff8502171f                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff8502171f
+               0xffffffff85091286
+
+     0.17%     0.00%  [unknown]             [.] 0xffffffff85091286                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff85091286
+
+     0.17%     0.07%  perf_profile          [.] <fp_columnar::Column>::take_affine_all_valid_float64_positions                                                                                                                                                                                                              -      -
+     0.16%     0.00%  [unknown]             [.] 0xffffffff84c00f4b                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff84c00f4b
+               |
+                --0.16%--0xffffffff86227465
+                          0xffffffff86228a43
+                          |
+                           --0.16%--0xffffffff86228929
+                                     |
+                                      --0.16%--0xffffffff8622f947
+
+     0.16%     0.00%  [unknown]             [.] 0xffffffff86227465                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff86227465
+               0xffffffff86228a43
+               |
+                --0.16%--0xffffffff86228929
+                          |
+                           --0.16%--0xffffffff8622f947
+
+     0.16%     0.00%  [unknown]             [.] 0xffffffff86228929                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff86228929
+               |
+                --0.16%--0xffffffff8622f947
+
+     0.16%     0.00%  [unknown]             [.] 0xffffffff8622f947                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff8622f947
+
+     0.14%     0.00%  perf_profile          [.] <fp_index::Index>::set_names                                                                                                                                                                                                                                                -      -
+            |
+            ---<fp_index::Index>::set_names
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff84c01199                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff84c01199
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff853c9742                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff8539cea1                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff8539cd76                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff8539cb30                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff8539c594                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff8539c594
+               0xffffffff8539c06e
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff8539c06e                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff8539c06e
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff853c9794                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853c9794
+               0xffffffff853ae78e
+               0xffffffff853adcca
+               0xffffffff853fc79e
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff853ae78e                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853ae78e
+               0xffffffff853adcca
+               0xffffffff853fc79e
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff853adcca                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853adcca
+               0xffffffff853fc79e
+
+     0.14%     0.00%  [unknown]             [.] 0xffffffff853fc79e                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff853fc79e
+
+     0.11%     0.11%  [unknown]             [k] 0xffffffff84c01192                                                                                                                                                                                                                                                          -      -
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+
+     0.10%     0.00%  [unknown]             [.] 0xffffffff85139003                                                                                                                                                                                                                                                          -      -
+            |
+            ---0xffffffff85139003
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

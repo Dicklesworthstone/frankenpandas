@@ -1,0 +1,124 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-base/release-perf/examples/perf_profile str_groupby_count 200000 6",
+      "mean": 0.2028203319,
+      "stddev": 0.018048383979978752,
+      "median": 0.19824303290000003,
+      "user": 0.24443337999999998,
+      "system": 0.07828205999999999,
+      "min": 0.18420844090000002,
+      "max": 0.23223993590000003,
+      "times": [
+        0.18420844090000002,
+        0.19824303290000003,
+        0.19467022790000002,
+        0.2047400219,
+        0.23223993590000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-base/release-perf/examples/perf_profile str_groupby_sum 200000 6",
+      "mean": 0.1933972955,
+      "stddev": 0.006633270944511222,
+      "median": 0.19160045590000002,
+      "user": 0.23985917999999998,
+      "system": 0.07523186,
+      "min": 0.18433710390000002,
+      "max": 0.20159804390000002,
+      "times": [
+        0.20159804390000002,
+        0.18433710390000002,
+        0.19160045590000002,
+        0.19157065990000002,
+        0.19788021390000002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-base/release-perf/examples/perf_profile str_groupby_std 200000 6",
+      "mean": 0.25322499410000004,
+      "stddev": 0.02106904095193937,
+      "median": 0.2526249359,
+      "user": 0.27680958,
+      "system": 0.10082065999999998,
+      "min": 0.23100406990000003,
+      "max": 0.28143639690000005,
+      "times": [
+        0.23100406990000003,
+        0.2658770449,
+        0.2526249359,
+        0.28143639690000005,
+        0.23518252290000002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-base/release-perf/examples/perf_profile str_groupby_count_lowcard 200000 20",
+      "mean": 0.0635895245,
+      "stddev": 0.0030194914480449826,
+      "median": 0.0635015919,
+      "user": 0.05094297999999999,
+      "system": 0.01235126,
+      "min": 0.0606115319,
+      "max": 0.0682132459,
+      "times": [
+        0.0606115319,
+        0.0643919199,
+        0.0635015919,
+        0.0682132459,
+        0.0612293329
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenpandas-lavenderstone-opt-remote-20260613-1/.rch-target-uza04100-base/release-perf/examples/perf_profile str_groupby_sum_lowcard 200000 20",
+      "mean": 0.06063805770000001,
+      "stddev": 0.0023469849950055496,
+      "median": 0.060404197900000005,
+      "user": 0.04909898,
+      "system": 0.011399860000000001,
+      "min": 0.057876865900000005,
+      "max": 0.0631954109,
+      "times": [
+        0.060404197900000005,
+        0.06282142190000001,
+        0.0588923919,
+        0.057876865900000005,
+        0.0631954109
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

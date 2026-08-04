@@ -1,0 +1,48 @@
+ℹ Preparing shadow workspace for 1 specified file(s)
+ℹ Scanning shadow workspace at /data/tmp/tmp.lc2ZMNM9mt/files_scan
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝              ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗                ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝                ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗              ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝              ║
+║                                                                              ║
+║  ██████╗ ██╗   ██╗ ██████╗         __       __                               ║
+║  ██╔══██╗██║   ██║██╔════╝         \ `-'"-'` /                               ║
+║  ██████╔╝██║   ██║██║  ███╗        / \_   _/ \                               ║
+║  ██╔══██╗██║   ██║██║   ██║        |  d\_/b  |                               ║
+║  ██████╔╝╚██████╔╝╚██████╔╝       .'\   V   /'.                              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝        /   '-...-'   \                            ║
+║                                  | /         \ |                             ║
+║                                  \/\         /\/                             ║
+║                                  ==(||)---(||)==                             ║
+║                                                                              ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗              ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗             ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝             ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗             ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║             ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝                  ║
+║                                                                              ║
+║   JS / TS • PYTHON • C / C++ • RUST • GO • JAVA • RUBY                       ║
+║   SWIFT • C# • ELIXIR                                                        ║
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.3.2  2026-06-14 20:16:11
+Project: /data/projects/.scratch/frankenpandas-lavender-vc4de-integrate
+Format:  text
+Detected: rust
+Scanning rust...
+
+Interrupted at 2026-06-14T20:26:14-04:00 after the Rust ast-grep phase
+remained stuck for roughly ten minutes on this single large file. Validation
+for the kept hunk is covered by the crate-scoped RCH check, clippy, test,
+rustfmt, golden sha256, and paired hyperfine evidence listed in
+proof_lavender_uza04135_simd_dot_lanes.md.

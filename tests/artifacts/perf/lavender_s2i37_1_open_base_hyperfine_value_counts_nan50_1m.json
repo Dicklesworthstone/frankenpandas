@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-lavender-s2i37-open-base/release-perf/fp-bench --category dataframe_ops --workload value_counts --size 1M --dtype float64_nan50 --json",
+      "mean": 2.10041032256,
+      "stddev": 0.059348577762609114,
+      "median": 2.10799806286,
+      "user": 1.48805808,
+      "system": 0.7510568199999998,
+      "min": 2.0274057973599997,
+      "max": 2.19899694236,
+      "times": [
+        2.0322265483599997,
+        2.11093754836,
+        2.0274057973599997,
+        2.04736436436,
+        2.1341614133599998,
+        2.14314322136,
+        2.19899694236,
+        2.15755321336,
+        2.10505857736,
+        2.0472555993599997
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,234 @@
+[RCH] local (all workers failed preflight checks)
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling typenum v1.20.0
+   Compiling memchr v2.8.0
+   Compiling equivalent v1.0.2
+   Compiling rustc-hash v2.1.2
+   Compiling const-oid v0.10.2
+   Compiling siphasher v1.0.2
+   Compiling hashbrown v0.17.0
+   Compiling itoa v1.0.18
+   Compiling cfg-if v1.0.4
+   Compiling regex-syntax v0.8.10
+   Compiling cpufeatures v0.3.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling ucd v0.1.1
+   Compiling unicode-casefold v0.2.0
+   Compiling bumpalo v3.20.3
+   Compiling smallvec v1.15.1
+   Compiling serde_core v1.0.228
+   Compiling num-traits v0.2.19
+   Compiling zmij v1.0.21
+   Compiling thiserror v2.0.18
+   Compiling tinyvec v1.11.0
+   Compiling phf_shared v0.12.1
+   Compiling phf v0.12.1
+   Compiling unicode-normalization v0.1.25
+   Compiling aho-corasick v1.1.4
+   Compiling indexmap v2.14.0
+   Compiling chrono v0.4.45
+   Compiling hybrid-array v0.4.10
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling chrono-tz v0.10.4
+   Compiling regex-automata v0.4.14
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.150
+   Compiling fp-types v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-types)
+   Compiling fp-runtime v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-runtime)
+   Compiling fp-columnar v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-columnar)
+   Compiling fp-index v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-index)
+   Compiling regex v1.12.3
+   Compiling fp-frame v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-frame)
+   Compiling fp-join v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-3wo1d-current-20260609/crates/fp-join)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.31s
+     Running unittests src/lib.rs (/data/projects/.scratch/cargo-target-orangepeak-uza0449-check/debug/deps/fp_join-9cf459d02e7e7a6a)
+
+running 113 tests
+test tests::arena_reset_between_operations ... ok
+test tests::arena_right_join_matches_global ... ok
+test tests::merge_asof_by_column_requires_globally_sorted_right_keys ... ok
+test tests::merge_asof_by_column_requires_globally_sorted_left_keys ... ok
+test tests::merge_asof_invalid_direction_errors ... ok
+test tests::dataframe_join_aliases_join_on_index ... ok
+test tests::inner_join_multiplies_cardinality_for_duplicates ... ok
+test tests::merge_asof_duplicate_column_gets_suffix ... ok
+test tests::dense_i64_inner_high_fanout_emits_repeat_run_left_lanes ... ok
+test tests::merge_asof_missing_column_errors ... ok
+test tests::arena_join_is_stable_across_many_small_operations ... ok
+test tests::merge_asof_nearest ... ok
+test tests::merge_asof_nan_in_right_key ... ok
+test tests::merge_asof_forward ... ok
+test tests::arena_join_matches_global_allocator_behavior ... ok
+test tests::merge_asof_backward ... ok
+test tests::merge_asof_exact_match ... ok
+test tests::arena_join_falls_back_when_budget_is_too_small ... ok
+test tests::merge_asof_nan_in_key ... ok
+test tests::merge_asof_allow_exact_matches_false_backward ... ok
+test tests::arena_outer_join_matches_global ... ok
+test tests::merge_asof_no_matches_forward ... ok
+test tests::dense_i64_inner_parallel_output_data_preserves_row_major_order ... ok
+test tests::merge_asof_unsorted_left_errors ... ok
+test tests::merge_asof_unsorted_right_errors ... ok
+test tests::merge_asof_nearest_excludes_exact_finds_neighbor ... ok
+test tests::merge_column_name_conflict_honors_custom_suffixes ... ok
+test tests::merge_composite_inner_matches_missing_key_components ... ok
+test tests::merge_column_name_conflict_rejects_duplicate_output_columns_from_suffixes ... ok
+test tests::merge_composite_inner_multiplies_cardinality_for_duplicates ... ok
+test tests::merge_column_name_conflict_rejects_missing_suffixes_for_overlap ... ok
+test tests::left_join_injects_missing_for_unmatched_right_rows ... ok
+test tests::merge_column_name_conflict_adds_suffixes ... ok
+test tests::join_series_cross_cartesian_product ... ok
+test tests::merge_composite_key_alias_inner_keeps_both_key_sets ... ok
+test tests::merge_asof_no_matches_backward ... ok
+test tests::merge_asof_preserves_all_left_rows ... ok
+test tests::merge_cross_cartesian_product ... ok
+test tests::merge_composite_key_alias_outer_propagates_missing_per_side ... ok
+test tests::merge_composite_missing_key_column_errors ... ok
+test tests::merge_asof_tolerance ... ok
+test tests::merge_column_name_conflict_allows_one_sided_suffix ... ok
+test tests::merge_composite_outer_keeps_right_only_rows_with_missing_keys ... ok
+test tests::merge_composite_outer_sorts_join_keys_lexicographically ... ok
+test tests::merge_asof_non_numeric_key_errors ... ok
+test tests::merge_asof_by_column ... ok
+test tests::merge_asof_overlapping_columns_apply_suffixes ... ok
+test tests::dataframe_merge_via_trait ... ok
+test tests::merge_duplicate_keys_multiply_cardinality ... ok
+test tests::merge_indicator_default_name_tracks_row_provenance ... ok
+test tests::merge_indicator_rejects_conflicting_column_name ... ok
+test tests::merge_identical_duplicate_keys_cross_join_values_jdupk ... ok
+test tests::merge_cross_with_empty_side_yields_empty_rows ... ok
+test tests::merge_cross_indicator_marks_all_rows_both ... ok
+test tests::merge_cross_does_not_require_on_column ... ok
+test tests::merge_indicator_custom_name_preserves_suffix_behavior ... ok
+test tests::merge_left_ordered_unique_int64_subset_matches_generic_validated_route ... ok
+test tests::merge_ordered_invalid_fill_method_errors ... ok
+test tests::merge_ordered_sorts_and_ffills_values ... ok
+test tests::merge_outer_all_matched_dense_int64_duplicates_matches_generic_validated_route ... ok
+test tests::merge_inner_ordered_identity_matches_generic_validated_route ... ok
+test tests::merge_preserves_pandas_column_order_for_nonalphabetical_names ... ok
+test tests::merge_left_right_all_matched_dense_int64_duplicates_match_generic_validated_route ... ok
+test tests::merge_left_preserves_all_left_rows ... ok
+test tests::merge_missing_key_column_errors ... ok
+test tests::merge_inner_sort_true_orders_float_keys_numerically ... ok
+test tests::merge_default_suffixes_match_pandas ... ok
+test tests::merge_validate_one_to_one_rejects_duplicate_left_keys ... ok
+test tests::ordered_unique_utf8_uncertified_fixed_width_still_matches_jbyuc111111 ... ok
+test tests::merge_inner_sort_true_orders_join_keys_lexicographically ... ok
+test tests::merge_key_alias_lists_must_have_equal_lengths ... ok
+test tests::merge_validate_many_to_one_rejects_duplicate_right_keys ... ok
+test tests::merge_outer_all_matched_dense_int64_fused_output_matches_sorted_generic_route ... ok
+test tests::merge_right_all_matched_dense_int64_fused_output_matches_dense_materialization ... ok
+test tests::merge_mixed_dtype_missing_keys_metamorphic_outer_both_equals_inner_tn6qb8 ... ok
+test tests::merge_right_ordered_unique_int64_subset_matches_generic_validated_route ... ok
+test tests::merge_right_dense_int64_duplicates_matches_generic_validated_route ... ok
+test tests::merge_validate_one_to_many_allows_duplicate_right_keys ... ok
+test tests::merge_inner_ordered_unique_int64_subset_matches_generic_validated_route ... ok
+test tests::merge_outer_contains_all_rows ... ok
+test tests::merge_right_preserves_all_right_rows ... ok
+test tests::merge_outer_ordered_unique_int64_subset_matches_generic_validated_route ... ok
+test tests::merge_inner_sort_false_preserves_left_key_order ... ok
+test tests::merge_outer_dense_int64_duplicates_matches_generic_validated_route ... ok
+test tests::merge_right_sort_true_orders_join_keys_lexicographically ... ok
+test tests::merge_validate_many_to_many_allows_duplicates_on_both_sides ... ok
+test tests::ordered_unique_utf8_fixed_width_gap_falls_back_jbyuc11 ... ok
+test tests::merge_left_dense_int64_duplicates_matches_generic_validated_route ... ok
+test tests::right_join_multiplies_cardinality_for_duplicates ... ok
+test tests::ordered_identity_int64_guard_uses_strict_unique_certificate ... ok
+test tests::ordered_unique_utf8_seek_bound_preserves_late_overlap_lr52z ... ok
+test tests::merge_left_all_matched_dense_int64_fused_output_matches_sorted_generic_route ... ok
+test tests::ordered_unique_utf8_lower_hex_certificate_returns_range_plan_jbyuc111111 ... ok
+test tests::ordered_unique_utf8_bulk_fixed_width_window_jbyuc11 ... ok
+test tests::merge_inner_wide_sparse_int64_hash_matches_generic_validated_route ... ok
+test tests::outer_join_sorts_union_labels_like_pandas ... ok
+test tests::merge_ordered_rejects_bfill_like_pandas ... ok
+test tests::outer_join_with_duplicates ... ok
+test tests::right_join_contains_all_right_labels ... ok
+test tests::ordered_unique_utf8_inner_positions_match_left_major_hash_order_53lat ... ok
+test tests::ordered_unique_utf8_lower_hex_prefix_mismatch_falls_back_jbyuc1111111111 ... ok
+test tests::ordered_unique_utf8_bulk_window_returns_range_plan_jbyuc11111 ... ok
+test tests::ordered_unique_utf8_lower_hex_arithmetic_empty_overlap_jbyuc1111111111 ... ok
+test tests::merge_inner_basic ... ok
+test tests::merge_inner_ordered_identity_falls_back_for_non_identity_keys ... ok
+test tests::outer_join_contains_all_labels_from_both_sides ... ok
+test tests::ordered_unique_utf8_rejects_unsorted_or_duplicate_keys_53lat ... ok
+test tests::ordered_utf8_contiguous_no_overlap_output_fast_path_jbyuc111111111 ... ok
+test tests::merge_null_nan_keys_metamorphic_unmatched_rows_do_not_disturb_inner_tn6qb8 ... ok
+test tests::merge_inner_single_key_preserves_duplicate_probe_order ... ok
+test tests::merge_inner_dense_int64_fused_materialization_matches_generic_route ... ok
+test tests::merge_inner_int64_fast_paths_match_naive_reference_fuzz_jdupk ... ok
+test tests::arena_large_join_100k_rows ... ok
+
+test result: ok. 113 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.57s
+
+     Running unittests src/bin.rs (/data/projects/.scratch/cargo-target-orangepeak-uza0449-check/debug/deps/fp_join-388aa4bf59611d49)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/join-bench.rs (/data/projects/.scratch/cargo-target-orangepeak-uza0449-check/debug/deps/join_bench-c3f137cb5c23745f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests fp_join
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

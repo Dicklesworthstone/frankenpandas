@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-silvercedar-uza0477-base/release-perf/examples/perf_profile filter_bool 100000 1000
+  Time (mean ± σ):      60.3 ms ±   4.6 ms    [User: 28.6 ms, System: 30.8 ms]
+  Range (min … max):    54.7 ms …  68.5 ms    10 runs
+ 

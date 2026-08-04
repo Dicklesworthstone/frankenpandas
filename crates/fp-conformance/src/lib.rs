@@ -91,8 +91,8 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use fp_columnar::{ArithmeticOp, Column};
 use fp_expr::{eval_str_with_locals, parse_expr, query_str, query_str_with_locals};
 use fp_frame::{
-    ConcatJoin, DataFrame, FrameError, Series, concat_dataframes_with_axis_join, concat_series,
-    cut, qcut, to_numeric,
+    ConcatJoin, DataFrame, FrameError, Series, ToNumericErrors, ToNumericOptions,
+    concat_dataframes_with_axis_join, concat_series, cut, qcut, to_numeric_with_options,
 };
 use fp_groupby::{
     GroupByExecutionOptions, GroupByOptions, groupby_count, groupby_first, groupby_last,
@@ -128,8 +128,9 @@ use fp_runtime::{
     RaptorQMetadata, RuntimeMode, RuntimePolicy, ScrubStatus,
 };
 use fp_types::{
-    DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar, cast_scalar_owned, common_dtype,
-    dropna, fill_na, nancount, nanmax, nanmean, nanmin, nanstd, nansum, nanvar,
+    DType, NullKind, Period, PeriodFreq, Scalar, Timedelta, Timestamp, cast_scalar,
+    cast_scalar_owned, common_dtype, dropna, fill_na, nancount, nanmax, nanmean, nanmin, nanstd,
+    nansum, nanvar,
 };
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use serde::{Deserialize, Serialize};
@@ -6359,7 +6360,7 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
             Scalar::Timedelta64(i64::from(payload % 100) * Timedelta::NANOS_PER_HOUR)
         }
         DType::Datetime64 => Scalar::Datetime64(i64::from(payload % 100) * 1_000_000_000),
-        DType::Period => Scalar::Period(i64::from(payload % 100)),
+        DType::Period => Scalar::Period(Period::new(i64::from(payload % 100), PeriodFreq::Daily)),
         DType::Interval => Scalar::Interval(fp_types::Interval {
             left: f64::from(payload % 10),
             right: f64::from(payload % 10 + 5),
@@ -8919,6 +8920,7 @@ fn run_fixture_operation(
                             utc: fixture.datetime_utc.unwrap_or(false),
                             origin,
                             infer_mixed_timezone: true,
+                            mixed_tz_as_object: false,
                         },
                     )
                     .map_err(|err| err.to_string())
@@ -9716,7 +9718,7 @@ fn run_fixture_operation(
         FixtureOperation::SeriesPctChange => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let periods = fixture.pct_change_periods.unwrap_or(1) as usize;
+            let periods = fixture.pct_change_periods.unwrap_or(1);
             let actual = series.pct_change(periods).map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
@@ -15587,12 +15589,7 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     .pct_change_axis1(periods)
                     .map_err(|err| err.to_string())
             } else {
-                if periods < 0 {
-                    return Err("dataframe_pct_change periods must be non-negative".to_owned());
-                }
-                frame
-                    .pct_change(periods as usize)
-                    .map_err(|err| err.to_string())
+                frame.pct_change(periods).map_err(|err| err.to_string())
             }
         }
         FixtureOperation::DataFrameMelt => {
@@ -16460,7 +16457,16 @@ fn execute_series_module_utility_fixture_operation(
 ) -> Result<Series, String> {
     let series = build_series(require_left_series(fixture)?)?;
     match fixture.operation {
-        FixtureOperation::SeriesToNumeric => to_numeric(&series).map_err(|err| err.to_string()),
+        // The series_to_numeric oracle uses errors='coerce' (pandas_oracle.py),
+        // so replay through the coerce policy — bare to_numeric now defaults to
+        // raise (br-frankenpandas-mlaht).
+        FixtureOperation::SeriesToNumeric => to_numeric_with_options(
+            &series,
+            ToNumericOptions {
+                errors: ToNumericErrors::Coerce,
+            },
+        )
+        .map_err(|err| err.to_string()),
         FixtureOperation::SeriesConvertDtypes => {
             series.convert_dtypes().map_err(|err| err.to_string())
         }
@@ -17091,6 +17097,8 @@ fn dataframe_with_index_as_columns(
 fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(value) => Scalar::Int64(*value),
+        IndexLabel::Float64(value) => Scalar::Float64(value.0),
+        IndexLabel::Bool(value) => Scalar::Bool(*value),
         IndexLabel::Utf8(value) => Scalar::Utf8(value.clone()),
         IndexLabel::Timedelta64(value) => Scalar::Timedelta64(*value),
         IndexLabel::Datetime64(value) => Scalar::Utf8(format_datetime_ns(*value)),
@@ -17253,10 +17261,10 @@ fn encode_groupby_composite_key(values: &[Scalar]) -> Result<String, String> {
                 format!("dt:{v}")
             }
             Scalar::Period(v) => {
-                if *v == i64::MIN {
+                if v.ordinal == i64::MIN {
                     return Err("groupby composite key component cannot be NaT".to_owned());
                 }
-                format!("pd:{v}")
+                format!("pd:{}:{}", v.freq, v.ordinal)
             }
             Scalar::Interval(iv) => format!("iv:{iv}"),
             Scalar::Null(_) => {
@@ -17964,6 +17972,7 @@ fn execute_and_compare_differential(
                             utc: fixture.datetime_utc.unwrap_or(false),
                             origin,
                             infer_mixed_timezone: true,
+                            mixed_tz_as_object: false,
                         },
                     )
                     .map_err(|err| err.to_string())
@@ -18912,7 +18921,7 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesPctChange => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let periods = fixture.pct_change_periods.unwrap_or(1) as usize;
+            let periods = fixture.pct_change_periods.unwrap_or(1);
             let actual = series.pct_change(periods).map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),

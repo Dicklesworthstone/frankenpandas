@@ -1,0 +1,3 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-g2veb-baseline/release-perf/examples/bench_window_moments
+  Time (mean ± σ):     337.2 ms ±   9.3 ms    [User: 333.6 ms, System: 2.8 ms]
+  Range (min … max):   327.8 ms … 347.5 ms    5 runs

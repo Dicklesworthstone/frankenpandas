@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-0dm7c-base/release-perf/examples/perf_profile df_kendall 50000 1",
+      "mean": 0.15450657904,
+      "stddev": 0.005360329246661549,
+      "median": 0.15387527624,
+      "user": 0.9097139799999999,
+      "system": 0.07639934,
+      "min": 0.14922932824000001,
+      "max": 0.16246602224,
+      "times": [
+        0.15673910824,
+        0.15022316024000001,
+        0.15387527624,
+        0.16246602224,
+        0.14922932824000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

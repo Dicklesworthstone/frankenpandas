@@ -1,0 +1,27 @@
+### df_dot n=100000 iters=5
+perf_profile: scenario=df_dot n=100000 iters=5
+perf_profile: done 5 iters in 0.611s (122.242 ms/iter), sink=500000
+### df_kendall n=50000 iters=1
+perf_profile: scenario=df_kendall n=50000 iters=1
+perf_profile: done 1 iters in 0.040s (39.504 ms/iter), sink=32
+### series_add_align n=100000 iters=50
+perf_profile: scenario=series_add_align n=100000 iters=50
+perf_profile: done 50 iters in 0.041s (0.823 ms/iter), sink=5000050
+### str_outer_join n=100000 iters=5
+perf_profile: scenario=str_outer_join n=100000 iters=5
+perf_profile: done 5 iters in 0.207s (41.362 ms/iter), sink=750000
+### str_left_join n=100000 iters=5
+perf_profile: scenario=str_left_join n=100000 iters=5
+perf_profile: done 5 iters in 0.175s (35.001 ms/iter), sink=500000
+### csv_read_options n=100000 iters=5
+perf_profile: scenario=csv_read_options n=100000 iters=5
+perf_profile: done 5 iters in 0.062s (12.496 ms/iter), sink=500000
+### str_sort_chain n=100000 iters=10
+perf_profile: scenario=str_sort_chain n=100000 iters=10
+perf_profile: done 10 iters in 0.135s (13.530 ms/iter), sink=1000000
+### df_corr n=5000 iters=10
+perf_profile: scenario=df_corr n=5000 iters=10
+perf_profile: done 10 iters in 0.049s (4.880 ms/iter), sink=640
+### df_cov n=5000 iters=10
+perf_profile: scenario=df_cov n=5000 iters=10
+perf_profile: done 10 iters in 0.055s (5.486 ms/iter), sink=640

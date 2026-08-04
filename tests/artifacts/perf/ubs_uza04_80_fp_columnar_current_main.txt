@@ -1,0 +1,573 @@
+ℹ Preparing shadow workspace for 1 specified file(s)
+ℹ Scanning shadow workspace at /data/tmp/tmp.c7x07sW5Oz/files_scan
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝              ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗                ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝                ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗              ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝              ║
+║                                                                              ║
+║  ██████╗ ██╗   ██╗ ██████╗         __       __                               ║
+║  ██╔══██╗██║   ██║██╔════╝         \ `-'"-'` /                               ║
+║  ██████╔╝██║   ██║██║  ███╗        / \_   _/ \                               ║
+║  ██╔══██╗██║   ██║██║   ██║        |  d\_/b  |                               ║
+║  ██████╔╝╚██████╔╝╚██████╔╝       .'\   V   /'.                              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝        /   '-...-'   \                            ║
+║                                  | /         \ |                             ║
+║                                  \/\         /\/                             ║
+║                                  ==(||)---(||)==                             ║
+║                                                                              ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗              ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗             ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝             ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗             ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║             ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝                  ║
+║                                                                              ║
+║   JS / TS • PYTHON • C / C++ • RUST • GO • JAVA • RUBY                       ║
+║   SWIFT • C# • ELIXIR                                                        ║
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.3.2  2026-06-11 16:11:17
+Project: /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952
+Format:  text
+Detected: rust
+Scanning rust...
+Finished rust (53s)
+
+──────── rust ────────
+
+╔═══════════════════════════════════════════════════════════════════╗ 
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║ 
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║ 
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║ 
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║ 
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║ 
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║ 
+║                                            /\                     ║ 
+║  ██████╗ ██╗   ██╗ ██████╗                ( /   @ @    ()         ║ 
+║  ██╔══██╗██║   ██║██╔════╝                 \  __| |__  /          ║ 
+║  ██████╔╝██║   ██║██║  ███╗                 -/   "   \-           ║ 
+║  ██╔══██╗██║   ██║██║   ██║                /-|       |-\          ║ 
+║  ██████╔╝╚██████╔╝╚██████╔╝               / /-\     /-\ \         ║ 
+║  ╚═════╝  ╚═════╝  ╚═════╝                 / /-`---'-\\ \          ║ 
+║                                             /         \           ║ 
+║                                                                   ║ 
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║ 
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║ 
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║ 
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║ 
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║ 
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║ 
+║                                                                   ║ 
+║  Rust module • ownership sanity, unsafe & async spotlights        ║ 
+║  UBS module: rust • cargo-aware targeting, low-noise caching      ║ 
+║  ASCII homage: Ferris crab (ASCII Art Archive)                    ║ 
+║  Run standalone: modules/ubs-rust.sh --help                       ║ 
+║                                                                   ║ 
+║  Night Owl QA                                                     ║ 
+║  “We see bugs before you do.”                                     ║ 
+╚═══════════════════════════════════════════════════════════════════╝ 
+                                                                      
+
+Project:  /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952
+Started:  2026-06-11 16:11:17
+Files:    1 source files (rs)
+
+✓ ast-grep available (ast-grep) - full AST analysis enabled
+✓ cargo detected
+  ✓ clippy available
+  ✓ rustfmt available
+  ✓ cargo-audit available
+  ✓ cargo-deny available
+  ⚠ cargo-udeps not installed
+  ⚠ cargo-outdated not installed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OWNERSHIP & ERROR HANDLING MACROS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unwrap/expect, panic/unreachable/todo/unimplemented, dbg/println
+Panic-prone and debug macros frequently leak into production and cause crashes
+
+• unwrap()/expect() usage
+  ⚠ Warning (2432 found)
+    Potential panics via unwrap/expect
+    Prefer `?` or match to propagate/handle errors
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:16523 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L16523)
+                      .map(|&i| col.values()[i].to_f64().unwrap())
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:16525 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L16525)
+                  gt3_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:16538 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L16538)
+                      .map(|&i| col.values()[i].to_f64().unwrap())
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:16540 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L16540)
+                  lte3_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:16564 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L16564)
+                      .map(|&i| col.values()[i].to_f64().unwrap())
+
+• panic!/unreachable!/todo!/unimplemented!
+  ✓ OK No panic! macros
+  ⚠ Warning (20 found)
+    unreachable! may panic if reached
+    Double-check logic
+
+• dbg!/println!/eprintln!
+  ℹ Info (3 found)
+    println! found - prefer logging
+  ℹ Info (18 found)
+    eprintln! found - prefer logging
+
+• Guard clauses that still unwrap later
+  ✓ OK No guard/unwrap mismatches detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. UNSAFE & MEMORY OPERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unsafe blocks, transmute/uninitialized/zeroed/forget, raw ffi hazards
+These patterns may introduce UB, memory leaks, or hard-to-debug crashes
+
+• unsafe { ... } blocks
+  ✓ OK No unsafe blocks detected
+
+• transmute, uninitialized, zeroed, assume_init, forget
+
+• CStr::from_bytes_with_nul_unchecked
+
+• get_unchecked / from_utf8_unchecked / from_raw_parts
+
+• Unsafe Send/Sync impls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CONCURRENCY & ASYNC PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Arc<Mutex>, Rc<RefCell>, blocking ops in async, await-in-loop, spawn misuse
+Concurrency misuse leads to deadlocks, head-of-line blocking, and performance issues
+
+• Arc<Mutex<..>> / Rc<RefCell<..>> / RwLock
+
+• Mutex::lock().unwrap()/expect()
+
+• await inside loops (sequentialism)
+
+• Blocking ops inside async (thread::sleep, std::fs)
+
+• block_on within async context
+
+• std::thread::spawn within async
+
+• tokio::spawn usage (heuristic for detached tasks)
+
+• Async error path coverage
+  ✓ OK No tokio::spawn usage detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. NUMERIC & FLOATING-POINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: float equality, division/modulo by variable, potential overflow hints
+Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
+
+• Floating-point equality comparisons
+  ℹ Info (53 found)
+    Float equality/inequality check
+    Consider epsilon comparisons
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:1145 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L1145)
+              if lhs == 0.0 {
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:1167 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L1167)
+              if lhs == 0.0 {
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:1175 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L1175)
+          } else if lhs.is_infinite() && rhs != 0.0 {
+
+• Division/modulo by variable (verify non-zero)
+  ℹ Info (48 found)
+    Division by variables - guard zero divisors
+  ℹ Info (17 found)
+    Modulo by variables - guard zero divisors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. COLLECTIONS & ITERATORS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: clone in loops, collect then iterate, nth(0), length checks
+Iterator misuse often leads to unnecessary allocations or slow paths
+
+• clone() occurrences & clone() in loops
+  ℹ Info (149 found)
+    clone() usages - audit for necessity
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:171 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L171)
+              self.words.clone()
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:814 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L814)
+                              Scalar::Utf8(s) => s.clone(),
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:912 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L912)
+                              Scalar::Utf8(v.clone())
+  ⚠ Warning (68 found)
+    clone() inside loops - potential perf hit
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:3020 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L3020)
+      Self::Eager(values) => Self::Eager(values.clone()),
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:3038 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L3038)
+      Self::lazy_nullable_float64(data.clone(), validity.clone())
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:3066 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L3066)
+      validity: validity.clone(),
+
+• collect::<Vec<_>>() then for
+  ℹ Info (44 found)
+    collect::<Vec<_>>() usage - consider streaming
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:6622 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L6622)
+              let values = positions
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:6623 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L6623)
+                  .iter()
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:6624 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L6624)
+                  .map(|slot| match slot {
+
+• nth(0) → next()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. STRING & ALLOCATION SMELLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: needless allocations, format!(literal), to_owned().to_string()
+Unnecessary allocations and conversions reduce performance
+
+• to_owned().to_string() chain
+
+• format!("literal") with no placeholders
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FILESYSTEM & PROCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: blocking std::fs in async, process::Command usage heuristics
+I/O misuse or command construction from untrusted input can be risky
+
+• std::fs usage (general inventory)
+
+• std::process::Command usage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SECURITY FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TLS verification disabled, weak hash algos, security-sensitive non-crypto randomness, timing-unsafe secret comparisons, JWT verification bypasses, shell command injection, request-derived response headers/open redirects/host-header absolute URLs/outbound URLs/SQL/regex, unbounded request body reads, credentialed CORS, HTTP URLs, secrets
+Security misconfigurations can lead to credential leaks, command injection, and MITM attacks
+
+• Weak hash algorithms (MD5/SHA1)
+  ✓ OK No MD5/SHA1 found
+
+• TLS verification disabled
+
+• Security-sensitive non-crypto randomness
+  ✓ OK No security-sensitive non-crypto randomness detected
+
+• Secret/token comparisons without timing-safe equality
+  ✓ OK No secret comparisons using ==/!= detected
+
+• JWT decode, validation bypass, or missing claim binding
+  ✓ OK No JWT decode/validation bypass patterns detected
+
+• Shell command execution through -c/-lc
+  ✓ OK No shell -c/-lc Command usage detected
+
+• Command::new executable from untrusted-looking value
+
+• Path join/push with untrusted-looking segment
+
+• Archive entry paths joined into extraction destination
+
+• Predictable temp-file writes
+
+• Request-derived open redirects
+  ✓ OK No request-derived open redirect sinks detected
+
+• Host header used for absolute URL construction
+  ✓ OK No Host-header-derived absolute URL construction detected
+
+• Request-derived response headers
+  ✓ OK No request-derived response header values detected
+
+• Request-derived outbound HTTP URLs
+  ✓ OK No request-derived outbound HTTP URL sinks detected
+
+• Request-derived SQL construction
+  ✓ OK No request-derived SQL construction sinks detected
+
+• Request-controlled regex patterns
+  ✓ OK No request-controlled regex compilation detected
+
+• Unbounded request body reads
+  ✓ OK No unbounded request body reads detected
+
+• CORS credential policy
+  ✓ OK No unsafe CORS credential policy detected
+
+• Plain http:// URLs
+
+• Hardcoded secrets/credentials
+  ✓ OK No hardcoded secrets detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. CODE QUALITY MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TODO, FIXME, HACK, NOTE
+Technical debt markers indicate incomplete or problematic code
+  ✓ OK No TODO/FIXME/HACK markers found
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. MODULE & VISIBILITY ISSUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pub use wildcards, glob imports, re-exports
+Overly broad visibility complicates API stability and encapsulation
+
+• Wildcard imports (use crate::* or ::*)
+  ℹ Info (14 found)
+    Wildcard imports found; prefer explicit names
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:16509 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L16509)
+              use super::super::*;
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:16724 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L16724)
+              use super::super::*;
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:17143 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L17143)
+              use super::*;
+
+• pub use re-exports (inventory)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS & BENCHES HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: ignored tests, todo! in tests, println!/dbg! in tests
+Ensure tests do not hide failures or produce noisy output
+
+• #[ignore] tests
+
+• todo!/unimplemented! in tests
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. LINTS & STYLE (fmt/clippy)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo fmt -- --check, cargo clippy
+Formatter and lints help maintain consistent style and catch many issues
+  ✓ OK Formatting is clean
+  ✓ OK No clippy warnings/errors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. BUILD HEALTH (check/test)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo check, cargo test --no-run
+Ensures the project compiles and tests build
+  ✓ OK cargo check clean
+  ✓ OK Tests build clean
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. DEPENDENCY HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo audit, cargo deny check, cargo udeps, cargo outdated
+Keeps dependencies safe, minimal, and up-to-date
+  ✓ OK No known advisories (cargo-audit)
+  ✓ OK cargo-deny clean
+  ℹ Info (1 found)
+    cargo-udeps not installed; skipping unused dep scan
+  ℹ Info (1 found)
+    cargo-outdated not installed; skipping update report
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. API MISUSE (COMMON)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: nth(0), DefaultHasher, expect_err/unwrap_err, Option::unwrap_or_default in hot paths
+Common footguns and readability hazards
+
+• std::collections::hash_map::DefaultHasher
+
+• unwrap_err()/expect_err() usage inventory
+  ℹ Info (22 found)
+    unwrap_err/expect_err present - ensure test-only or justified
+
+• Option::unwrap_or_default inventory
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. DOMAIN-SPECIFIC HEURISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: reqwest builder, SQL string concatenation (heuristic), serde_json::from_str without context
+Domain patterns that often hint at bugs
+
+• reqwest::ClientBuilder inventory
+
+• serde_json::from_str without error context (heuristic)
+
+• SQL string concatenation (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. AST-GREP RULE PACK FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ℹ Info (0 found)
+    AST rule pack staged
+    Run with --format=sarif to emit SARIF from the rule pack
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. META STATISTICS & INVENTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: crate counts, bin/lib targets, feature flags (Cargo.toml heuristic)
+High-level view of the project layout
+
+• Cargo.toml features (heuristic count)
+  ℹ Info (1 found)
+    No Cargo.toml at project root (workspace? set PROJECT_DIR accordingly)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+19. RESOURCE LIFECYCLE CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: std::thread::spawn without join, tokio::spawn without await, TcpStream without shutdown
+Rust relies on explicit joins/shutdowns even with RAII—leaks create zombie work
+
+• Resource lifecycle correlation
+  ✓ OK All tracked resource acquisitions have matching cleanups
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+20. ASYNC LOCKING ACROSS AWAIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: locks acquired in async fns and potentially held across await
+Holding locks across await can deadlock, starve tasks, and cause latency spikes; std::sync locks can block executor threads
+
+• std::sync lock usage inside async fn (blocking risk)
+  ✓ OK No obvious std::sync lock usage inside async fns
+
+• Potential std::sync guard held across await (heuristic)
+
+• Potential async lock guard held across await (tokio/async locks heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+21. PANIC SURFACES & UNWINDING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: assert macros, direct indexing, unreachable_unchecked/unwrap_unchecked, panic/unwrap inside Drop
+Panics in destructors or UB hints can crash/abort in subtle ways; these can slip past linting depending on cfg/features
+
+• assert!/assert_eq!/assert_ne! inventory
+  ⚠ Warning (1391 found)
+    assert! macros present (panic surface)
+    If these are runtime invariants, consider explicit error handling; ensure not reachable by untrusted input
+
+• unreachable_unchecked / unwrap_unchecked
+
+• direct indexing / slicing panic surfaces
+  ⚠ Warning (328 found)
+    Direct indexing/slicing may panic
+    Use get()/get_mut(), checked ranges, or prior bounds checks when indexes can come from input
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:129 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L129)
+                  let (start, len) = ranges[mid];
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:166 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L166)
+                          words[idx / 64] &= !(1_u64 << (idx % 64));
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:208 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L208)
+                      words[idx / 64] |= 1_u64 << (idx % 64);
+
+• panic!/unwrap/expect inside Drop
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+22. SUSPICIOUS CASTS & TRUNCATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pervasive `as` casts, try_into().unwrap, numeric narrowing patterns
+`as` casts can silently truncate or change sign; conversion panics may be missed in uncommon input paths
+
+• `as` cast inventory
+  ℹ Info (184 found)
+    `as` casts present (possible truncation/sign bugs)
+    Prefer TryFrom/TryInto for correctness or document invariants
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:2936 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L2936)
+              let nibble = ((value >> (shift * 4)) & 0x0f) as u8;
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:7714 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L7714)
+                          let shift = (*y).clamp(0, 63) as u32;
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:7746 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L7746)
+                          let shift = (*y).clamp(0, 63) as u32;
+
+• len()/count() narrowed via `as`
+
+• try_into().unwrap()/expect() (panic on conversion failure)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+23. PARSING & VALIDATION ROBUSTNESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: parse/from_str/env-var unwraps, decode unwraps, missing error context
+Parsing and decoding failures often happen in prod on edge inputs; unwrap/expect turns them into panics
+
+• parse::<T>().unwrap()/expect()
+
+• serde/toml deserialization unwrap()/expect()
+  ⚠ Warning (2 found)
+    serde/toml deserialization unwrap/expect
+    Add context, validation, and schema checks; avoid panics on malformed data
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:15002 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L15002)
+              let roundtrip: Column = serde_json::from_str(&json).expect("deserialize");
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:15410 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L15410)
+              let back: ValidityMask = serde_json::from_str(&json).expect("deserialize");
+
+• env::var(...).unwrap()/expect()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+24. PERF/DoS HOTSPOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: regex compilation in loops, chars().nth(n), format!/allocations in loops
+Some perf pitfalls become DoS risks on large inputs or hot paths; these often evade linting in non-bench builds
+
+• Regex::new occurrences and in-loop compilation
+  ✓ OK No regex::Regex::new detected
+
+• chars().nth(n)/nth_back(n) (O(n))
+
+• format!/to_string/allocations inside loops (heuristic)
+  ⚠ Warning (56 found)
+    String allocation inside loop
+    Consider preallocating buffers, using write!, or restructuring to reduce allocations
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:7431 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L7431)
+      value: format!("{v:?}"),
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:7472 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L7472)
+      value: format!("{v:?}"),
+      /data/projects/.scratch/frankenpandas-orangepeak-uza04-50-integrate-20260611T1952/crates/fp-columnar/src/lib.rs:7519 (https://github.com/Dicklesworthstone/frankenpandas/blob/98ed64a93d225436dee4ffb15132c711e7570638/crates/fp-columnar/src/lib.rs#L7519)
+      value: format!("{v:?}"),
+
+═══════════════════════════════════════════════════════════════════════════
+                    🎯 SCAN COMPLETE 🎯                                  
+═══════════════════════════════════════════════════════════════════════════
+
+Summary Statistics:
+  Files scanned:    1
+  Critical issues:  0
+  Warning issues:   4297
+  Info items:       555
+
+Priority Actions:
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+  Code quality improvements and best practices
+
+Scan completed at: 2026-06-11 16:12:10
+
+Tip: Run with -v/--verbose for more code samples per finding.
+Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt
+
+
+──────── Combined Summary ────────
+Files: 1
+Critical: 0
+Warning: 4297
+Info: 555

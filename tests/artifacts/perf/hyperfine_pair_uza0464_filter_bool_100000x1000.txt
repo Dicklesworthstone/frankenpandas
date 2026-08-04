@@ -1,0 +1,11 @@
+Benchmark 1: base
+  Time (mean ± σ):     175.3 ms ±   7.7 ms    [User: 147.0 ms, System: 27.8 ms]
+  Range (min … max):   162.2 ms … 195.5 ms    20 runs
+
+Benchmark 2: after
+  Time (mean ± σ):     158.4 ms ±  11.3 ms    [User: 129.8 ms, System: 27.6 ms]
+  Range (min … max):   146.9 ms … 196.3 ms    20 runs
+
+Summary
+  after ran
+    1.11 ± 0.09 times faster than base

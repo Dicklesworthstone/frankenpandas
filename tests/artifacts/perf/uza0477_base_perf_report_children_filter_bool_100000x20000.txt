@@ -1,0 +1,120 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 270  of event 'cycles:P'
+# Event count (approx.): 644359592
+#
+# Children      Self  Command       Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                               IPC   [IPC Coverage]
+# ........  ........  ............  ....................  ...................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    55.15%    46.46%  perf_profile  perf_profile          [.] <fp_frame::DataFrame>::loc_bool                                                                                                                                                                                                                                                                                                                                  -      -            
+            |          
+            |--32.07%--<std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+            |          |          
+            |          |--31.45%--<fp_frame::DataFrame>::loc_bool
+            |          |          
+            |           --0.61%--__memmove_avx_unaligned_erms
+            |          
+            |--9.88%--<fp_frame::DataFrame>::loc_bool
+            |          |          
+            |           --0.53%--0xffffffff84c00f0b
+            |          
+            |--3.07%--__memcmp_avx2_movbe
+            |          
+            |--2.15%--0x7ffe00000003
+            |          <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |          __libc_malloc2
+            |          _int_malloc
+            |          malloc_consolidate
+            |          
+            |--2.11%--0x2
+            |          __memmove_avx_unaligned_erms
+            |          
+            |--1.85%--<fp_frame::DataFrame>::new_with_axes
+            |          |          
+            |           --0.61%--__libc_malloc2
+            |                     _int_malloc
+            |          
+            |--1.85%--0
+            |          0x75ca71434b20
+            |          <fp_frame::DataFrame>::loc_bool
+            |          |          
+            |           --1.24%--__libc_malloc2
+            |                     _int_malloc
+            |          
+            |--1.07%--__memmove_avx_unaligned_erms
+            |          
+             --0.62%--malloc
+
+    42.19%     0.00%  perf_profile  perf_profile          [.] <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str                                                                                                                                                                                                                                                                 -      -            
+            |
+            ---<std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+               |          
+               |--40.13%--<fp_frame::DataFrame>::loc_bool
+               |          |          
+               |           --0.53%--0xffffffff84c00f0b
+               |          
+                --2.01%--__memmove_avx_unaligned_erms
+                          |          
+                           --0.78%--0xffffffff84c00f0b
+                                     0xffffffff86227724
+                                     0xffffffff84fc4bc8
+                                     0xffffffff85139f5d
+                                     0xffffffff85139003
+                                     0xffffffff851524f6
+                                     0xffffffff85137e40
+                                     0xffffffff85079cb1
+                                     0xffffffff85088667
+
+    20.87%     2.54%  perf_profile  libc.so.6             [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                                                                     -      -            
+            |          
+            |--18.94%--__memmove_avx_unaligned_erms
+            |          |          
+            |          |--8.38%--0xffffffff84c00bb7
+            |          |          0xffffffff8622811f
+            |          |          |          
+            |          |          |--7.78%--0xffffffff84feb96b
+            |          |          |          0xffffffff853a5627
+            |          |          |          0xffffffff853a53ad
+            |          |          |          0xffffffff853a4de7
+            |          |          |          |          
+            |          |          |          |--5.30%--0xffffffff853a37ea
+            |          |          |          |          |          
+            |          |          |          |          |--3.55%--0xffffffff853a33d2
+            |          |          |          |          |          0xffffffff8541df1b
+            |          |          |          |          |          0xffffffff8541a9e8
+            |          |          |          |          |          0xffffffff853dda90
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--2.35%--0xffffffff853dc432
+            |          |          |          |          |          |          0xffffffff853da487
+            |          |          |          |          |          |          0xffffffff853d9102
+            |          |          |          |          |          |          0xffffffff853d8f99
+            |          |          |          |          |          |          0xffffffff853d7d2a
+            |          |          |          |          |          |          
+            |          |          |          |          |           --1.20%--0xffffffff853dc6c9
+            |          |          |          |          |                     0xffffffff8621b2b7
+            |          |          |          |          |          
+            |          |          |          |          |--0.60%--0xffffffff853a33ec
+            |          |          |          |          |          0xffffffff85458fd7
+            |          |          |          |          |          
+            |          |          |          |          |--0.59%--0xffffffff853a3437
+            |          |          |          |          |          0xffffffff85404a1a
+            |          |          |          |          |          0xffffffff857c0272
+            |          |          |          |          |          
+            |          |          |          |           --0.56%--0xffffffff84d04104
+            |          |          |          |          
+            |          |          |          |--1.86%--0xffffffff853a3963
+            |          |          |          |          0xffffffff853442bf
+            |          |          |          |          0xffffffff853439e9
+            |          |          |          |          0xffffffff853438f4
+            |          |          |          |          0xffffffff853437ad
+            |          |          |          |          0xffffffff85342072
+            |          |          |          |          |          
+            |          |          |          |          |--0.63%--0xffffffff8536b95f
+            |          |          |          |          |          
+            |          |          |          |          |--0.62%--0xffffffff8534151e
+            |          |          |          |          |          0xffffffff8536b97e
+            |          |          |          |          |          
+            |          |          |          |           --0.62%--0xffffffff85341477
