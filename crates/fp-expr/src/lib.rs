@@ -6188,7 +6188,8 @@ mod tests {
     #[test]
     fn eval_str_reflected_arithmetic_methods_pizig() {
         // br-frankenpandas-pizig: reflected method-call arithmetic (rsub/rfloordiv)
-        // swaps operands: a.rsub(b)==b-a. Seeded LCG, no mocks.
+        // swap operands: a.rsub(b)==b-a and a.rfloordiv(b)==b//a. Seeded
+        // LCG, no mocks. Keep `a` nonzero because it is the reflected divisor.
         let mut st: u64 = 0x4ef1_e7a1_2b3c_4d5e;
         let mut next = || {
             st = st
@@ -6199,7 +6200,12 @@ mod tests {
         let policy = RuntimePolicy::hardened(Some(100));
         for iter in 0..400u32 {
             let n = (next() % 5) as usize + 1;
-            let a: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
+            let a: Vec<i64> = (0..n)
+                .map(|_| {
+                    let value = (next() % 40) as i64 - 20;
+                    if value >= 0 { value + 1 } else { value }
+                })
+                .collect();
             let b: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
             let mut ledger = EvidenceLedger::new();
             let frame = fp_frame::DataFrame::from_series(vec![
@@ -6225,11 +6231,18 @@ mod tests {
                 }
             };
             let rsub = super::eval_str("a.rsub(b)", &frame, &policy, &mut ledger).unwrap();
+            let rfloordiv =
+                super::eval_str("a.rfloordiv(b)", &frame, &policy, &mut ledger).unwrap();
             for i in 0..n {
                 assert_eq!(
                     geti(&rsub.values()[i]),
                     b[i] - a[i],
                     "rsub iter={iter} i={i}"
+                );
+                assert_eq!(
+                    geti(&rfloordiv.values()[i]),
+                    ((b[i] as f64) / (a[i] as f64)).floor() as i64,
+                    "rfloordiv iter={iter} i={i}"
                 );
             }
         }
