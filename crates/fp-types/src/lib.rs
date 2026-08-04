@@ -3334,21 +3334,24 @@ fn collect_finite(values: &[Scalar]) -> Vec<f64> {
 /// (with optional NAT/Null missing), sum/mean preserve Timedelta dtype
 /// matching pandas — instead of silently coercing to Float64(0.0) via
 /// the collect_finite path (which drops Timedelta64 because to_f64
-/// errors). Returns Some(sum_in_ns, observed_count) when applicable.
+/// errors). A NaT-only input remains a Timedelta family so sum returns
+/// zero Timedelta and mean returns NaT. Returns Some(sum_in_ns,
+/// observed_count) when applicable.
 fn collect_timedelta_ns(values: &[Scalar]) -> Option<(i128, usize)> {
     let mut sum: i128 = 0;
     let mut count: usize = 0;
     let mut saw_timedelta = false;
     for v in values {
-        if v.is_missing() {
-            continue;
-        }
         match v {
             Scalar::Timedelta64(ns) => {
                 saw_timedelta = true;
+                if v.is_missing() {
+                    continue;
+                }
                 sum += i128::from(*ns);
                 count += 1;
             }
+            _ if v.is_missing() => continue,
             // Any non-Timedelta non-missing value bails out to the
             // existing Float64 path, preserving cross-type behavior.
             _ => return None,
@@ -6738,7 +6741,10 @@ mod tests {
                 }
             }
             if count == 0 {
-                return (Scalar::Float64(0.0), Scalar::Null(NullKind::NaN));
+                return (
+                    Scalar::Timedelta64(0),
+                    Scalar::Timedelta64(Timedelta::NAT),
+                );
             }
             let sum = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
             let mean = (sum / count).clamp(i128::from(i64::MIN), i128::from(i64::MAX));
