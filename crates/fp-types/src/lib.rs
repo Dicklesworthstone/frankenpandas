@@ -7075,7 +7075,9 @@ mod tests {
                 }
                 (Scalar::Utf8(left), Scalar::Utf8(right)) => left.cmp(right),
                 (Scalar::Timedelta64(left), Scalar::Timedelta64(right)) => left.cmp(right),
-                _ => panic!("mixed family in nanmin/nanmax oracle"),
+                // `assert_minmax` verifies that every present value belongs
+                // to one generated family before it invokes this comparator.
+                _ => std::cmp::Ordering::Equal,
             }
         }
 
@@ -7098,6 +7100,19 @@ mod tests {
                 );
                 return;
             }
+
+            let is_expected_family = |value: &Scalar| match family {
+                "int" => matches!(value, Scalar::Int64(_)),
+                "float" => matches!(value, Scalar::Float64(_)),
+                "bool" => matches!(value, Scalar::Bool(_)),
+                "utf8" => matches!(value, Scalar::Utf8(_)),
+                "timedelta" => matches!(value, Scalar::Timedelta64(_)),
+                _ => false,
+            };
+            assert!(
+                present.iter().all(is_expected_family),
+                "case={case} family={family}: mixed family escaped generator: {values:?}"
+            );
 
             let expected_min = present.iter().min_by(|left, right| family_cmp(left, right));
             let expected_max = present.iter().max_by(|left, right| family_cmp(left, right));
