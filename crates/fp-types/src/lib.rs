@@ -2681,12 +2681,33 @@ impl Timestamp {
             return Self::nat();
         }
 
+        // Checked nanosecond arithmetic (br-frankenpandas-dzz6x). The component
+        // validation above rejects an out-of-range month/day/hour/... but says
+        // nothing about the YEAR, and i64 nanoseconds run out at
+        // `i64::MAX / NANOS_PER_DAY` = 106_751 days from the epoch — about year
+        // 2262, the same bound pandas documents for ns-resolution Timestamps.
+        // Unchecked, `replace(year=3000)` wrapped in release mode and returned a
+        // silently wrong, plausible-looking in-range instant. Overflow now folds
+        // to NaT, matching both the validation arm above and the sibling
+        // constructors `fromordinal` / `floor_to`, which already fail this way.
+        // In-range results are unchanged: the checked ops return exactly the
+        // value the plain operators produced whenever no overflow occurred.
         let days_from_epoch = Self::days_from_ymd(y, mo, d);
         let secs = h * 3600 + mi * 60 + s;
-        let total_nanos = days_from_epoch * Timedelta::NANOS_PER_DAY
-            + secs * Timedelta::NANOS_PER_SEC
-            + us * Timedelta::NANOS_PER_MICRO
-            + ns;
+        let Some(total_nanos) = days_from_epoch
+            .checked_mul(Timedelta::NANOS_PER_DAY)
+            .and_then(|nanos| {
+                secs.checked_mul(Timedelta::NANOS_PER_SEC)
+                    .and_then(|s_nanos| nanos.checked_add(s_nanos))
+            })
+            .and_then(|nanos| {
+                us.checked_mul(Timedelta::NANOS_PER_MICRO)
+                    .and_then(|us_nanos| nanos.checked_add(us_nanos))
+            })
+            .and_then(|nanos| nanos.checked_add(ns))
+        else {
+            return Self::nat();
+        };
 
         Self {
             nanos: total_nanos,
@@ -11559,6 +11580,95 @@ mod tests {
             Timestamp::nat()
                 .replace(Some(2024), Some(1), Some(1), None, None, None, None, None)
                 .is_nat()
+        );
+    }
+
+    /// br-frankenpandas-dzz6x: `replace` validates every component EXCEPT the
+    /// year, and i64 nanoseconds run out around year 2262. The old unchecked
+    /// multiply wrapped in release mode and handed back a plausible-looking
+    /// in-range instant for an unrepresentable year — the exact failure a naive
+    /// implementation still produces, so each far-out year below is a real
+    /// negative case, not a restatement of the code.
+    #[test]
+    fn timestamp_replace_returns_nat_on_nanosecond_overflow_dzz6x() {
+        let ts = Timestamp::parse("2024-01-15T10:30:45.123456789").unwrap();
+
+        for year in [3000, 10_000, 300_000, i64::MAX / 400] {
+            let out = ts.replace(Some(year), None, None, None, None, None, None, None);
+            assert!(
+                out.is_nat(),
+                "replace(year={year}) is unrepresentable in i64 ns and must be \
+                 NaT, got nanos={:?} (year {:?}) — this is the silent wrap",
+                out.nanos,
+                out.year()
+            );
+        }
+        for year in [-3000, -100_000, i64::MIN / 400] {
+            let out = ts.replace(Some(year), None, None, None, None, None, None, None);
+            assert!(out.is_nat(), "replace(year={year}) must be NaT");
+        }
+
+        // Boundary: i64 ns tops out at 106_751 days from the epoch, so 2262 is
+        // representable at the start of the year and 2263 is not. This pins the
+        // fix to the real limit — a guard that merely rejected "big" years by
+        // some rounder cutoff would fail one side of this pair.
+        let in_range = ts.replace(
+            Some(2262),
+            Some(1),
+            Some(1),
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+        );
+        assert!(
+            !in_range.is_nat(),
+            "2262-01-01 is representable and must survive"
+        );
+        assert_eq!(in_range.year(), Some(2262));
+        assert!(
+            ts.replace(
+                Some(2263),
+                Some(12),
+                Some(31),
+                Some(23),
+                Some(59),
+                Some(59),
+                Some(999_999),
+                Some(999)
+            )
+            .is_nat(),
+            "end of 2263 exceeds the i64 ns axis and must be NaT"
+        );
+
+        // In-range results are untouched by the checked arithmetic, including
+        // the timezone, so the guard cannot have been bought with a behavior
+        // change on the normal path.
+        let unchanged = ts.replace(
+            Some(1999),
+            Some(6),
+            Some(30),
+            Some(12),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+        );
+        assert_eq!(unchanged.year(), Some(1999));
+        assert_eq!(unchanged.month(), Some(6));
+        assert_eq!(unchanged.day(), Some(30));
+        assert_eq!(unchanged.hour(), Some(12));
+        assert_eq!(unchanged.minute(), Some(1));
+        assert_eq!(unchanged.second(), Some(2));
+        assert_eq!(unchanged.microsecond(), Some(3));
+        assert_eq!(unchanged.nanosecond(), Some(4));
+        let tz = Timestamp::from_nanos_tz(ts.nanos, "UTC");
+        assert_eq!(
+            tz.replace(Some(1999), None, None, None, None, None, None, None)
+                .tz
+                .as_deref(),
+            Some("UTC")
         );
     }
 
