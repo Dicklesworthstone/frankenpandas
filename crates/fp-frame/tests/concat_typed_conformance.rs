@@ -88,6 +88,31 @@ fn concat_float64_labeled_typed_matches_expected() {
 }
 
 #[test]
+fn concat_float64_ignore_index_true_typed_matches_expected() {
+    // Exercise the Float64 buffer path together with the typed range-index
+    // construction. The source labels deliberately are not a range, so the
+    // assertion cannot pass by accidentally retaining either input index.
+    let mk = |idx: &[i64], vals: &[f64]| {
+        Series::from_values(
+            "f",
+            idx.iter().map(|&x| IndexLabel::Int64(x)).collect(),
+            vals.iter().map(|&x| Scalar::Float64(x)).collect(),
+        )
+        .unwrap()
+    };
+    let a = mk(&[41, 7], &[-2.5, 0.0]);
+    let b = mk(&[-3, 99], &[8.25, -0.75]);
+
+    let out = concat_series_with_ignore_index(&[&a, &b], true).unwrap();
+
+    assert_eq!(
+        out.column().as_f64_slice(),
+        Some([-2.5, 0.0, 8.25, -0.75].as_slice())
+    );
+    assert_eq!(idx_i64(&out), vec![0, 1, 2, 3]);
+}
+
+#[test]
 fn concat_mixed_dtype_falls_back_to_scalar_path() {
     // An Int64 series + a Utf8 series: not homogeneous, so the typed fast path is
     // skipped and the Scalar concat preserves each value verbatim.
