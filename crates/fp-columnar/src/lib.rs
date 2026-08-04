@@ -9704,7 +9704,6 @@ impl Column {
     /// has missing values — callers fall back to the `Scalar` path, which is
     /// the only path that must reason about missingness. Per
     /// br-frankenpandas-lei31.
-    #[must_use]
     /// Borrow the column's contiguous `f64` buffer **and** its validity mask
     /// when this is a Float64 column with a directly-addressable backing
     /// (all-valid or nullable). Unlike [`Column::as_f64_slice`] this also serves
