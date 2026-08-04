@@ -55,7 +55,7 @@ sql-mysql = ["fp-io/sql-mysql"]
 tracing = ["fp-frame/tracing"]
 asupersync = ["fp-runtime/asupersync"]
 lazy-transpose-view = ["fp-frame/lazy-transpose-view"]
-block-storage = ["fp-frame/block-storage"]
+block-storage = ["fp-frame/block-storage", "fp-io/block-storage"]
 
 [dev-dependencies]
 # fd90.196: serde_json round-trip integration test for the README's

@@ -155,6 +155,37 @@ jobs:
         # builds at release time.
         run: cargo test --doc --workspace
 
+  eager-frame:
+    # br-frankenpandas-it6kj: the default build uses lazy transpose storage,
+    # so exercise the non-default eager store separately before it silently
+    # drifts out of type and behavior coverage.
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.target-eager-frame
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+
+      - name: Eager fp-frame tests
+        run: cargo test -p fp-frame --lib --no-default-features
+
   conformance:
     runs-on: ubuntu-latest
     needs: [test]

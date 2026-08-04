@@ -1187,6 +1187,14 @@ def bench_csv_read_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     df.to_csv(csv_path, index=False)
     return time_operation(lambda: pd.read_csv(csv_path))
 
+
+def bench_csv_read_block_view_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
+    """Read a homogeneous Float64 CSV and take pandas' no-copy array view."""
+    csv_path = tmp_path / "bench.csv"
+    df.to_csv(csv_path, index=False)
+    return time_operation(lambda: pd.read_csv(csv_path).to_numpy(copy=False))
+
+
 def bench_csv_write_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     csv_path = tmp_path / "bench_out.csv"
     return time_operation(lambda: df.to_csv(csv_path, index=False))
@@ -2475,6 +2483,7 @@ def bench_dt_month_name_pandas(df: pd.DataFrame) -> PairedSamples:
 PANDAS_WORKLOADS = {
     "io": {
         "csv_read": bench_csv_read_pandas,
+        "csv_read_block_view": bench_csv_read_block_view_pandas,
         "csv_write": bench_csv_write_pandas,
         "json_read_records": bench_json_read_records_pandas,
         "json_read_columns": bench_json_read_columns_pandas,

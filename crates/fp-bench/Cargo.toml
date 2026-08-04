@@ -32,3 +32,4 @@ sha2 = "0.11.0"
 default = ["lazy-transpose-view"]
 lazy-transpose-prototype = []
 lazy-transpose-view = ["fp-frame/lazy-transpose-view"]
+block-storage = ["fp-frame/block-storage", "fp-io/block-storage"]

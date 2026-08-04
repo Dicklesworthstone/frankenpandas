@@ -47,6 +47,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 # (br-frankenpandas / issue #9)
 [features]
 default = ["sql-sqlite"]
+block-storage = ["fp-frame/block-storage"]
 hdf5 = ["dep:hdf5"]
 sql-sqlite = ["dep:rusqlite"]
 # Placeholder only. The old concrete `postgres` adapter depended on

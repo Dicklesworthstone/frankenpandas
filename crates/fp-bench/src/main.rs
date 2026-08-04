@@ -2583,6 +2583,25 @@ fn run(
                 let _ = fp_io::read_csv_str(&csv).expect("read_csv");
             })
         }
+        #[cfg(feature = "block-storage")]
+        ("io", "csv_read_block_view") => {
+            // pandas: pd.read_csv(...).to_numpy(copy=False). The Float64 CSV
+            // parser is deliberately inside the timed closure; each A/A arm
+            // therefore proves a fresh frame becomes block-backed before its
+            // first array observation. CSV serialization remains setup.
+            let csv = fp_io::write_csv_string(&df).expect("csv serialize");
+            time_us(|| {
+                let frame = fp_io::read_csv_str(&csv).expect("read_csv");
+                let view = frame
+                    .to_numpy_block_view()
+                    .expect("homogeneous Float64 CSV must be block-backed");
+                black_box((view.rows, view.cols, view.block));
+            })
+        }
+        #[cfg(not(feature = "block-storage"))]
+        ("io", "csv_read_block_view") => {
+            panic!("csv_read_block_view requires fp-bench --features block-storage")
+        }
         ("io", "csv_write") => {
             // pandas: time df.to_csv(file, index=False). FP: time write_csv_string.
             time_us(|| {
