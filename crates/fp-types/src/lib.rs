@@ -3586,27 +3586,41 @@ fn float_ns_to_timedelta(value: f64) -> Scalar {
 }
 
 pub fn nanmedian(values: &[Scalar]) -> Scalar {
-    // Per br-frankenpandas-j8ntk: Timedelta64 median preserves dtype.
-    if let Some(mut td) = collect_timedelta_ns_f64(values) {
-        if td.is_empty() {
-            return Scalar::Timedelta64(Timedelta::NAT);
+    // Preserve exact nanosecond ordering for uniformly-Timedelta64 input.
+    // Converting to f64 loses distinct ticks beyond the 53-bit boundary.
+    let mut timedeltas = Vec::with_capacity(values.len());
+    let mut saw_timedelta = false;
+    let mut all_timedelta = true;
+    for value in values {
+        if value.is_missing() {
+            continue;
         }
-        // O(n) selection instead of a full sort (see the numeric arm below):
-        // collect_timedelta_ns_f64 yields finite ns (NaT excluded), so the
-        // comparator is a total order; order statistics depend only on values,
-        // so the unstable partition yields the same td[mid-1]/td[mid].
+        match value {
+            Scalar::Timedelta64(ns) => {
+                saw_timedelta = true;
+                timedeltas.push(*ns);
+            }
+            _ => {
+                all_timedelta = false;
+                break;
+            }
+        }
+    }
+    if all_timedelta && saw_timedelta {
+        // O(n) selection instead of a full sort: order statistics depend only
+        // on values, so the unstable partition yields the same middle values.
+        let mut td = timedeltas;
         let n = td.len();
         let mid = n / 2;
-        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-        let (left, mid_ref, _right) = td.select_nth_unstable_by(mid, cmp);
+        let (left, mid_ref, _right) = td.select_nth_unstable(mid);
         let mid_val = *mid_ref;
         let median_ns = if n.is_multiple_of(2) {
-            let lower = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            (lower + mid_val) / 2.0
+            let lower = left.iter().copied().fold(i64::MIN, i64::max);
+            (i128::from(lower) + i128::from(mid_val)) / 2
         } else {
-            mid_val
+            i128::from(mid_val)
         };
-        return float_ns_to_timedelta(median_ns);
+        return Scalar::Timedelta64(median_ns as i64);
     }
     let mut nums = collect_finite(values);
     if nums.is_empty() {
@@ -7322,19 +7336,19 @@ mod tests {
             let mut finite = values
                 .iter()
                 .filter_map(|value| match value {
-                    Scalar::Timedelta64(ns) if !value.is_missing() => Some(*ns as f64),
+                    Scalar::Timedelta64(ns) if !value.is_missing() => Some(*ns),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
             if finite.is_empty() {
                 return Scalar::Null(NullKind::NaN);
             }
-            finite.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+            finite.sort_unstable();
             let mid = finite.len() / 2;
             let median = if finite.len().is_multiple_of(2) {
-                (finite[mid - 1] + finite[mid]) / 2.0
+                (i128::from(finite[mid - 1]) + i128::from(finite[mid])) / 2
             } else {
-                finite[mid]
+                i128::from(finite[mid])
             };
             Scalar::Timedelta64(median as i64)
         }
@@ -7358,6 +7372,18 @@ mod tests {
             "timedelta_all_missing",
             &[Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)],
             Scalar::Null(NullKind::NaN),
+        );
+        let beyond_f64_exact_ns = 200 * Timedelta::NANOS_PER_DAY;
+        assert_median(
+            usize::MAX - 2,
+            "timedelta_odd_median_beyond_f64_exactness",
+            &[
+                Scalar::Timedelta64(beyond_f64_exact_ns),
+                Scalar::Timedelta64(beyond_f64_exact_ns + 1),
+                Scalar::Timedelta64(beyond_f64_exact_ns + 2),
+                Scalar::Timedelta64(Timedelta::NAT),
+            ],
+            Scalar::Timedelta64(beyond_f64_exact_ns + 1),
         );
 
         let mut seed = 0x0ab1_1eda_57a7_15e5_u64;
