@@ -1349,6 +1349,29 @@ impl IndexLabels {
         self.len() == 0
     }
 
+    /// Whether this is a Datetime64-backed index containing the NaT sentinel.
+    ///
+    /// Pandas treats every DatetimeIndex containing NaT as non-monotonic in
+    /// either direction. Keep the affine witness lazy while checking its
+    /// reserved sentinel; eager and sliced DatetimeIndex storage is scanned
+    /// directly without materializing any unrelated typed backing.
+    fn has_datetime64_nat(&self) -> bool {
+        if let Some(range) = self.datetime64_affine {
+            return range.position(i64::MIN).is_some();
+        }
+        if let Some(slice) = &self.materialized_slice {
+            return slice
+                .as_slice()
+                .iter()
+                .any(|label| matches!(label, IndexLabel::Datetime64(value) if *value == i64::MIN));
+        }
+        self.materialized.get().is_some_and(|labels| {
+            labels
+                .iter()
+                .any(|label| matches!(label, IndexLabel::Datetime64(value) if *value == i64::MIN))
+        })
+    }
+
     fn int64_unit_range(&self) -> Option<Int64UnitRangeLabels> {
         self.int64_unit_range
     }
@@ -3085,6 +3108,9 @@ impl Index {
 
     #[must_use]
     pub fn is_monotonic_increasing(&self) -> bool {
+        if self.labels.has_datetime64_nat() {
+            return false;
+        }
         if self.labels.len() <= 1 {
             return true;
         }
@@ -3127,6 +3153,9 @@ impl Index {
 
     #[must_use]
     pub fn is_monotonic_decreasing(&self) -> bool {
+        if self.labels.has_datetime64_nat() {
+            return false;
+        }
         if self.labels.len() <= 1 {
             return true;
         }
@@ -23832,19 +23861,12 @@ mod tests {
             );
         }
 
-        // NaT-bearing affine ranges deliberately retain the former eager
-        // fallback. This optimization must not define or change NaT ordering
-        // semantics; pandas-parity for that pre-existing behavior is tracked
-        // separately.
-        for (name, start, step) in [
-            ("nat_start", i64::MIN, 1),
-            ("nat_end", i64::MIN + 2, -1),
-        ] {
+        // NaT-bearing affine ranges must reject monotonicity without
+        // materializing their labels.
+        for (name, start, step) in [("nat_start", i64::MIN, 1), ("nat_end", i64::MIN + 2, -1)] {
             let affine = Index::from_datetime64_affine_range(start, step, 3)
                 .expect("valid NaT-bearing Datetime64 affine range");
-            let eager_values = (0..3)
-                .map(|offset| start + step * offset)
-                .collect();
+            let eager_values = (0..3).map(|offset| start + step * offset).collect();
             let eager = Index::from_datetime64(eager_values);
 
             assert_eq!(
@@ -23858,8 +23880,36 @@ mod tests {
                 "{name}: decreasing predicate must retain the eager fallback",
             );
             assert!(
-                affine.labels.materialized.get().is_some(),
-                "{name}: NaT-bearing ranges must decline the affine shortcut",
+                affine.labels.materialized.get().is_none(),
+                "{name}: NaT detection must keep affine labels lazy",
+            );
+        }
+    }
+
+    #[test]
+    fn datetime64_nat_is_not_monotonic_x6i5k() {
+        // pandas 2.2.3 reports both predicates false for a DatetimeIndex with
+        // NaT at every position, including the singleton case.
+        for (name, values) in [
+            ("nat_start", vec![i64::MIN, 1, 2]),
+            ("nat_middle", vec![1, i64::MIN, 2]),
+            ("nat_end", vec![1, 2, i64::MIN]),
+            ("reverse", vec![2, 1, i64::MIN]),
+            ("singleton_nat", vec![i64::MIN]),
+        ] {
+            let index = Index::from_datetime64(values);
+
+            assert!(
+                !index.is_monotonic_increasing(),
+                "{name}: NaT-bearing DatetimeIndex must not be increasing",
+            );
+            assert!(
+                !index.is_monotonic_decreasing(),
+                "{name}: NaT-bearing DatetimeIndex must not be decreasing",
+            );
+            assert!(
+                !index.is_monotonic(),
+                "{name}: monotonic alias must preserve increasing semantics",
             );
         }
     }

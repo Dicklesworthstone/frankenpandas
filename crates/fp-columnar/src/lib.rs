@@ -6124,7 +6124,7 @@ fn cum_accum_nullable_i64(
 fn argextreme_nullable_f64(data: &[f64], validity: Option<&ValidityMask>, want_max: bool) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, &x) in data.iter().enumerate() {
-        let present = validity.map_or(true, |v| v.get(i)) && !x.is_nan();
+        let present = validity.is_none_or(|v| v.get(i)) && !x.is_nan();
         if present {
             let better = match best {
                 None => true,
@@ -6150,7 +6150,7 @@ fn argextreme_nullable_f64(data: &[f64], validity: Option<&ValidityMask>, want_m
 fn argextreme_nullable_i64(data: &[i64], validity: Option<&ValidityMask>, want_max: bool) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, &v) in data.iter().enumerate() {
-        if validity.map_or(true, |vm| vm.get(i)) {
+        if validity.is_none_or(|vm| vm.get(i)) {
             let x = v as f64;
             let better = match best {
                 None => true,
@@ -6180,7 +6180,7 @@ fn ptp_nullable_f64(data: &[f64], validity: Option<&ValidityMask>) -> Scalar {
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut seen = false;
     for (i, &x) in data.iter().enumerate() {
-        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+        if validity.is_none_or(|v| v.get(i)) && !x.is_nan() {
             seen = true;
             if x < lo {
                 lo = x;
@@ -6203,7 +6203,7 @@ fn ptp_nullable_i64(data: &[i64], validity: Option<&ValidityMask>) -> Scalar {
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut seen = false;
     for (i, &v) in data.iter().enumerate() {
-        if validity.map_or(true, |vm| vm.get(i)) {
+        if validity.is_none_or(|vm| vm.get(i)) {
             let x = v as f64;
             seen = true;
             if x < lo {
@@ -6231,7 +6231,7 @@ fn present_moments_f64(data: &[f64], validity: Option<&ValidityMask>) -> (usize,
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &x) in data.iter().enumerate() {
-        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+        if validity.is_none_or(|v| v.get(i)) && !x.is_nan() {
             sum += x;
             n += 1;
         }
@@ -6242,7 +6242,7 @@ fn present_moments_f64(data: &[f64], validity: Option<&ValidityMask>) -> (usize,
     let mean = sum / n as f64;
     let mut sum_sq = 0.0_f64;
     for (i, &x) in data.iter().enumerate() {
-        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+        if validity.is_none_or(|v| v.get(i)) && !x.is_nan() {
             sum_sq += (x - mean).powi(2);
         }
     }
@@ -6262,7 +6262,7 @@ fn present_central_moments_f64(
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &x) in data.iter().enumerate() {
-        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+        if validity.is_none_or(|v| v.get(i)) && !x.is_nan() {
             sum += x;
             n += 1;
         }
@@ -6273,7 +6273,7 @@ fn present_central_moments_f64(
     let mean = sum / n as f64;
     let (mut m2, mut m3, mut m4) = (0.0_f64, 0.0_f64, 0.0_f64);
     for (i, &x) in data.iter().enumerate() {
-        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+        if validity.is_none_or(|v| v.get(i)) && !x.is_nan() {
             let d = x - mean;
             m2 += d.powi(2);
             m3 += d.powi(3);
@@ -6292,7 +6292,7 @@ fn present_central_moments_i64(
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &v) in data.iter().enumerate() {
-        if validity.map_or(true, |vm| vm.get(i)) {
+        if validity.is_none_or(|vm| vm.get(i)) {
             sum += v as f64;
             n += 1;
         }
@@ -6303,7 +6303,7 @@ fn present_central_moments_i64(
     let mean = sum / n as f64;
     let (mut m2, mut m3, mut m4) = (0.0_f64, 0.0_f64, 0.0_f64);
     for (i, &v) in data.iter().enumerate() {
-        if validity.map_or(true, |vm| vm.get(i)) {
+        if validity.is_none_or(|vm| vm.get(i)) {
             let d = v as f64 - mean;
             m2 += d.powi(2);
             m3 += d.powi(3);
@@ -6319,7 +6319,7 @@ fn present_moments_i64(data: &[i64], validity: Option<&ValidityMask>) -> (usize,
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &v) in data.iter().enumerate() {
-        if validity.map_or(true, |vm| vm.get(i)) {
+        if validity.is_none_or(|vm| vm.get(i)) {
             sum += v as f64;
             n += 1;
         }
@@ -6330,7 +6330,7 @@ fn present_moments_i64(data: &[i64], validity: Option<&ValidityMask>) -> (usize,
     let mean = sum / n as f64;
     let mut sum_sq = 0.0_f64;
     for (i, &v) in data.iter().enumerate() {
-        if validity.map_or(true, |vm| vm.get(i)) {
+        if validity.is_none_or(|vm| vm.get(i)) {
             sum_sq += (v as f64 - mean).powi(2);
         }
     }
