@@ -1578,10 +1578,33 @@ impl Timedelta {
         result
     }
 
+    /// Build a nanosecond Timedelta from a float quantity of `unit`.
+    ///
+    /// Matches `pd.Timedelta(value, unit=...)`:
+    /// - `NaN` → `NAT`. pandas returns `NaT`, and `NAT` is how NaT is spelled
+    ///   in this i64 representation. Rust's float→int `as` maps `NaN` to
+    ///   **0**, so the unguarded cast used to hand back a ZERO DURATION for a
+    ///   missing value (br-frankenpandas-8v92m).
+    /// - non-finite or out-of-range product → [`TimedeltaError::Overflow`].
+    ///   pandas raises `OutOfBoundsTimedelta` ("Cannot cast inf from s to 'ns'
+    ///   without overflow"); the `as` cast used to SATURATE to `i64::MAX`,
+    ///   returning a finite, plausible ~106751-day duration instead.
+    /// - unknown unit → [`TimedeltaError::InvalidFormat`], unchanged.
+    ///
+    /// The overflow guard is the same one `parse` and the component parser
+    /// already use (added by br-frankenpandas-zw3mg, which fixed two of the
+    /// three sites sharing this expression and missed this one).
     pub fn from_unit(value: f64, unit: &str) -> Result<i64, TimedeltaError> {
         let multiplier = Self::unit_to_nanos(unit)
             .ok_or_else(|| TimedeltaError::InvalidFormat(unit.to_string()))?;
-        Ok((value * multiplier as f64).round() as i64)
+        if value.is_nan() {
+            return Ok(Self::NAT);
+        }
+        let product = value * multiplier as f64;
+        if !product.is_finite() || product.abs() >= 9223372036854775808.0 {
+            return Err(TimedeltaError::Overflow);
+        }
+        Ok(product.round() as i64)
     }
 
     // ── Arithmetic (br-frankenpandas-4r56 Phase 1) ──────────────────────
@@ -10786,6 +10809,92 @@ mod tests {
         // pandas `pd.Timedelta.max * 2` raises OverflowError.
         assert_eq!(Timedelta::mul_scalar(i64::MAX, 2), Timedelta::NAT);
         assert_eq!(Timedelta::mul_scalar(i64::MIN + 1, 2), Timedelta::NAT);
+    }
+
+    #[test]
+    fn from_unit_nan_is_nat_and_overflow_is_err_8v92m() {
+        use super::TimedeltaError;
+
+        // br-frankenpandas-8v92m. Rust's float->int `as` maps NaN to 0 and
+        // saturates infinities, so the unguarded
+        //     Ok((value * multiplier as f64).round() as i64)
+        // failed OPEN twice: NaN became a ZERO DURATION, and inf/1e30 became a
+        // finite plausible ~106751-day duration. Live pandas 2.2.3:
+        //   pd.Timedelta(nan, unit='s')   -> NaT
+        //   pd.Timedelta(inf, unit='s')   -> OutOfBoundsTimedelta
+        //                                    "Cannot cast inf from s to 'ns' without overflow."
+        //   pd.Timedelta(1e30, unit='s')  -> OutOfBoundsTimedelta
+        //   pd.Timedelta(1.5, unit='s')   -> Timedelta('0 days 00:00:01.5')  <- must NOT change
+        // The guard is copied from the two siblings that already had it
+        // (br-frankenpandas-zw3mg), which is why `parse` behaviour is pinned
+        // below too: all three copies must now agree.
+
+        // ── NaN -> NaT, NOT zero. This is the load-bearing case: an impl that
+        // returns Ok(0) fails, and so does one that returns Err, because
+        // pandas gives NaT rather than raising.
+        assert_eq!(Timedelta::from_unit(f64::NAN, "s"), Ok(Timedelta::NAT));
+        assert_ne!(Timedelta::from_unit(f64::NAN, "s"), Ok(0));
+        assert_eq!(Timedelta::from_unit(f64::NAN, "D"), Ok(Timedelta::NAT));
+
+        // ── non-finite / out-of-range -> Overflow, not a saturated duration.
+        assert_eq!(
+            Timedelta::from_unit(f64::INFINITY, "s"),
+            Err(TimedeltaError::Overflow)
+        );
+        assert_eq!(
+            Timedelta::from_unit(f64::NEG_INFINITY, "s"),
+            Err(TimedeltaError::Overflow)
+        );
+        assert_eq!(
+            Timedelta::from_unit(1e30, "s"),
+            Err(TimedeltaError::Overflow)
+        );
+        assert_eq!(
+            Timedelta::from_unit(1e30, "D"),
+            Err(TimedeltaError::Overflow)
+        );
+
+        // ── CONTROL: ordinary values must be untouched, bit-for-bit. An
+        // over-eager guard that rejected anything large would fail here.
+        assert_eq!(Timedelta::from_unit(1.5, "s"), Ok(1_500_000_000));
+        assert_eq!(Timedelta::from_unit(0.0, "s"), Ok(0));
+        assert_eq!(Timedelta::from_unit(-2.5, "s"), Ok(-2_500_000_000));
+        assert_eq!(Timedelta::from_unit(1.0, "D"), Ok(Timedelta::NANOS_PER_DAY));
+        assert_eq!(
+            Timedelta::from_unit(3.0, "h"),
+            Ok(3 * Timedelta::NANOS_PER_HOUR)
+        );
+        // Just inside the representable range still returns its exact product,
+        // so the boundary is pinned from the accepting side as well.
+        let big_days = 100_000.0_f64;
+        let expected = (big_days * Timedelta::NANOS_PER_DAY as f64).round() as i64;
+        assert_eq!(Timedelta::from_unit(big_days, "D"), Ok(expected));
+        assert!(expected > 0, "fixture must stay in range to be a control");
+
+        // ── an unknown unit is still InvalidFormat, NOT Overflow — the unit
+        // check must keep running before the range check.
+        assert!(matches!(
+            Timedelta::from_unit(1.0, "nonsense-unit"),
+            Err(TimedeltaError::InvalidFormat(_))
+        ));
+        assert!(matches!(
+            Timedelta::from_unit(f64::NAN, "nonsense-unit"),
+            Err(TimedeltaError::InvalidFormat(_)),
+        ));
+
+        // ── the already-guarded sibling is unchanged. NOTE the input shape:
+        // the compound lexer accepts only digits, '.' and '-', so scientific
+        // notation is an InvalidFormat, not an Overflow — the overflow case
+        // needs a long decimal literal (this is zw3mg's own fixture).
+        let huge = format!("{} days", "9".repeat(18));
+        assert!(matches!(
+            Timedelta::parse(&huge),
+            Err(TimedeltaError::Overflow)
+        ));
+        assert!(matches!(
+            Timedelta::parse("1e100 days"),
+            Err(TimedeltaError::InvalidFormat(_))
+        ));
     }
 
     #[test]
