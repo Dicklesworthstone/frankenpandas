@@ -6894,11 +6894,14 @@ mod tests {
             if count == 0 {
                 return (Scalar::Timedelta64(0), Scalar::Timedelta64(Timedelta::NAT));
             }
-            let sum = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
-            let mean = (sum / count).clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+            // br-frankenpandas-opz27: this reference oracle used to clamp, which
+            // is the exact behaviour the production path was just fixed away
+            // from. Keeping the clamp here would leave the oracle blessing a
+            // contradicted rule (it only ever agreed because these inputs do
+            // not overflow). Mirror the representable-range contract instead.
             (
-                Scalar::Timedelta64(sum as i64),
-                Scalar::Timedelta64(mean as i64),
+                super::timedelta_ns_to_scalar(sum),
+                super::timedelta_ns_to_scalar(sum / count),
             )
         }
 
@@ -8784,10 +8787,11 @@ mod tests {
                     continue;
                 };
                 running_sum = running_sum.saturating_add(i128::from(*ns));
-                let clamped = running_sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
                 running_max = Some(running_max.map_or(*ns, |current| current.max(*ns)));
                 running_min = Some(running_min.map_or(*ns, |current| current.min(*ns)));
-                sum.push(Scalar::Timedelta64(clamped as i64));
+                // br-frankenpandas-opz27: mirror the production contract (NaT
+                // outside the representable range), not the old clamp.
+                sum.push(super::timedelta_ns_to_scalar(running_sum));
                 max.push(Scalar::Timedelta64(running_max.expect("initialized")));
                 min.push(Scalar::Timedelta64(running_min.expect("initialized")));
             }

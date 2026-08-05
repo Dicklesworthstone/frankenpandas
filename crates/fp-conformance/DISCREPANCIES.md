@@ -105,6 +105,17 @@
 - **Tests affected:** `packet_filter_runs_dataframe_concat_axis1_packet`, `packet_filter_runs_dataframe_to_json_records_packet`, `fuzz_json_io_bytes_accepts_records_seed_fixture` (the records seed has `[{"temp":72},{"temp":null}]` — read promotes to Float64, write emits `72.0` instead of `72`, reparse + diff detects the drift), plus other downstream packets that hit the same root cause.
 - **Review date:** 2026-04-26
 
+### DISC-018: Timedelta/Timestamp arithmetic overflow surfaces as NaT (pandas raises)
+- **Reference:** pandas 2.2.3 is **not uniform** here, which is the load-bearing fact. Probed live against the installed oracle:
+  - **RAISES** — `Series + Timedelta`, `Series - Series`, `Series.diff` → `OverflowError: Overflow in int64 addition`; `Series.sum()`, `Series.std()` → `ValueError: overflow in timedelta operation`; `Timedelta.max + Timedelta('1ns')` → `OverflowError`; `Timestamp.max + Timedelta('1ns')` → `OutOfBoundsDatetime`; `Series([tmin,tmax]).max() - .min()` (the ptp expression) → `OverflowError`.
+  - **WRAPS SILENTLY** — `Series.cumsum()` and `Series * 2` wrap modulo 2^64 with no exception (raw numpy int64), e.g. `Timedelta.max * 2` → `-1 days +23:59:59.999999998`. `Period` arithmetic likewise wraps with no check at all.
+  - **Returns NaT** — `Series([tmax, tmax]).mean()` (pandas' own internal float cast overflows).
+- **Our impl:** FrankenPandas returns **NaT** wherever the exact result is unrepresentable, uniformly, and keeps the helpers infallible (`#[must_use]`, no `Result`). This covers the scalar boundary (`Timedelta::{add,sub,mul_scalar}`, `Timestamp::{add_timedelta,sub_timedelta}`, `Timedelta::from_unit`) and the vectorized reduction surface (`nansum`, `nanptp`, `nancumsum`). The representable range is `[i64::MIN + 1, i64::MAX]`, since `i64::MIN` is the NaT sentinel.
+- **Impact:** A caller who overflows gets a missing value where pandas would raise, and NaT is indistinguishable from a genuinely missing input. This is a deliberate trade, not an oversight: the alternative previously in the tree was **saturation**, which fabricated a finite ~106751-day Timedelta and presented it as real data — fail-open, and strictly worse than either pandas behavior. Fail-closed-as-missing beats fail-open-as-plausible-data. Where pandas *wraps*, we deliberately do not chase the wrap (wrapping is not better behavior than NaT, and matching it would need its own justification).
+- **Resolution:** ACCEPTED for the current API shape; making overflow *observable* (a `Result` at the fp-types boundary, or a strict/hardened mode split where STRICT raises and HARDENED surfaces NaT with an audit-log entry) is the open API decision tracked in `br-frankenpandas-fyr1z`. Escalating to `Result` would force ~12 elementwise call sites to re-litigate raise-vs-propagate, so it is not smuggled in here. Precedent: `Timedelta::div_scalar` already documents returning NaT on divide-by-zero where pandas raises.
+- **Tests affected:** `nansum_timedelta_overflow_is_nat_not_fabricated_max_opz27`, `nansum_timedelta_negative_overflow_is_nat_opz27`, `nanptp_timedelta_overflow_is_nat_opz27`, `nancumsum_timedelta_overflow_recovers_exact_value_opz27`, `nancumsum_timedelta_exact_path_unchanged_opz27` (all in `fp-types`). Beads: `br-frankenpandas-lgyy8`, `br-frankenpandas-8v92m`, `br-frankenpandas-opz27`; decision tracked in `br-frankenpandas-fyr1z`.
+- **Review date:** 2026-08-05
+
 ## Resolved Divergences
 
 ### DISC-005: Mixed string/numeric constructors now preserve pandas object semantics
