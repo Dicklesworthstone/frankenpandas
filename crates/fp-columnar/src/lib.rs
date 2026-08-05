@@ -23185,7 +23185,21 @@ impl Column {
                 if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
                     out.push(Scalar::Null(NullKind::NaT));
                 } else {
-                    out.push(Scalar::Timedelta64(cur_ns.saturating_sub(*prev_ns)));
+                    // br-frankenpandas-zffwp: subtract in i128 and surface NaT
+                    // when the difference is unrepresentable. `saturating_sub`
+                    // fabricated a finite ~106751-day Timedelta and presented
+                    // it as real data — the br-frankenpandas-lgyy8 fail-open
+                    // class, reachable here with a large positive minus a large
+                    // negative. Live pandas 2.2.3 raises OverflowError on
+                    // `.diff()`; FP surfaces NaT per DISC-018, keeping this
+                    // path infallible. `i64::MIN` is the NaT sentinel, so the
+                    // representable range is [i64::MIN + 1, i64::MAX].
+                    let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
+                    if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                        out.push(Scalar::Null(NullKind::NaT));
+                    } else {
+                        out.push(Scalar::Timedelta64(delta as i64));
+                    }
                 }
                 continue;
             }
@@ -37066,6 +37080,49 @@ mod tests {
             assert!(d.values()[0].is_missing());
             assert!(d.values()[1].is_missing()); // NaT current → NaT
             assert!(d.values()[2].is_missing()); // NaT previous → NaT
+        }
+
+        /// br-frankenpandas-zffwp: `saturating_sub` used to fabricate a finite
+        /// ~106751-day Timedelta when the difference did not fit in i64. Live
+        /// pandas 2.2.3 raises `OverflowError` on `.diff()` here; FP surfaces
+        /// NaT (DISC-018). A saturating implementation returns
+        /// `Timedelta64(i64::MAX)` and fails this test.
+        #[test]
+        fn diff_timedelta64_overflow_is_nat_not_fabricated_max_zffwp() {
+            let big = i64::MAX / 2 + 2;
+            let col = Column::from_values(vec![
+                Scalar::Timedelta64(-big), // previous
+                Scalar::Timedelta64(big),  // current: true delta exceeds i64::MAX
+            ])
+            .expect("col");
+            let d = col.diff(1).expect("diff");
+            assert_eq!(d.dtype(), DType::Timedelta64);
+            assert!(d.values()[0].is_missing()); // first row → NaT
+            assert!(
+                d.values()[1].is_missing(),
+                "unrepresentable diff must be NaT, got {:?}",
+                d.values()[1]
+            );
+            assert_ne!(d.values()[1], Scalar::Timedelta64(i64::MAX));
+        }
+
+        /// The boundary the old clamp got wrong: `i64::MIN` is the NaT
+        /// sentinel, so the most-negative *representable* difference is
+        /// `i64::MIN + 1` and must stay a real value rather than collapsing
+        /// into missing one nanosecond below it.
+        #[test]
+        fn diff_timedelta64_representable_extremes_stay_exact_zffwp() {
+            let col = Column::from_values(vec![
+                Scalar::Timedelta64(i64::MAX),
+                Scalar::Timedelta64(0),
+                Scalar::Timedelta64(-1),
+            ])
+            .expect("col");
+            let d = col.diff(1).expect("diff");
+            // 0 - i64::MAX == i64::MIN + 1: exactly representable, not NaT.
+            assert_eq!(d.values()[1], Scalar::Timedelta64(i64::MIN + 1));
+            assert!(!d.values()[1].is_missing());
+            assert_eq!(d.values()[2], Scalar::Timedelta64(-1));
         }
 
         #[test]
