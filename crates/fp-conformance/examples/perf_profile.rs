@@ -66,6 +66,29 @@ fn build_series_pair_same(n: usize) -> (Series, Series) {
     (left, right)
 }
 
+/// Frame with a Utf8 GROUP-KEY column (~`num_groups` distinct ~16-char
+/// strings) + a Float64 value, for the string-keyed groupby probe
+/// (br-frankenpandas-vecff follow-up).
+fn build_str_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
+    let g = num_groups.max(1);
+    let keys: Vec<Scalar> = (0..n)
+        .map(|i| Scalar::Utf8(format!("group_{:06}", i % g)))
+        .collect();
+    let values: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 0.1)).collect();
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let key_column = fp_columnar::Column::from_values(keys).expect("key column");
+    let value_column = fp_columnar::Column::from_values(values).expect("value column");
+    let mut columns = BTreeMap::new();
+    columns.insert("k".to_string(), key_column);
+    columns.insert("v".to_string(), value_column);
+    DataFrame::new_with_column_order(
+        Index::new(labels),
+        columns,
+        vec!["k".to_string(), "v".to_string()],
+    )
+    .expect("frame")
+}
+
 fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
     let keys: Vec<Scalar> = (0..n)
         .map(|i| Scalar::Int64((i % num_groups) as i64))
@@ -246,6 +269,11 @@ fn run_golden(scenario: &str, n: usize) {
         "drop_duplicates" => build_groupby_frame(n, 100)
             .drop_duplicates(None, DuplicateKeep::First, false)
             .expect("dedup"),
+        "str_groupby" => build_str_groupby_frame(n, 512)
+            .groupby(&["k"])
+            .expect("gb")
+            .sum()
+            .expect("sum"),
         "sort_single" => build_numeric_frame(n, 4)
             .sort_values("c0", true)
             .expect("sort"),
@@ -542,6 +570,13 @@ fn main() {
             let s = build_str_series(n);
             for _ in 0..iters {
                 let out = s.sort_values(true).expect("sort");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby" => {
+            let frame = build_str_groupby_frame(n, 512);
+            for _ in 0..iters {
+                let out = frame.groupby(&["k"]).expect("gb").sum().expect("sum");
                 sink = sink.wrapping_add(out.len());
             }
         }

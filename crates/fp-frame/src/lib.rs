@@ -106,6 +106,7 @@ use fp_types::{
     common_dtype,
 };
 use regex::Regex;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -721,7 +722,13 @@ enum ScalarKey<'a> {
 }
 
 type GroupKey<'a> = Vec<ScalarKey<'a>>;
-type GroupMap<'a> = HashMap<GroupKey<'a>, Vec<usize>>;
+// FxHashMap (rustc-hash) replaces the std SipHash map for group dedup/
+// accumulation (br-frankenpandas-vecff follow-up). SipHash on the
+// Vec<ScalarKey> row keys was ~37% of string-keyed groupby; FxHash is a
+// safe swap because output ORDER is carried by the `group_order` side Vec
+// (first-seen, then optional sort) and aggregations index the map by key —
+// the map's own iteration order is never observed.
+type GroupMap<'a> = FxHashMap<GroupKey<'a>, Vec<usize>>;
 
 fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
     match value {
@@ -45401,7 +45408,8 @@ impl DataFrameGroupBy<'_> {
                 };
                 positions[g].push(row);
             }
-            let mut groups: GroupMap<'_> = HashMap::with_capacity(group_order.len());
+            let mut groups: GroupMap<'_> =
+                FxHashMap::with_capacity_and_hasher(group_order.len(), Default::default());
             for (g, key) in group_order.iter().enumerate() {
                 groups.insert(key.clone(), std::mem::take(&mut positions[g]));
             }
@@ -45480,7 +45488,8 @@ impl DataFrameGroupBy<'_> {
                     };
                     positions[g].push(row);
                 }
-                let mut groups: GroupMap<'_> = HashMap::with_capacity(group_order.len());
+                let mut groups: GroupMap<'_> =
+                    FxHashMap::with_capacity_and_hasher(group_order.len(), Default::default());
                 for (g, key) in group_order.iter().enumerate() {
                     groups.insert(key.clone(), std::mem::take(&mut positions[g]));
                 }
@@ -45492,7 +45501,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         let mut group_order: Vec<GroupKey<'_>> = Vec::new();
-        let mut groups: GroupMap<'_> = HashMap::new();
+        let mut groups: GroupMap<'_> = FxHashMap::default();
 
         for row in 0..n {
             // Check if any group key is missing

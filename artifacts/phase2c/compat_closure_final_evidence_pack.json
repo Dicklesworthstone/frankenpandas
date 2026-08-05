@@ -1,5 +1,5 @@
 {
-  "generated_unix_ms": 1780810179834,
+  "generated_unix_ms": 1780860497323,
   "suite_id": "COMPAT-CLOSURE-I",
   "coverage_report": {
     "suite_id": "COMPAT-CLOSURE-E",
@@ -71,7 +71,7 @@
     ]
   },
   "reproducibility_ledger": {
-    "env_fingerprint": "30870abbbd9aa5a26fdc566a08beabc1667d21a8a6482d26db2edd8df4f115f3",
+    "env_fingerprint": "6afb1eb33e936cb3fc0cc9d3c4a629973414f8b2fffc08e8d726016e82292ce8",
     "lockfile_path": "Cargo.lock",
     "replay_commands": [
       "rch exec -- cargo run -p fp-conformance --bin fp-conformance-cli -- --packet-id FP-P2C-001 --write-artifacts --require-green --write-drift-history --write-differential-validation --write-fault-injection --write-e2e-scenarios --write-final-evidence-pack",
@@ -87,9 +87,9 @@
       "artifacts/phase2c/COMPAT_CLOSURE_TEST_LOGGING_EVIDENCE.md": "sha256:3c043387f7048cc0139753af0e9428d165d26c1e446afd381021a756be48b7d7",
       "artifacts/phase2c/FP-P2C-001/parity_gate_result.json": "sha256:399b3a292dcdf042c533b6d359a90b02d85d38f4a682647108b9f7d7272f1a1b",
       "artifacts/phase2c/FP-P2C-001/parity_mismatch_corpus.json": "sha256:dcdeca1387618fb84b2e690b13182a033bf2d8dc5923bee48e9cdf204884c276",
-      "artifacts/phase2c/FP-P2C-001/parity_report.decode_proof.json": "sha256:b8560120b7530f3fede4e29dcfe4192c8584781c92a201fbaaa7522c41da332f",
-      "artifacts/phase2c/FP-P2C-001/parity_report.json": "sha256:3930d07cfd868603f705f4232a775b9519f52592184dcdaa81b85e55195a4335",
-      "artifacts/phase2c/FP-P2C-001/parity_report.raptorq.json": "sha256:944023b91433c54416de9d413e1fa1c96cbe84acf14bb73bc096c6f370432747",
+      "artifacts/phase2c/FP-P2C-001/parity_report.decode_proof.json": "sha256:23223279330fcee9197cd160ea8b4726d5dbe85d22a9c3b2a9fdb39467aa9e00",
+      "artifacts/phase2c/FP-P2C-001/parity_report.json": "sha256:88dfa3a8c1f0ad82c79e2a34981292ff9635a6d412af8f5c57ce450c2685337b",
+      "artifacts/phase2c/FP-P2C-001/parity_report.raptorq.json": "sha256:7d339fffb3805520e48966a03106f98f06ad67d29d9b1db07990e3cb74c23c44",
       "artifacts/phase2c/PERFORMANCE_BASELINES.md": "sha256:7ca200a0e40f0c0ab3e9f13c9df3b1bde2ce8aeea88c06e7d917310d290b5199"
     }
   },
@@ -103,5 +103,5 @@
     "hardened allowlisted divergence count=2"
   ],
   "all_checks_passed": true,
-  "attestation_signature": "sha256:87beda7038f912b7f0247fbecac7091ef147df7d256abf615fd403f14001280c"
+  "attestation_signature": "sha256:187d39becb6b972f74b6090092bde0bfaf6f1b2355b86828cf0f5179abf44d5a"
 }
