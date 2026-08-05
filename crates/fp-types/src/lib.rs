@@ -1768,12 +1768,18 @@ impl Timedelta {
         if unit_nanos == 0 {
             return Self::NAT;
         }
-        nanos.div_euclid(unit_nanos).saturating_mul(unit_nanos)
+        nanos
+            .div_euclid(unit_nanos)
+            .checked_mul(unit_nanos)
+            .unwrap_or(Self::NAT)
     }
 
     /// Rounds up to the nearest frequency unit.
     ///
-    /// Matches pandas `pd.Timedelta.ceil(freq)`. NaT is preserved.
+    /// Matches pandas `pd.Timedelta.ceil(freq)`. NaT is preserved; overflow
+    /// → NaT (`pd.Timedelta.max.ceil('D')` raises `OutOfBoundsTimedelta:
+    /// Cannot round ... without overflow`, so a clamped `i64::MAX` would be a
+    /// fabricated finite duration — see br-frankenpandas-kyd16).
     #[must_use]
     pub fn ceil(nanos: i64, freq: &str) -> i64 {
         if nanos == Self::NAT {
@@ -1789,7 +1795,9 @@ impl Timedelta {
         if remainder == 0 {
             nanos
         } else {
-            nanos.saturating_add(unit_nanos - remainder)
+            nanos
+                .checked_add(unit_nanos - remainder)
+                .unwrap_or(Self::NAT)
         }
     }
 
@@ -1815,20 +1823,43 @@ impl Timedelta {
         let remainder = abs_nanos % unit_nanos;
         let half = unit_nanos / 2;
 
+        // Round-UP must be checked (br-frankenpandas-kyd16). `quotient *
+        // unit_nanos` is always <= abs_nanos and cannot overflow, but
+        // `(quotient + 1) * unit_nanos` can exceed i64::MAX — and this used
+        // UNCHECKED arithmetic, so it panicked in debug and WRAPPED to a
+        // large-negative duration in release. pandas raises
+        // OutOfBoundsTimedelta ("Cannot round ... without overflow"); we
+        // surface NaT, consistent with the rest of this block.
+        let round_up = || {
+            quotient
+                .checked_add(1)
+                .and_then(|q| q.checked_mul(unit_nanos))
+        };
         let rounded = if remainder > half {
-            (quotient + 1) * unit_nanos
+            round_up()
         } else if remainder < half {
-            quotient * unit_nanos
+            Some(quotient * unit_nanos)
         } else {
             // Exactly half: round to even
             if quotient % 2 == 0 {
-                quotient * unit_nanos
+                Some(quotient * unit_nanos)
             } else {
-                (quotient + 1) * unit_nanos
+                round_up()
             }
         };
 
-        if negative { -rounded } else { rounded }
+        match rounded {
+            // Negating is safe: `rounded` is non-negative and at most i64::MAX,
+            // so `-rounded` is at worst i64::MIN + 1 — never the NaT sentinel.
+            Some(rounded) => {
+                if negative {
+                    -rounded
+                } else {
+                    rounded
+                }
+            }
+            None => Self::NAT,
+        }
     }
 }
 
@@ -2125,7 +2156,14 @@ impl Timestamp {
         let nanos = if rem == 0 {
             self.nanos
         } else {
-            self.nanos.saturating_add(unit_nanos - rem)
+            // Checked, matching the sibling `floor_to` directly above
+            // (br-frankenpandas-kyd16). A clamped i64::MAX would be a finite,
+            // plausible ~year-2262 instant; `pd.Timestamp.max.ceil('D')`
+            // raises OutOfBoundsDatetime "Cannot round ... without overflow".
+            let Some(nanos) = self.nanos.checked_add(unit_nanos - rem) else {
+                return Self::nat();
+            };
+            nanos
         };
         Self {
             nanos,
@@ -2157,8 +2195,14 @@ impl Timestamp {
             // Tie: pick the even multiple.
             if floor % 2 == 0 { floor } else { floor + 1 }
         };
+        // Checked, matching the sibling `floor_to` (br-frankenpandas-kyd16):
+        // `pd.Timestamp.max.round('D')` raises OutOfBoundsDatetime rather than
+        // returning the clamped i64::MAX instant.
+        let Some(nanos) = chosen_floor.checked_mul(unit_nanos) else {
+            return Self::nat();
+        };
         Self {
-            nanos: chosen_floor.saturating_mul(unit_nanos),
+            nanos,
             tz: self.tz.clone(),
         }
     }
@@ -3261,11 +3305,17 @@ impl Timestamp {
 
     /// Create a Timestamp from milliseconds since epoch.
     ///
-    /// Convenience constructor complementing fromtimestamp.
+    /// Convenience constructor complementing fromtimestamp. An `ms` outside
+    /// the representable nanosecond range → NaT, matching `fromtimestamp`
+    /// directly above (br-frankenpandas-kyd16); the previous
+    /// `saturating_mul` handed back a finite ~year-2262 instant instead.
     #[must_use]
     pub fn from_millis(ms: i64, tz: Option<&str>) -> Self {
+        let Some(nanos) = ms.checked_mul(1_000_000) else {
+            return Self::nat();
+        };
         Self {
-            nanos: ms.saturating_mul(1_000_000),
+            nanos,
             tz: tz.map(String::from),
         }
     }
@@ -3275,8 +3325,11 @@ impl Timestamp {
     /// Convenience constructor complementing fromtimestamp.
     #[must_use]
     pub fn from_micros(us: i64, tz: Option<&str>) -> Self {
+        let Some(nanos) = us.checked_mul(1_000) else {
+            return Self::nat();
+        };
         Self {
-            nanos: us.saturating_mul(1_000),
+            nanos,
             tz: tz.map(String::from),
         }
     }
@@ -10733,6 +10786,112 @@ mod tests {
         // pandas `pd.Timedelta.max * 2` raises OverflowError.
         assert_eq!(Timedelta::mul_scalar(i64::MAX, 2), Timedelta::NAT);
         assert_eq!(Timedelta::mul_scalar(i64::MIN + 1, 2), Timedelta::NAT);
+    }
+
+    #[test]
+    fn rounding_and_ms_us_overflow_never_fabricates_a_finite_value_kyd16() {
+        // br-frankenpandas-kyd16, the sibling sweep of lgyy8. Three defects:
+        //   (1) Timedelta::round used UNCHECKED `(quotient + 1) * unit_nanos`
+        //       on the round-up branch — debug PANIC, release WRAP to a
+        //       large-negative duration.
+        //   (2) Timedelta::floor/ceil and Timestamp::ceil_to/round_to
+        //       saturated to i64::MAX, a finite plausible duration / ~year-2262
+        //       instant handed back as real data — while their own sibling
+        //       Timestamp::floor_to was ALREADY checked.
+        //   (3) Timestamp::from_millis/from_micros saturated likewise, while
+        //       their neighbour `fromtimestamp` already returned NaT.
+        // Live pandas 2.2.3 raises on every one of these and names the cause:
+        //   Timestamp.max.ceil('D')/round('D') -> OutOfBoundsDatetime
+        //       "Cannot round 2262-04-11 23:47:16.854775807 to freq=<Day> without overflow"
+        //   Timestamp.min.floor('D')           -> OutOfBoundsDatetime (same)
+        //   Timedelta.max.ceil('D')/round('D') -> OutOfBoundsTimedelta (same shape)
+        //   Timedelta.min.floor('D')           -> OutOfBoundsTimedelta (same)
+        // ...but Timestamp.max.floor('D') is an ordinary in-range answer and
+        // must NOT change. Both halves are asserted below.
+        const MAX: i64 = i64::MAX;
+        const MIN_OK: i64 = i64::MIN + 1;
+        const DAY: i64 = Timedelta::NANOS_PER_DAY;
+
+        // ── (1) round(): must not panic, must not wrap negative ────────────
+        let rounded = Timedelta::round(MAX, "D");
+        assert_eq!(
+            rounded,
+            Timedelta::NAT,
+            "rounding i64::MAX up to a whole day overflows; the old unchecked \
+             multiply panicked in debug and wrapped in release"
+        );
+        // The wrap signature specifically: a positive input must never round
+        // to a negative duration. This fails for a wrapping impl even if the
+        // debug panic is somehow avoided.
+        assert!(
+            rounded == Timedelta::NAT || rounded > 0,
+            "a positive duration must never round to a negative one"
+        );
+        assert_eq!(Timedelta::round(MIN_OK, "D"), Timedelta::NAT);
+
+        // ── (2) floor/ceil overflow -> NaT, not a fabricated finite value ──
+        assert_eq!(Timedelta::ceil(MAX, "D"), Timedelta::NAT);
+        assert_eq!(Timedelta::floor(MIN_OK, "D"), Timedelta::NAT);
+        assert!(Timestamp::from_nanos(MAX).ceil_to(DAY).is_nat());
+        assert!(Timestamp::from_nanos(MAX).round_to(DAY).is_nat());
+        assert!(Timestamp::from_nanos(MIN_OK).floor_to(DAY).is_nat());
+        assert!(Timestamp::from_nanos(MIN_OK).round_to(DAY).is_nat());
+
+        // ── (3) ms/us constructors out of range -> NaT ─────────────────────
+        assert!(Timestamp::from_millis(MAX, None).is_nat());
+        assert!(Timestamp::from_millis(MIN_OK, None).is_nat());
+        assert!(Timestamp::from_micros(MAX, None).is_nat());
+        assert!(Timestamp::from_micros(MIN_OK, Some("US/Eastern")).is_nat());
+
+        // ── CONTROL: in-range rounding is untouched. An implementation that
+        // NaT'd too eagerly — or that treated "near the limit" as overflow —
+        // fails every assertion below.
+        //
+        // Timestamp.max.floor('D') is the exact case pandas ANSWERS rather
+        // than raising, so it pins the boundary from the other side.
+        let max_floor = Timestamp::from_nanos(MAX).floor_to(DAY);
+        assert!(!max_floor.is_nat(), "Timestamp.max.floor(D) must succeed");
+        assert_eq!(max_floor.nanos, (MAX / DAY) * DAY);
+        assert_eq!(Timedelta::floor(MAX, "D"), (MAX / DAY) * DAY);
+        assert_eq!(
+            Timedelta::ceil(MIN_OK, "D"),
+            (MIN_OK.div_euclid(DAY) + 1) * DAY
+        );
+
+        // Ordinary values, bit-for-bit.
+        let hour = Timedelta::NANOS_PER_HOUR;
+        assert_eq!(Timedelta::floor(90 * 60 * 1_000_000_000, "h"), hour);
+        assert_eq!(Timedelta::ceil(90 * 60 * 1_000_000_000, "h"), 2 * hour);
+        assert_eq!(Timedelta::round(90 * 60 * 1_000_000_000, "h"), 2 * hour);
+        assert_eq!(Timedelta::round(-90 * 60 * 1_000_000_000, "h"), -2 * hour);
+        assert_eq!(Timedelta::round(29 * 60 * 1_000_000_000, "h"), 0);
+        assert_eq!(Timestamp::from_millis(1_500, None).nanos, 1_500_000_000);
+        assert_eq!(Timestamp::from_micros(-2_000, None).nanos, -2_000_000);
+        assert_eq!(
+            Timestamp::from_nanos(hour + 1).floor_to(hour).nanos,
+            hour,
+            "in-range floor unchanged"
+        );
+        assert_eq!(
+            Timestamp::from_nanos(hour + 1).ceil_to(hour).nanos,
+            2 * hour,
+            "in-range ceil unchanged"
+        );
+
+        // NaT / degenerate-unit inputs unchanged.
+        assert_eq!(Timedelta::round(Timedelta::NAT, "D"), Timedelta::NAT);
+        assert_eq!(Timedelta::floor(Timedelta::NAT, "D"), Timedelta::NAT);
+        assert_eq!(Timedelta::ceil(1_000, "nonsense-unit"), Timedelta::NAT);
+        assert!(Timestamp::nat().ceil_to(DAY).is_nat());
+        assert!(Timestamp::from_nanos(0).round_to(0).is_nat());
+        // A non-overflowing round still carries its zone.
+        assert_eq!(
+            Timestamp::from_nanos_tz(hour + 1, "US/Eastern")
+                .ceil_to(hour)
+                .tz
+                .as_deref(),
+            Some("US/Eastern")
+        );
     }
 
     #[test]
