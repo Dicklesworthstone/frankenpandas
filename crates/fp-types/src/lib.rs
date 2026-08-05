@@ -3482,10 +3482,34 @@ fn collect_timedelta_ns(values: &[Scalar]) -> Option<(i128, usize)> {
     }
 }
 
+/// Narrow an exact `i128` nanosecond quantity back to a `Timedelta64` scalar,
+/// surfacing NaT when the value is not representable.
+///
+/// Per br-frankenpandas-opz27, this replaces the `clamp(i64::MIN, i64::MAX)`
+/// the reduction paths used to do, which failed open twice over:
+///
+/// - a positive overflow became `i64::MAX`, a fabricated finite ~106751-day
+///   Timedelta presented as real data (the br-frankenpandas-lgyy8 class);
+/// - `Timedelta::NAT` *is* `i64::MIN`, so the clamp's lower bound landed
+///   exactly on the missing sentinel — a negative overflow silently became
+///   NaT by accident, and the bound was off by one against the true minimum.
+///
+/// The representable range is therefore `[i64::MIN + 1, i64::MAX]`, and both
+/// overflow directions now yield NaT deliberately. Live pandas 2.2.3 raises
+/// (`OverflowError` / `ValueError: overflow in timedelta operation`) where
+/// these reductions overflow; FP surfaces NaT instead, matching the
+/// infallible-helper convention established by `Timedelta::div_scalar` and
+/// br-frankenpandas-lgyy8. Every exactly-representable result is unaffected.
+fn timedelta_ns_to_scalar(ns: i128) -> Scalar {
+    if ns > i128::from(i64::MAX) || ns <= i128::from(i64::MIN) {
+        return Scalar::Timedelta64(Timedelta::NAT);
+    }
+    Scalar::Timedelta64(ns as i64)
+}
+
 pub fn nansum(values: &[Scalar]) -> Scalar {
     if let Some((sum, _)) = collect_timedelta_ns(values) {
-        let clamped = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
-        return Scalar::Timedelta64(clamped as i64);
+        return timedelta_ns_to_scalar(sum);
     }
     // Fused single-pass fold: filter missing / non-f64-coercible and accumulate
     // in one scan, avoiding the intermediate `collect_finite` Vec<f64> and its
@@ -3508,9 +3532,9 @@ pub fn nanmean(values: &[Scalar]) -> Scalar {
         if count == 0 {
             return Scalar::Timedelta64(Timedelta::NAT);
         }
-        let mean = sum / count as i128;
-        let clamped = mean.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
-        return Scalar::Timedelta64(clamped as i64);
+        // |sum / count| <= max|ns| for count >= 1, so the mean of representable
+        // inputs is always representable; the narrowing is defensive only.
+        return timedelta_ns_to_scalar(sum / count as i128);
     }
     // Fused single-pass fold (see `nansum`): accumulate sum + count of finite
     // values in one scan. Bit-identical to the prior `collect_finite` two-pass:
@@ -3861,7 +3885,10 @@ pub fn nanptp(values: &[Scalar]) -> Scalar {
         }
     }
     if all_timedelta && saw_timedelta {
-        return Scalar::Timedelta64(td_hi.saturating_sub(td_lo));
+        // Subtract in i128: the true range of two representable Timedeltas can
+        // exceed i64 (max - min overflows), where live pandas 2.2.3 raises
+        // OverflowError. Saturating here fabricated a finite Timedelta.max.
+        return timedelta_ns_to_scalar(i128::from(td_hi) - i128::from(td_lo));
     }
     // Fused single-pass min/max (see `nansum`): track lo/hi while filtering, no
     // intermediate Vec<f64>. Bit-identical to the prior collect_finite two-pass:
@@ -4049,9 +4076,14 @@ where
             continue;
         }
         if let Scalar::Timedelta64(ns) = v {
+            // `running` is exact: i128 has enough headroom that folding i64
+            // nanoseconds cannot overflow it for any constructible input. Only
+            // the narrowing to the output element can fail, so a running sum
+            // that overflows i64 and later returns to range emits its true
+            // value again instead of poisoning the tail — nothing is
+            // fabricated at any index.
             running = step(running, i128::from(*ns));
-            let clamped = running.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
-            out.push(Scalar::Timedelta64(clamped as i64));
+            out.push(timedelta_ns_to_scalar(running));
         } else {
             out.push(Scalar::Null(NullKind::NaT));
         }
@@ -7071,6 +7103,103 @@ mod tests {
         // NAT is missing → skipped. Sum: 1h+3h=4h; mean: 2h.
         assert_eq!(super::nansum(&vals), Scalar::Timedelta64(4 * one_hour));
         assert_eq!(super::nanmean(&vals), Scalar::Timedelta64(2 * one_hour));
+    }
+
+    /// br-frankenpandas-opz27: the Timedelta reduction surface used to narrow
+    /// its exact i128 accumulator with `clamp(i64::MIN, i64::MAX)`, which
+    /// fabricated a finite Timedelta.max on positive overflow. Live pandas
+    /// 2.2.3 raises `ValueError: overflow in timedelta operation` here; FP
+    /// surfaces NaT per the lgyy8 convention. A clamping implementation
+    /// returns `Timedelta64(i64::MAX)` and fails this.
+    #[test]
+    fn nansum_timedelta_overflow_is_nat_not_fabricated_max_opz27() {
+        let vals = vec![Scalar::Timedelta64(i64::MAX), Scalar::Timedelta64(i64::MAX)];
+        let got = super::nansum(&vals);
+        assert!(got.is_missing(), "overflowing sum must be missing, got {got:?}");
+        assert_eq!(got, Scalar::Timedelta64(Timedelta::NAT));
+        assert_ne!(got, Scalar::Timedelta64(i64::MAX));
+    }
+
+    /// The negative direction used to reach NaT only *by accident*, because
+    /// `Timedelta::NAT == i64::MIN` is exactly the clamp's lower bound — and
+    /// that bound is off by one against the true minimum (`i64::MIN + 1`).
+    /// Pin both the sentinel and the boundary so the accident becomes a rule.
+    #[test]
+    fn nansum_timedelta_negative_overflow_is_nat_opz27() {
+        let min_repr = i64::MIN + 1; // Timedelta.min; i64::MIN is the NaT sentinel
+        let vals = vec![
+            Scalar::Timedelta64(min_repr),
+            Scalar::Timedelta64(min_repr),
+        ];
+        assert_eq!(super::nansum(&vals), Scalar::Timedelta64(Timedelta::NAT));
+
+        // Exactly the most-negative representable total stays a real value and
+        // must NOT collapse into the sentinel one nanosecond above it.
+        let exact = vec![
+            Scalar::Timedelta64(min_repr + 1),
+            Scalar::Timedelta64(-1),
+        ];
+        let got = super::nansum(&exact);
+        assert_eq!(got, Scalar::Timedelta64(min_repr));
+        assert!(!got.is_missing(), "Timedelta.min is representable, not NaT");
+    }
+
+    /// pandas 2.2.3: `Series([Timedelta.min, Timedelta.max]).max() - .min()`
+    /// raises OverflowError. FP used `saturating_sub`, fabricating
+    /// Timedelta.max as a plausible range.
+    #[test]
+    fn nanptp_timedelta_overflow_is_nat_opz27() {
+        let vals = vec![
+            Scalar::Timedelta64(i64::MIN + 1),
+            Scalar::Timedelta64(i64::MAX),
+        ];
+        let got = super::nanptp(&vals);
+        assert!(got.is_missing(), "unrepresentable range must be NaT, got {got:?}");
+        assert_ne!(got, Scalar::Timedelta64(i64::MAX));
+
+        // A representable range is still exact to the nanosecond (the reason
+        // this path avoids f64 at all).
+        let hour = 3_600 * 1_000_000_000_i64;
+        let ok = vec![Scalar::Timedelta64(hour), Scalar::Timedelta64(4 * hour)];
+        assert_eq!(super::nanptp(&ok), Scalar::Timedelta64(3 * hour));
+    }
+
+    /// The load-bearing cumsum case: accumulation stays exact in i128, so only
+    /// the *unrepresentable* index goes NaT and a later index that returns to
+    /// range emits its true value. A clamping implementation pins `running` at
+    /// i64::MAX and can never produce the final value, so it fails this test.
+    #[test]
+    fn nancumsum_timedelta_overflow_recovers_exact_value_opz27() {
+        let vals = vec![
+            Scalar::Timedelta64(i64::MAX),
+            Scalar::Timedelta64(i64::MAX), // true total 2*i64::MAX: unrepresentable
+            Scalar::Timedelta64(i64::MIN + 1), // back in range: total == i64::MAX
+        ];
+        let out = super::nancumsum(&vals);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], Scalar::Timedelta64(i64::MAX));
+        assert!(out[1].is_missing(), "overflowed index must be NaT, got {:?}", out[1]);
+        assert_eq!(
+            out[2],
+            Scalar::Timedelta64(i64::MAX),
+            "exact i128 accumulation must recover; a clamped running sum cannot"
+        );
+    }
+
+    /// Non-overflowing cumsum is unchanged bit-for-bit, and input NaT still
+    /// passes through without advancing the running total.
+    #[test]
+    fn nancumsum_timedelta_exact_path_unchanged_opz27() {
+        let sec = 1_000_000_000_i64;
+        let vals = vec![
+            Scalar::Timedelta64(sec),
+            Scalar::Timedelta64(Timedelta::NAT),
+            Scalar::Timedelta64(2 * sec),
+        ];
+        let out = super::nancumsum(&vals);
+        assert_eq!(out[0], Scalar::Timedelta64(sec));
+        assert!(out[1].is_missing());
+        assert_eq!(out[2], Scalar::Timedelta64(3 * sec));
     }
 
     #[test]
