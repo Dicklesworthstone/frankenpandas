@@ -13890,8 +13890,12 @@ impl Column {
         //   Timedelta64 + Datetime64   -> Datetime64   (commutative)
         //   Datetime64  - Timedelta64  -> Datetime64
         // The VALUE is uniformly the raw-ns `Timedelta::add`/`Timedelta::sub` (NaT-propagating,
-        // saturating — the SAME helpers the rest of FP uses in Series.diff / reductions /
-        // Timestamp::{add,sub}_timedelta, so byte-consistent); only the OUTPUT dtype differs.
+        // and CHECKED — br-frankenpandas-lgyy8 replaced the old saturating arithmetic, which
+        // fabricated a finite ~106751-day Timedelta at the i64 boundary, with
+        // `checked_*().unwrap_or(NAT)`. These are the SAME helpers the rest of FP uses in
+        // Series.diff / reductions / Timestamp::{add,sub}_timedelta, so byte-consistent);
+        // only the OUTPUT dtype differs. Overflow therefore yields NaT, which the validity
+        // fold-down below turns into a properly-masked missing row rather than plausible data.
         // A row is missing iff either operand is missing (validity unset OR the NaT sentinel,
         // which add/sub fold into a NaT result). Every OTHER temporal combo — Datetime64 +
         // Datetime64 (pandas raises), Timedelta64 - Datetime64 (raises), mul/div/mod/pow/
@@ -30730,8 +30734,10 @@ mod tests {
     #[test]
     fn temporal_two_col_arith_exact_masks_missing_and_rejects_bad_combos() {
         // Typed temporal arm in binary_numeric: dt - dt -> Timedelta64 (elapsed ns),
-        // td - td / td + td -> Timedelta64, over raw i64 ns with the saturating/
-        // NaT-propagating Timedelta::sub/add the rest of FP uses. A row is missing iff
+        // td - td / td + td -> Timedelta64, over raw i64 ns with the checked/
+        // NaT-propagating Timedelta::sub/add the rest of FP uses (br-frankenpandas-lgyy8
+        // replaced the old saturating form; overflow is pinned by the o9e5q tests below).
+        // A row is missing iff
         // either operand is missing (validity unset OR NaT sentinel) => Timedelta64(NaT).
         // Was erroring (to_f64 rejects a temporal scalar). Reference mirrors the arm
         // exactly; values near 1.6e18 >> 2^53 prove exactness. Also asserts the combos
@@ -37104,6 +37110,124 @@ mod tests {
                 d.values()[1]
             );
             assert_ne!(d.values()[1], Scalar::Timedelta64(i64::MAX));
+        }
+
+        /// br-frankenpandas-o9e5q: the two-column temporal arm in
+        /// `binary_numeric` is correct (it routes through the checked
+        /// `Timedelta::add`/`::sub` and folds a NaT result into validity), but
+        /// nothing pinned that — the existing seeded-LCG temporal test never
+        /// reaches the i64 boundary. This closes the gap for both output
+        /// dtypes.
+        ///
+        /// The operands are deliberately `i64::MAX` and `2`, NOT `i64::MAX` and
+        /// `1`, so the test DISCRIMINATES between implementations:
+        ///   checked (correct) -> None -> NAT      -> masked missing, PASSES
+        ///   wrapping          -> i64::MIN + 1     -> a VALID Timedelta.min, FAILS
+        ///   saturating        -> i64::MAX         -> a VALID extreme, FAILS
+        /// With `1` instead of `2`, a wrapping implementation would land exactly
+        /// on the NaT sentinel and pass by accident.
+        #[test]
+        fn temporal_two_col_add_overflow_is_masked_missing_o9e5q() {
+            let validity = ValidityMask::all_valid(1);
+            let td_max =
+                Column::from_timedelta64_values_with_validity(vec![i64::MAX], validity.clone());
+            let td_two = Column::from_timedelta64_values_with_validity(vec![2], validity.clone());
+
+            // Timedelta64 + Timedelta64 -> Timedelta64
+            let sum = td_max
+                .binary_numeric(&td_two, ArithmeticOp::Add)
+                .expect("td + td");
+            assert_eq!(sum.dtype(), DType::Timedelta64);
+            assert!(
+                sum.values()[0].is_missing(),
+                "overflowing td+td must be masked missing, got {:?}",
+                sum.values()[0]
+            );
+            assert_ne!(
+                sum.values()[0],
+                Scalar::Timedelta64(i64::MAX),
+                "saturating would fabricate Timedelta.max here"
+            );
+            assert_ne!(
+                sum.values()[0],
+                Scalar::Timedelta64(i64::MIN + 1),
+                "wrapping would fabricate Timedelta.min here"
+            );
+
+            // Datetime64 + Timedelta64 -> Datetime64 (different output dtype,
+            // same underlying helper).
+            let dt_max =
+                Column::from_datetime64_values_with_validity(vec![i64::MAX], validity.clone());
+            let shifted = dt_max
+                .binary_numeric(&td_two, ArithmeticOp::Add)
+                .expect("dt + td");
+            assert_eq!(shifted.dtype(), DType::Datetime64);
+            assert!(
+                shifted.values()[0].is_missing(),
+                "overflowing dt+td must be masked missing, got {:?}",
+                shifted.values()[0]
+            );
+            assert_ne!(shifted.values()[0], Scalar::Datetime64(i64::MAX));
+        }
+
+        /// Subtraction in BOTH overflow directions, plus an exactness control.
+        ///
+        /// Both directions are needed, and the reason is the sentinel collision
+        /// documented in br-frankenpandas-opz27. Negative-direction saturation
+        /// lands exactly on `i64::MIN`, which IS the NaT sentinel, so a
+        /// saturating implementation would pass the underflow case BY ACCIDENT
+        /// and only a wrapping one gets caught. The positive-direction case
+        /// (`i64::MAX - (-2)`) is what actually discriminates against
+        /// saturation, because it saturates to a VALID `i64::MAX`.
+        #[test]
+        fn temporal_two_col_sub_overflow_and_exact_control_o9e5q() {
+            let validity = ValidityMask::all_valid(1);
+            let td_min =
+                Column::from_timedelta64_values_with_validity(vec![i64::MIN + 1], validity.clone());
+            let td_two = Column::from_timedelta64_values_with_validity(vec![2], validity.clone());
+
+            // Negative direction: catches wrapping (-> i64::MAX - 1, a valid value).
+            let diff = td_min
+                .binary_numeric(&td_two, ArithmeticOp::Sub)
+                .expect("td - td");
+            assert!(
+                diff.values()[0].is_missing(),
+                "underflowing td-td must be masked missing, got {:?}",
+                diff.values()[0]
+            );
+
+            // Positive direction: catches saturating (-> a valid i64::MAX).
+            let td_max =
+                Column::from_timedelta64_values_with_validity(vec![i64::MAX], validity.clone());
+            let td_neg_two =
+                Column::from_timedelta64_values_with_validity(vec![-2], validity.clone());
+            let over = td_max
+                .binary_numeric(&td_neg_two, ArithmeticOp::Sub)
+                .expect("td - td");
+            assert!(
+                over.values()[0].is_missing(),
+                "overflowing td-td must be masked missing, got {:?}",
+                over.values()[0]
+            );
+            assert_ne!(
+                over.values()[0],
+                Scalar::Timedelta64(i64::MAX),
+                "saturating would fabricate Timedelta.max here"
+            );
+
+            // Control: a large, exactly-representable subtraction is unchanged.
+            let a = Column::from_timedelta64_values_with_validity(
+                vec![1_600_000_000_000_000_001],
+                validity.clone(),
+            );
+            let b =
+                Column::from_timedelta64_values_with_validity(vec![1], validity.clone());
+            let exact = a.binary_numeric(&b, ArithmeticOp::Sub).expect("exact");
+            assert_eq!(
+                exact.values()[0],
+                Scalar::Timedelta64(1_600_000_000_000_000_000)
+            );
+            assert!(!exact.values()[0].is_missing());
         }
 
         /// The boundary the old clamp got wrong: `i64::MIN` is the NaT
