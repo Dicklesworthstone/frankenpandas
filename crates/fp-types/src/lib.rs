@@ -1588,25 +1588,49 @@ impl Timedelta {
     //
     // NaT propagation: any arithmetic with `NAT` returns `NAT`. Matches
     // pandas `pd.NaT + anything == NaT`, `pd.NaT - anything == NaT`, etc.
-    // Saturation: i64 overflow clamps to i64::MAX/MIN (never wraps). Matches
-    // pandas's OverflowError surface at the type-system boundary.
+    //
+    // Overflow (br-frankenpandas-lgyy8): i64 overflow yields `NAT` in BOTH
+    // directions. It never wraps and never fabricates a finite value.
+    //
+    // These previously used `saturating_*`, which was asymmetric and failed
+    // OPEN on one side. Because `NAT == i64::MIN`, negative overflow clamped
+    // onto the sentinel and already surfaced as missing — but POSITIVE
+    // overflow clamped to `i64::MAX`, a perfectly valid, finite, plausible
+    // duration (and, for `Timestamp`, a ~year-2262 instant) returned as if it
+    // were real data. Live pandas 2.2.3 never does that, in either the scalar
+    // or the vectorized path:
+    //
+    //   pd.Timedelta.min + Timedelta('-1ns')      -> NaT  (lands on the sentinel)
+    //   pd.Series[datetime64] + Timedelta('-1ns') -> [NaT, ...]
+    //   pd.Timedelta.max + Timedelta('1ns')       -> raises OverflowError
+    //   pd.Timestamp.max + Timedelta('1ns')       -> raises OutOfBoundsDatetime
+    //   pd.Series[datetime64] + Timedelta('1ns')  -> raises OverflowError
+    //   pd.Timestamp.min - pd.Timestamp.max       -> raises OutOfBoundsDatetime
+    //   pd.Timedelta.max * 2                      -> raises OverflowError
+    //
+    // We surface NaT where pandas raises, rather than making these infallible
+    // `#[must_use]` helpers fallible: that is the SAME documented divergence
+    // `div_scalar` already takes for divide-by-zero ("matches pandas, which
+    // raises, but we surface as NaT to avoid panics at the type-system
+    // boundary"). Every input whose exact result is representable is
+    // unaffected bit-for-bit; only overflow moves.
 
-    /// Add two Timedelta nanosecond values. NaT propagates; saturates on overflow.
+    /// Add two Timedelta nanosecond values. NaT propagates; overflow → NaT.
     #[must_use]
     pub fn add(a: i64, b: i64) -> i64 {
         if a == Self::NAT || b == Self::NAT {
             return Self::NAT;
         }
-        a.saturating_add(b)
+        a.checked_add(b).unwrap_or(Self::NAT)
     }
 
-    /// Subtract two Timedelta nanosecond values. NaT propagates; saturates on overflow.
+    /// Subtract two Timedelta nanosecond values. NaT propagates; overflow → NaT.
     #[must_use]
     pub fn sub(a: i64, b: i64) -> i64 {
         if a == Self::NAT || b == Self::NAT {
             return Self::NAT;
         }
-        a.saturating_sub(b)
+        a.checked_sub(b).unwrap_or(Self::NAT)
     }
 
     /// Negate a Timedelta value. NaT stays NaT. Saturates on overflow
@@ -1629,15 +1653,16 @@ impl Timedelta {
     }
 
     /// Multiply a Timedelta value by an integer factor. NaT propagates;
-    /// saturates on overflow.
+    /// overflow → NaT (see the overflow note above).
     ///
-    /// Matches pandas `pd.Timedelta(...) * int`.
+    /// Matches pandas `pd.Timedelta(...) * int`, which raises `OverflowError`
+    /// rather than returning a saturated duration.
     #[must_use]
     pub fn mul_scalar(a: i64, factor: i64) -> i64 {
         if a == Self::NAT {
             return Self::NAT;
         }
-        a.saturating_mul(factor)
+        a.checked_mul(factor).unwrap_or(Self::NAT)
     }
 
     /// Floor-divide a Timedelta value by an integer divisor. NaT propagates.
@@ -1994,39 +2019,56 @@ impl Timestamp {
         Ok(rounded)
     }
 
-    /// Add a Timedelta. NaT in either operand → NaT; saturates on overflow.
+    /// Add a Timedelta. NaT in either operand → NaT; overflow → NaT.
     /// TZ is preserved from `self`.
+    ///
+    /// Overflow is NaT in both directions (br-frankenpandas-lgyy8) — see the
+    /// overflow note on [`Timedelta::add`]. A saturated `i64::MAX` would be a
+    /// finite, plausible ~year-2262 instant returned as if it were real data;
+    /// `pd.Timestamp.max + pd.Timedelta('1ns')` raises `OutOfBoundsDatetime`.
     #[must_use]
     pub fn add_timedelta(&self, td_nanos: i64) -> Self {
         if self.is_nat() || td_nanos == Timedelta::NAT {
             return Self::nat();
         }
-        Self {
-            nanos: self.nanos.saturating_add(td_nanos),
-            tz: self.tz.clone(),
+        match self.nanos.checked_add(td_nanos) {
+            Some(nanos) => Self {
+                nanos,
+                tz: self.tz.clone(),
+            },
+            // Overflow drops the tz with the value: an out-of-range instant has
+            // no zone, and `Self::nat()` is the one canonical NaT (matching the
+            // NaT-operand arms above, which also return an untagged NaT).
+            None => Self::nat(),
         }
     }
 
-    /// Subtract a Timedelta. NaT propagation + saturation; TZ preserved.
+    /// Subtract a Timedelta. NaT propagation; overflow → NaT. TZ preserved.
     #[must_use]
     pub fn sub_timedelta(&self, td_nanos: i64) -> Self {
         if self.is_nat() || td_nanos == Timedelta::NAT {
             return Self::nat();
         }
-        Self {
-            nanos: self.nanos.saturating_sub(td_nanos),
-            tz: self.tz.clone(),
+        match self.nanos.checked_sub(td_nanos) {
+            Some(nanos) => Self {
+                nanos,
+                tz: self.tz.clone(),
+            },
+            None => Self::nat(),
         }
     }
 
     /// Subtract another Timestamp. Returns a Timedelta (i64 nanos).
-    /// NaT in either → `Timedelta::NAT`; saturates on overflow.
+    /// NaT in either → `Timedelta::NAT`; overflow → `Timedelta::NAT`
+    /// (`pd.Timestamp.min - pd.Timestamp.max` raises `OutOfBoundsDatetime`).
     #[must_use]
     pub fn sub_timestamp(&self, other: &Self) -> i64 {
         if self.is_nat() || other.is_nat() {
             return Timedelta::NAT;
         }
-        self.nanos.saturating_sub(other.nanos)
+        self.nanos
+            .checked_sub(other.nanos)
+            .unwrap_or(Timedelta::NAT)
     }
 
     /// NaT-aware semantic equality: two NaT Timestamps are equal to each
@@ -10626,10 +10668,17 @@ mod tests {
     }
 
     #[test]
-    fn timedelta_add_saturates_on_overflow() {
-        assert_eq!(Timedelta::add(i64::MAX - 10, 100), i64::MAX);
-        // Note: i64::MIN is NaT; use MIN+1 to test saturation on the negative side.
-        assert_eq!(Timedelta::add(i64::MIN + 10, -100), i64::MIN);
+    fn timedelta_add_returns_nat_on_overflow() {
+        // CORRECTED br-frankenpandas-lgyy8. This test previously asserted
+        // `add(i64::MAX - 10, 100) == i64::MAX`, i.e. that positive overflow
+        // yields a finite, plausible duration. Live pandas 2.2.3 raises
+        // OverflowError for `pd.Timedelta.max + pd.Timedelta('1ns')` and never
+        // returns a fabricated finite value, so the old expectation encoded a
+        // fail-open bug. Overflow is now NaT in BOTH directions.
+        assert_eq!(Timedelta::add(i64::MAX - 10, 100), Timedelta::NAT);
+        // Negative side is unchanged: i64::MIN IS the NaT sentinel, so this
+        // already surfaced as missing (pandas: Timedelta.min + -1ns -> NaT).
+        assert_eq!(Timedelta::add(i64::MIN + 10, -100), Timedelta::NAT);
     }
 
     #[test]
@@ -10679,15 +10728,120 @@ mod tests {
     }
 
     #[test]
-    fn timedelta_mul_scalar_saturates() {
-        assert_eq!(Timedelta::mul_scalar(i64::MAX, 2), i64::MAX);
-        // (i64::MIN + 1) * 2 saturates to i64::MIN (magnitude too large).
-        assert_eq!(Timedelta::mul_scalar(i64::MIN + 1, 2), i64::MIN);
+    fn timedelta_mul_scalar_returns_nat_on_overflow() {
+        // CORRECTED br-frankenpandas-lgyy8: previously asserted i64::MAX.
+        // pandas `pd.Timedelta.max * 2` raises OverflowError.
+        assert_eq!(Timedelta::mul_scalar(i64::MAX, 2), Timedelta::NAT);
+        assert_eq!(Timedelta::mul_scalar(i64::MIN + 1, 2), Timedelta::NAT);
     }
 
     #[test]
     fn timedelta_mul_scalar_propagates_nat() {
         assert_eq!(Timedelta::mul_scalar(Timedelta::NAT, 5), Timedelta::NAT);
+    }
+
+    #[test]
+    fn arithmetic_overflow_never_fabricates_a_finite_value_lgyy8() {
+        // br-frankenpandas-lgyy8. The bug: these six helpers used
+        // `saturating_*`, so POSITIVE overflow returned i64::MAX — a valid,
+        // finite, plausible duration / ~year-2262 instant — as if it were real
+        // data. (Negative overflow landed on i64::MIN, which IS the NaT
+        // sentinel, so that direction already surfaced as missing.) Live
+        // pandas 2.2.3 never returns a fabricated finite value on overflow in
+        // either direction, scalar or vectorized:
+        //   pd.Timedelta.max + Timedelta('1ns')  -> OverflowError
+        //   pd.Timestamp.max + Timedelta('1ns')  -> OutOfBoundsDatetime
+        //   pd.Timestamp.min - pd.Timestamp.max  -> OutOfBoundsDatetime
+        //   pd.Timedelta.max * 2                 -> OverflowError
+        //   pd.Timedelta.min + Timedelta('-1ns') -> NaT
+        //
+        // Every assertion below is a case a saturating implementation FAILS.
+        const MAX: i64 = i64::MAX;
+        const MIN_OK: i64 = i64::MIN + 1; // most-negative NON-NaT value
+
+        // ── positive overflow: the actual bug ──────────────────────────────
+        assert_eq!(Timedelta::add(MAX, 1), Timedelta::NAT);
+        assert_eq!(Timedelta::add(MAX - 10, 100), Timedelta::NAT);
+        assert_eq!(Timedelta::sub(MAX, -1), Timedelta::NAT);
+        assert_eq!(Timedelta::mul_scalar(MAX, 2), Timedelta::NAT);
+        assert_eq!(Timedelta::mul_scalar(MAX / 2 + 2, 2), Timedelta::NAT);
+        assert!(Timestamp::from_nanos(MAX).add_timedelta(1).is_nat());
+        assert!(Timestamp::from_nanos(MAX).sub_timedelta(-1).is_nat());
+        // Timestamp.max - Timestamp.min: the true difference is ~2^64, far
+        // outside i64. Saturation returned MAX (a ~292-year duration presented
+        // as the real answer); pandas raises OutOfBoundsDatetime.
+        assert_eq!(
+            Timestamp::from_nanos(MAX).sub_timestamp(&Timestamp::from_nanos(MIN_OK)),
+            Timedelta::NAT
+        );
+
+        // ── negative overflow: unchanged, still NaT ────────────────────────
+        assert_eq!(Timedelta::add(MIN_OK, -1), Timedelta::NAT);
+        assert_eq!(Timedelta::add(MIN_OK, -2), Timedelta::NAT);
+        assert_eq!(Timedelta::sub(MIN_OK, 1), Timedelta::NAT);
+        assert_eq!(Timedelta::mul_scalar(MIN_OK, 2), Timedelta::NAT);
+        assert!(Timestamp::from_nanos(MIN_OK).sub_timedelta(1).is_nat());
+        assert!(Timestamp::from_nanos(MIN_OK).add_timedelta(-1).is_nat());
+        assert_eq!(
+            Timestamp::from_nanos(MIN_OK).sub_timestamp(&Timestamp::from_nanos(MAX)),
+            Timedelta::NAT
+        );
+
+        // ── the boundary: the largest REPRESENTABLE results must still be
+        // returned exactly. This is what stops the fix from being bought with
+        // an over-eager NaT that swallows valid arithmetic — an implementation
+        // that NaT'd one step early fails here, as does one that NaT'd on any
+        // operand near the limits.
+        assert_eq!(Timedelta::add(MAX - 1, 1), MAX);
+        assert_eq!(Timedelta::add(MAX, 0), MAX);
+        assert_eq!(Timedelta::sub(MAX, 1), MAX - 1);
+        assert_eq!(Timedelta::add(MIN_OK + 1, -1), MIN_OK);
+        assert_eq!(Timedelta::mul_scalar(MAX / 2, 2), (MAX / 2) * 2);
+        assert_eq!(Timedelta::mul_scalar(MIN_OK, 1), MIN_OK);
+        assert_eq!(Timestamp::from_nanos(MAX - 1).add_timedelta(1).nanos, MAX);
+        assert_eq!(
+            Timestamp::from_nanos(MIN_OK + 1).sub_timedelta(1).nanos,
+            MIN_OK
+        );
+        assert_eq!(
+            Timestamp::from_nanos(MAX).sub_timestamp(&Timestamp::from_nanos(0)),
+            MAX
+        );
+        // Ordinary values are untouched bit-for-bit.
+        assert_eq!(Timedelta::add(1_000, 2_345), 3_345);
+        assert_eq!(Timedelta::sub(1_000, 2_345), -1_345);
+        assert_eq!(Timedelta::mul_scalar(-7, 6), -42);
+
+        // ── a result landing EXACTLY on i64::MIN is representable, but i64::MIN
+        // IS the NaT sentinel, so it must read as NaT rather than as the most
+        // negative duration. pandas agrees: Timedelta.min + -1ns -> NaT. Note
+        // `MIN_OK - 1 == i64::MIN` does not overflow, so this case survives the
+        // switch from saturating_* to checked_* only because the sentinel and
+        // the clamp coincide — assert it explicitly rather than by accident.
+        assert_eq!(MIN_OK - 1, i64::MIN);
+        assert_eq!(Timedelta::sub(MIN_OK, 1), Timedelta::NAT);
+        assert_eq!(Timedelta::add(MIN_OK, 0), MIN_OK);
+
+        // ── NaT operands still propagate, and tz no longer rides along with a
+        // fabricated instant: an overflowed Timestamp is the canonical NaT.
+        assert!(Timestamp::nat().add_timedelta(1).is_nat());
+        assert!(
+            Timestamp::from_nanos(0)
+                .add_timedelta(Timedelta::NAT)
+                .is_nat()
+        );
+        let tzed = Timestamp::from_nanos_tz(MAX, "US/Eastern");
+        let overflowed = tzed.add_timedelta(1);
+        assert!(overflowed.is_nat());
+        assert_eq!(overflowed.tz, None, "an overflow NaT carries no zone");
+        // ...while a NON-overflowing shift still preserves the zone.
+        assert_eq!(
+            Timestamp::from_nanos_tz(0, "US/Eastern")
+                .add_timedelta(Timedelta::NANOS_PER_DAY)
+                .tz
+                .as_deref(),
+            Some("US/Eastern")
+        );
     }
 
     #[test]
@@ -10786,10 +10940,12 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_add_timedelta_saturates_on_overflow() {
+    fn timestamp_add_timedelta_returns_nat_on_overflow() {
+        // CORRECTED br-frankenpandas-lgyy8: previously asserted i64::MAX, i.e.
+        // a finite ~year-2262 instant handed back as real data. pandas
+        // `pd.Timestamp.max + pd.Timedelta('1ns')` raises OutOfBoundsDatetime.
         let ts = Timestamp::from_nanos(i64::MAX - 10);
-        let shifted = ts.add_timedelta(100);
-        assert_eq!(shifted.nanos, i64::MAX);
+        assert!(ts.add_timedelta(100).is_nat());
     }
 
     #[test]
