@@ -60314,7 +60314,7 @@ impl DataFrame {
     /// Matches `df.drop(columns=[...])`. Returns error if any column is missing.
     pub fn drop_columns(&self, names: &[&str]) -> Result<Self, FrameError> {
         for name in names {
-            if !self.columns.contains_key(*name) {
+            if !self.columns.contains_key(name) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "column '{name}' not found"
                 )));
@@ -60396,7 +60396,7 @@ impl DataFrame {
             let mut seen = HashSet::new();
             items
                 .iter()
-                .filter(|name| self.columns.contains_key(**name) && seen.insert(*name))
+                .filter(|name| self.columns.contains_key(name) && seen.insert(*name))
                 .map(|name| (*name).to_owned())
                 .collect()
         } else if let Some(like) = like {
@@ -63380,7 +63380,7 @@ impl DataFrame {
 
         // Validate columns exist
         for col in id_vars {
-            if !self.columns.contains_key(*col) {
+            if !self.columns.contains_key(col) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "missing column: {col}"
                 )));
@@ -66339,7 +66339,7 @@ impl DataFrame {
     /// combinations of values in the specified columns only.
     pub fn value_counts_subset(&self, subset: &[&str]) -> Result<Series, FrameError> {
         for name in subset {
-            if !self.columns.contains_key(*name) {
+            if !self.columns.contains_key(name) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "column not found: '{name}'"
                 )));
@@ -68009,7 +68009,7 @@ impl DataFrame {
         }
         // Validate columns exist
         for col in by {
-            if !self.columns.contains_key(*col) {
+            if !self.columns.contains_key(col) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "missing column: {col}"
                 )));
@@ -76837,7 +76837,7 @@ impl DataFrame {
             // Drop columns by name
             let drop_set: BTreeSet<&str> = labels.iter().copied().collect();
             for name in &drop_set {
-                if !self.columns.contains_key(*name) {
+                if !self.columns.contains_key(name) {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "column '{name}' not found"
                     )));
