@@ -58,12 +58,21 @@ fn self_identity() -> String {
 // ============================================================================
 
 fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
+    build_numeric_frame_prefixed(n, cols, "c")
+}
+
+/// `build_numeric_frame` with a caller-chosen column-name prefix.
+///
+/// Only `concat(axis=1)` needs this: its two operands must carry *disjoint*
+/// column names (br-frankenpandas-6ojob). Every other workload shares the
+/// default `c{i}` names.
+fn build_numeric_frame_prefixed(n: usize, cols: usize, prefix: &str) -> DataFrame {
     let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
     let index = Index::new(labels);
     let mut columns = BTreeMap::new();
     let mut column_order = Vec::with_capacity(cols);
     for c in 0..cols {
-        let col_name = format!("c{}", c);
+        let col_name = format!("{}{}", prefix, c);
         let values: Vec<Scalar> = (0..n)
             .map(|i| Scalar::Float64((i * (c + 1)) as f64 * 0.1))
             .collect();
@@ -397,10 +406,26 @@ fn bench_concat_axis0(c: &mut Criterion) {
 }
 
 fn bench_concat_axis1(c: &mut Criterion) {
+    // br-frankenpandas-6ojob: both operands used the default `c{i}` names, so
+    // every iteration hit `CompatibilityRejected("duplicate column 'c0' in
+    // concat(axis=1) output")` and the `.expect()` panicked — this bench timed
+    // nothing and failed the bench-as-test target of `cargo test -p
+    // fp-conformance --all-targets`.
+    //
+    // That rejection is DELIBERATE, not a bug to route around: FrankenPandas's
+    // column store is `BTreeMap<String, Column>` and structurally cannot hold
+    // duplicate column labels, and the divergence is pinned by two conformance
+    // fixtures (fp_p2d_028 strict / fp_p2d_029 hardened, both asserting
+    // "duplicate column") plus the oracle's own guard at pandas_oracle.py:7018.
+    // Neither fixture is touched here. The underlying pandas-parity gap — pandas
+    // DOES allow duplicate column labels — is tracked separately.
+    //
+    // So the fix is to the workload, not the semantics: disjoint prefixes make
+    // this a genuine 5+5 -> 10-column axis=1 concat.
     let mut group = c.benchmark_group("joins/concat_axis1");
     for &n in &[10_000usize, 50_000] {
-        let f1 = build_numeric_frame(n, 5);
-        let f2 = build_numeric_frame(n, 5);
+        let f1 = build_numeric_frame_prefixed(n, 5, "l");
+        let f2 = build_numeric_frame_prefixed(n, 5, "r");
         group.bench_with_input(BenchmarkId::new("rows", n), &(f1, f2), |b, (a, bb)| {
             b.iter(|| concat_dataframes_with_axis(&[a, bb], 1).expect("concat axis1"))
         });
