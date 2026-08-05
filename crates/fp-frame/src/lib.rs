@@ -52256,7 +52256,7 @@ impl LazyTransposeFramePlan {
             .map(Box::as_ref)
     }
 
-    fn materialize_columns(&self, column_start: i64) -> BTreeMap<String, Column> {
+    fn materialize_columns(&self, column_start: i64) -> ColumnStore {
         let mut columns = BTreeMap::new();
         for output_column in 0..self.output_columns {
             let offset = i64::try_from(output_column)
@@ -52271,7 +52271,7 @@ impl LazyTransposeFramePlan {
                 .unwrap_or_else(|| self.materialize_column(output_column));
             columns.insert(name, column);
         }
-        columns
+        columns.into()
     }
 
     #[cfg(test)]
@@ -52284,13 +52284,315 @@ impl LazyTransposeFramePlan {
     }
 }
 
+/// Order-preserving, duplicate-tolerant column store.
+///
+/// Step `.1` of the duplicate-column-label work (`br-frankenpandas-b6orh`,
+/// parent `br-frankenpandas-ih4t0`): pandas lets a `DataFrame` carry repeated
+/// column labels and a plain `BTreeMap<String, Column>` structurally cannot.
+/// This type *can represent* repeats while behaving exactly like the map it
+/// replaces, so the representation lands before any operation is allowed to
+/// build one (that is `.4`).
+///
+/// # Layout
+///
+/// * `primary` — the FIRST occurrence of every distinct name. `BTreeMap`
+///   iterates name-sorted, which is load-bearing: `columns().keys()` order is
+///   observed by ~40 downstream call sites, while the user-visible column
+///   ORDER lives separately in `DataFrame::column_order`.
+/// * `repeats` — every occurrence after the first, kept name-sorted so
+///   [`ColumnStore::iter`] merges the two in one pass. **Empty on every path
+///   that exists today**: nothing in the crate constructs a duplicate yet, so
+///   the merge degenerates to a straight `primary` walk.
+///
+/// Single-valued reads (`get`, `contains_key`, `Index`, and everything
+/// reached through [`Deref`](std::ops::Deref)) resolve to the FIRST
+/// occurrence. That is unobservable today because duplicates are still
+/// rejected at every construction site; `.4` turns it into the documented
+/// rule once ops may create them.
+///
+/// # Why the `BTreeMap` spine is kept
+///
+/// `DataFrame::columns()` hands out a `&BTreeMap<String, Column>` and is
+/// called from 223 in-crate plus 149 downstream sites. A purely `Vec`-backed
+/// store cannot produce that borrow without materializing and caching a
+/// parallel `BTreeMap`, which would double column-map memory and add a map
+/// build per frame to the default build. Keeping `primary` as a real
+/// `BTreeMap` makes `columns()` a zero-cost borrow and `From<BTreeMap>` a
+/// move, so the ~150 frame-rebuild sites keep their current cost exactly.
+/// The fully positional `Vec` layout becomes affordable in `.3`, after `.2`
+/// removes the `&BTreeMap` leak.
+///
+/// # Not yet duplicate-aware
+///
+/// [`Serialize`] writes `primary` as a map, because a JSON object cannot hold
+/// repeated keys; the wire format has to change in `.4` together with the ops
+/// that can produce repeats. Likewise every method reached through `Deref`
+/// sees `primary` only. Both are safe while `repeats` is unreachable, and
+/// `.2` removes the `Deref` escape hatch.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ColumnStore {
+    primary: BTreeMap<String, Column>,
+    repeats: Vec<(String, Column)>,
+}
+
+impl ColumnStore {
+    /// Empty store.
+    pub(crate) const fn new() -> Self {
+        Self {
+            primary: BTreeMap::new(),
+            repeats: Vec::new(),
+        }
+    }
+
+    /// Build from an ordered pair sequence, PRESERVING repeated names.
+    ///
+    /// Unreachable from production code until `.4` (`br-frankenpandas-8b4d4`)
+    /// lets an operation emit a repeat; the tests in this bead exercise it so
+    /// the representation is proven before anything depends on it.
+    ///
+    /// The first occurrence of each name becomes the single-valued answer;
+    /// later occurrences are retained as repeats. This is the only
+    /// constructor that can build a duplicate-carrying store, and today only
+    /// tests use it — production paths still go through [`From<BTreeMap>`],
+    /// which cannot carry one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn from_pairs(pairs: impl IntoIterator<Item = (String, Column)>) -> Self {
+        let mut store = Self::new();
+        for (name, column) in pairs {
+            match store.primary.entry(name) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(column);
+                }
+                std::collections::btree_map::Entry::Occupied(existing) => {
+                    store.repeats.push((existing.key().clone(), column));
+                }
+            }
+        }
+        // Stable sort keeps repeats of one name in their arrival order, so a
+        // merged walk yields first-then-later for each name.
+        store.repeats.sort_by(|left, right| left.0.cmp(&right.0));
+        store
+    }
+
+    /// First column stored under `name`, if any.
+    pub(crate) fn get(&self, name: &str) -> Option<&Column> {
+        self.primary.get(name)
+    }
+
+    /// Every column stored under `name`, first occurrence first.
+    ///
+    /// This is the "lookup returns ALL matching columns" contract the parent
+    /// bead names. Like [`ColumnStore::from_pairs`] it has no production
+    /// caller until `.4`, and is proven by this bead's tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn get_all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Column> + 'a {
+        self.primary.get(name).into_iter().chain(
+            self.repeats
+                .iter()
+                .filter(move |(repeat, _)| repeat == name)
+                .map(|(_, column)| column),
+        )
+    }
+
+    /// How many columns are stored under `name` (0, 1, or more once `.4`
+    /// allows repeats). No production caller until then; see
+    /// [`ColumnStore::get_all`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn occurrences(&self, name: &str) -> usize {
+        usize::from(self.primary.contains_key(name))
+            + self
+                .repeats
+                .iter()
+                .filter(|(repeat, _)| repeat == name)
+                .count()
+    }
+
+    pub(crate) fn contains_key(&self, name: &str) -> bool {
+        self.primary.contains_key(name)
+    }
+
+    /// Total column count, counting each repeat separately.
+    pub(crate) fn len(&self) -> usize {
+        self.primary.len() + self.repeats.len()
+    }
+
+    /// Counterpart to [`ColumnStore::len`]. The lazy store answers emptiness
+    /// through its own `Deref` today, so this has no in-crate caller until
+    /// `.2` retargets those sites.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.primary.is_empty() && self.repeats.is_empty()
+    }
+
+    /// Name-sorted walk over every column, repeats included.
+    pub(crate) fn iter(&self) -> ColumnStoreIter<'_> {
+        ColumnStoreIter {
+            primary: self.primary.iter(),
+            repeats: self.repeats.iter(),
+            pending_primary: None,
+            pending_repeat: None,
+        }
+    }
+
+    /// Name-sorted walk over column names, repeats included (so a repeated
+    /// name appears once per occurrence).
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &String> + '_ {
+        self.iter().map(|(name, _)| name)
+    }
+
+    /// Name-sorted walk over columns, repeats included. Same story as
+    /// [`ColumnStore::is_empty`]: no in-crate caller until `.2`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn values(&self) -> impl Iterator<Item = &Column> + '_ {
+        self.iter().map(|(_, column)| column)
+    }
+
+    /// Replace (or add) the FIRST column stored under `name`, returning the
+    /// column it displaced. Mirrors `BTreeMap::insert`; repeats are untouched.
+    pub(crate) fn insert(&mut self, name: String, column: Column) -> Option<Column> {
+        self.primary.insert(name, column)
+    }
+
+    /// Name-sorted owned pairs, repeats included.
+    fn into_sorted_pairs(self) -> Vec<(String, Column)> {
+        if self.repeats.is_empty() {
+            return self.primary.into_iter().collect();
+        }
+        let mut pairs: Vec<(String, Column)> = self.primary.into_iter().collect();
+        pairs.extend(self.repeats);
+        pairs.sort_by(|left, right| left.0.cmp(&right.0));
+        pairs
+    }
+}
+
+/// Merging iterator behind [`ColumnStore::iter`]: walks the name-sorted
+/// `primary` map and the name-sorted `repeats` vector together, emitting the
+/// first occurrence of a name ahead of its repeats.
+pub(crate) struct ColumnStoreIter<'a> {
+    primary: std::collections::btree_map::Iter<'a, String, Column>,
+    repeats: std::slice::Iter<'a, (String, Column)>,
+    pending_primary: Option<(&'a String, &'a Column)>,
+    pending_repeat: Option<&'a (String, Column)>,
+}
+
+impl<'a> Iterator for ColumnStoreIter<'a> {
+    type Item = (&'a String, &'a Column);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pending_primary.is_none() {
+            self.pending_primary = self.primary.next();
+        }
+        if self.pending_repeat.is_none() {
+            self.pending_repeat = self.repeats.next();
+        }
+        match (self.pending_primary, self.pending_repeat) {
+            // Strictly-smaller repeat name goes first; on a TIE the primary
+            // (first occurrence) wins, which is what makes a repeated name
+            // emit as first-then-repeats.
+            (Some((primary, _)), Some(repeat)) if repeat.0 < *primary => {
+                self.pending_repeat = None;
+                Some((&repeat.0, &repeat.1))
+            }
+            (Some(_), _) => self.pending_primary.take(),
+            (None, Some(repeat)) => {
+                self.pending_repeat = None;
+                Some((&repeat.0, &repeat.1))
+            }
+            (None, None) => None,
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.primary.len()
+            + self.repeats.len()
+            + usize::from(self.pending_primary.is_some())
+            + usize::from(self.pending_repeat.is_some());
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for ColumnStoreIter<'_> {}
+
+impl std::ops::Index<&str> for ColumnStore {
+    type Output = Column;
+
+    /// Panicking lookup, matching `BTreeMap`'s message shape so the ~435
+    /// `self.columns[name]` sites keep their existing failure text.
+    fn index(&self, name: &str) -> &Self::Output {
+        self.primary.get(name).expect("no entry found for key")
+    }
+}
+
+impl std::ops::Deref for ColumnStore {
+    type Target = BTreeMap<String, Column>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.primary
+    }
+}
+
+impl std::ops::DerefMut for ColumnStore {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.primary
+    }
+}
+
+impl From<BTreeMap<String, Column>> for ColumnStore {
+    /// Zero-cost: the map already collapsed any repeated name, so it becomes
+    /// `primary` by move and `repeats` stays empty.
+    fn from(primary: BTreeMap<String, Column>) -> Self {
+        Self {
+            primary,
+            repeats: Vec::new(),
+        }
+    }
+}
+
+impl From<ColumnStore> for BTreeMap<String, Column> {
+    /// Drops repeats — lossless today because none can exist, and `.4` must
+    /// revisit every caller when they can.
+    fn from(store: ColumnStore) -> Self {
+        store.primary
+    }
+}
+
+impl IntoIterator for ColumnStore {
+    type Item = (String, Column);
+    type IntoIter = std::vec::IntoIter<(String, Column)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_sorted_pairs().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ColumnStore {
+    type Item = (&'a String, &'a Column);
+    type IntoIter = ColumnStoreIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl Serialize for ColumnStore {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.primary.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ColumnStore {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        BTreeMap::<String, Column>::deserialize(deserializer).map(Self::from)
+    }
+}
+
 #[cfg(feature = "lazy-transpose-view")]
 enum LazyDataFrameColumns {
-    Eager(BTreeMap<String, Column>),
+    Eager(ColumnStore),
     HomogeneousTranspose {
         plan: Arc<LazyTransposeFramePlan>,
         column_start: i64,
-        materialized: OnceLock<BTreeMap<String, Column>>,
+        materialized: OnceLock<ColumnStore>,
     },
     /// All-valid Float64 frame backed by a single column-major `Arc<[f64]>`
     /// block (`block[col * rows + row]`). Enables an O(1) `.values`/`.to_numpy`
@@ -52299,7 +52601,7 @@ enum LazyDataFrameColumns {
     #[cfg(feature = "block-storage")]
     Float64Block {
         store: Arc<Float64BlockStore>,
-        materialized: OnceLock<BTreeMap<String, Column>>,
+        materialized: OnceLock<ColumnStore>,
     },
 }
 
@@ -52383,7 +52685,26 @@ impl LazyDataFrameColumns {
         )
     }
 
-    fn materialized(&self) -> &BTreeMap<String, Column> {
+    // The delegating reads below exist so that call sites resolve to
+    // [`ColumnStore`]'s surface rather than silently deref-ing past it into
+    // the inner `BTreeMap`. Each materializes exactly where the `Deref` impl
+    // would have, so laziness and cost are unchanged — the only difference is
+    // which type answers, which is what lets `.2` (br-frankenpandas-u387a)
+    // retarget them without hunting through deref coercions.
+
+    fn contains_key(&self, name: &str) -> bool {
+        self.materialized().contains_key(name)
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &String> + '_ {
+        self.materialized().keys()
+    }
+
+    fn insert(&mut self, name: String, column: Column) -> Option<Column> {
+        self.make_eager().insert(name, column)
+    }
+
+    fn materialized(&self) -> &ColumnStore {
         match self {
             Self::Eager(columns) => columns,
             Self::HomogeneousTranspose {
@@ -52399,9 +52720,9 @@ impl LazyDataFrameColumns {
         }
     }
 
-    fn make_eager(&mut self) -> &mut BTreeMap<String, Column> {
+    fn make_eager(&mut self) -> &mut ColumnStore {
         if matches!(self, Self::HomogeneousTranspose { .. }) {
-            let previous = std::mem::replace(self, Self::Eager(BTreeMap::new()));
+            let previous = std::mem::replace(self, Self::Eager(ColumnStore::new()));
             let Self::HomogeneousTranspose {
                 plan,
                 column_start,
@@ -52417,7 +52738,7 @@ impl LazyDataFrameColumns {
         }
         #[cfg(feature = "block-storage")]
         if matches!(self, Self::Float64Block { .. }) {
-            let previous = std::mem::replace(self, Self::Eager(BTreeMap::new()));
+            let previous = std::mem::replace(self, Self::Eager(ColumnStore::new()));
             let Self::Float64Block {
                 store,
                 materialized,
@@ -52436,7 +52757,7 @@ impl LazyDataFrameColumns {
         columns
     }
 
-    fn into_materialized(self) -> BTreeMap<String, Column> {
+    fn into_materialized(self) -> ColumnStore {
         match self {
             Self::Eager(columns) => columns,
             Self::HomogeneousTranspose {
@@ -52493,7 +52814,7 @@ impl Float64BlockStore {
         self.column_slots[column].get_or_init(|| self.materialize_column(column))
     }
 
-    fn materialize_columns(&self) -> BTreeMap<String, Column> {
+    fn materialize_columns(&self) -> ColumnStore {
         (0..self.cols)
             .map(|column| {
                 (
@@ -52501,7 +52822,8 @@ impl Float64BlockStore {
                     self.cached_column(column).clone(),
                 )
             })
-            .collect()
+            .collect::<BTreeMap<String, Column>>()
+            .into()
     }
 }
 
@@ -52523,12 +52845,26 @@ pub struct Float64BlockView {
 #[cfg(feature = "lazy-transpose-view")]
 impl From<BTreeMap<String, Column>> for LazyDataFrameColumns {
     fn from(columns: BTreeMap<String, Column>) -> Self {
+        Self::Eager(columns.into())
+    }
+}
+
+#[cfg(feature = "lazy-transpose-view")]
+impl From<ColumnStore> for LazyDataFrameColumns {
+    fn from(columns: ColumnStore) -> Self {
         Self::Eager(columns)
     }
 }
 
 #[cfg(feature = "lazy-transpose-view")]
 impl From<LazyDataFrameColumns> for BTreeMap<String, Column> {
+    fn from(columns: LazyDataFrameColumns) -> Self {
+        columns.into_materialized().into()
+    }
+}
+
+#[cfg(feature = "lazy-transpose-view")]
+impl From<LazyDataFrameColumns> for ColumnStore {
     fn from(columns: LazyDataFrameColumns) -> Self {
         columns.into_materialized()
     }
@@ -52537,7 +52873,7 @@ impl From<LazyDataFrameColumns> for BTreeMap<String, Column> {
 #[cfg(feature = "lazy-transpose-view")]
 impl Default for LazyDataFrameColumns {
     fn default() -> Self {
-        Self::Eager(BTreeMap::new())
+        Self::Eager(ColumnStore::new())
     }
 }
 
@@ -52603,7 +52939,8 @@ impl Serialize for LazyDataFrameColumns {
 #[cfg(feature = "lazy-transpose-view")]
 impl<'de> Deserialize<'de> for LazyDataFrameColumns {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        BTreeMap::<String, Column>::deserialize(deserializer).map(Self::Eager)
+        BTreeMap::<String, Column>::deserialize(deserializer)
+            .map(|columns| Self::Eager(columns.into()))
     }
 }
 
@@ -52626,7 +52963,7 @@ impl std::ops::DerefMut for LazyDataFrameColumns {
 #[cfg(feature = "lazy-transpose-view")]
 impl IntoIterator for LazyDataFrameColumns {
     type Item = (String, Column);
-    type IntoIter = std::collections::btree_map::IntoIter<String, Column>;
+    type IntoIter = std::vec::IntoIter<(String, Column)>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.into_materialized().into_iter()
@@ -52636,7 +52973,7 @@ impl IntoIterator for LazyDataFrameColumns {
 #[cfg(feature = "lazy-transpose-view")]
 impl<'a> IntoIterator for &'a LazyDataFrameColumns {
     type Item = (&'a String, &'a Column);
-    type IntoIter = std::collections::btree_map::Iter<'a, String, Column>;
+    type IntoIter = ColumnStoreIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.materialized().iter()
@@ -52920,7 +53257,7 @@ impl<'a> IntoIterator for &'a mut LazyDataFrameColumnOrder {
 #[cfg(feature = "lazy-transpose-view")]
 type DataFrameColumnsStore = LazyDataFrameColumns;
 #[cfg(not(feature = "lazy-transpose-view"))]
-type DataFrameColumnsStore = BTreeMap<String, Column>;
+type DataFrameColumnsStore = ColumnStore;
 
 #[cfg(feature = "lazy-transpose-view")]
 type DataFrameColumnOrderStore = LazyDataFrameColumnOrder;
@@ -184875,5 +185212,225 @@ mod block_storage_cod_fp {
         .unwrap();
         let view = no_rows.to_numpy_block_view().unwrap();
         assert_eq!((view.rows, view.cols), (0, 2));
+    }
+}
+
+/// `br-frankenpandas-b6orh` (`.1` of `br-frankenpandas-ih4t0`): the
+/// order-preserving, duplicate-tolerant [`ColumnStore`] that replaces the bare
+/// `BTreeMap<String, Column>` column store.
+///
+/// The load-bearing property is that iteration stays NAME-SORTED — user-visible
+/// column order lives in `DataFrame::column_order`, and ~40 downstream
+/// `columns().keys()` sites read sorted order. A store that iterated in
+/// insertion order instead would scramble output far from the change with no
+/// type error to catch it, so that case is pinned explicitly below.
+#[cfg(test)]
+mod column_store_b6orh {
+    use std::collections::BTreeMap;
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::{DType, Scalar};
+
+    use super::{ColumnStore, DataFrame};
+
+    fn column(values: &[f64]) -> Column {
+        let scalars: Vec<Scalar> = values.iter().map(|&v| Scalar::Float64(v)).collect();
+        Column::new(DType::Float64, scalars).expect("f64 column")
+    }
+
+    /// Deterministic, dependency-free corpus source (no `rand`).
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state
+    }
+
+    /// NEGATIVE CASE: a naive `Vec`-in-insertion-order store passes every
+    /// other test in this module and FAILS this one.
+    #[test]
+    fn iteration_is_name_sorted_not_insertion_order() {
+        let insertion = vec![
+            ("delta".to_string(), column(&[4.0])),
+            ("alpha".to_string(), column(&[1.0])),
+            ("charlie".to_string(), column(&[3.0])),
+            ("bravo".to_string(), column(&[2.0])),
+        ];
+        let store = ColumnStore::from_pairs(insertion);
+
+        let keys: Vec<&str> = store.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec!["alpha", "bravo", "charlie", "delta"],
+            "ColumnStore must iterate name-sorted, not in insertion order"
+        );
+
+        let iter_keys: Vec<&str> = store.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(iter_keys, keys, "iter() must agree with keys()");
+
+        // values() rides the same merge, so it must line up positionally.
+        let values: Vec<f64> = store
+            .values()
+            .map(|col| col.as_f64_slice().expect("f64 column")[0])
+            .collect();
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn reads_agree_with_source_btreemap_over_seeded_corpus() {
+        let mut state: u64 = 0xb60b_5eed;
+        for case in 0..64_usize {
+            // Case 0 exercises the empty store and case 1 a single column.
+            let width = case;
+            let mut source: BTreeMap<String, Column> = BTreeMap::new();
+            for slot in 0..width {
+                // Names collide deliberately so some cases have fewer
+                // entries than `width` — the map is the oracle either way.
+                let name = format!("c{}", lcg(&mut state) % 32);
+                source.insert(name, column(&[slot as f64]));
+            }
+
+            let store: ColumnStore = source.clone().into();
+
+            assert_eq!(store.len(), source.len());
+            assert_eq!(store.is_empty(), source.is_empty());
+
+            let store_keys: Vec<&String> = store.keys().collect();
+            let source_keys: Vec<&String> = source.keys().collect();
+            assert_eq!(store_keys, source_keys, "case {case}");
+
+            for probe in 0..40_u64 {
+                let name = format!("c{probe}");
+                assert_eq!(
+                    store.contains_key(&name),
+                    source.contains_key(&name),
+                    "contains_key disagreed on {name} (case {case})"
+                );
+                assert_eq!(
+                    store.get(&name),
+                    source.get(&name),
+                    "get disagreed on {name} (case {case})"
+                );
+                if let Some(expected) = source.get(&name) {
+                    assert_eq!(&store[name.as_str()], expected, "Index disagreed on {name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn from_btreemap_round_trips() {
+        let mut source: BTreeMap<String, Column> = BTreeMap::new();
+        source.insert("b".to_string(), column(&[2.0, 20.0]));
+        source.insert("a".to_string(), column(&[1.0, 10.0]));
+
+        let store: ColumnStore = source.clone().into();
+        let restored: BTreeMap<String, Column> = store.into();
+        assert_eq!(restored, source);
+    }
+
+    #[test]
+    #[should_panic(expected = "no entry found for key")]
+    fn index_still_panics_on_missing_name() {
+        let store: ColumnStore = BTreeMap::from([("a".to_string(), column(&[1.0]))]).into();
+        let _ = &store["missing"];
+    }
+
+    /// The whole point of `.1`: repeats are REPRESENTABLE before any operation
+    /// may build one, and every single-valued read resolves to the FIRST.
+    #[test]
+    fn repeats_are_representable_and_resolve_to_first() {
+        let store = ColumnStore::from_pairs(vec![
+            ("dup".to_string(), column(&[1.0])),
+            ("solo".to_string(), column(&[9.0])),
+            ("dup".to_string(), column(&[2.0])),
+            ("dup".to_string(), column(&[3.0])),
+        ]);
+
+        assert_eq!(store.occurrences("dup"), 3);
+        assert_eq!(store.occurrences("solo"), 1);
+        assert_eq!(store.occurrences("absent"), 0);
+        assert_eq!(store.len(), 4, "len counts every occurrence");
+        assert!(!store.is_empty());
+
+        // Single-valued reads see the FIRST occurrence only.
+        assert_eq!(store.get("dup"), Some(&column(&[1.0])));
+        assert_eq!(&store["dup"], &column(&[1.0]));
+        assert!(store.contains_key("dup"));
+
+        // The multi-valued read sees all of them, in arrival order.
+        let all: Vec<f64> = store
+            .get_all("dup")
+            .map(|col| col.as_f64_slice().expect("f64 column")[0])
+            .collect();
+        assert_eq!(all, vec![1.0, 2.0, 3.0]);
+
+        // Merged iteration keeps repeats adjacent to their first occurrence
+        // and the whole walk name-sorted.
+        let names: Vec<&str> = store.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["dup", "dup", "dup", "solo"]);
+        let walk: Vec<f64> = store
+            .values()
+            .map(|col| col.as_f64_slice().expect("f64 column")[0])
+            .collect();
+        assert_eq!(walk, vec![1.0, 2.0, 3.0, 9.0]);
+
+        // Owned iteration must agree with the borrowed walk.
+        let owned: Vec<String> = store.into_iter().map(|(name, _)| name).collect();
+        assert_eq!(owned, vec!["dup", "dup", "dup", "solo"]);
+    }
+
+    /// `insert` mirrors `BTreeMap::insert`: it replaces the FIRST occurrence
+    /// and returns what it displaced, leaving repeats untouched.
+    #[test]
+    fn insert_replaces_first_occurrence_only() {
+        let mut store = ColumnStore::from_pairs(vec![
+            ("dup".to_string(), column(&[1.0])),
+            ("dup".to_string(), column(&[2.0])),
+        ]);
+
+        let displaced = store.insert("dup".to_string(), column(&[7.0]));
+        assert_eq!(displaced, Some(column(&[1.0])));
+
+        let all: Vec<f64> = store
+            .get_all("dup")
+            .map(|col| col.as_f64_slice().expect("f64 column")[0])
+            .collect();
+        assert_eq!(all, vec![7.0, 2.0]);
+        assert_eq!(store.len(), 2, "insert must not add a third occurrence");
+
+        assert_eq!(store.insert("fresh".to_string(), column(&[5.0])), None);
+        assert_eq!(store.len(), 3);
+    }
+
+    /// The transpose materializer now yields a `ColumnStore`; it must produce
+    /// exactly the columns the eager path did.
+    #[test]
+    fn transpose_materializer_matches_eager_columns() {
+        let source = DataFrame::new(
+            Index::from_utf8(vec!["r0".to_string(), "r1".to_string()]),
+            BTreeMap::from([
+                ("a".to_string(), column(&[1.0, 2.0])),
+                ("b".to_string(), column(&[3.0, 4.0])),
+            ]),
+        )
+        .expect("source frame");
+
+        let transposed = source.transpose().expect("transpose");
+
+        let names: Vec<&String> = transposed.columns().keys().collect();
+        assert_eq!(names, vec!["r0", "r1"]);
+
+        let r0 = transposed.columns()["r0"]
+            .as_f64_slice()
+            .expect("f64 column")
+            .to_vec();
+        let r1 = transposed.columns()["r1"]
+            .as_f64_slice()
+            .expect("f64 column")
+            .to_vec();
+        assert_eq!(r0, vec![1.0, 3.0], "column r0 = original row r0");
+        assert_eq!(r1, vec![2.0, 4.0], "column r1 = original row r1");
     }
 }
