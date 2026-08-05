@@ -41647,6 +41647,39 @@ pub struct StringAccessor<'a> {
     series: &'a Series,
 }
 
+/// Which end of a row `startswith`/`endswith` compares against
+/// (br-frankenpandas-vrjrf). A plain `Copy` enum rather than a closure so the
+/// predicate can cross into a `'static` pool job without capturing anything
+/// borrowed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StrAffix {
+    Prefix,
+    Suffix,
+}
+
+/// The affix predicate over one row range of a contiguous Utf8 buffer.
+///
+/// Shared verbatim by the serial and pooled arms so they cannot drift: the
+/// only difference between them is which thread calls this.
+fn affix_rows(
+    bytes: &[u8],
+    offsets: &[usize],
+    needle: &[u8],
+    affix: StrAffix,
+    start_row: usize,
+    end_row: usize,
+) -> Vec<bool> {
+    let mut part = Vec::with_capacity(end_row - start_row);
+    for w in offsets[start_row..=end_row].windows(2) {
+        let row = &bytes[w[0]..w[1]];
+        part.push(match affix {
+            StrAffix::Prefix => row.starts_with(needle),
+            StrAffix::Suffix => row.ends_with(needle),
+        });
+    }
+    part
+}
+
 /// Index into a split-parts list with pandas `.str[n]` semantics: a negative
 /// `n` counts from the end (`-1` is the last part), and any out-of-range index
 /// yields a missing value. Per br-frankenpandas-7evu8.
@@ -41657,6 +41690,180 @@ fn split_part_at(parts: &[&str], n: i64) -> Scalar {
         Scalar::Utf8(parts[idx as usize].to_string())
     } else {
         Scalar::Null(NullKind::NaN)
+    }
+}
+
+/// A process-wide worker pool for the contiguous-Utf8 string kernels.
+///
+/// # Why this exists (br-frankenpandas-vrjrf)
+///
+/// The contiguous string kernels open a fresh `std::thread::scope` on EVERY
+/// call. That spawn is the measured source of FrankenPandas's run-to-run
+/// spread, and the spread — not the mean — is what makes every shipped-path
+/// string row undecidable against live pandas:
+///
+/// | arm                       | A/A null median | within ±2%? |
+/// |---------------------------|-----------------|-------------|
+/// | serial, no spawn (csapr)  | 0.9992          | PASS        |
+/// | 4 workers, spawn (2s5hs)  | 0.9121          | FAIL        |
+/// | 8 workers, spawn (2s5hs)  | 1.0304          | FAIL        |
+/// | pandas, single-threaded   | 0.9866          | PASS        |
+///
+/// br-frankenpandas-2s5hs measured the 4-vs-8 row directly and REJECTED
+/// worker-count tuning: halving the workers moved the null further from unity
+/// AND cost 1.333x the time. Spawn presence, not worker count, is what tracks
+/// the failure — so the spawn is what has to go.
+///
+/// # Safety and the `#![forbid(unsafe_code)]` constraint
+///
+/// The standing note in the parallel-overhead ledger says a reusable pool
+/// "needs unsafe". For this path that is false. `thread::scope` is only
+/// required because `as_utf8_contiguous` hands back BORROWED `(&[u8],
+/// &[usize])`. The backing store already holds `Arc<[u8]>` / `Arc<[usize]>`
+/// (`Utf8ArcBuffers`), and `as_utf8_contiguous_arc` returns owned clones of
+/// those Arcs for the price of two refcount bumps. Owned `Arc<[T]>` is
+/// `Send + Sync + 'static`, so a `'static` worker can hold it directly: no
+/// borrowed-slice lifetime, hence no scoped threads, hence no unsafe.
+///
+/// # Lifecycle decision (made explicitly, not incidentally)
+///
+/// The threads live for the process. That is a real, library-wide behavioural
+/// commitment and br-frankenpandas-vrjrf asked for it to be an explicit call,
+/// so: **lazy `OnceLock` init, never eager.** A program that performs no
+/// large contiguous string predicate spawns nothing at all — the pool is
+/// constructed on first use of the parallel path, which already requires a
+/// ≥8 MiB buffer. This matches what `rayon` does and what the crate already
+/// did implicitly (it spawned per call); the change is that the threads are
+/// now reused rather than rebuilt. No `shutdown` is offered on purpose: a
+/// pool that can be torn down mid-flight is a synchronisation problem with no
+/// caller asking for it.
+///
+/// A panicking job does NOT poison the pool — the worker catches the unwind,
+/// stays alive, and the caller observes the dropped result channel and
+/// re-panics, which is the behaviour `scope.spawn(..).join().expect(..)` had.
+mod str_worker_pool {
+    use std::sync::OnceLock;
+    use std::sync::mpsc::{Sender, channel};
+
+    type Job = Box<dyn FnOnce() + Send + 'static>;
+
+    pub struct Pool {
+        job_tx: Sender<Job>,
+        threads: usize,
+    }
+
+    static POOL: OnceLock<Pool> = OnceLock::new();
+
+    /// The process-wide pool, constructed on first use.
+    pub fn pool() -> &'static Pool {
+        POOL.get_or_init(Pool::new)
+    }
+
+    impl Pool {
+        fn new() -> Self {
+            // Mirrors the per-call cap the scoped-spawn path used, so the
+            // pool can serve any chunking those kernels ask for without
+            // queueing behind itself.
+            let threads = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(64);
+            let (job_tx, job_rx) = channel::<Job>();
+            let job_rx = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
+            for id in 0..threads {
+                let job_rx = std::sync::Arc::clone(&job_rx);
+                let spawned = std::thread::Builder::new()
+                    .name(format!("fp-str-{id}"))
+                    .spawn(move || {
+                        loop {
+                            // Hold the receiver lock only long enough to take
+                            // one job; running under it would serialise the
+                            // pool. A poisoned lock means a previous holder
+                            // panicked WHILE dequeuing, which the catch_unwind
+                            // below makes unreachable — treat it as terminal
+                            // for this worker rather than propagating.
+                            let job = {
+                                let Ok(rx) = job_rx.lock() else { return };
+                                rx.recv()
+                            };
+                            // `Err` means every Sender is gone, i.e. the pool
+                            // itself was dropped: exit cleanly.
+                            let Ok(job) = job else { return };
+                            // Keep the worker alive across a panicking job.
+                            // The caller still observes the panic, because the
+                            // job's result sender is dropped without sending
+                            // and its `recv` fails.
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                        }
+                    });
+                if spawned.is_err() {
+                    // The OS refused a thread. Whatever count we reached is
+                    // what the pool has; `run` degrades to running everything
+                    // on the caller when `threads == 0`.
+                    return Self {
+                        job_tx,
+                        threads: id,
+                    };
+                }
+            }
+            Self { job_tx, threads }
+        }
+
+        /// Run `jobs` on the pool and return their results **in submission
+        /// order**, which is what makes the merged output bit-identical to the
+        /// scoped-spawn version this replaces.
+        ///
+        /// The caller's own thread runs the first job rather than blocking on
+        /// it, so a `jobs.len() == 1` call costs no hand-off at all and an
+        /// N-job call occupies N-1 pool threads.
+        pub fn run<T, F>(&self, jobs: Vec<F>) -> Vec<T>
+        where
+            F: FnOnce() -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            let mut jobs = jobs;
+            if self.threads == 0 || jobs.len() < 2 {
+                return jobs.into_iter().map(|job| job()).collect();
+            }
+            let (result_tx, result_rx) = channel::<(usize, T)>();
+            // Keep index 0 for this thread; dispatch the rest.
+            let first = jobs.remove(0);
+            let dispatched = jobs.len();
+            for (offset, job) in jobs.into_iter().enumerate() {
+                let result_tx = result_tx.clone();
+                let index = offset + 1;
+                let boxed: Job = Box::new(move || {
+                    let value = job();
+                    // The receiver hangs up only if the caller already
+                    // unwound; dropping the value is correct then.
+                    let _ = result_tx.send((index, value));
+                });
+                if self.job_tx.send(boxed).is_err() {
+                    // Pool is gone (cannot happen while `POOL` is a static,
+                    // but do not rely on that): there is no worker to run
+                    // this, so the caller must not block waiting for it.
+                    unreachable_pool_send();
+                }
+            }
+            drop(result_tx);
+
+            let mut slots: Vec<Option<T>> = (0..=dispatched).map(|_| None).collect();
+            slots[0] = Some(first());
+            for _ in 0..dispatched {
+                let (index, value) = result_rx
+                    .recv()
+                    .expect("string-kernel worker panicked or pool shut down");
+                slots[index] = Some(value);
+            }
+            slots
+                .into_iter()
+                .map(|slot| slot.expect("every dispatched job reported exactly once"))
+                .collect()
+        }
+    }
+
+    #[cold]
+    fn unreachable_pool_send() -> ! {
+        panic!("string-kernel worker pool receiver disappeared while the pool is a live static")
     }
 }
 
@@ -41886,6 +42093,84 @@ impl StringAccessor<'_> {
             });
             let mut merged = Vec::with_capacity(n);
             for part in parts {
+                merged.extend(part);
+            }
+            merged
+        };
+        let index = self.series.index().clone();
+        Series::new(name, index, Column::from_bool_values(out))
+    }
+
+    /// `startswith`/`endswith` over a contiguous Utf8 column, run on the
+    /// process-wide [`str_worker_pool`] instead of a per-call
+    /// `std::thread::scope` (br-frankenpandas-vrjrf).
+    ///
+    /// This is a specialisation of [`Self::apply_str_bytes_bool`], not a
+    /// replacement: pool jobs must be `Send + 'static`, and the generic `F:
+    /// Fn(&[u8]) -> bool` cannot be, because callers capture a borrowed
+    /// `pat: &str`. Rather than tighten that bound and force all 15 predicate
+    /// call sites to own their captures, the two affix predicates — the only
+    /// ones whose capture is a single needle — own the needle as an
+    /// `Arc<[u8]>` and carry a plain enum. The generic path is untouched and
+    /// still serves every other predicate.
+    ///
+    /// BIT-TRANSPARENCY: same needle bytes, same `starts_with`/`ends_with` on
+    /// the same row byte ranges, same chunk boundaries (`n.div_ceil(workers)`
+    /// with the same `workers` formula), and results merged in submission
+    /// order — so the output `Vec<bool>` is identical element-for-element to
+    /// the scoped-spawn version. The `Arc` accessor returns clones of the very
+    /// buffers `as_utf8_contiguous` borrows, so the bytes are the same bytes.
+    fn apply_str_affix_bool(
+        &self,
+        needle: &str,
+        affix: StrAffix,
+        name: &str,
+    ) -> Result<Series, FrameError> {
+        let column = self.series.column();
+        let Some((in_bytes, in_offsets)) = column.as_utf8_contiguous_arc() else {
+            // Non-contiguous / null-bearing backings keep the borrowed generic
+            // path, which delegates onward to the Scalar implementation.
+            return self.apply_str_bytes_bool(
+                |b| match affix {
+                    StrAffix::Prefix => b.starts_with(needle.as_bytes()),
+                    StrAffix::Suffix => b.ends_with(needle.as_bytes()),
+                },
+                name,
+            );
+        };
+        // Same thresholds as apply_str_bool / apply_str_bytes_bool so the
+        // three paths stay comparable under A/B.
+        const PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
+        const MIN_ROWS_PER_WORKER: usize = 131_072;
+        let n = in_offsets.len() - 1;
+        let workers = if in_bytes.len() >= PARALLEL_MIN_BYTES {
+            std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(64)
+                .min(n.div_ceil(MIN_ROWS_PER_WORKER))
+        } else {
+            1
+        };
+
+        let out = if workers < 2 {
+            affix_rows(&in_bytes, &in_offsets, needle.as_bytes(), affix, 0, n)
+        } else {
+            let needle: Arc<[u8]> = Arc::from(needle.as_bytes());
+            let rows_per_worker = n.div_ceil(workers);
+            let jobs: Vec<_> = (0..n)
+                .step_by(rows_per_worker)
+                .map(|start_row| {
+                    let end_row = (start_row + rows_per_worker).min(n);
+                    // O(1) refcount bumps — this is the whole reason the pool
+                    // needs no unsafe and no scoped threads.
+                    let bytes = Arc::clone(&in_bytes);
+                    let offsets = Arc::clone(&in_offsets);
+                    let needle = Arc::clone(&needle);
+                    move || affix_rows(&bytes, &offsets, &needle, affix, start_row, end_row)
+                })
+                .collect();
+            let mut merged = Vec::with_capacity(n);
+            for part in str_worker_pool::pool().run(jobs) {
                 merged.extend(part);
             }
             merged
@@ -42415,8 +42700,9 @@ impl StringAccessor<'_> {
         // Byte-level predicate (br-frankenpandas-i7znp): a prefix test is a pure
         // function of the bytes, so it skips the per-row `from_utf8` validation
         // the `&str` path pays. Bit-identical — see `apply_str_bytes_bool`.
-        let pat = pat.as_bytes();
-        self.apply_str_bytes_bool(|b| b.starts_with(pat), self.series.name())
+        // Routed through the reusable worker pool rather than a per-call
+        // `thread::scope` (br-frankenpandas-vrjrf) — see `apply_str_affix_bool`.
+        self.apply_str_affix_bool(pat, StrAffix::Prefix, self.series.name())
     }
 
     /// Check whether each string starts with any of the given prefixes.
@@ -42461,8 +42747,8 @@ impl StringAccessor<'_> {
     /// Check whether each string ends with a suffix.
     pub fn endswith(&self, pat: &str) -> Result<Series, FrameError> {
         // Byte-level predicate (br-frankenpandas-i7znp): see `startswith`.
-        let pat = pat.as_bytes();
-        self.apply_str_bytes_bool(|b| b.ends_with(pat), self.series.name())
+        // Pooled rather than per-call-spawned (br-frankenpandas-vrjrf).
+        self.apply_str_affix_bool(pat, StrAffix::Suffix, self.series.name())
     }
 
     /// Check whether each string ends with any of the given suffixes.
@@ -105320,6 +105606,140 @@ mod tests {
         let ends = s.str().endswith("suffix").unwrap();
         assert_eq!(ends.values()[0], Scalar::Bool(false));
         assert_eq!(ends.values()[1], Scalar::Bool(true));
+    }
+
+    /// The pooled affix path must be bit-identical to a serial oracle over the
+    /// SAME rows (br-frankenpandas-vrjrf).
+    ///
+    /// This is the test that has to bite, because the pool changes how the
+    /// work is split across threads and how the parts are reassembled. It
+    /// therefore drives an input large enough to actually take the parallel
+    /// arm — the gate is `bytes >= 8 MiB` AND `rows >= 2 * 131_072`, so a
+    /// small fixture would silently exercise only the serial branch and prove
+    /// nothing. The assertion is per row against `str::starts_with` /
+    /// `str::ends_with`, so an off-by-one chunk boundary, a dropped part, or
+    /// parts merged out of submission order all fail here rather than
+    /// surfacing as a rare wrong boolean in production.
+    #[test]
+    fn str_affix_pooled_matches_serial_oracle_vrjrf() {
+        // 300k rows x ~32 bytes ~= 9.6 MB > the 8 MiB parallel gate, and
+        // 300k > 2 * 131_072 so `workers` lands at >= 2.
+        const ROWS: usize = 300_000;
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        // Deliberately mix rows that match, rows that share a prefix but
+        // diverge, and rows shorter than the needle.
+        let variants = ["item_", "item", "ITEM_", "it", ""];
+        let mut labels = Vec::with_capacity(ROWS);
+        let mut values = Vec::with_capacity(ROWS);
+        for row in 0..ROWS {
+            let head = variants[(next() % variants.len() as u64) as usize];
+            labels.push((row as i64).into());
+            values.push(Scalar::Utf8(format!("{head}{row:022}_end{head}")));
+        }
+        let s = Series::from_values("x", labels, values).unwrap();
+        // `lower()` emits the contiguous representation the fast path needs.
+        let contiguous = s.str().lower().unwrap();
+        assert!(
+            contiguous.column().as_utf8_contiguous().is_some(),
+            "input must be contiguous or this test does not reach the pooled path"
+        );
+        let (bytes, offsets) = contiguous.column().as_utf8_contiguous().unwrap();
+        assert!(
+            bytes.len() >= 8 * 1024 * 1024,
+            "corpus must exceed the 8 MiB parallel gate, got {} bytes",
+            bytes.len()
+        );
+        assert!(
+            (offsets.len() - 1).div_ceil(131_072) >= 2,
+            "corpus must chunk into >= 2 workers or the pool is never used"
+        );
+
+        let rows: Vec<String> = contiguous
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Utf8(s) => s.clone(),
+                other => panic!("expected Utf8, got {other:?}"),
+            })
+            .collect();
+
+        for needle in ["item_", "it", "", "_end", "zzz"] {
+            let starts = contiguous.str().startswith(needle).unwrap();
+            let ends = contiguous.str().endswith(needle).unwrap();
+            assert_eq!(starts.values().len(), ROWS);
+            assert_eq!(ends.values().len(), ROWS);
+            for (row, text) in rows.iter().enumerate() {
+                assert_eq!(
+                    starts.values()[row],
+                    Scalar::Bool(text.starts_with(needle)),
+                    "startswith({needle:?}) row {row} = {text:?}"
+                );
+                assert_eq!(
+                    ends.values()[row],
+                    Scalar::Bool(text.ends_with(needle)),
+                    "endswith({needle:?}) row {row} = {text:?}"
+                );
+            }
+        }
+    }
+
+    /// The pool is a process-wide static, so concurrent callers share it
+    /// (br-frankenpandas-vrjrf). Each caller runs its own first chunk and
+    /// dispatches the rest, and pool workers never block on another caller's
+    /// job — so overlapping calls must make progress rather than deadlock, and
+    /// must not cross-deliver parts between callers.
+    ///
+    /// A pool that ran jobs while holding the receiver lock, or that routed
+    /// results through shared state instead of a per-call channel, hangs or
+    /// returns another caller's booleans here.
+    #[test]
+    fn str_affix_pool_is_safe_under_concurrent_callers_vrjrf() {
+        const ROWS: usize = 300_000;
+        // Each thread gets a DISTINCT needle whose expected answer differs, so
+        // a cross-delivered part is detected as a wrong value, not masked by
+        // two callers agreeing.
+        let build = |tag: &str| {
+            let mut labels = Vec::with_capacity(ROWS);
+            let mut values = Vec::with_capacity(ROWS);
+            for row in 0..ROWS {
+                labels.push((row as i64).into());
+                values.push(Scalar::Utf8(format!("{tag}{row:026}")));
+            }
+            Series::from_values("x", labels, values)
+                .unwrap()
+                .str()
+                .lower()
+                .unwrap()
+        };
+
+        let tags = ["aaa_", "bbb_", "ccc_", "ddd_"];
+        let series: Vec<Series> = tags.iter().map(|tag| build(tag)).collect();
+        assert!(
+            series[0].column().as_utf8_contiguous().unwrap().0.len() >= 8 * 1024 * 1024,
+            "corpus must exceed the 8 MiB parallel gate"
+        );
+
+        std::thread::scope(|scope| {
+            for (i, s) in series.iter().enumerate() {
+                scope.spawn(move || {
+                    // Every row of series i starts with tags[i] and no other.
+                    for (j, needle) in tags.iter().enumerate() {
+                        let got = s.str().startswith(needle).unwrap();
+                        let expected = Scalar::Bool(i == j);
+                        assert!(
+                            got.values().iter().all(|v| *v == expected),
+                            "series {i} vs needle {needle:?}: expected all {expected:?}"
+                        );
+                    }
+                });
+            }
+        });
     }
 
     /// Differential guard for the byte-level prefix/suffix path
