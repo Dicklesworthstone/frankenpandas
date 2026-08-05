@@ -7118,7 +7118,10 @@ mod tests {
     fn nansum_timedelta_overflow_is_nat_not_fabricated_max_opz27() {
         let vals = vec![Scalar::Timedelta64(i64::MAX), Scalar::Timedelta64(i64::MAX)];
         let got = super::nansum(&vals);
-        assert!(got.is_missing(), "overflowing sum must be missing, got {got:?}");
+        assert!(
+            got.is_missing(),
+            "overflowing sum must be missing, got {got:?}"
+        );
         assert_eq!(got, Scalar::Timedelta64(Timedelta::NAT));
         assert_ne!(got, Scalar::Timedelta64(i64::MAX));
     }
@@ -7130,18 +7133,12 @@ mod tests {
     #[test]
     fn nansum_timedelta_negative_overflow_is_nat_opz27() {
         let min_repr = i64::MIN + 1; // Timedelta.min; i64::MIN is the NaT sentinel
-        let vals = vec![
-            Scalar::Timedelta64(min_repr),
-            Scalar::Timedelta64(min_repr),
-        ];
+        let vals = vec![Scalar::Timedelta64(min_repr), Scalar::Timedelta64(min_repr)];
         assert_eq!(super::nansum(&vals), Scalar::Timedelta64(Timedelta::NAT));
 
         // Exactly the most-negative representable total stays a real value and
         // must NOT collapse into the sentinel one nanosecond above it.
-        let exact = vec![
-            Scalar::Timedelta64(min_repr + 1),
-            Scalar::Timedelta64(-1),
-        ];
+        let exact = vec![Scalar::Timedelta64(min_repr + 1), Scalar::Timedelta64(-1)];
         let got = super::nansum(&exact);
         assert_eq!(got, Scalar::Timedelta64(min_repr));
         assert!(!got.is_missing(), "Timedelta.min is representable, not NaT");
@@ -7157,7 +7154,10 @@ mod tests {
             Scalar::Timedelta64(i64::MAX),
         ];
         let got = super::nanptp(&vals);
-        assert!(got.is_missing(), "unrepresentable range must be NaT, got {got:?}");
+        assert!(
+            got.is_missing(),
+            "unrepresentable range must be NaT, got {got:?}"
+        );
         assert_ne!(got, Scalar::Timedelta64(i64::MAX));
 
         // A representable range is still exact to the nanosecond (the reason
@@ -7181,7 +7181,11 @@ mod tests {
         let out = super::nancumsum(&vals);
         assert_eq!(out.len(), 3);
         assert_eq!(out[0], Scalar::Timedelta64(i64::MAX));
-        assert!(out[1].is_missing(), "overflowed index must be NaT, got {:?}", out[1]);
+        assert!(
+            out[1].is_missing(),
+            "overflowed index must be NaT, got {:?}",
+            out[1]
+        );
         assert_eq!(
             out[2],
             Scalar::Timedelta64(i64::MAX),

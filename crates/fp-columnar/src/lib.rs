@@ -37220,8 +37220,7 @@ mod tests {
                 vec![1_600_000_000_000_000_001],
                 validity.clone(),
             );
-            let b =
-                Column::from_timedelta64_values_with_validity(vec![1], validity.clone());
+            let b = Column::from_timedelta64_values_with_validity(vec![1], validity.clone());
             let exact = a.binary_numeric(&b, ArithmeticOp::Sub).expect("exact");
             assert_eq!(
                 exact.values()[0],
