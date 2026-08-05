@@ -41837,11 +41837,16 @@ mod str_worker_pool {
                     // unwound; dropping the value is correct then.
                     let _ = result_tx.send((index, value));
                 });
-                if self.job_tx.send(boxed).is_err() {
-                    // Pool is gone (cannot happen while `POOL` is a static,
-                    // but do not rely on that): there is no worker to run
-                    // this, so the caller must not block waiting for it.
-                    unreachable_pool_send();
+                // If every worker has exited there is nobody to run this, and
+                // blocking on its result below would hang. `SendError` hands
+                // the job back, so run it here instead of failing: the pool
+                // degrades to caller-side execution rather than deadlocking or
+                // panicking. (Reaching this needs all workers gone while the
+                // `POOL` static is alive, which the catch_unwind in the worker
+                // loop is designed to prevent — but the recovery costs one
+                // branch and removes a panic from library code.)
+                if let Err(std::sync::mpsc::SendError(job)) = self.job_tx.send(boxed) {
+                    job();
                 }
             }
             drop(result_tx);
@@ -41859,11 +41864,6 @@ mod str_worker_pool {
                 .map(|slot| slot.expect("every dispatched job reported exactly once"))
                 .collect()
         }
-    }
-
-    #[cold]
-    fn unreachable_pool_send() -> ! {
-        panic!("string-kernel worker pool receiver disappeared while the pool is a live static")
     }
 }
 
