@@ -10746,6 +10746,58 @@ impl Column {
         }
     }
 
+    /// Owned `Arc` handles to the same contiguous Utf8 backing that
+    /// [`Self::as_utf8_contiguous`] exposes by reference.
+    ///
+    /// perf/unblock (br-frankenpandas-vrjrf): `as_utf8_contiguous` hands back
+    /// BORROWED `(&[u8], &[usize])`, which is the only reason the parallel string
+    /// kernels must use `std::thread::scope` — the borrow may not outlive the
+    /// call. The backing is already `Arc<[u8]>` / `Arc<[usize]>`, and `Arc<T>` is
+    /// `Send + Sync` whenever `T` is, so returning CLONED `Arc`s instead lets a
+    /// worker own its view for as long as it likes: no borrowed-slice lifetime,
+    /// hence no scoped threads and no `unsafe` for the DATA side.
+    ///
+    /// Both clones are O(1) refcount bumps, never buffer copies, and the backing
+    /// is immutable after construction, so a reader can never observe a change
+    /// underneath it.
+    ///
+    /// Declines under exactly the same conditions as [`Self::as_utf8_contiguous`]
+    /// (non-Utf8 dtype, any missing row, or a non-contiguous backing) and resolves
+    /// the same two backings, so the two accessors agree row-for-row: row `r` is
+    /// `bytes[offsets[r]..offsets[r + 1]]` under both.
+    ///
+    /// NOTE for pool work: this removes the data-lifetime constraint but NOT the
+    /// predicate one. A `'static` worker pool also needs a `'static` job, and the
+    /// current `apply_str_bool` / `apply_str_bytes_bool` callers pass closures
+    /// that BORROW their pattern (`|s| s.contains(pat)`). Making those `'static`
+    /// (owned pattern captures) is a separate, still-safe step — see the
+    /// br-frankenpandas-vrjrf notes.
+    #[must_use]
+    pub fn as_utf8_contiguous_arc(&self) -> Option<Utf8ArcBuffers> {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } => {
+                Some((Arc::clone(bytes), Arc::clone(offsets)))
+            }
+            ScalarValues::LazyLowerHexSequenceUtf8 {
+                prefix,
+                start,
+                len,
+                hex_width,
+                buffers,
+                ..
+            } => {
+                let (bytes, offsets) = ScalarValues::materialized_lower_hex_buffers(
+                    prefix, *start, *len, *hex_width, buffers,
+                );
+                Some((Arc::clone(bytes), Arc::clone(offsets)))
+            }
+            _ => None,
+        }
+    }
+
     /// Raw contiguous byte backing of a NULLABLE Utf8 column (`LazyNullableUtf8` —
     /// a string column WITH missing rows). Returns `(bytes, offsets)` where a
     /// present row `r` is `bytes[offsets[r]..offsets[r+1]]` and a missing row's
@@ -32075,6 +32127,93 @@ mod tests {
                     .collect();
                 assert_eq!(got.values(), expected, "nullable Int64 op {op:?}");
             }
+        }
+
+        #[test]
+        fn as_utf8_contiguous_arc_agrees_with_borrowed_vrjrf() {
+            // br-frankenpandas-vrjrf: `as_utf8_contiguous_arc` is the Arc-returning
+            // sibling of `as_utf8_contiguous`. It must agree with the borrowed
+            // accessor on BOTH axes or the pool work built on it is unsound:
+            //   (1) the Some/None decision — identical gating (dtype, validity,
+            //       backing), so a caller can swap accessors without changing which
+            //       inputs take the typed path;
+            //   (2) the bytes/offsets contents — so row r resolves to the same span.
+            // Seeded LCG, no mocks; empty strings and an empty column included.
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..80 {
+                let n = (next() % 40) as usize;
+                let strings: Vec<String> = (0..n)
+                    .map(|_| {
+                        let len = (next() % 5) as usize; // 0..4 incl empty
+                        (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect()
+                    })
+                    .collect();
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for s in &strings {
+                    bytes.extend_from_slice(s.as_bytes());
+                    offsets.push(bytes.len());
+                }
+                let column = Column::from_utf8_contiguous(bytes, offsets);
+
+                let borrowed = column.as_utf8_contiguous();
+                let owned = column.as_utf8_contiguous_arc();
+                assert_eq!(
+                    borrowed.is_some(),
+                    owned.is_some(),
+                    "Arc and borrowed accessors must make the SAME Some/None decision"
+                );
+                let (b_bytes, b_offsets) = borrowed.expect("contiguous fixture");
+                let (a_bytes, a_offsets) = owned.expect("contiguous fixture");
+                assert_eq!(a_bytes.as_ref(), b_bytes, "byte buffers must be identical");
+                assert_eq!(
+                    a_offsets.as_ref(),
+                    b_offsets,
+                    "offset buffers must be identical"
+                );
+                // Every row resolves to the same span through either handle.
+                for (r, expected) in strings.iter().enumerate() {
+                    let via_arc = &a_bytes[a_offsets[r]..a_offsets[r + 1]];
+                    let via_ref = &b_bytes[b_offsets[r]..b_offsets[r + 1]];
+                    assert_eq!(via_arc, via_ref, "row {r} span mismatch");
+                    assert_eq!(via_arc, expected.as_bytes(), "row {r} content mismatch");
+                }
+            }
+
+            // NEGATIVE: the Arc accessor must DECLINE wherever the borrowed one does,
+            // otherwise a pool consumer would take the typed path on input the
+            // borrowed path rejects. A nullable Utf8 column (missing row ⇒
+            // validity.all() false) is the load-bearing case, and a non-Utf8 column
+            // pins the dtype gate.
+            let nullable = Column::from_values(vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("c".into()),
+            ])
+            .expect("nullable utf8 column");
+            assert!(
+                nullable.as_utf8_contiguous().is_none(),
+                "fixture must have a missing row so the borrowed accessor declines"
+            );
+            assert!(
+                nullable.as_utf8_contiguous_arc().is_none(),
+                "Arc accessor must decline on a nullable Utf8 column too"
+            );
+
+            let ints = Column::from_i64_values(vec![1, 2, 3]);
+            assert!(ints.as_utf8_contiguous().is_none());
+            assert!(
+                ints.as_utf8_contiguous_arc().is_none(),
+                "Arc accessor must decline on a non-Utf8 dtype too"
+            );
         }
 
         #[test]
