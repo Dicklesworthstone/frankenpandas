@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import concurrent.futures
 import json
 import subprocess
 import sys
@@ -104,7 +105,24 @@ def main() -> int:
     parser.add_argument("--glob", default="*.json", help="restrict to matching fixtures")
     parser.add_argument("--limit", type=int, default=0, help="stop after N fixtures (0 = all)")
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help=(
+            "concurrent oracle invocations (default 1). Each one spawns a fresh "
+            "python that re-imports pandas (~1.5s), so a serial full-corpus pass "
+            "is ~30min and step 2's review will want several. Threads are the "
+            "right pool here because the work is entirely subprocess wait. "
+            "NOTE: this loads the host — do not run a wide pass while a "
+            "vs-pandas measurement window is open, since the benchmark gate "
+            "requires every CPU under 20% busy."
+        ),
+    )
     args = parser.parse_args()
+    if args.jobs < 1:
+        print("--jobs must be >= 1", file=sys.stderr)
+        return 2
 
     if args.apply and not args.i_reviewed_the_diff:
         print(
@@ -128,16 +146,31 @@ def main() -> int:
     unchanged = 0
     by_prior_sha: collections.Counter[str] = collections.Counter()
 
-    for path in fixtures:
+    def examine(path: Path) -> tuple[Path, dict[str, Any], dict[str, Any] | None, str | None]:
+        """Read a fixture and ask the oracle about it. Pure — no writes here."""
         fixture = json.loads(path.read_text(encoding="utf-8"))
-        prior = (fixture.get(PROVENANCE_KEY) or {}).get("oracle_script_sha256", "?")
         try:
             response = run_oracle(fixture, args.legacy_root, args.timeout)
         except Exception as exc:  # noqa: BLE001 - report and continue
-            errored.append((path.name, str(exc)[:160]))
-            continue
+            return path, fixture, None, str(exc)[:160]
         if response.get("error"):
-            errored.append((path.name, f"oracle error: {response['error']}"))
+            return path, fixture, None, f"oracle error: {response['error']}"
+        return path, fixture, response, None
+
+    # Threads, not processes: the work is entirely waiting on a subprocess, so
+    # the GIL is released throughout. Results are collected in submission order
+    # so the report is DETERMINISTIC regardless of --jobs — a report whose
+    # contents depended on scheduling would be useless for reviewing a diff.
+    if args.jobs > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            outcomes = list(pool.map(examine, fixtures))
+    else:
+        outcomes = [examine(path) for path in fixtures]
+
+    for path, fixture, response, error in outcomes:
+        prior = (fixture.get(PROVENANCE_KEY) or {}).get("oracle_script_sha256", "?")
+        if error is not None or response is None:
+            errored.append((path.name, error or "unknown"))
             continue
 
         changed, updated = compare(fixture, response)
