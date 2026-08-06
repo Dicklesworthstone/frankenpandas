@@ -3681,6 +3681,28 @@ pub fn nanmin(values: &[Scalar]) -> Scalar {
                     min = Some(v)
                 }
             }
+            // br-frankenpandas-srqdo: Interval, fourth dtype whose to_f64()
+            // errors. pandas orders Intervals by (left, right) — a tie on left
+            // falls through to right. `closed` is NOT part of the comparison:
+            // pandas does order scalar Intervals that tie on both bounds by an
+            // internal `closed` ordering, but a real IntervalArray requires a
+            // UNIFORM closed, so that case cannot arise from an Interval
+            // column, and guessing an undocumented enum order would be worse
+            // than keeping the first on an exact tie.
+            //
+            // A NaN bound is not orderable and has no pandas counterpart —
+            // IntervalArray refuses to build one ("missing values must be
+            // missing in the same location both left and right") — so bail to
+            // missing rather than impose an arbitrary order. Note this avoids
+            // `partial_cmp().unwrap()`, which would be a panic in library code.
+            (Some(Scalar::Interval(a)), Scalar::Interval(b)) => {
+                if a.left.is_nan() || a.right.is_nan() || b.left.is_nan() || b.right.is_nan() {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                if (b.left, b.right) < (a.left, a.right) {
+                    min = Some(v)
+                }
+            }
             (Some(a), b) => match (a.to_f64(), b.to_f64()) {
                 (Ok(af), Ok(bf)) if bf < af => min = Some(v),
                 (Ok(_), Ok(_)) => {}
@@ -3742,6 +3764,16 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
                     return Scalar::Null(NullKind::NaN);
                 }
                 if b.ordinal > a.ordinal {
+                    max = Some(v)
+                }
+            }
+            // br-frankenpandas-srqdo: Interval, ordered by (left, right) with
+            // NaN bounds refused — see `nanmin` for the full reasoning.
+            (Some(Scalar::Interval(a)), Scalar::Interval(b)) => {
+                if a.left.is_nan() || a.right.is_nan() || b.left.is_nan() || b.right.is_nan() {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                if (b.left, b.right) > (a.left, a.right) {
                     max = Some(v)
                 }
             }
@@ -7873,6 +7905,71 @@ mod tests {
         assert!(super::nanvar(&vals, 1).is_missing(), "pandas raises var");
         assert!(super::nansem(&vals, 1).is_missing(), "pandas raises sem");
         assert!(super::nanmean(&vals).is_missing(), "pandas raises mean");
+    }
+
+    /// br-frankenpandas-srqdo: Interval is the FOURTH dtype whose `to_f64()`
+    /// errors, so min/max fell into the f64 catch-all and returned
+    /// `Null(NaN)`. pandas 2.2.3 on `IntervalArray.from_tuples([(0,1),(4,5),(2,3)])`
+    /// gives min `(0, 1]` and max `(4, 5]`.
+    #[test]
+    fn interval_min_max_match_pandas_srqdo() {
+        let iv = |l: f64, r: f64| Scalar::Interval(Interval::new(l, r, IntervalClosed::Right));
+        let vals = vec![iv(0.0, 1.0), iv(4.0, 5.0), iv(2.0, 3.0)];
+        assert_eq!(super::nanmin(&vals), iv(0.0, 1.0));
+        assert_eq!(super::nanmax(&vals), iv(4.0, 5.0));
+
+        // Size-dependence, per the axhhk lesson: ONE element always worked via
+        // the `(None, _)` seed, so a single-value test passes even with no arm.
+        assert_eq!(super::nanmin(&[iv(2.0, 3.0)]), iv(2.0, 3.0));
+        let two = vec![iv(4.0, 5.0), iv(0.0, 1.0)];
+        assert!(!super::nanmin(&two).is_missing());
+        assert_eq!(super::nanmin(&two), iv(0.0, 1.0));
+        assert_eq!(super::nanmax(&two), iv(4.0, 5.0));
+    }
+
+    /// The tie-on-left case, which is what discriminates a correct (left, right)
+    /// comparison from one that only looks at `left`. pandas: Interval(0,2) <
+    /// Interval(0,5) is True. An implementation comparing left alone keeps
+    /// whichever came first and returns the wrong element here.
+    #[test]
+    fn interval_ties_on_left_order_by_right_srqdo() {
+        let iv = |l: f64, r: f64| Scalar::Interval(Interval::new(l, r, IntervalClosed::Right));
+        let vals = vec![iv(0.0, 5.0), iv(0.0, 2.0), iv(0.0, 9.0)];
+        assert_eq!(super::nanmin(&vals), iv(0.0, 2.0));
+        assert_eq!(super::nanmax(&vals), iv(0.0, 9.0));
+    }
+
+    /// A NaN bound has no pandas counterpart — `IntervalArray` refuses to build
+    /// one ("missing values must be missing in the same location both left and
+    /// right") — so it must report missing rather than impose an arbitrary
+    /// order. Critically this must NOT panic: the obvious
+    /// `partial_cmp().unwrap()` implementation would.
+    #[test]
+    fn interval_nan_bound_is_not_ordered_srqdo() {
+        let iv = |l: f64, r: f64| Scalar::Interval(Interval::new(l, r, IntervalClosed::Right));
+        let vals = vec![iv(0.0, 1.0), iv(f64::NAN, 5.0)];
+        assert!(super::nanmin(&vals).is_missing());
+        assert!(super::nanmax(&vals).is_missing());
+    }
+
+    /// pandas RAISES or NotImplementedErrors every other reduction for
+    /// Interval (median/mean/sum/std/quantile/cummax). FP must not invent
+    /// values, so they stay missing.
+    #[test]
+    fn interval_unsupported_reductions_stay_missing_srqdo() {
+        let iv = |l: f64, r: f64| Scalar::Interval(Interval::new(l, r, IntervalClosed::Right));
+        let vals = vec![iv(0.0, 1.0), iv(4.0, 5.0), iv(2.0, 3.0)];
+        assert!(super::nanmedian(&vals).is_missing(), "pandas raises median");
+        assert!(super::nanmean(&vals).is_missing(), "pandas raises mean");
+        assert!(super::nanstd(&vals, 1).is_missing(), "pandas raises std");
+        assert!(
+            super::nanquantile(&vals, 0.5).is_missing(),
+            "pandas raises quantile"
+        );
+        assert!(
+            super::nancummax(&vals).iter().all(Scalar::is_missing),
+            "pandas NotImplementedErrors cummax"
+        );
     }
 
     /// Mixed Datetime64 + another dtype must NOT take the typed arm — it falls
