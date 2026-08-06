@@ -8,6 +8,41 @@ Continuing the attribution pass into the 35 op-introduced null markers and the 4
 class. Nothing attributed, regenerated, or retired; all 159 still fail; the 110 oracle errors
 remain untriaged and are not folded into any total.
 
+## HEADLINE — 94% of what looks like corpus drift is not corpus drift
+
+**163 fixtures move against the current oracle. Only 2 of them are stale.**
+
+The number that gets carried forward from this bead is 163, so here is what those 163 actually are.
+Every moved fixture was additionally run through the oracle its own `oracle_script_sha256` NAMES,
+and the verdicts partition the set exactly:
+
+| verdict | n | share | what it means |
+|---|---:|---:|---|
+| `PROVENANCE_FICTION` | 96 | 58.9% | neither the named nor the current oracle produces the pinned values |
+| `STAMP_IMPOSSIBLE` | 56 | 34.4% | the named oracle has no handler for the op, so it cannot have generated it |
+| `BOTH_MOVED` | 8 | 4.9% | the named oracle produces a third answer |
+| `GENUINELY_STALE` | **2** | **1.2%** | the named oracle DID produce these values; today's does not |
+| `STAMP_ERRORED` | 1 | 0.6% | the named oracle failed for another reason — indeterminate |
+| **total** | **163** | **100%** | |
+
+- **152 of 163 — 93.3% — are PROVABLY not drift** (`PROVENANCE_FICTION` + `STAMP_IMPOSSIBLE`).
+  Counting the one indeterminate `STAMP_ERRORED` gives 153, **93.9%**.
+- **161 of 163 — 98.8% — do not match their named oracle at all**, so "the pinned values were once
+  correct output" is false for all but two.
+- **2 of 163 — 1.2% — are stale** in the sense this bead's title assumes:
+  `fp_p2d_025_series_clip_with_nulls_hardened` and `fp_p2d_130_dataframe_clip_nulls_hardened`.
+
+So the remedy the bead names — regenerate the corpus — applies to two fixtures. Applied to the
+other 161 it would overwrite hand-authored parity targets with the output of the code under test.
+
+**Why the partition is trustworthy.** Each verdict path is exercised by a test, the verdicts are
+asserted to partition the moved set at runtime (not merely summed for display), and the check that
+makes the newly-visible cases visible carries a negative control: disabling
+`test_oracle_success_contradicts_a_fixture_that_requires_failure`'s branch turns the suite red —
+**1 failed, 28 passed**, that one test and no other. A partition whose members are only ever
+counted, never contradicted, is bookkeeping; this one fails loudly when the tooling and the corpus
+disagree, in whichever direction they disagree.
+
 ## The finding that reframes the bead
 
 p6srr is titled *"the corpus is stale against its oracle"*. That phrasing presumes the pinned

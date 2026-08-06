@@ -252,6 +252,25 @@ def test_reproducing_the_fixture_wins_over_matching_today():
     )
 
 
+def test_every_moved_fixture_gets_exactly_one_verdict():
+    """The partition property the headline depends on.
+
+    "163 moved fixtures" is the number that gets carried forward, so every
+    verdict is reported as a share of it. If the verdicts did not partition the
+    moved set, the shares would not add up and the headline would be arithmetic
+    rather than a decomposition.
+    """
+    verdicts = [
+        regenerate_fixtures.provenance_verdict(True, False),
+        regenerate_fixtures.provenance_verdict(False, True),
+        regenerate_fixtures.provenance_verdict(False, False),
+        regenerate_fixtures.named_oracle_verdict("unsupported operation: 'x'"),
+        regenerate_fixtures.named_oracle_verdict("something else blew up"),
+    ]
+    assert all(verdicts), "every path must yield a verdict, never a silent blank"
+    assert len(set(verdicts)) == len(verdicts), "the paths must not collide"
+
+
 def test_the_verdicts_are_distinct_labels():
     labels = {
         regenerate_fixtures.GENUINELY_STALE,

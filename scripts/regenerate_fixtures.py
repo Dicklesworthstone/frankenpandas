@@ -698,8 +698,23 @@ def main() -> int:
                 "  not share one attribution."
             )
         if provenance_verdicts:
+            moved_n = len(moved_unattributed)
+            stale_n = provenance_verdicts[GENUINELY_STALE]
+            not_drift = (provenance_verdicts[PROVENANCE_FICTION]
+                         + provenance_verdicts[STAMP_IMPOSSIBLE])
+            # State the partition against the SAME denominator the headline
+            # number uses. "163 moved fixtures" is what gets carried forward, so
+            # every verdict is reported as a share of it and the shares are
+            # asserted to account for all of it.
+            assert sum(provenance_verdicts.values()) == moved_n, (
+                "provenance verdicts must partition the moved set"
+            )
             print(
-                "\nDID THE FIXTURE'S OWN NAMED ORACLE EVER PRODUCE ITS PINNED VALUES?\n"
+                f"\nDID THE FIXTURE'S OWN NAMED ORACLE EVER PRODUCE ITS PINNED VALUES?\n"
+                f"  Of {moved_n} moved fixtures, {stale_n} "
+                f"({100.0 * stale_n / moved_n:.1f}%) are stale in the sense "
+                f"'the oracle drifted from\n  values it once produced'. "
+                f"{not_drift} ({100.0 * not_drift / moved_n:.1f}%) are PROVABLY not that.\n"
                 f"  {provenance_verdicts[GENUINELY_STALE]:5d}  {GENUINELY_STALE}"
                 "     the named oracle DID; today's does not. Regeneration is the remedy.\n"
                 f"  {provenance_verdicts[PROVENANCE_FICTION]:5d}  {PROVENANCE_FICTION}"
@@ -711,7 +726,9 @@ def main() -> int:
                 "   the named oracle does not implement this fixture's operation,\n"
                 "                             so it cannot have generated it. No comparison needed.\n"
                 f"  {provenance_verdicts[STAMP_ERRORED]:5d}  {STAMP_ERRORED}"
-                "      the named oracle failed for some other reason. Reported, not dropped."
+                "      the named oracle failed for some other reason. Reported, not dropped.\n"
+                f"  {'-' * 5}\n"
+                f"  {moved_n:5d}  total — the verdicts partition the moved set exactly."
             )
         if args.list_limit:
             print(f"\nUNATTRIBUTED MOVES (first {args.list_limit} of "
