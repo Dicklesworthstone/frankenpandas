@@ -64,6 +64,22 @@ except ImportError as exc:  # pragma: no cover
 # Keys fixture_differ.compare_expected adjudicates semantically.
 SEMANTIC_KEYS = ("expected_series", "expected_frame", "expected_scalar", "expected_bool")
 
+# The key by which a fixture asserts the operation must FAIL.
+ERROR_KEY = "expected_error_contains"
+ERROR_EXPECTED_BUT_SUCCEEDED = "ERROR expected-but-succeeded"
+
+
+def fixture_expects_error(fixture: dict[str, Any]) -> bool:
+    """Does this fixture assert that the operation must fail?
+
+    A bare `null` under the key is NOT such an assertion — generated fixtures
+    carry every `expected_*` key with a null placeholder, and one of them was
+    inflating the uncompared count. A missing value is encoded as
+    `{"kind": "null", ...}`, never as bare JSON null, so this cannot swallow a
+    real claim.
+    """
+    return fixture.get(ERROR_KEY) is not None
+
 
 def differing_leaves(pinned: Any, live: Any, path: str = "") -> list[tuple[str, Any, Any]]:
     """Every differing leaf between two normalized trees, with its path.
@@ -303,7 +319,9 @@ def classify(fixture: dict[str, Any], response: dict[str, Any]) -> dict[str, Any
     records whether each key was adjudicated SEMANTIC or STRUCTURAL; `uncompared`
     lists keys present in the fixture that neither path could judge.
     """
-    present = [k for k in fixture if k.startswith("expected")]
+    # A bare-null expected key is a placeholder, not a claim. Counting them made
+    # generated fixtures contribute phantom uncompared keys.
+    present = [k for k in fixture if k.startswith("expected") and fixture[k] is not None]
     moved: list[str] = []
     how: dict[str, str] = {}
     uncompared: list[str] = []
@@ -320,6 +338,18 @@ def classify(fixture: dict[str, Any], response: dict[str, Any]) -> dict[str, Any
 
     for key in present:
         if key in SEMANTIC_KEYS:
+            continue
+        if key == ERROR_KEY:
+            # `classify` only runs when the oracle SUCCEEDED, so a fixture that
+            # asserts failure has been contradicted. This used to be reported as
+            # an UNCOMPARED key, which let 11 fixtures saying "this must fail"
+            # be counted as agreement while pandas happily returned a value —
+            # the silent-non-comparison-as-success bug, in this tool.
+            moved.append(key)
+            how[key] = "SEMANTIC"
+            detail["expected_error"] = (
+                f"fixture requires failure containing {fixture[key]!r}; the oracle succeeded"
+            )
             continue
         if key not in response:
             uncompared.append(key)
@@ -525,6 +555,7 @@ def main() -> int:
     retired: list[tuple[str, str]] = []
     unsupported: list[tuple[str, str]] = []
     other_errors: list[tuple[str, str]] = []
+    expected_error_agreements: list[tuple[str, str]] = []
     uncompared_keys: collections.Counter[str] = collections.Counter()
     how_counts: collections.Counter[str] = collections.Counter()
 
@@ -540,6 +571,15 @@ def main() -> int:
                         json.dumps(retire(fixture, entry["reason"]), indent=2) + "\n",
                         encoding="utf-8")
                     retired.append((name, entry["reason"]))
+            elif fixture_expects_error(fixture):
+                # The fixture asserts this operation fails and the oracle failed.
+                # Both sides agree it is an error, so this is NOT an oracle defect
+                # to triage. The MESSAGE TEXT is deliberately not compared:
+                # `expected_error_contains` pins FrankenPandas's wording, which the
+                # Rust harness checks; the oracle raises pandas' own English and
+                # the two were never meant to match ('out of bounds' vs pandas'
+                # 'out-of-bounds' is the shape of that trap).
+                expected_error_agreements.append((name, msg))
             else:
                 other_errors.append((name, msg))
             continue
@@ -568,6 +608,8 @@ def main() -> int:
                         found, ex = classify_move(fixture[key], response[key])
                         classes.extend(found)
                         example = example or ex
+                if ERROR_KEY in verdict["moved"]:
+                    classes.append(ERROR_EXPECTED_BUT_SUCCEEDED)
                 classes = sorted(set(classes)) or ["UNCLASSIFIED"]
                 # Split each null-marker class by whether the pinned marker came
                 # from this fixture's own input, so one attribution cannot cover
@@ -617,7 +659,9 @@ def main() -> int:
     print(f"  MOVED, attributed          : {len(moved_attributed)}")
     print(f"  MOVED, UNATTRIBUTED        : {len(moved_unattributed)}   <-- stay failing fixtures")
     print(f"  oracle: unsupported op     : {len(unsupported)}   <-- retire candidates")
-    print(f"  oracle: other errors       : {len(other_errors)}")
+    print(f"  expected-error, BOTH failed: {len(expected_error_agreements)}   "
+          "<-- legitimate expected-error fixtures, NOT defects")
+    print(f"  oracle: other errors       : {len(other_errors)}   <-- untriaged")
     print(f"\ncomparison coverage          : "
           f"{how_counts['SEMANTIC']} semantic, {how_counts['STRUCTURAL']} structural")
     if uncompared_keys:
@@ -705,6 +749,9 @@ def main() -> int:
                         {"fixture": n, "error": m} for n, m in unsupported
                     ],
                     "other_errors": [{"fixture": n, "error": m} for n, m in other_errors],
+                    "expected_error_agreements": [
+                        {"fixture": n, "error": m} for n, m in expected_error_agreements
+                    ],
                     "uncompared_keys": dict(uncompared_keys),
                     "coverage": dict(how_counts),
                 },

@@ -157,6 +157,61 @@ def test_corpus_anchor_merge_missing_is_op_introduced():
     assert regenerate_fixtures.roundtrip_implicated(fixture, [NULL_TO_NAN]) == []
 
 
+# --- expected-error fixtures ----------------------------------------------
+#
+# 11 fixtures assert "this operation must fail" while the oracle returns a value,
+# and every one was counted as agreement because `expected_error_contains` was
+# reported as an UNCOMPARED key. That is the silent-non-comparison-as-success bug
+# this tool exists downstream of, occurring inside this tool.
+
+
+def test_a_fixture_pinning_an_error_message_expects_an_error():
+    assert regenerate_fixtures.fixture_expects_error({"expected_error_contains": "boom"})
+
+
+def test_a_bare_null_placeholder_is_not_an_assertion():
+    """NEGATIVE: generated fixtures carry every expected_* key with a null."""
+    assert not regenerate_fixtures.fixture_expects_error(
+        {"expected_error_contains": None}
+    )
+    assert not regenerate_fixtures.fixture_expects_error({})
+
+
+def test_oracle_success_contradicts_a_fixture_that_requires_failure():
+    fixture = {"expected_error_contains": "boolean mask required for filter"}
+    verdict = regenerate_fixtures.classify(fixture, {"expected_series": None})
+    assert verdict["moved"] == ["expected_error_contains"]
+    assert "expected_error_contains" not in verdict["uncompared"], (
+        "an expected-error fixture the oracle contradicted must never be filed "
+        "as merely uncompared"
+    )
+    assert "succeeded" in verdict["detail"]["expected_error"]
+
+
+def test_a_null_placeholder_is_neither_moved_nor_uncompared():
+    """NEGATIVE: the placeholder must not become a phantom disagreement either."""
+    verdict = regenerate_fixtures.classify(
+        {"expected_error_contains": None}, {"expected_series": None}
+    )
+    assert verdict["moved"] == []
+    assert verdict["uncompared"] == []
+
+
+def test_error_text_is_not_compared_between_fp_and_pandas():
+    """`expected_error_contains` pins FP's wording; the oracle raises pandas'.
+
+    The real corpus case: a fixture expecting 'out of bounds' against pandas'
+    'positional indexers are out-of-bounds'. Matching those texts would reject
+    83 legitimate agreements over a hyphen.
+    """
+    fixture = {"expected_error_contains": "out of bounds"}
+    assert regenerate_fixtures.fixture_expects_error(fixture)
+    # The predicate is about EXISTENCE of an error expectation, never its text.
+    assert regenerate_fixtures.fixture_expects_error(
+        {"expected_error_contains": "totally different wording"}
+    )
+
+
 # --- "stale" vs "never generated" are different findings -------------------
 #
 # p6srr is titled "the corpus is stale against its oracle", which presumes the
