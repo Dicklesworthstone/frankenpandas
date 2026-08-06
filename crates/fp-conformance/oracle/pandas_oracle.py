@@ -986,7 +986,16 @@ def op_series_combine_first(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def resolve_window_size(payload: dict[str, Any], op_name: str) -> int:
-    raw = payload.get("window_size", 3)
+    # The fixtures spell this `rolling_window`; nothing in the corpus or in the
+    # Rust OracleRequest ever emits `window_size`. Reading only the latter meant
+    # every rolling op silently used the default below.
+    #
+    # This one was LATENT, not active: all six rolling fixtures happen to use
+    # window 3, which is exactly the default, so the results were right BY
+    # ACCIDENT. The first fixture added with any other window would have been
+    # silently evaluated at 3. `window_size` is kept as an accepted alias so a
+    # caller that does send it is still honoured.
+    raw = payload.get("rolling_window", payload.get("window_size", 3))
     if not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0:
         raise OracleError(f"{op_name} requires positive integer window_size")
     return raw
@@ -1442,7 +1451,21 @@ def op_series_dt_month_name(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def op_series_dt_strftime(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
-    dt_format = payload.get("dt_format", "%Y-%m-%d")
+    # The fixtures spell this `dt_strftime_format`, and so does the Rust
+    # OracleRequest (crates/fp-conformance/src/lib.rs). Nothing anywhere emits
+    # `dt_format`, so this silently fell back to the default below and every
+    # series_dt_strftime case was evaluated with "%Y-%m-%d" instead of the
+    # format the fixture asked for.
+    #
+    # Unlike the rolling_window sibling, this one was ACTIVE. Measured on
+    # fp_p2d_310_series_dt_strftime_null_hardened (format "%Y/%m/%d %H:%M"):
+    #   pinned              ['2024/03/15 14:30', ..., '2024/12/31 23:59']
+    #   oracle, before fix  ['2024-03-15',       ..., '2024-12-31']
+    #   oracle, after fix   ['2024/03/15 14:30', ..., '2024/12/31 23:59']
+    # i.e. the pinned fixture was RIGHT and the oracle was wrong.
+    dt_format = payload.get(
+        "dt_strftime_format", payload.get("dt_format", "%Y-%m-%d")
+    )
     if left is None:
         raise OracleError("series_dt_strftime requires left payload")
     if not isinstance(dt_format, str):
