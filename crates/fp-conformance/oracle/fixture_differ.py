@@ -26,6 +26,13 @@ from typing import Any
 @dataclass
 class DiffResult:
     packet_id: str
+    # br-frankenpandas-fixture-divergence-triage-9s0c4: a packet id is NOT a
+    # fixture id. FP-P2D-037 alone covers four fixtures, of which one diverges
+    # — and with only the packet id recorded there was no way to tell which,
+    # so a reported divergence could not be reproduced or triaged. The
+    # maintainer's policy is explicitly per-fixture, which this made impossible.
+    case_id: str
+    fixture_file: str
     operation: str
     live_derivable: bool
     matches_pinned: bool
@@ -296,8 +303,11 @@ def run_live_oracle(packet: dict, legacy_root: Path, oracle_path: Path) -> dict 
         os.unlink(tmp_path)
 
 
-def diff_packet(packet: dict, legacy_root: Path, oracle_path: Path) -> DiffResult:
+def diff_packet(
+    packet: dict, legacy_root: Path, oracle_path: Path, fixture_file: str = ""
+) -> DiffResult:
     packet_id = packet.get("packet_id", "unknown")
+    case_id = packet.get("case_id", "unknown")
     operation = packet.get("operation", "unknown")
 
     live_result = run_live_oracle(packet, legacy_root, oracle_path)
@@ -305,6 +315,8 @@ def diff_packet(packet: dict, legacy_root: Path, oracle_path: Path) -> DiffResul
     if live_result is None:
         return DiffResult(
             packet_id=packet_id,
+            case_id=case_id,
+            fixture_file=fixture_file,
             operation=operation,
             live_derivable=False,
             matches_pinned=False,
@@ -315,6 +327,8 @@ def diff_packet(packet: dict, legacy_root: Path, oracle_path: Path) -> DiffResul
     if live_result.get("error"):
         return DiffResult(
             packet_id=packet_id,
+            case_id=case_id,
+            fixture_file=fixture_file,
             operation=operation,
             live_derivable=False,
             matches_pinned=False,
@@ -326,6 +340,8 @@ def diff_packet(packet: dict, legacy_root: Path, oracle_path: Path) -> DiffResul
 
     return DiffResult(
         packet_id=packet_id,
+        case_id=case_id,
+        fixture_file=fixture_file,
         operation=operation,
         live_derivable=True,
         matches_pinned=matches,
@@ -367,16 +383,21 @@ def main() -> int:
             print(f"Failed to load {packet_path}: {e}", file=sys.stderr)
             continue
 
-        result = diff_packet(packet, args.legacy_root, oracle_path)
+        result = diff_packet(
+            packet, args.legacy_root, oracle_path, fixture_file=packet_path.name
+        )
 
         if result.live_derivable:
             report.live_derivable += 1
             if result.matches_pinned:
                 report.matches_pinned += 1
             else:
-                report.fixture_defects.append(result.packet_id)
+                # Record the FIXTURE, not the packet: one packet covers several
+                # fixtures and a bare packet id cannot be reproduced or triaged
+                # (br-frankenpandas-fixture-divergence-triage-9s0c4).
+                report.fixture_defects.append(result.fixture_file)
                 if args.verbose:
-                    print(f"FIXTURE DEFECT: {result.packet_id} - {result.divergence}")
+                    print(f"FIXTURE DEFECT: {result.fixture_file} - {result.divergence}")
         else:
             report.replay_only.append(result.packet_id)
             if args.verbose:
@@ -384,6 +405,8 @@ def main() -> int:
 
         report.results.append({
             "packet_id": result.packet_id,
+            "case_id": result.case_id,
+            "fixture_file": result.fixture_file,
             "operation": result.operation,
             "live_derivable": result.live_derivable,
             "matches_pinned": result.matches_pinned,

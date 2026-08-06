@@ -125,6 +125,20 @@ def test_column_set_difference_is_still_caught_without_explicit_order(differ):
     assert "column set mismatch" in message
 
 
+def test_diff_result_carries_fixture_identity_not_just_packet_id(differ):
+    """A packet id is not a fixture id, and triage is per-fixture.
+
+    br-frankenpandas-fixture-divergence-triage-9s0c4: FP-P2D-037 alone covers
+    four fixtures, of which exactly one diverges. With only the packet id
+    recorded, a reported divergence could not be located, reproduced, or
+    triaged — and the maintainer's regeneration policy is explicitly
+    per-fixture, so the tool could not support the policy it feeds.
+    """
+    fields = differ.DiffResult.__dataclass_fields__
+    assert "case_id" in fields
+    assert "fixture_file" in fields
+
+
 def test_explicit_order_difference_is_still_a_divergence(differ):
     """Ordering IS part of the contract when both sides claim one."""
     pinned = {"index": [], "column_order": ["a", "b"], "columns": {"a": [], "b": []}}
