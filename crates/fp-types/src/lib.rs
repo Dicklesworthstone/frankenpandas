@@ -3892,7 +3892,19 @@ pub fn nanvar(values: &[Scalar], ddof: usize) -> Scalar {
 
 pub fn nanstd(values: &[Scalar], ddof: usize) -> Scalar {
     // Per br-frankenpandas-j8ntk: Timedelta64 std preserves dtype.
-    if let Some(td) = collect_timedelta_ns_f64(values) {
+    //
+    // br-frankenpandas-40ujm: Datetime64 is accepted here too, and the family
+    // constructor is deliberately DISCARDED — the dispersion of a set of
+    // instants is a DURATION, so datetime std returns a Timedelta, exactly as
+    // pandas does. Verified against the oracle: pandas gives the identical
+    // value for a Datetime64 series and a Timedelta64 series built from the
+    // same ns (both 2592479955563784 for [0, 60d, 31d]).
+    //
+    // This is the ONLY reduction in the std/var/sem group that widens. pandas
+    // RAISES for datetime64 var and sem ("does not support reduction"), so
+    // those keep the Timedelta-only `collect_timedelta_ns_f64` gate rather than
+    // inventing a value pandas refuses to produce.
+    if let Some((td, _family)) = collect_temporal_ns_f64(values) {
         if td.len() <= ddof {
             return Scalar::Timedelta64(Timedelta::NAT);
         }
@@ -7587,6 +7599,78 @@ mod tests {
             odd.contains(&med),
             "odd-count median must be one of the inputs; pandas returns B+256, which is not"
         );
+    }
+
+    /// br-frankenpandas-40ujm: datetime std returned `Null(NaN)`; pandas 2.2.3
+    /// returns a Timedelta. Every value below is the probed oracle answer for
+    /// `Series([2020-01-01, +60d, +31d])`, in raw ns:
+    ///   ddof=1 (default) 2592479955563784   ddof=0 2116751019841492
+    ///   ddof=2           3666320313338702   ddof=3 NaT (n - ddof <= 0)
+    /// pandas truncates the sqrt toward zero (ddof=0 is 2116751019841492.8).
+    #[test]
+    fn datetime64_std_matches_pandas_ddof_variants_40ujm() {
+        let d = Scalar::Datetime64;
+        let vals = vec![
+            d(DT_2020),
+            d(DT_2020 + 60 * DAY_NS),
+            d(DT_2020 + 31 * DAY_NS),
+        ];
+        // Dispersion of instants is a DURATION: Timedelta64, not Datetime64.
+        let s1 = super::nanstd(&vals, 1);
+        assert_eq!(s1, Scalar::Timedelta64(2_592_479_955_563_784));
+        assert_eq!(s1.dtype(), DType::Timedelta64);
+        assert_eq!(
+            super::nanstd(&vals, 0),
+            Scalar::Timedelta64(2_116_751_019_841_492)
+        );
+        assert_eq!(
+            super::nanstd(&vals, 2),
+            Scalar::Timedelta64(3_666_320_313_338_702)
+        );
+        // n - ddof <= 0 => NaT, matching pandas.
+        assert!(super::nanstd(&vals, 3).is_missing());
+    }
+
+    /// pandas returns the SAME std for a Datetime64 series and a Timedelta64
+    /// series built from identical ns. That equivalence is the whole basis for
+    /// routing both families through one computation, so pin it directly.
+    #[test]
+    fn datetime64_std_equals_timedelta64_std_on_same_ns_40ujm() {
+        let offsets = [0_i64, 60 * DAY_NS, 31 * DAY_NS];
+        let dt: Vec<Scalar> = offsets.iter().map(|o| Scalar::Datetime64(*o)).collect();
+        let td: Vec<Scalar> = offsets.iter().map(|o| Scalar::Timedelta64(*o)).collect();
+        assert_eq!(super::nanstd(&dt, 1), super::nanstd(&td, 1));
+        assert_eq!(
+            super::nanstd(&dt, 1),
+            Scalar::Timedelta64(2_592_479_955_563_784)
+        );
+    }
+
+    /// NaT skips (a 3-element series with one NaT must equal the 2-element
+    /// series without it), a single element gives NaT at the default ddof, and
+    /// var/sem stay REFUSED for datetimes because pandas raises on them.
+    #[test]
+    fn datetime64_std_skips_nat_and_var_sem_stay_unsupported_40ujm() {
+        let d = Scalar::Datetime64;
+        let with_nat = vec![d(DT_2020), d(Timestamp::NAT), d(DT_2020 + 2 * DAY_NS)];
+        let without = vec![d(DT_2020), d(DT_2020 + 2 * DAY_NS)];
+        // pandas: both are Timedelta 1 days 09:56:28.051789035.
+        assert_eq!(super::nanstd(&with_nat, 1), super::nanstd(&without, 1));
+        assert_eq!(
+            super::nanstd(&with_nat, 1),
+            Scalar::Timedelta64(122_188_051_789_035)
+        );
+
+        // n=1 with ddof=1 -> NaT, as pandas returns.
+        assert!(super::nanstd(&[d(DT_2020)], 1).is_missing());
+        assert!(super::nanstd(&[d(Timestamp::NAT)], 1).is_missing());
+
+        // pandas RAISES TypeError for datetime64 var and sem. FP must not
+        // invent a value: these stay on the Timedelta-only gate and report
+        // missing. A regression that widened them would return a number here.
+        let vals = vec![d(DT_2020), d(DT_2020 + 60 * DAY_NS)];
+        assert!(super::nanvar(&vals, 1).is_missing());
+        assert!(super::nansem(&vals, 1).is_missing());
     }
 
     /// Mixed Datetime64 + another dtype must NOT take the typed arm — it falls
