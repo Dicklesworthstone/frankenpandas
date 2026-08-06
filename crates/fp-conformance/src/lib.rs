@@ -1761,6 +1761,20 @@ pub struct FixtureProvenance {
     pub intentional_divergence_notes: Vec<String>,
 }
 
+/// Why a fixture was retired, recorded in the fixture itself.
+///
+/// br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr. The reason is
+/// mandatory: a retirement without one is indistinguishable from a fixture
+/// someone quietly disabled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixtureRetirement {
+    pub reason: String,
+    #[serde(default)]
+    pub retired_at: Option<String>,
+    #[serde(default)]
+    pub bead: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PacketFixture {
     pub packet_id: String,
@@ -1769,6 +1783,13 @@ pub struct PacketFixture {
     pub operation: FixtureOperation,
     #[serde(default)]
     pub fixture_provenance: Option<FixtureProvenance>,
+    /// Present when this fixture has been RETIRED, per
+    /// br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr. Written by
+    /// `scripts/regenerate_fixtures.py --apply` for fixtures whose operation the
+    /// oracle no longer supports. The fixture keeps its expected values — it
+    /// stops claiming to be regenerable, it does not stop being evidence.
+    #[serde(default)]
+    pub retired: Option<FixtureRetirement>,
     #[serde(default)]
     pub oracle_source: Option<FixtureOracleSource>,
     /// Conformance requirement level (MUST / SHOULD / MAY). Per
@@ -2179,6 +2200,16 @@ pub struct PacketFixture {
 pub enum CaseStatus {
     Pass,
     Fail,
+    /// The fixture is retired: it was NOT executed, and it is NOT a pass.
+    ///
+    /// br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr. Retirement exists
+    /// for fixtures whose operation the oracle no longer supports, which cannot
+    /// be regenerated and must not be silently rewritten. A retired fixture
+    /// stays in the DENOMINATOR (`fixture_count`) and carries its reason, so a
+    /// skipped case can never be mistaken for a checked one — the exact
+    /// pass-by-skip hazard tracked by
+    /// br-frankenpandas-live-oracle-passes-by-skip-l7r1p.
+    Retired,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2256,6 +2287,40 @@ pub struct DifferentialResult {
     pub status: CaseStatus,
     pub drift_records: Vec<DriftRecord>,
     pub evidence_records: usize,
+    /// Why this case was retired, when `status` is [`CaseStatus::Retired`].
+    ///
+    /// br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr. Deliberately a
+    /// dedicated field rather than a synthetic drift record: a retirement is
+    /// not drift, and folding it into `drift_records` would inflate the drift
+    /// summary with cases that were never even executed.
+    #[serde(default)]
+    pub retired_reason: Option<String>,
+}
+
+impl DifferentialResult {
+    /// A case that was retired and therefore NOT executed.
+    ///
+    /// No drift records and no evidence: nothing ran. The status is
+    /// [`CaseStatus::Retired`], never `Pass`, so it cannot be mistaken for a
+    /// fixture that was checked.
+    #[must_use]
+    pub fn retired(fixture: &PacketFixture, reason: &str) -> Self {
+        Self {
+            case_id: fixture.case_id.clone(),
+            packet_id: fixture.packet_id.clone(),
+            operation: fixture.operation,
+            mode: fixture.mode,
+            replay_key: String::new(),
+            trace_id: String::new(),
+            oracle_source: fixture
+                .oracle_source
+                .unwrap_or(FixtureOracleSource::Fixture),
+            status: CaseStatus::Retired,
+            drift_records: Vec::new(),
+            evidence_records: 0,
+            retired_reason: Some(reason.to_owned()),
+        }
+    }
 }
 
 fn runtime_mode_slug(mode: RuntimeMode) -> &'static str {
@@ -2333,6 +2398,9 @@ fn result_label_for_status(status: &CaseStatus) -> &'static str {
     match status {
         CaseStatus::Pass => "pass",
         CaseStatus::Fail => "fail",
+        // NOT "pass". A retired case was never executed, and labelling it as a
+        // pass anywhere is the pass-by-skip hazard this status exists to close.
+        CaseStatus::Retired => "retired",
     }
 }
 
@@ -2340,6 +2408,8 @@ fn decision_action_for(status: &CaseStatus) -> &'static str {
     match status {
         CaseStatus::Pass => "allow",
         CaseStatus::Fail => "repair",
+        // Neither allowed nor repaired: nothing was decided because nothing ran.
+        CaseStatus::Retired => "skipped",
     }
 }
 
@@ -2914,7 +2984,16 @@ impl DifferentialResult {
     /// Convert to backward-compatible CaseResult.
     #[must_use]
     pub fn to_case_result(&self) -> CaseResult {
-        let mismatch = if self.drift_records.is_empty() {
+        // A retired case carries its REASON where a failing case carries its
+        // mismatch, so every reporting path that already surfaces `mismatch`
+        // surfaces the retirement too, without needing to know about it.
+        let mismatch = if matches!(self.status, CaseStatus::Retired) {
+            Some(
+                self.retired_reason
+                    .clone()
+                    .unwrap_or_else(|| "retired without a recorded reason".to_owned()),
+            )
+        } else if self.drift_records.is_empty() {
             None
         } else {
             Some(
@@ -3023,6 +3102,12 @@ pub struct PacketParityReport {
     pub fixture_count: usize,
     pub passed: usize,
     pub failed: usize,
+    /// Cases that were RETIRED and therefore never executed
+    /// (br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr). Counted
+    /// separately and kept inside `fixture_count`, so
+    /// `passed + failed + retired == fixture_count`.
+    #[serde(default)]
+    pub retired: usize,
     pub results: Vec<CaseResult>,
 }
 
@@ -3030,6 +3115,36 @@ impl PacketParityReport {
     #[must_use]
     pub fn is_green(&self) -> bool {
         self.failed == 0 && self.fixture_count > 0
+    }
+
+    /// Cases actually executed and compared against an oracle.
+    ///
+    /// Use this, not `fixture_count`, when reporting coverage: a suite whose
+    /// fixtures are largely retired is green but barely checked, and the two
+    /// numbers must not be conflated.
+    #[must_use]
+    pub const fn executed(&self) -> usize {
+        self.fixture_count - self.retired
+    }
+
+    /// Human-readable retirement summary, empty when nothing is retired.
+    ///
+    /// Every retired case is named WITH its reason: a retirement nobody can see
+    /// is ceremony, and a silent skip is the pass-by-skip hazard this guards.
+    #[must_use]
+    pub fn retirement_report(&self) -> Vec<String> {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.status, CaseStatus::Retired))
+            .map(|r| {
+                format!(
+                    "RETIRED {}::{} — {}",
+                    r.packet_id,
+                    r.case_id,
+                    r.mismatch.as_deref().unwrap_or("no reason recorded")
+                )
+            })
+            .collect()
     }
 }
 
@@ -3793,6 +3908,9 @@ fn ensure_phase2c_parity_reports(config: &HarnessConfig) -> Result<(), HarnessEr
             fixture_count,
             passed: 0,
             failed: fixture_count,
+            // Nothing ran, so nothing is retired either — this synthetic report
+            // records an unrun packet as wholly failed, not partly skipped.
+            retired: 0,
             results: Vec::new(),
         };
         write_packet_artifacts(config, &synthetic)?;
@@ -3854,7 +3972,20 @@ pub fn build_differential_report(
         .iter()
         .filter(|r| matches!(r.status, CaseStatus::Fail))
         .count();
-    let passed = case_results.len().saturating_sub(failed);
+    // br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr: count PASSES, do
+    // not infer them as "everything that did not fail". Under the old
+    // `len - failed` arithmetic a RETIRED case — which was never executed —
+    // silently counted as a pass, making a skipped fixture indistinguishable
+    // from a checked one. Retired cases stay in `fixture_count`, so
+    // `passed + failed + retired == fixture_count` and the gap is visible.
+    let passed = case_results
+        .iter()
+        .filter(|r| matches!(r.status, CaseStatus::Pass))
+        .count();
+    let retired = case_results
+        .iter()
+        .filter(|r| matches!(r.status, CaseStatus::Retired))
+        .count();
     DifferentialReport {
         report: PacketParityReport {
             suite,
@@ -3863,6 +3994,7 @@ pub fn build_differential_report(
             fixture_count: case_results.len(),
             passed,
             failed,
+            retired,
             results: case_results,
         },
         differential_results: results,
@@ -5923,7 +6055,17 @@ fn build_report(
         .iter()
         .filter(|result| matches!(result.status, CaseStatus::Fail))
         .count();
-    let passed = results.len().saturating_sub(failed);
+    // Same p6srr correction as build_differential_report: count PASSES rather
+    // than inferring them, so a retired (never-executed) case cannot land in
+    // the passed column.
+    let passed = results
+        .iter()
+        .filter(|result| matches!(result.status, CaseStatus::Pass))
+        .count();
+    let retired = results
+        .iter()
+        .filter(|result| matches!(result.status, CaseStatus::Retired))
+        .count();
 
     Ok(PacketParityReport {
         suite,
@@ -5931,6 +6073,7 @@ fn build_report(
         oracle_present: config.oracle_root.exists(),
         fixture_count: results.len(),
         passed,
+        retired,
         failed,
         results,
     })
@@ -17787,6 +17930,13 @@ fn run_differential_fixture(
     fixture: &PacketFixture,
     options: &SuiteOptions,
 ) -> Result<DifferentialResult, HarnessError> {
+    // br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr: a RETIRED fixture
+    // is not executed, and — critically — is not a pass. It keeps its place in
+    // `fixture_count` and carries its reason, so the report can never present a
+    // skipped case as a checked one.
+    if let Some(retirement) = &fixture.retired {
+        return Ok(DifferentialResult::retired(fixture, &retirement.reason));
+    }
     let policy = match fixture.mode {
         RuntimeMode::Strict => RuntimePolicy::strict(),
         RuntimeMode::Hardened => RuntimePolicy::hardened(Some(100_000)),
@@ -17825,6 +17975,8 @@ fn run_differential_fixture(
         replay_key: deterministic_replay_key(&fixture.packet_id, &fixture.case_id, fixture.mode),
         trace_id: deterministic_trace_id(&fixture.packet_id, &fixture.case_id, fixture.mode),
         oracle_source,
+        // This path EXECUTED the fixture, so it is never a retirement.
+        retired_reason: None,
         status: if has_critical {
             CaseStatus::Fail
         } else {
@@ -24969,6 +25121,75 @@ mod tests {
         assert_eq!(diff_report.report.failed, legacy_report.failed);
     }
 
+    /// br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr: a RETIRED fixture
+    /// must never read as a pass, must stay in the denominator, and must carry
+    /// its reason.
+    ///
+    /// The negative control is the arithmetic itself: under the previous
+    /// `passed = len - failed` inference, the retired case below would have
+    /// been counted as PASSED — a fixture that was never executed presented as
+    /// one that was checked. That is the pass-by-skip hazard, and this test
+    /// fails if anyone reintroduces the inference.
+    #[test]
+    fn retired_fixture_is_not_a_pass_and_stays_in_the_denominator_p6srr() {
+        let make = |case_id: &str, status: CaseStatus, reason: Option<&str>| DifferentialResult {
+            case_id: case_id.to_owned(),
+            packet_id: "FP-P2C-001".to_owned(),
+            operation: FixtureOperation::SeriesAdd,
+            mode: RuntimeMode::Strict,
+            replay_key: String::new(),
+            trace_id: String::new(),
+            oracle_source: FixtureOracleSource::Fixture,
+            status,
+            drift_records: Vec::new(),
+            evidence_records: 0,
+            retired_reason: reason.map(str::to_owned),
+        };
+
+        let results = vec![
+            make("passing", CaseStatus::Pass, None),
+            make(
+                "retired",
+                CaseStatus::Retired,
+                Some("oracle no longer supports operation 'column_dtype_check'"),
+            ),
+        ];
+        let report = build_differential_report("suite".to_owned(), None, false, results).report;
+
+        // In the denominator, but NOT in passed.
+        assert_eq!(report.fixture_count, 2, "retired stays in the denominator");
+        assert_eq!(report.passed, 1, "retired must NOT be counted as a pass");
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.retired, 1);
+        assert_eq!(
+            report.passed + report.failed + report.retired,
+            report.fixture_count,
+            "the three buckets must account for every fixture"
+        );
+        // Executed coverage is smaller than the fixture count, and visibly so.
+        assert_eq!(report.executed(), 1);
+
+        // The reason survives to the report, named per case.
+        let retirement = report.retirement_report();
+        assert_eq!(retirement.len(), 1);
+        assert!(
+            retirement[0].contains("column_dtype_check"),
+            "retirement must carry its reason, got {:?}",
+            retirement[0]
+        );
+        assert!(retirement[0].contains("RETIRED"));
+
+        // A retired case is not silently green: its status is distinguishable.
+        let retired_case = report
+            .results
+            .iter()
+            .find(|r| r.case_id == "retired")
+            .expect("retired case present");
+        assert_eq!(retired_case.status, CaseStatus::Retired);
+        assert_ne!(retired_case.status, CaseStatus::Pass);
+        assert!(retired_case.mismatch.is_some(), "reason lands in mismatch");
+    }
+
     #[test]
     fn differential_result_converts_to_case_result() {
         let diff = DifferentialResult {
@@ -24982,6 +25203,7 @@ mod tests {
             status: CaseStatus::Pass,
             drift_records: Vec::new(),
             evidence_records: 0,
+            retired_reason: None,
         };
         let case = diff.to_case_result();
         assert_eq!(case.status, CaseStatus::Pass);
@@ -25018,6 +25240,7 @@ mod tests {
                 },
             ],
             evidence_records: 0,
+            retired_reason: None,
         };
         let case = diff.to_case_result();
         assert_eq!(case.status, CaseStatus::Fail);
@@ -25063,6 +25286,7 @@ mod tests {
                 },
             ],
             evidence_records: 0,
+            retired_reason: None,
         }];
         let summary = super::summarize_drift(&results);
         assert_eq!(summary.total_drift_records, 3);
@@ -25086,6 +25310,7 @@ mod tests {
                 status: CaseStatus::Pass,
                 drift_records: Vec::new(),
                 evidence_records: 0,
+                retired_reason: None,
             },
             DifferentialResult {
                 case_id: "fail_case".to_owned(),
@@ -25104,6 +25329,7 @@ mod tests {
                     message: "bad".to_owned(),
                 }],
                 evidence_records: 1,
+                retired_reason: None,
             },
         ];
         let report = build_differential_report(
@@ -26377,6 +26603,7 @@ mod tests {
             fixture_count: 2,
             passed: 2,
             failed: 0,
+            retired: 0,
             results: vec![
                 CaseResult {
                     packet_id: packet_id.to_owned(),
@@ -26913,6 +27140,7 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
             fixture_count: 1,
             passed: 0,
             failed: 1,
+            retired: 0,
             results: vec![CaseResult {
                 packet_id: "FP-P2C-001".to_owned(),
                 case_id: "case_a".to_owned(),
@@ -26958,6 +27186,7 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
             fixture_count: 2,
             passed: 0,
             failed: 2,
+            retired: 0,
             results: vec![
                 CaseResult {
                     packet_id: "FP-P2C-001".to_owned(),
@@ -27059,6 +27288,7 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
             fixture_count: 1,
             passed: 0,
             failed: 1,
+            retired: 0,
             results: vec![CaseResult {
                 packet_id: String::new(),
                 case_id: "case_a".to_owned(),
@@ -27105,6 +27335,7 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
             fixture_count: 1,
             passed: 0,
             failed: 1,
+            retired: 0,
             results: vec![CaseResult {
                 packet_id: "FP-P2C-001".to_owned(),
                 case_id: "case_a".to_owned(),
