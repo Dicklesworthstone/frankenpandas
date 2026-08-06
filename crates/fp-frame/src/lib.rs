@@ -701,6 +701,16 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
 fn scalar_to_series_value_counts_index_label(value: &Scalar) -> IndexLabel {
     match value {
         Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
+        // br-frankenpandas-oracle-bool-label-stale-6bqfr: the sibling of the
+        // Float64 arm above. `pd.Series([True, False, True]).value_counts()`
+        // has a BOOLEAN index -- `list(vc.index)` is `[True, False]` with
+        // `type(...) is bool`, for object-dtype and bool-dtype inputs alike --
+        // never the strings "True"/"False". The shared mapper still stringifies
+        // (its comment "Match pandas string representation for boolean index
+        // values" predates `IndexLabel::Bool`), so route Bool here exactly as
+        // br-frankenpandas-8sxez routed Float64, leaving the pivot/crosstab/
+        // mode callers of that mapper untouched for their own beads.
+        Scalar::Bool(v) => IndexLabel::Bool(*v),
         other => scalar_to_value_counts_index_label(other),
     }
 }
@@ -10724,9 +10734,13 @@ impl Series {
             // Utf8 label. Both inlined here rather than in
             // scalar_to_value_counts_index_label so pivot/crosstab/mode callers
             // of that shared mapper are untouched (separate beads).
+            // Bool joins them per br-frankenpandas-oracle-bool-label-stale-6bqfr:
+            // pandas' bool value_counts index holds real `True`/`False`, not
+            // their string renderings. Same containment argument as above.
             labels.push(match &value {
                 Scalar::Null(kind) => IndexLabel::Null(*kind),
                 Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
+                Scalar::Bool(v) => IndexLabel::Bool(*v),
                 other => scalar_to_value_counts_index_label(other),
             });
             if normalize {
@@ -94582,7 +94596,25 @@ mod tests {
     }
 
     #[test]
-    fn series_value_counts_bool_labels_use_python_style_strings() {
+    fn series_value_counts_bool_labels_are_boolean_not_strings_6bqfr() {
+        // CORRECTED br-frankenpandas-oracle-bool-label-stale-6bqfr. This test
+        // was `..._use_python_style_strings` and asserted
+        // `[IndexLabel::from("True"), IndexLabel::from("False")]`, i.e. Utf8.
+        // It pinned a divergence rather than parity. Measured on the installed
+        // oracle, pandas 2.2.3, using this test's exact input:
+        //   s = pd.Series([True, False, True, True, None, False],
+        //                 index=[f"r{i}" for i in range(1, 7)], name="vals")
+        //   vc = s.value_counts()
+        //   list(vc.index)                 -> [True, False]
+        //   [type(x).__name__ for x in vc.index] -> ['bool', 'bool']
+        // and the same for a pure bool-dtype Series (index dtype `bool`).
+        // pandas never renders these labels as the strings "True"/"False".
+        //
+        // The correction makes the assertion STRICTER: `IndexLabel::Bool(true)`
+        // and `IndexLabel::Utf8("True")` are distinct labels that no longer
+        // compare equal, so a regression to stringification now fails here.
+        // Same shape as the Float64 sibling pinned by
+        // `series_value_counts_float_labels_are_numeric_8sxez`.
         let s = Series::from_values(
             "vals",
             vec![
@@ -94607,9 +94639,68 @@ mod tests {
         let out = s.value_counts().unwrap();
         assert_eq!(
             out.index().labels(),
-            &[IndexLabel::from("True"), IndexLabel::from("False")]
+            &[IndexLabel::Bool(true), IndexLabel::Bool(false)]
         );
         assert_eq!(out.values(), &[Scalar::Int64(3), Scalar::Int64(2)]);
+
+        // The stringified labels must NOT be what comes back — asserted
+        // explicitly, because `IndexLabel::from("True")` is exactly what the
+        // superseded expectation used and is the regression to catch.
+        assert_ne!(
+            out.index().labels(),
+            &[IndexLabel::from("True"), IndexLabel::from("False")]
+        );
+
+        // pandas keeps the source Series name as the index name and calls the
+        // result "count" (br-frankenpandas-nvglo); unchanged by this fix.
+        assert_eq!(out.name(), "count");
+        assert_eq!(out.index().name(), Some("vals"));
+    }
+
+    #[test]
+    fn series_value_counts_with_options_bool_labels_are_boolean_6bqfr() {
+        // The `value_counts_with_options` path builds its labels from its OWN
+        // inline match, not the shared mapper, so fixing one arm does not fix
+        // the other. dropna=false additionally exercises the null bucket
+        // alongside the bool labels, which is where a mis-typed label would
+        // collide with a genuine "True" string.
+        let s = Series::from_values(
+            "flag",
+            vec![
+                IndexLabel::from("r1"),
+                IndexLabel::from("r2"),
+                IndexLabel::from("r3"),
+                IndexLabel::from("r4"),
+            ],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let kept = s.value_counts_with_options(false, true, false, false).unwrap();
+        assert_eq!(
+            kept.index().labels(),
+            &[
+                IndexLabel::Bool(true),
+                IndexLabel::Bool(false),
+                IndexLabel::Null(NullKind::Null),
+            ]
+        );
+        assert_eq!(
+            kept.values(),
+            &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(1)]
+        );
+
+        // Dropping nulls leaves the bool labels typed and untouched.
+        let dropped = s.value_counts_with_options(false, true, false, true).unwrap();
+        assert_eq!(
+            dropped.index().labels(),
+            &[IndexLabel::Bool(true), IndexLabel::Bool(false)]
+        );
     }
 
     #[test]

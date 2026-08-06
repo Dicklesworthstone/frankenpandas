@@ -245,11 +245,24 @@ def scalar_to_json(value: Any) -> dict[str, Any]:
 
 
 def label_to_json(value: Any) -> dict[str, Any]:
-    # FrankenPandas IndexLabel has no Bool variant, so a bool index/column
-    # label is stringified to "True"/"False" (Utf8). The bool check must stay
-    # ahead of the int check since bool is an int subclass.
+    # The bool check must stay ahead of the int check since bool is an int
+    # subclass.
+    #
+    # br-frankenpandas-oracle-bool-label-stale-6bqfr: this used to stringify a
+    # bool label to "True"/"False" on the premise "FrankenPandas IndexLabel has
+    # no Bool variant". That variant exists (fp-index/src/lib.rs, `Bool(bool)`,
+    # "pandas boolean index label"), and `label_from_json` above has always
+    # ACCEPTED kind="bool" -- so the oracle could read a boolean label it could
+    # never write.
+    #
+    # The FLOAT sibling is deliberately NOT fixed here: `label_from_json`
+    # accepts kind="float64" while this function has no float branch and falls
+    # through to `str(value)`, the identical asymmetry -- but changing it moves
+    # every float-labelled fixture rather than the single bool one, and it has
+    # to answer for NaN/inf labels, which are not representable in JSON. It is
+    # its own bead and its own lever.
     if isinstance(value, bool):
-        return {"kind": "utf8", "value": str(value)}
+        return {"kind": "bool", "value": value}
     if isinstance(value, int):
         return {"kind": "int64", "value": value}
     return {"kind": "utf8", "value": str(value)}
