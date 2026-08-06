@@ -1,9 +1,10 @@
 {
   "fixtures_examined": 1258,
   "agree_current": 0,
-  "agree_provenance_only": 972,
+  "agree_provenance_only": 966,
   "move_classes": {
     "KIND int64->float64": 57,
+    "ERROR expected-but-succeeded": 9,
     "NULL_MARKER null->na_n": 85,
     "NULL_MARKER na_n->null": 9,
     "KIND float64->null": 2,
@@ -17,11 +18,11 @@
     "KIND utf8->int64": 3,
     "KIND float64->utf8": 1,
     "KIND int64->utf8": 1,
-    "SHAPE key-added-by-oracle": 7,
     "KIND null->utf8": 3,
     "SHAPE longer": 4,
     "KIND null->bool": 7,
     "KIND int64->null": 2,
+    "SHAPE key-added-by-oracle": 2,
     "SHAPE key-dropped-by-oracle": 1
   },
   "roundtrip_classes": {
@@ -29,9 +30,9 @@
     "NULL_MARKER na_n->null": 5
   },
   "provenance_verdicts": {
-    "PROVENANCE_FICTION": 93,
+    "PROVENANCE_FICTION": 96,
     "BOTH_MOVED": 8,
-    "STAMP_IMPOSSIBLE": 55,
+    "STAMP_IMPOSSIBLE": 56,
     "GENUINELY_STALE": 2,
     "STAMP_ERRORED": 1
   },
@@ -74,6 +75,19 @@
       "example": ".values[0].kind: 'int64' vs 'float64'",
       "roundtrip_implicated": [],
       "provenance": "BOTH_MOVED"
+    },
+    {
+      "fixture": "fp_p2c_010_series_filter_non_boolean_mask_strict.json",
+      "keys": [
+        "expected_error_contains"
+      ],
+      "why": "",
+      "classes": [
+        "ERROR expected-but-succeeded"
+      ],
+      "example": "",
+      "roundtrip_implicated": [],
+      "provenance": "PROVENANCE_FICTION"
     },
     {
       "fixture": "fp_p2c_010_series_head_with_nulls_hardened.json",
@@ -187,6 +201,19 @@
         "NULL_MARKER null->na_n"
       ],
       "example": ".columns.left_v[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [],
+      "provenance": "PROVENANCE_FICTION"
+    },
+    {
+      "fixture": "fp_p2d_016_csv_round_trip_ragged_row_error_strict.json",
+      "keys": [
+        "expected_error_contains"
+      ],
+      "why": "",
+      "classes": [
+        "ERROR expected-but-succeeded"
+      ],
+      "example": "",
       "roundtrip_implicated": [],
       "provenance": "PROVENANCE_FICTION"
     },
@@ -454,6 +481,19 @@
       "provenance": "STAMP_IMPOSSIBLE"
     },
     {
+      "fixture": "fp_p2d_022_dataframe_constructor_list_like_empty_rows_nonempty_index_error_strict.json",
+      "keys": [
+        "expected_error_contains"
+      ],
+      "why": "",
+      "classes": [
+        "ERROR expected-but-succeeded"
+      ],
+      "example": "",
+      "roundtrip_implicated": [],
+      "provenance": "PROVENANCE_FICTION"
+    },
+    {
       "fixture": "fp_p2d_022_dataframe_constructor_list_like_null_fill_determinism_hardened.json",
       "keys": [
         "expected_frame"
@@ -495,6 +535,19 @@
       "example": ".values[0].value: 60.0 vs 6e-08",
       "roundtrip_implicated": [],
       "provenance": "STAMP_IMPOSSIBLE"
+    },
+    {
+      "fixture": "fp_p2d_023_dataframe_constructor_list_like_dtype_bool_invalid_int_error_strict.json",
+      "keys": [
+        "expected_error_contains"
+      ],
+      "why": "",
+      "classes": [
+        "ERROR expected-but-succeeded"
+      ],
+      "example": "",
+      "roundtrip_implicated": [],
+      "provenance": "PROVENANCE_FICTION"
     },
     {
       "fixture": "fp_p2d_023_dataframe_from_dict_dtype_bool_invalid_error_hardened.json",
@@ -593,6 +646,19 @@
       "provenance": "STAMP_IMPOSSIBLE"
     },
     {
+      "fixture": "fp_p2d_024_dataframe_from_dict_dtype_category_unsupported_error_hardened.json",
+      "keys": [
+        "expected_error_contains"
+      ],
+      "why": "",
+      "classes": [
+        "ERROR expected-but-succeeded"
+      ],
+      "example": "",
+      "roundtrip_implicated": [],
+      "provenance": "PROVENANCE_FICTION"
+    },
+    {
       "fixture": "fp_p2d_024_dataframe_from_series_dtype_f64_alias_hardened.json",
       "keys": [
         "expected_frame"
@@ -606,67 +672,15 @@
       "provenance": "PROVENANCE_FICTION"
     },
     {
-      "fixture": "fp_p2d_025_dataframe_iloc_negative_with_columns_hardened.json",
+      "fixture": "fp_p2d_025_dataframe_iloc_duplicate_column_selector_error_strict.json",
       "keys": [
-        "expected_frame"
+        "expected_error_contains"
       ],
-      "why": "column set mismatch: ['b'] vs ['a', 'b']",
+      "why": "",
       "classes": [
-        "SHAPE key-added-by-oracle"
+        "ERROR expected-but-succeeded"
       ],
-      "example": ".columns.a: '<absent>' vs [{'kind': 'int64', 'value': 1200}, {'kind': 'int64', 'value': 1000}]",
-      "roundtrip_implicated": [],
-      "provenance": "PROVENANCE_FICTION"
-    },
-    {
-      "fixture": "fp_p2d_025_dataframe_iloc_row_column_subset_strict.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column set mismatch: ['a', 'b'] vs ['a', 'b', 'c']",
-      "classes": [
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".columns.c: '<absent>' vs [{'kind': 'utf8', 'value': 'z'}, {'kind': 'utf8', 'value': 'x'}]",
-      "roundtrip_implicated": [],
-      "provenance": "PROVENANCE_FICTION"
-    },
-    {
-      "fixture": "fp_p2d_025_dataframe_loc_duplicate_rows_hardened.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column set mismatch: ['a', 'b'] vs ['a', 'b', 'c']",
-      "classes": [
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".columns.c: '<absent>' vs [{'kind': 'utf8', 'value': 'y'}, {'kind': 'utf8', 'value': 'x'}, {'kind': 'utf8', 'value': 'y'}]",
-      "roundtrip_implicated": [],
-      "provenance": "PROVENANCE_FICTION"
-    },
-    {
-      "fixture": "fp_p2d_025_dataframe_loc_empty_column_selector_strict.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column set mismatch: [] vs ['a', 'b']",
-      "classes": [
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".columns.a: '<absent>' vs [{'kind': 'int64', 'value': 2}]",
-      "roundtrip_implicated": [],
-      "provenance": "PROVENANCE_FICTION"
-    },
-    {
-      "fixture": "fp_p2d_025_dataframe_loc_row_column_subset_strict.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column set mismatch: ['a', 'c'] vs ['a', 'b', 'c']",
-      "classes": [
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".columns.b: '<absent>' vs [{'kind': 'int64', 'value': 300}, {'kind': 'int64', 'value': 100}]",
+      "example": "",
       "roundtrip_implicated": [],
       "provenance": "PROVENANCE_FICTION"
     },
@@ -1031,6 +1045,19 @@
         "KIND int64->float64"
       ],
       "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [],
+      "provenance": "PROVENANCE_FICTION"
+    },
+    {
+      "fixture": "fp_p2d_046_series_fillna_cast_error_strict.json",
+      "keys": [
+        "expected_error_contains"
+      ],
+      "why": "",
+      "classes": [
+        "ERROR expected-but-succeeded"
+      ],
+      "example": "",
       "roundtrip_implicated": [],
       "provenance": "PROVENANCE_FICTION"
     },
@@ -1443,6 +1470,19 @@
         "NULL_MARKER na_n->null"
       ],
       "example": ".values[1].value: 'na_n' vs 'null'",
+      "roundtrip_implicated": [],
+      "provenance": "STAMP_IMPOSSIBLE"
+    },
+    {
+      "fixture": "fp_p2d_245_series_dt_total_seconds_basic_strict.json",
+      "keys": [
+        "expected_error_contains"
+      ],
+      "why": "",
+      "classes": [
+        "ERROR expected-but-succeeded"
+      ],
+      "example": "",
       "roundtrip_implicated": [],
       "provenance": "STAMP_IMPOSSIBLE"
     },
@@ -2254,6 +2294,19 @@
       "provenance": "PROVENANCE_FICTION"
     },
     {
+      "fixture": "fp_p2d_423_series_str_split_expand_empty_separator_strict.json",
+      "keys": [
+        "expected_error_contains"
+      ],
+      "why": "",
+      "classes": [
+        "ERROR expected-but-succeeded"
+      ],
+      "example": "",
+      "roundtrip_implicated": [],
+      "provenance": "PROVENANCE_FICTION"
+    },
+    {
       "fixture": "fp_p2d_429_csv_read_frame_parse_dates_mixed_timezone_strict.json",
       "keys": [
         "expected_frame"
@@ -2370,6 +2423,116 @@
   ],
   "other_errors": [
     {
+      "fixture": "fp_p2c_010_series_filter_duplicate_index_null_mask_hardened.json",
+      "error": "oracle error: series_filter mask application failed: Cannot mask with non-boolean array containing NA / NaN values"
+    },
+    {
+      "fixture": "fp_p2c_010_series_filter_duplicate_index_null_mask_strict.json",
+      "error": "oracle error: series_filter mask application failed: Cannot mask with non-boolean array containing NA / NaN values"
+    },
+    {
+      "fixture": "fp_p2d_017_dataframe_from_series_duplicate_name_last_wins_strict.json",
+      "error": "oracle error: duplicate column label 'dup' has non-identical values and cannot be represented"
+    },
+    {
+      "fixture": "fp_p2d_018_dataframe_from_records_matrix_short_rows_null_fill_hardened.json",
+      "error": "oracle error: dataframe_from_records failed: 3 columns passed, passed data had 2 columns"
+    },
+    {
+      "fixture": "fp_p2d_021_dataframe_constructor_list_like_explicit_index_and_padding_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: 2 columns passed, passed data had 1 columns"
+    },
+    {
+      "fixture": "fp_p2d_021_dataframe_constructor_list_like_extra_columns_null_fill_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: 3 columns passed, passed data had 2 columns"
+    },
+    {
+      "fixture": "fp_p2d_022_dataframe_constructor_list_like_ragged_with_explicit_columns_and_index_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: 3 columns passed, passed data had 2 columns"
+    },
+    {
+      "fixture": "fp_p2d_025_series_clip_array_bounds_missing_entries_strict.json",
+      "error": "oracle error: series_clip failed: Invalid value '-inf' for dtype Int64"
+    },
+    {
+      "fixture": "fp_p2d_056_dataframe_merge_asof_backward_nan_left_key_strict.json",
+      "error": "oracle error: dataframe_merge_asof failed: incompatible merge keys [0] Int64Dtype() and dtype('int64'), must be the same type"
+    },
+    {
+      "fixture": "fp_p2d_078_series_xs_single_match_strict.json",
+      "error": "oracle error: series_xs currently requires duplicate-label selections that return a Series"
+    },
+    {
+      "fixture": "fp_p2d_094_dataframe_asof_before_first_strict.json",
+      "error": "oracle error: dataframe_asof selection failed: '<' not supported between instances of 'int' and 'Timestamp'"
+    },
+    {
+      "fixture": "fp_p2d_094_dataframe_asof_match_strict.json",
+      "error": "oracle error: dataframe_asof selection failed: '<' not supported between instances of 'int' and 'Timestamp'"
+    },
+    {
+      "fixture": "fp_p2d_098_dataframe_xs_single_match_strict.json",
+      "error": "oracle error: dataframe_xs currently requires duplicate-label selections that return a DataFrame"
+    },
+    {
+      "fixture": "fp_p2d_149_dataframe_sem_skips_nonnumeric_order_strict.json",
+      "error": "oracle error: dataframe_sem failed: could not convert string to float: 'alpha'"
+    },
+    {
+      "fixture": "fp_p2d_151_dataframe_kurtosis_skips_nonnumeric_order_strict.json",
+      "error": "oracle error: dataframe_kurtosis failed: could not convert string to float: 'alpha'"
+    },
+    {
+      "fixture": "fp_p2d_153_dataframe_mean_skips_nonnumeric_strict.json",
+      "error": "oracle error: dataframe_mean failed: Could not convert ['zam'] to numeric"
+    },
+    {
+      "fixture": "fp_p2d_154_dataframe_std_skips_nonnumeric_order_strict.json",
+      "error": "oracle error: dataframe_std failed: could not convert string to float: 'alpha'"
+    },
+    {
+      "fixture": "fp_p2d_155_dataframe_var_skips_nonnumeric_order_strict.json",
+      "error": "oracle error: dataframe_var failed: could not convert string to float: 'alpha'"
+    },
+    {
+      "fixture": "fp_p2d_158_dataframe_median_skips_nonnumeric_strict.json",
+      "error": "oracle error: dataframe_median failed: Cannot convert [['alpha' 'beta' 'gamma' 'delta' 'epsilon']] to numeric"
+    },
+    {
+      "fixture": "fp_p2d_162_dataframe_quantile_skips_nonnumeric_strict.json",
+      "error": "oracle error: dataframe_quantile failed: unsupported operand type(s) for -: 'str' and 'str'"
+    },
+    {
+      "fixture": "fp_p2d_167_dataframe_skew_mixed_symmetric_strict.json",
+      "error": "oracle error: dataframe_skew failed: could not convert string to float: 'alpha'"
+    },
+    {
+      "fixture": "fp_p2d_167_dataframe_skew_skips_nonnumeric_order_strict.json",
+      "error": "oracle error: dataframe_skew failed: could not convert string to float: 'alpha'"
+    },
+    {
+      "fixture": "fp_p2d_168_dataframe_prod_skips_nonnumeric_order_strict.json",
+      "error": "oracle error: dataframe_prod failed: can't multiply sequence by non-int of type 'str'"
+    },
+    {
+      "fixture": "fp_p2d_174_series_str_startswith_empty_pattern_strict.json",
+      "error": "oracle error: series_str_startswith requires non-empty regex_pattern"
+    },
+    {
+      "fixture": "fp_p2d_175_series_str_endswith_empty_pattern_strict.json",
+      "error": "oracle error: series_str_endswith requires non-empty regex_pattern"
+    },
+    {
+      "fixture": "fp_p2d_421_series_dt_to_pydatetime_warn_false_naive_strict.json",
+      "error": "oracle error: series_dt_to_pydatetime failed: DatetimeProperties.to_pydatetime() got an unexpected keyword argument 'warn'"
+    },
+    {
+      "fixture": "fp_p2d_421_series_dt_to_pydatetime_warn_false_tzaware_strict.json",
+      "error": "oracle error: series_dt_to_pydatetime failed: DatetimeProperties.to_pydatetime() got an unexpected keyword argument 'warn'"
+    }
+  ],
+  "expected_error_agreements": [
+    {
       "fixture": "fp_p2c_004_series_join_cross_rejected_strict.json",
       "error": "oracle error: series_join requires join_type=inner|left|right|outer, got 'cross'"
     },
@@ -2388,14 +2551,6 @@
     {
       "fixture": "fp_p2c_010_dataframe_loc_missing_label_strict.json",
       "error": "oracle error: dataframe_loc label lookup failed: \"None of [Index(['missing'], dtype='object')] are in the [index]\""
-    },
-    {
-      "fixture": "fp_p2c_010_series_filter_duplicate_index_null_mask_hardened.json",
-      "error": "oracle error: series_filter mask application failed: Cannot mask with non-boolean array containing NA / NaN values"
-    },
-    {
-      "fixture": "fp_p2c_010_series_filter_duplicate_index_null_mask_strict.json",
-      "error": "oracle error: series_filter mask application failed: Cannot mask with non-boolean array containing NA / NaN values"
     },
     {
       "fixture": "fp_p2c_010_series_iloc_negative_out_of_bounds_hardened.json",
@@ -2422,10 +2577,6 @@
       "error": "oracle error: csv_round_trip failed: Error tokenizing data. C error: EOF inside string starting at row 1"
     },
     {
-      "fixture": "fp_p2d_017_dataframe_from_series_duplicate_name_last_wins_strict.json",
-      "error": "oracle error: duplicate column label 'dup' has non-identical values and cannot be represented"
-    },
-    {
       "fixture": "fp_p2d_017_dataframe_from_series_no_payload_error_hardened.json",
       "error": "oracle error: dataframe_from_series requires at least one series payload (left/right/groupby_keys)"
     },
@@ -2450,10 +2601,6 @@
       "error": "oracle error: dataframe_from_records failed: 2 columns passed, passed data had 3 columns"
     },
     {
-      "fixture": "fp_p2d_018_dataframe_from_records_matrix_short_rows_null_fill_hardened.json",
-      "error": "oracle error: dataframe_from_records failed: 3 columns passed, passed data had 2 columns"
-    },
-    {
       "fixture": "fp_p2d_019_dataframe_constructor_kwargs_frame_missing_error_hardened.json",
       "error": "oracle error: dataframe_constructor_kwargs requires frame payload"
     },
@@ -2468,14 +2615,6 @@
     {
       "fixture": "fp_p2d_020_dataframe_constructor_scalar_missing_index_error_strict.json",
       "error": "oracle error: dataframe_constructor_scalar failed: DataFrame constructor not properly called!"
-    },
-    {
-      "fixture": "fp_p2d_021_dataframe_constructor_list_like_explicit_index_and_padding_hardened.json",
-      "error": "oracle error: dataframe_constructor_list_like failed: 2 columns passed, passed data had 1 columns"
-    },
-    {
-      "fixture": "fp_p2d_021_dataframe_constructor_list_like_extra_columns_null_fill_hardened.json",
-      "error": "oracle error: dataframe_constructor_list_like failed: 3 columns passed, passed data had 2 columns"
     },
     {
       "fixture": "fp_p2d_021_dataframe_constructor_list_like_index_length_mismatch_error_strict.json",
@@ -2502,10 +2641,6 @@
       "error": "oracle error: dataframe_constructor_list_like requires matrix_rows list payload"
     },
     {
-      "fixture": "fp_p2d_022_dataframe_constructor_list_like_ragged_with_explicit_columns_and_index_strict.json",
-      "error": "oracle error: dataframe_constructor_list_like failed: 3 columns passed, passed data had 2 columns"
-    },
-    {
       "fixture": "fp_p2d_022_dataframe_constructor_list_like_row_width_exceeds_columns_by_two_strict.json",
       "error": "oracle error: dataframe_constructor_list_like failed: 2 columns passed, passed data had 4 columns"
     },
@@ -2530,16 +2665,20 @@
       "error": "oracle error: dataframe_constructor_list_like failed: unsupported constructor dtype 'uint64'"
     },
     {
+      "fixture": "fp_p2d_025_dataframe_iloc_missing_column_error_hardened.json",
+      "error": "oracle error: dataframe_iloc column_order names absent from frame: ['missing']"
+    },
+    {
       "fixture": "fp_p2d_025_dataframe_iloc_out_of_bounds_error_strict.json",
       "error": "oracle error: dataframe_iloc position lookup failed: positional indexers are out-of-bounds"
     },
     {
-      "fixture": "fp_p2d_025_dataframe_loc_missing_label_error_strict.json",
-      "error": "oracle error: dataframe_loc label lookup failed: \"None of [Index(['missing'], dtype='object')] are in the [index]\""
+      "fixture": "fp_p2d_025_dataframe_loc_missing_column_error_hardened.json",
+      "error": "oracle error: dataframe_loc column_order names absent from frame: ['missing']"
     },
     {
-      "fixture": "fp_p2d_025_series_clip_array_bounds_missing_entries_strict.json",
-      "error": "oracle error: series_clip failed: Invalid value '-inf' for dtype Int64"
+      "fixture": "fp_p2d_025_dataframe_loc_missing_label_error_strict.json",
+      "error": "oracle error: dataframe_loc label lookup failed: \"None of [Index(['missing'], dtype='object')] are in the [index]\""
     },
     {
       "fixture": "fp_p2d_028_dataframe_concat_axis1_duplicate_column_error_hardened.json",
@@ -2646,28 +2785,12 @@
       "error": "oracle error: dataframe_drop_duplicates failed: Index(['missing'], dtype='object')"
     },
     {
-      "fixture": "fp_p2d_056_dataframe_merge_asof_backward_nan_left_key_strict.json",
-      "error": "oracle error: dataframe_merge_asof failed: incompatible merge keys [0] Int64Dtype() and dtype('int64'), must be the same type"
-    },
-    {
       "fixture": "fp_p2d_078_series_xs_key_not_found_hardened.json",
       "error": "oracle error: series_xs failed: 'missing'"
     },
     {
-      "fixture": "fp_p2d_078_series_xs_single_match_strict.json",
-      "error": "oracle error: series_xs currently requires duplicate-label selections that return a Series"
-    },
-    {
       "fixture": "fp_p2d_080_series_bool_multi_element_hardened.json",
       "error": "oracle error: series_bool failed: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all()."
-    },
-    {
-      "fixture": "fp_p2d_094_dataframe_asof_before_first_strict.json",
-      "error": "oracle error: dataframe_asof selection failed: '<' not supported between instances of 'int' and 'Timestamp'"
-    },
-    {
-      "fixture": "fp_p2d_094_dataframe_asof_match_strict.json",
-      "error": "oracle error: dataframe_asof selection failed: '<' not supported between instances of 'int' and 'Timestamp'"
     },
     {
       "fixture": "fp_p2d_097_dataframe_bool_multi_element_hardened.json",
@@ -2676,10 +2799,6 @@
     {
       "fixture": "fp_p2d_098_dataframe_xs_key_not_found_hardened.json",
       "error": "oracle error: dataframe_xs failed: 'missing'"
-    },
-    {
-      "fixture": "fp_p2d_098_dataframe_xs_single_match_strict.json",
-      "error": "oracle error: dataframe_xs currently requires duplicate-label selections that return a DataFrame"
     },
     {
       "fixture": "fp_p2d_104_dataframe_groupby_get_group_not_found_hardened.json",
@@ -2742,54 +2861,6 @@
       "error": "oracle error: dataframe_shift shift_axis must be 0 or 1 (got 2)"
     },
     {
-      "fixture": "fp_p2d_149_dataframe_sem_skips_nonnumeric_order_strict.json",
-      "error": "oracle error: dataframe_sem failed: could not convert string to float: 'alpha'"
-    },
-    {
-      "fixture": "fp_p2d_151_dataframe_kurtosis_skips_nonnumeric_order_strict.json",
-      "error": "oracle error: dataframe_kurtosis failed: could not convert string to float: 'alpha'"
-    },
-    {
-      "fixture": "fp_p2d_153_dataframe_mean_skips_nonnumeric_strict.json",
-      "error": "oracle error: dataframe_mean failed: Could not convert ['zam'] to numeric"
-    },
-    {
-      "fixture": "fp_p2d_154_dataframe_std_skips_nonnumeric_order_strict.json",
-      "error": "oracle error: dataframe_std failed: could not convert string to float: 'alpha'"
-    },
-    {
-      "fixture": "fp_p2d_155_dataframe_var_skips_nonnumeric_order_strict.json",
-      "error": "oracle error: dataframe_var failed: could not convert string to float: 'alpha'"
-    },
-    {
-      "fixture": "fp_p2d_158_dataframe_median_skips_nonnumeric_strict.json",
-      "error": "oracle error: dataframe_median failed: Cannot convert [['alpha' 'beta' 'gamma' 'delta' 'epsilon']] to numeric"
-    },
-    {
-      "fixture": "fp_p2d_162_dataframe_quantile_skips_nonnumeric_strict.json",
-      "error": "oracle error: dataframe_quantile failed: unsupported operand type(s) for -: 'str' and 'str'"
-    },
-    {
-      "fixture": "fp_p2d_167_dataframe_skew_mixed_symmetric_strict.json",
-      "error": "oracle error: dataframe_skew failed: could not convert string to float: 'alpha'"
-    },
-    {
-      "fixture": "fp_p2d_167_dataframe_skew_skips_nonnumeric_order_strict.json",
-      "error": "oracle error: dataframe_skew failed: could not convert string to float: 'alpha'"
-    },
-    {
-      "fixture": "fp_p2d_168_dataframe_prod_skips_nonnumeric_order_strict.json",
-      "error": "oracle error: dataframe_prod failed: can't multiply sequence by non-int of type 'str'"
-    },
-    {
-      "fixture": "fp_p2d_174_series_str_startswith_empty_pattern_strict.json",
-      "error": "oracle error: series_str_startswith requires non-empty regex_pattern"
-    },
-    {
-      "fixture": "fp_p2d_175_series_str_endswith_empty_pattern_strict.json",
-      "error": "oracle error: series_str_endswith requires non-empty regex_pattern"
-    },
-    {
       "fixture": "fp_p2d_262_series_loc_missing_label_error_strict.json",
       "error": "oracle error: series_loc label lookup failed: \"None of [Index(['z'], dtype='object')] are in the [index]\""
     },
@@ -2800,21 +2871,11 @@
     {
       "fixture": "fp_p2d_417_series_categorical_from_codes_out_of_bounds_strict.json",
       "error": "oracle error: series_categorical_from_codes failed: codes need to be between -1 and len(categories)-1"
-    },
-    {
-      "fixture": "fp_p2d_421_series_dt_to_pydatetime_warn_false_naive_strict.json",
-      "error": "oracle error: series_dt_to_pydatetime failed: DatetimeProperties.to_pydatetime() got an unexpected keyword argument 'warn'"
-    },
-    {
-      "fixture": "fp_p2d_421_series_dt_to_pydatetime_warn_false_tzaware_strict.json",
-      "error": "oracle error: series_dt_to_pydatetime failed: DatetimeProperties.to_pydatetime() got an unexpected keyword argument 'warn'"
     }
   ],
-  "uncompared_keys": {
-    "expected_error_contains": 12
-  },
+  "uncompared_keys": {},
   "coverage": {
-    "SEMANTIC": 1114,
-    "STRUCTURAL": 13
+    "SEMANTIC": 1120,
+    "STRUCTURAL": 9
   }
 }

@@ -51,15 +51,19 @@ own stamp names and splits the moves three ways:
 
 Run over all 1258 fixtures with the generation-era oracle extracted from `9aa1ed6fe`:
 
-| verdict | n | share of the 159 moved |
+| verdict | n | share of the 163 moved |
 |---|---:|---:|
-| `PROVENANCE_FICTION` | 93 | 58.5% |
-| `STAMP_IMPOSSIBLE` | 55 | 34.6% |
-| `BOTH_MOVED` | 8 | 5.0% |
-| `GENUINELY_STALE` | **2** | **1.3%** |
+| `PROVENANCE_FICTION` | 96 | 58.9% |
+| `STAMP_IMPOSSIBLE` | 56 | 34.4% |
+| `BOTH_MOVED` | 8 | 4.9% |
+| `GENUINELY_STALE` | **2** | **1.2%** |
 | `STAMP_ERRORED` | 1 | 0.6% |
 
-**Two.** Out of 159 moved fixtures, two are stale in the sense the bead's title assumes:
+(Restated against the same pass as the bucket table below, so the two are comparable. An earlier
+pass measured 93/55/8/2/1 over 159 moved — the same conclusion; the four extra moved fixtures are
+the newly-visible expected-error ones plus the conformance lane's concurrent oracle fixes.)
+
+**Two.** Out of 163 moved fixtures, two are stale in the sense the bead's title assumes:
 `fp_p2d_025_series_clip_with_nulls_hardened` and `fp_p2d_130_dataframe_clip_nulls_hardened`, both
 `KIND float64->int64` + `NULL_MARKER na_n->null`. Everything else pins values its own named oracle
 never produced.
@@ -76,9 +80,9 @@ non-comparison that this tool exists downstream of.
 
 Per-class, the fiction is not concentrated anywhere; it is the general condition:
 
-    NULL_MARKER null->na_n   48 fiction /  2 both-moved / 35 no-answer
-    KIND int64->float64      39 fiction /  4 both-moved / 14 no-answer
-    VALUE                    20 fiction /  4 both-moved / 19 no-answer
+    NULL_MARKER null->na_n   48 fiction /  2 both-moved / 35 stamp-impossible
+    KIND int64->float64      39 fiction /  4 both-moved / 14 stamp-impossible
+    VALUE                    20 fiction /  4 both-moved / 18 stamp-impossible / 1 stamp-errored
 
 ## `VALUE` (43) is the most heterogeneous class: 38 distinct operations
 
@@ -171,10 +175,70 @@ None of these four is attributable to a *named* divergence today: DISCREPANCIES.
 casing, asof missing-value dtype, EWM null handling, or dummy column placement. They are candidate
 new entries, and each needs the FP side confirmed before anything is written down.
 
+## The 110 oracle errors, triaged — and a false-agreement in this tool
+
+The bead's standing precondition was that nothing is retired until these are triaged, "several
+being legitimate expected-error fixtures". They are, and it is most of them.
+
+94 fixtures pin `expected_error_contains`. **85 of the reported errors are those fixtures failing
+exactly as they assert** — both sides agree the operation fails, so they are agreements, not
+defects. That leaves **27 genuinely untriaged**, not 110.
+
+**The error TEXT is deliberately not compared.** `expected_error_contains` pins FrankenPandas's
+wording, which the Rust harness checks; the oracle raises pandas' own English. My first pass at
+this triage matched them as substrings and rejected 45 of the agreements — on cases like a fixture
+expecting `'out of bounds'` against pandas' `'positional indexers are out-of-bounds'`. A hyphen.
+The predicate is the *existence* of an error expectation, never its text, and a test pins that.
+
+The remaining 9 are the find: **expected-error fixtures where the oracle SUCCEEDS.**
+
+    fp_p2c_010_series_filter_non_boolean_mask_strict
+    fp_p2d_016_csv_round_trip_ragged_row_error_strict
+    fp_p2d_022_dataframe_constructor_list_like_empty_rows_nonempty_index_error_strict
+    fp_p2d_023_dataframe_constructor_list_like_dtype_bool_invalid_int_error_strict
+    fp_p2d_024_dataframe_from_dict_dtype_category_unsupported_error_hardened
+    fp_p2d_025_dataframe_iloc_duplicate_column_selector_error_strict
+    fp_p2d_046_series_fillna_cast_error_strict
+    fp_p2d_245_series_dt_total_seconds_basic_strict
+    fp_p2d_423_series_str_split_expand_empty_separator_strict
+
+Every one was being counted as `agree, provenance-only`, because `expected_error_contains` was
+filed as an UNCOMPARED key. **A fixture asserting "this must fail" was silently satisfied by a run
+that did not fail** — the silent-non-comparison-counted-as-success bug, inside the tool built to
+catch it. They are now moves, classed `ERROR expected-but-succeeded`. As a class they say FP raises
+where pandas returns a value, which is a real over-strictness question and was invisible.
+
+### Corrected buckets (live pandas 2.2.3, all 1258)
+
+    agree, provenance-only     : 966
+    MOVED, unattributed        : 163   <-- all still failing
+    oracle: unsupported op     :  17
+    expected-error, BOTH failed:  85   <-- legitimate, NOT defects
+    oracle: other errors       :  27   <-- UNTRIAGED, deliberately not folded into any total
+    ------------------------------------
+                                 1258   every fixture in exactly one bucket
+
+`uncompared_keys` is now **empty**: no key reaches the end of a run unadjudicated. A bare-null
+`expected_*` key is also no longer counted — generated fixtures carry every key with a null
+placeholder, and one was inflating the uncompared count to 12 when only 11 fixtures made the
+assertion. Missing values are encoded `{"kind":"null",…}`, never bare JSON null, so nothing real is
+swallowed.
+
+⚠️ **Cross-pass deltas in this document are not all attributable to my changes.** The conformance
+lane is landing oracle fixes in the same session. Two fixtures I counted ad hoc as
+expected-but-succeeded — `..._025_dataframe_iloc_missing_column_error_hardened` and its `loc`
+sibling — are now correct agreements because of `a1239a9f0` (loc/iloc apply the `column_order`
+selector). My ad-hoc count of 11 was taken before that commit; the tool's 9 is after it. Compare
+buckets within one pass, not across passes.
+
 ## What is NOT concluded
 
-- **Nothing attributed.** All 159 stay failing.
-- **The 110 oracle errors are untriaged** and deliberately excluded from every total above.
+- **Nothing attributed.** All 163 stay failing.
+- **27 oracle errors remain untriaged** and are deliberately excluded from every total above. (The
+  other 85 are now adjudicated as expected-error agreements; the count fell from 110 by triage, not
+  by folding anything into a total.)
+- The 9 `ERROR expected-but-succeeded` fixtures are newly VISIBLE, not newly resolved. Each needs
+  the FP side run before anyone decides whether FP is over-strict or pandas is too permissive.
 - The four fixture-side divergences above are probed against pandas but **not yet confirmed against
   FrankenPandas itself** — the pinned values are consistent with FP behaviour, which is not the same
   as having run FP. That confirmation is the next step before any DISCREPANCIES entry.
