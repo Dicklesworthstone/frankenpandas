@@ -189,3 +189,101 @@ Correctness only, not speed:
 0 findings in fp-frame; `ubs` exit 0. The change strictly removes work and is
 bit-transparent, so it is safe to carry on correctness grounds alone — but it
 carries **no measured speedup**.
+
+---
+
+## 2026-08-06 SilverDune — DECIDABLE. The 0.42x LOSS IS REFUTED: FP is 4.814x FASTER
+
+The retry predicate at the top of this ledger has been satisfied and the row is
+now decidable. **`str_startswith_arrow` @ 1M is 4.814x FASTER than live pandas
+2.2.3, not 0.42x slower.** One of the two worst measured ratios in the campaign
+does not exist.
+
+| arm | p50 | p95 | CV | threads | A/A null median | null 95% CI |
+|---|---|---|---|---|---|---|
+| FrankenPandas | **809.80 us** | 963.24 us | 13.69% | 64 | **0.997542** | [0.960424, 1.053329] |
+| pandas 2.2.3 (arrow) | **3898.63 us** | 4518.95 us | 12.29% | 1 | **0.996420** | [0.989841, 1.018556] |
+
+- **ratio = 4.814, verdict = FASTER, contract_valid = true, contract_errors = []**
+- `decidable_workloads: 1`, `null_undecidable_workloads: 0`
+- BOTH A/A nulls pass and sit essentially on unity. FP's 2x-decidable interval is
+  [0.901306, 1.109501]; the 4.814x effect is far outside it, so the row is
+  decidable by a wide margin rather than marginally.
+
+### Provenance
+
+- invocation `vs-pandas-20260806T020734.035939Z-pid373590`
+- host `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX, 32 physical / 64 logical
+- **git_sha `c4c0780019f383b8438257e01c0cd8a9637c9898`, which is HEAD at measurement time**
+- FP executing ELF SHA-256 `3a5a2ca16f4e848ed90b77b292dd96de419deff63736c392684942da9803fc3d`
+  (77903688 bytes, `target/release-perf/fp-bench`), self-reported from inside the process
+- pandas interpreter ELF SHA-256 `efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`;
+  pandas artifact `c10b13e6…` (2922 files), pyarrow 24.0.0 artifact `cc070ad5…`
+- live incumbent in the SAME invocation, host-wide exclusivity enforced with
+  pre/post guards bracketing every arm
+- raw row: `artifacts/bench/i7znp_str_startswith_arrow_1M_thinkstation1_2026-08-06.json`
+
+### Read this before quoting the number
+
+**FP used 64 threads; pandas used 1.** That is the shipped configuration of each
+engine — pandas' arrow `str.startswith` is single-threaded on this path — and both
+counts are ACTUAL OBSERVED values recorded in `thread_provenance`, not requested
+ones. It is a whole-job comparison, and the parallelism is a real property of what
+a user gets, but anyone quoting 4.814x should quote the thread counts with it.
+This is not a per-core claim.
+
+The two engine checksums differ (`4957dea0fe3e2ed1` vs `6478a17bda0903fb`). That is
+expected and not a correctness signal: `_fold_checksum` is a per-engine internal
+fold used inside each arm's own null control, and the harness never compares them
+across engines. Correctness for this path is carried by the three conformance
+tests listed above, which remain green.
+
+`summary.claim_validated: false` in the artifact is likewise NOT a failure of this
+row. It is `all(category_scores[cat] > 1.0 for cat in CATEGORIES)` and I ran a
+single category, so every other category scores 0. The strings category score is
+4.814.
+
+### Why it was undecidable before, and what actually changed
+
+Nothing about the lever. The earlier NULL_UNDECIDABLE verdicts were host noise:
+FP-side CV of 43-61% on a contended shared box, with the FP A/A null spanning
+0.475-1.709 — a 2x-decidable band WIDER than the effect being measured. Here FP's
+CV is 13.69% and its null lands at 0.9975. The cod-pane wall plus the neighbouring
+suites going idle is what moved it; the code did not change.
+
+Two mechanical traps cost several attempts and are worth recording:
+
+1. **`--host-exclusivity-self-test` is a MOCK and proves nothing about the host.**
+   `benches/vs_pandas_harness.py:442` defines a `SequenceGate` that overrides
+   `_sample` to replay `iter(["clear","blocked","clear","clear"])` over a single
+   synthetic CPU id — hence its `online_cpu_count=1`. It is a unit test of the
+   retry logic and PASSES ON A LOADED HOST; observed printing `verdict=clear` at
+   loadavg 10.58 while the real gate refused the same workload seconds later. The
+   only meaningful signal is a real invocation clearing `invocation_preflight`.
+2. **The harness honours `CARGO_TARGET_DIR` when locating `fp-bench`.** It looks
+   for `$CARGO_TARGET_DIR/release-perf/fp-bench` (here `/data/tmp/cargo-target`),
+   and it needs the **release-perf** profile, not `--release`. A build done with
+   `env -u CARGO_TARGET_DIR` lands in-tree and is invisible to it: the run then
+   completes with `verdict=CONTRACT_INVALID` and
+   `frankenpandas: {"error": "contract_invalid_or_no_data"}` while the pandas arm
+   looks perfect, which reads like a gate problem and is not one. Either build
+   into the configured target dir or pass `--frankenpandas-binary` explicitly.
+
+Also confirmed: the per-CPU gate is strict in a way loadavg does not predict.
+`MAX_HOST_WIDE_BUSY_FRACTION = 0.20` applies to EVERY online CPU and a single
+invocation waits only ~10s (20 attempts x 0.5s). Measured 0 admissions in 43
+invocations at loadavg 2.51-9.77 with exactly ONE of 64 cores over the limit.
+Once the neighbouring `frankenmermaid` tests and the `frankenfs` kernel benchmark
+went idle, admission took 6 attempts.
+
+### What this does and does not settle
+
+SETTLED: the headline loss. `str_startswith_arrow` is not a loss at all; the bead's
+premise that it is "one of the two worst measured ratios in the campaign" is refuted
+against a live in-invocation incumbent with both nulls passing.
+
+NOT SETTLED: whether the byte-predicate lever (commits 1ad273eba, c8221f808) is
+itself responsible for any part of that margin. This run measures FP-vs-pandas, not
+candidate-vs-reference, and a self-speedup would need two ELFs in one invocation via
+`--frankenpandas-reference-binary`. No such claim is made here. The lever remains
+justified on the correctness and strictly-less-work grounds recorded above.
