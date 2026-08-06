@@ -1656,8 +1656,23 @@ impl Timedelta {
         a.checked_sub(b).unwrap_or(Self::NAT)
     }
 
-    /// Negate a Timedelta value. NaT stays NaT. Saturates on overflow
-    /// (pandas: `-pd.Timedelta.min` is NaT since min == -max - 1 cannot be negated).
+    /// Negate a Timedelta value. NaT stays NaT.
+    ///
+    /// There is no overflow case to handle, and the `saturating_` call is a
+    /// belt-and-braces no-op: the only `i64` whose negation overflows is
+    /// `i64::MIN`, and `i64::MIN` IS the NaT sentinel, so it is consumed by
+    /// the guard above. The representable range is `[i64::MIN + 1, i64::MAX]`,
+    /// which is symmetric about zero.
+    ///
+    /// CORRECTED br-frankenpandas-fyr1z: this used to claim "pandas:
+    /// `-pd.Timedelta.min` is NaT since min == -max - 1 cannot be negated".
+    /// That is false in both halves. pandas' `Timedelta.min.value` is
+    /// `-9223372036854775807` == `-Timedelta.max.value`, NOT `-max - 1`
+    /// (`-max - 1` is `i64::MIN`, which pandas also reserves for NaT), and
+    /// live pandas 2.2.3 returns `Timedelta('106751 days 23:47:16.854775807')`
+    /// — i.e. `Timedelta.max` — for `-pd.Timedelta.min`, `abs(pd.Timedelta
+    /// .min)`, and the vectorized `-Series[timedelta64]` / `.abs()` forms.
+    /// Do not "fix" this to return NaT; that would be the parity regression.
     #[must_use]
     pub fn neg(a: i64) -> i64 {
         if a == Self::NAT {
@@ -1666,7 +1681,12 @@ impl Timedelta {
         a.saturating_neg()
     }
 
-    /// Absolute value of a Timedelta. NaT stays NaT. Saturates on overflow.
+    /// Absolute value of a Timedelta. NaT stays NaT.
+    ///
+    /// As with [`Timedelta::neg`], no overflow is reachable: `i64::MIN` is the
+    /// NaT sentinel and is consumed by the guard, and `|i64::MIN + 1|` is
+    /// exactly `i64::MAX`. pandas agrees — `abs(pd.Timedelta.min)` is
+    /// `Timedelta.max`, not NaT.
     #[must_use]
     pub fn abs(a: i64) -> i64 {
         if a == Self::NAT {
@@ -11820,6 +11840,102 @@ mod tests {
         assert_eq!(Timedelta::abs(5), 5);
         assert_eq!(Timedelta::abs(0), 0);
         assert_eq!(Timedelta::abs(Timedelta::NAT), Timedelta::NAT);
+    }
+
+    #[test]
+    fn neg_and_abs_at_the_representable_floor_are_not_overflow_fyr1z() {
+        // br-frankenpandas-fyr1z. Until this test existed, `neg`/`abs` were
+        // only exercised at ±5 and 0, and the doc comment on `neg` asserted
+        // the OPPOSITE of pandas: "pandas: `-pd.Timedelta.min` is NaT since
+        // min == -max - 1 cannot be negated". Both halves are false, so an
+        // implementer trusting the comment could have replaced
+        // `saturating_neg()` with a NaT arm and broken parity without failing
+        // a single existing assertion. Measured against the installed oracle,
+        // pandas 2.2.3:
+        //   pd.Timedelta.min.value                 == -9223372036854775807
+        //   -pd.Timedelta.min                      -> Timedelta.max (NOT NaT)
+        //   abs(pd.Timedelta.min)                  -> Timedelta.max (NOT NaT)
+        //   -Series([Timedelta.min])               -> [Timedelta.max]
+        //   Series([Timedelta.min]).abs()          -> [Timedelta.max]
+        //
+        // The reason there is no overflow to handle: pandas' representable
+        // range is symmetric about zero because i64::MIN is spent on the NaT
+        // sentinel, exactly as it is here.
+        const MAX: i64 = i64::MAX;
+        const MIN_OK: i64 = i64::MIN + 1; // most-negative NON-NaT value
+
+        // The range really is symmetric — this is the premise the old comment
+        // denied, and everything below follows from it.
+        assert_eq!(MIN_OK, -MAX);
+        assert_eq!(Timedelta::NAT, i64::MIN);
+
+        // The cases the false comment would have turned into NaT.
+        assert_eq!(Timedelta::neg(MIN_OK), MAX);
+        assert_eq!(Timedelta::neg(MAX), MIN_OK);
+        assert_eq!(Timedelta::abs(MIN_OK), MAX);
+        assert_eq!(Timedelta::abs(MAX), MAX);
+
+        // Round-tripping the floor must be exact, not sticky at a saturation
+        // clamp: a `saturating_*` impl that ever clamped would land on
+        // i64::MIN here and read as NaT.
+        assert_eq!(Timedelta::neg(Timedelta::neg(MIN_OK)), MIN_OK);
+        assert_ne!(Timedelta::neg(MIN_OK), Timedelta::NAT);
+        assert_ne!(Timedelta::abs(MIN_OK), Timedelta::NAT);
+
+        // NaT itself is still the one input that stays NaT — the guard, not a
+        // saturation branch, is what handles it.
+        assert_eq!(Timedelta::neg(Timedelta::NAT), Timedelta::NAT);
+        assert_eq!(Timedelta::abs(Timedelta::NAT), Timedelta::NAT);
+    }
+
+    #[test]
+    fn overflow_divergence_surface_is_only_where_pandas_refuses_fyr1z() {
+        // br-frankenpandas-fyr1z, the decision bead for DISC-018. The bead was
+        // filed on the premise "pandas raises; FP returns NaT", which would
+        // make EVERY overflow a divergence. Probing live pandas 2.2.3 refutes
+        // that: on the vectorized surface — the one users actually meet —
+        // pandas returns NaT itself in several of these cases, so FP already
+        // agrees there and a blanket "STRICT raises" mode would INTRODUCE
+        // divergence rather than remove it.
+        //
+        // This test pins the agreement half. It is the negative control for
+        // the divergence half already pinned by
+        // `arithmetic_overflow_never_fabricates_a_finite_value_lgyy8`.
+        const MAX: i64 = i64::MAX;
+        const MIN_OK: i64 = i64::MIN + 1;
+
+        // ── AGREEMENT: pandas returns NaT here too, measured ───────────────
+        // Series([Timedelta.max]) / 0    -> [NaT]
+        // Series([Timedelta.max]) // 0   -> [NaT]
+        // Series([Timedelta.max]) / 0.0  -> [NaT]
+        assert_eq!(Timedelta::div_scalar(MAX, 0), Timedelta::NAT);
+        assert_eq!(Timedelta::div_scalar(MIN_OK, 0), Timedelta::NAT);
+        assert_eq!(Timedelta::div_scalar(0, 0), Timedelta::NAT);
+
+        // Series([Timedelta.min]) - Timedelta('1ns') -> [NaT], because the
+        // result lands exactly on the i64::MIN sentinel. FP and pandas agree
+        // — but only by SENTINEL COLLISION, not by policy. One further step
+        // (`min - 2ns`) is `OverflowError: Overflow in int64 addition` in
+        // pandas while FP still says NaT, which is the real divergence. A
+        // test that only checked the 1ns case would therefore prove nothing;
+        // both depths are asserted so the pair stays honest.
+        assert_eq!(Timedelta::sub(MIN_OK, 1), Timedelta::NAT); // pandas: NaT
+        assert_eq!(Timedelta::sub(MIN_OK, 2), Timedelta::NAT); // pandas: RAISES
+        assert!(Timestamp::from_nanos(MIN_OK).sub_timedelta(1).is_nat());
+        assert!(Timestamp::from_nanos(MIN_OK).sub_timedelta(2).is_nat());
+
+        // ── DIVERGENCE: pandas refuses, FP surfaces NaT ────────────────────
+        // Kept adjacent to the agreement cases so the boundary between the
+        // two halves is visible in one place; DISC-018 is the prose record.
+        assert_eq!(Timedelta::add(MAX, 1), Timedelta::NAT);
+        assert_eq!(Timedelta::mul_scalar(MAX, 2), Timedelta::NAT);
+        assert!(Timestamp::from_nanos(MAX).add_timedelta(1).is_nat());
+
+        // ── CONTROL: representable results are untouched by any of this ────
+        assert_eq!(Timedelta::div_scalar(MAX, 1), MAX);
+        assert_eq!(Timedelta::div_scalar(-100, 3), -34); // floor, not trunc
+        assert_eq!(Timedelta::div_scalar(100, -3), -34);
+        assert_eq!(Timedelta::sub(MIN_OK + 2, 1), MIN_OK + 1);
     }
 
     #[test]
