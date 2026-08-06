@@ -65,6 +65,81 @@ except ImportError as exc:  # pragma: no cover
 SEMANTIC_KEYS = ("expected_series", "expected_frame", "expected_scalar", "expected_bool")
 
 
+def differing_leaves(pinned: Any, live: Any, path: str = "") -> list[tuple[str, Any, Any]]:
+    """Every differing leaf between two normalized trees, with its path.
+
+    Walks BOTH sides and reports shape differences explicitly, because the
+    fixture_differ bug this tool exists downstream of was a silent
+    non-comparison: a default that made a loop iterate nothing while the run
+    still reported success. A structure this cannot descend is reported as a
+    difference at that node, never skipped.
+    """
+    if isinstance(pinned, dict) and isinstance(live, dict):
+        out: list[tuple[str, Any, Any]] = []
+        for key in sorted(set(pinned) | set(live)):
+            if key not in pinned or key not in live:
+                out.append((f"{path}.{key}", pinned.get(key, "<absent>"), live.get(key, "<absent>")))
+            else:
+                out.extend(differing_leaves(pinned[key], live[key], f"{path}.{key}"))
+        return out
+    if isinstance(pinned, list) and isinstance(live, list):
+        if len(pinned) != len(live):
+            return [(f"{path}[len]", len(pinned), len(live))]
+        out = []
+        for i, (p, l) in enumerate(zip(pinned, live)):
+            out.extend(differing_leaves(p, l, f"{path}[{i}]"))
+        return out
+    if pinned != live:
+        return [(path or ".", pinned, live)]
+    return []
+
+
+def classify_move(pinned: Any, live: Any) -> tuple[str, str]:
+    """Bucket a moved value into a countable class.
+
+    Returns (class, example). Classification is STRUCTURAL — it walks the trees
+    rather than parsing a human-readable mismatch string — so the counts do not
+    depend on message formatting.
+    """
+    # Compare the kind-normalized trees so serde aliases never register.
+    leaves = differing_leaves(normalize_structural(pinned), normalize_structural(live))
+    if not leaves:
+        return "NORMALIZES_EQUAL", ""
+
+    kinds: set[str] = set()
+    for path, p, l in leaves:
+        # A differing {"kind": ...} pair is the signal we care about; walk up by
+        # inspecting the sibling structures the leaf came from.
+        if path.endswith(".kind") and isinstance(p, str) and isinstance(l, str):
+            kinds.add(f"{p}->{l}")
+        elif path.endswith(".value"):
+            kinds.add("value")
+    path, p, l = leaves[0]
+    example = f"{path}: {p!r} vs {l!r}"
+
+    promo = {k for k in kinds if "->" in k and k != "null->null"}
+    if promo:
+        # e.g. int64->float64: dtype promotion, DISC-011 territory.
+        return f"KIND {sorted(promo)[0]}", example
+    if any(path.endswith(".value") for path, _, _ in leaves) and _null_marker_move(leaves):
+        direction = _null_marker_move(leaves)
+        return f"NULL_MARKER {direction}", example
+    if any(p == "<absent>" or l == "<absent>" for _, p, l in leaves):
+        return "SHAPE absent-key", example
+    if any(path.endswith("[len]") for path, _, _ in leaves):
+        return "SHAPE length", example
+    return "VALUE", example
+
+
+def _null_marker_move(leaves: list[tuple[str, Any, Any]]) -> str:
+    """Direction of a null-discriminator move, or empty string if not one."""
+    markers = {"null", "na_n", "nan"}
+    for _, p, l in leaves:
+        if isinstance(p, str) and isinstance(l, str) and p in markers and l in markers:
+            return f"{p}->{l}"
+    return ""
+
+
 def normalize_structural(node: Any) -> Any:
     """Apply the differ's kind-alias normalization recursively.
 
@@ -197,6 +272,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--jobs", type=int, default=1,
                         help="concurrent oracle invocations; report stays deterministic")
+    parser.add_argument("--list-limit", type=int, default=20,
+                        help="how many individual moves to print (class COUNTS are always complete)")
+    parser.add_argument("--report-json", type=Path,
+                        help="write the COMPLETE machine-readable report: every move with its "
+                             "class, every error, no truncation. Required input for an "
+                             "attribution pass driven by counts rather than by a visible slice.")
     args = parser.parse_args()
 
     if args.apply and args.attributions is None:
@@ -227,7 +308,8 @@ def main() -> int:
 
     agreed = prov_only = 0
     moved_attributed: list[tuple[str, str]] = []
-    moved_unattributed: list[tuple[str, list[str], str]] = []
+    moved_unattributed: list[tuple[str, list[str], str, str, str]] = []
+    move_classes: collections.Counter[str] = collections.Counter()
     retired: list[tuple[str, str]] = []
     unsupported: list[tuple[str, str]] = []
     other_errors: list[tuple[str, str]] = []
@@ -265,8 +347,17 @@ def main() -> int:
                         json.dumps(rebuild(fixture, response), indent=2) + "\n",
                         encoding="utf-8")
             else:
+                # Classify structurally so the attribution pass can work by
+                # CLASS rather than by eyeballing whatever sorts first.
+                klass, example = "UNCLASSIFIED", ""
+                for key in verdict["moved"]:
+                    if key in fixture and key in response:
+                        klass, example = classify_move(fixture[key], response[key])
+                        break
                 moved_unattributed.append(
-                    (name, verdict["moved"], verdict["detail"].get("semantic", "")[:110]))
+                    (name, verdict["moved"], verdict["detail"].get("semantic", "")[:110],
+                     klass, example))
+                move_classes[klass] += 1
         elif verdict["provenance_stale"]:
             prov_only += 1
         else:
@@ -286,13 +377,49 @@ def main() -> int:
         for key, count in uncompared_keys.most_common():
             print(f"    {key}: {count}")
     if moved_unattributed:
-        print("\nUNATTRIBUTED MOVES (first 20):")
-        for name, keys, why in moved_unattributed[:20]:
-            print(f"  {name}: {', '.join(keys)}  {why}")
+        # COUNTS FIRST, and over every move — not a slice. A truncated listing
+        # silently over-weights whatever sorts first, which is exactly how an
+        # attribution pass ends up mis-sized.
+        print(f"\nMOVE CLASSES (all {len(moved_unattributed)}, largest first):")
+        for klass, count in move_classes.most_common():
+            share = 100.0 * count / len(moved_unattributed)
+            print(f"  {count:5d}  {share:5.1f}%  {klass}")
+        print(f"\nUNATTRIBUTED MOVES (first {args.list_limit} of "
+              f"{len(moved_unattributed)}; use --report-json for all):")
+        for name, keys, why, klass, example in moved_unattributed[: args.list_limit]:
+            print(f"  [{klass}] {name}: {', '.join(keys)}  {why or example}")
     if unsupported:
         print("\nUNSUPPORTED OPERATION (first 10):")
         for name, msg in unsupported[:10]:
             print(f"  {name}: {msg}")
+    if args.report_json:
+        args.report_json.parent.mkdir(parents=True, exist_ok=True)
+        args.report_json.write_text(
+            json.dumps(
+                {
+                    "fixtures_examined": len(fixtures),
+                    "agree_current": agreed,
+                    "agree_provenance_only": prov_only,
+                    "move_classes": dict(move_classes),
+                    "moved_unattributed": [
+                        {"fixture": n, "keys": k, "why": w, "class": c, "example": e}
+                        for n, k, w, c, e in moved_unattributed
+                    ],
+                    "moved_attributed": [
+                        {"fixture": n, "divergence": d} for n, d in moved_attributed
+                    ],
+                    "unsupported_operation": [
+                        {"fixture": n, "error": m} for n, m in unsupported
+                    ],
+                    "other_errors": [{"fixture": n, "error": m} for n, m in other_errors],
+                    "uncompared_keys": dict(uncompared_keys),
+                    "coverage": dict(how_counts),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"\nfull machine-readable report: {args.report_json}")
     if args.apply:
         print(f"\nAPPLIED: {len(moved_attributed)} regenerated, {len(retired)} retired.")
     else:
