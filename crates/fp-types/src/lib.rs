@@ -1202,6 +1202,87 @@ pub struct TimedeltaComponents {
     pub nanoseconds: i64,
 }
 
+/// The pandas-side exception class an overflow corresponds to, per
+/// br-frankenpandas-fyr1z-policy-carrier-f29nz.
+///
+/// Recorded so a future STRICT arm (fyr1z.3) can raise the RIGHT error per op
+/// rather than one blanket type. Every mapping below was probed against live
+/// pandas 2.2.3 rather than inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PandasOverflowError {
+    /// `OverflowError`. e.g. `pd.Timedelta.max + pd.Timedelta('1ns')`, and
+    /// `Series + Timedelta` / `Series - Series` / `.diff()` which report
+    /// "Overflow in int64 addition".
+    Overflow,
+    /// `OutOfBoundsDatetime`. e.g. `pd.Timestamp.max + pd.Timedelta('1ns')`
+    /// and `pd.Timestamp.min - pd.Timestamp.max`.
+    OutOfBoundsDatetime,
+    /// `OutOfBoundsTimedelta`. Raised by the `pd.Timedelta(value, unit=...)`
+    /// constructor path (see br-frankenpandas-8v92m), not by the six
+    /// arithmetic helpers below.
+    OutOfBoundsTimedelta,
+}
+
+/// A temporal overflow, naming the operation that overflowed and the pandas
+/// exception it corresponds to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TemporalOverflow {
+    /// The FrankenPandas operation, e.g. `"Timedelta::add"`.
+    pub op: &'static str,
+    /// What pandas raises for this operation.
+    pub pandas_error: PandasOverflowError,
+}
+
+impl TemporalOverflow {
+    #[must_use]
+    pub const fn new(op: &'static str, pandas_error: PandasOverflowError) -> Self {
+        Self { op, pandas_error }
+    }
+}
+
+/// How a temporal overflow should be surfaced.
+///
+/// br-frankenpandas-fyr1z-policy-carrier-f29nz adds this carrier WITHOUT
+/// changing any default behavior: every existing call site is on
+/// [`OverflowPolicy::SurfaceNat`], which is exactly what the codebase did
+/// before. `Strict` exists so fyr1z.3 can wire per-op raise arms in a separate,
+/// reviewable step, and NOTHING routes to it yet.
+///
+/// Note DISC-018: a blanket "STRICT raises everywhere" is NOT pandas parity —
+/// pandas silently wraps on `Series * int` and `.cumsum()`, and returns NaT for
+/// `.mean()`. The strict arm therefore needs a per-op table, which is why the
+/// policy is carried per operation rather than set globally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OverflowPolicy {
+    /// Today's behavior, and the only arm currently wired up: overflow becomes
+    /// the family's NaT sentinel.
+    #[default]
+    SurfaceNat,
+    /// Reserved for fyr1z.3. Surfaces the [`TemporalOverflow`] to the caller.
+    Strict,
+}
+
+impl OverflowPolicy {
+    /// Resolve a fallible temporal result under this policy.
+    ///
+    /// `SurfaceNat` discards the overflow and yields `nat`, reproducing the
+    /// pre-f29nz behavior bit-for-bit. `Strict` propagates the overflow.
+    ///
+    /// # Errors
+    /// Returns the [`TemporalOverflow`] unchanged under [`Self::Strict`].
+    pub fn resolve<T>(
+        self,
+        outcome: Result<T, TemporalOverflow>,
+        nat: T,
+    ) -> Result<T, TemporalOverflow> {
+        match (self, outcome) {
+            (_, Ok(value)) => Ok(value),
+            (Self::SurfaceNat, Err(_)) => Ok(nat),
+            (Self::Strict, Err(overflow)) => Err(overflow),
+        }
+    }
+}
+
 pub struct Timedelta;
 
 impl Timedelta {
@@ -1638,22 +1719,48 @@ impl Timedelta {
     // boundary"). Every input whose exact result is representable is
     // unaffected bit-for-bit; only overflow moves.
 
+    /// Add two Timedelta nanosecond values, reporting overflow.
+    ///
+    /// br-frankenpandas-fyr1z-policy-carrier-f29nz. NaT propagation is NOT an
+    /// overflow — a NaT operand yields `Ok(NAT)`, exactly as before. Only an
+    /// unrepresentable result is an `Err`.
+    ///
+    /// # Errors
+    /// [`PandasOverflowError::Overflow`] when the sum exceeds i64.
+    pub fn try_add(a: i64, b: i64) -> Result<i64, TemporalOverflow> {
+        if a == Self::NAT || b == Self::NAT {
+            return Ok(Self::NAT);
+        }
+        a.checked_add(b).ok_or(TemporalOverflow::new(
+            "Timedelta::add",
+            PandasOverflowError::Overflow,
+        ))
+    }
+
     /// Add two Timedelta nanosecond values. NaT propagates; overflow → NaT.
     #[must_use]
     pub fn add(a: i64, b: i64) -> i64 {
+        Self::try_add(a, b).unwrap_or(Self::NAT)
+    }
+
+    /// Subtract two Timedelta nanosecond values, reporting overflow.
+    ///
+    /// # Errors
+    /// [`PandasOverflowError::Overflow`] when the difference exceeds i64.
+    pub fn try_sub(a: i64, b: i64) -> Result<i64, TemporalOverflow> {
         if a == Self::NAT || b == Self::NAT {
-            return Self::NAT;
+            return Ok(Self::NAT);
         }
-        a.checked_add(b).unwrap_or(Self::NAT)
+        a.checked_sub(b).ok_or(TemporalOverflow::new(
+            "Timedelta::sub",
+            PandasOverflowError::Overflow,
+        ))
     }
 
     /// Subtract two Timedelta nanosecond values. NaT propagates; overflow → NaT.
     #[must_use]
     pub fn sub(a: i64, b: i64) -> i64 {
-        if a == Self::NAT || b == Self::NAT {
-            return Self::NAT;
-        }
-        a.checked_sub(b).unwrap_or(Self::NAT)
+        Self::try_sub(a, b).unwrap_or(Self::NAT)
     }
 
     /// Negate a Timedelta value. NaT stays NaT.
@@ -1702,10 +1809,24 @@ impl Timedelta {
     /// rather than returning a saturated duration.
     #[must_use]
     pub fn mul_scalar(a: i64, factor: i64) -> i64 {
+        Self::try_mul_scalar(a, factor).unwrap_or(Self::NAT)
+    }
+
+    /// Multiply a Timedelta value by an integer factor, reporting overflow.
+    ///
+    /// # Errors
+    /// [`PandasOverflowError::Overflow`] when the product exceeds i64 — which
+    /// is what the SCALAR `pd.Timedelta.max * 2` raises. Note DISC-018: the
+    /// VECTORIZED `Series * int` wraps silently instead, so a strict arm for
+    /// this op must decide per-surface rather than inherit this class blindly.
+    pub fn try_mul_scalar(a: i64, factor: i64) -> Result<i64, TemporalOverflow> {
         if a == Self::NAT {
-            return Self::NAT;
+            return Ok(Self::NAT);
         }
-        a.checked_mul(factor).unwrap_or(Self::NAT)
+        a.checked_mul(factor).ok_or(TemporalOverflow::new(
+            "Timedelta::mul_scalar",
+            PandasOverflowError::Overflow,
+        ))
     }
 
     /// Floor-divide a Timedelta value by an integer divisor. NaT propagates.
@@ -2102,33 +2223,64 @@ impl Timestamp {
     /// `pd.Timestamp.max + pd.Timedelta('1ns')` raises `OutOfBoundsDatetime`.
     #[must_use]
     pub fn add_timedelta(&self, td_nanos: i64) -> Self {
+        self.try_add_timedelta(td_nanos)
+            .unwrap_or_else(|_| Self::nat())
+    }
+
+    /// Shift by a Timedelta, reporting overflow.
+    ///
+    /// br-frankenpandas-fyr1z-policy-carrier-f29nz. A NaT operand is
+    /// propagation, not overflow, so it yields `Ok(nat())`. On overflow the
+    /// caller gets the error INSTEAD of the tz-dropped NaT; the infallible
+    /// `add_timedelta` above still produces that NaT, unchanged.
+    ///
+    /// # Errors
+    /// [`PandasOverflowError::OutOfBoundsDatetime`], matching
+    /// `pd.Timestamp.max + pd.Timedelta('1ns')`.
+    pub fn try_add_timedelta(&self, td_nanos: i64) -> Result<Self, TemporalOverflow> {
         if self.is_nat() || td_nanos == Timedelta::NAT {
-            return Self::nat();
+            return Ok(Self::nat());
         }
         match self.nanos.checked_add(td_nanos) {
-            Some(nanos) => Self {
+            Some(nanos) => Ok(Self {
                 nanos,
                 tz: self.tz.clone(),
-            },
+            }),
             // Overflow drops the tz with the value: an out-of-range instant has
             // no zone, and `Self::nat()` is the one canonical NaT (matching the
             // NaT-operand arms above, which also return an untagged NaT).
-            None => Self::nat(),
+            None => Err(TemporalOverflow::new(
+                "Timestamp::add_timedelta",
+                PandasOverflowError::OutOfBoundsDatetime,
+            )),
         }
     }
 
     /// Subtract a Timedelta. NaT propagation; overflow → NaT. TZ preserved.
     #[must_use]
     pub fn sub_timedelta(&self, td_nanos: i64) -> Self {
+        self.try_sub_timedelta(td_nanos)
+            .unwrap_or_else(|_| Self::nat())
+    }
+
+    /// Shift back by a Timedelta, reporting overflow. See
+    /// [`Self::try_add_timedelta`].
+    ///
+    /// # Errors
+    /// [`PandasOverflowError::OutOfBoundsDatetime`].
+    pub fn try_sub_timedelta(&self, td_nanos: i64) -> Result<Self, TemporalOverflow> {
         if self.is_nat() || td_nanos == Timedelta::NAT {
-            return Self::nat();
+            return Ok(Self::nat());
         }
         match self.nanos.checked_sub(td_nanos) {
-            Some(nanos) => Self {
+            Some(nanos) => Ok(Self {
                 nanos,
                 tz: self.tz.clone(),
-            },
-            None => Self::nat(),
+            }),
+            None => Err(TemporalOverflow::new(
+                "Timestamp::sub_timedelta",
+                PandasOverflowError::OutOfBoundsDatetime,
+            )),
         }
     }
 
@@ -2137,12 +2289,24 @@ impl Timestamp {
     /// (`pd.Timestamp.min - pd.Timestamp.max` raises `OutOfBoundsDatetime`).
     #[must_use]
     pub fn sub_timestamp(&self, other: &Self) -> i64 {
+        self.try_sub_timestamp(other).unwrap_or(Timedelta::NAT)
+    }
+
+    /// Elapsed nanoseconds between two Timestamps, reporting overflow.
+    ///
+    /// # Errors
+    /// [`PandasOverflowError::OutOfBoundsDatetime`], matching
+    /// `pd.Timestamp.min - pd.Timestamp.max`.
+    pub fn try_sub_timestamp(&self, other: &Self) -> Result<i64, TemporalOverflow> {
         if self.is_nat() || other.is_nat() {
-            return Timedelta::NAT;
+            return Ok(Timedelta::NAT);
         }
         self.nanos
             .checked_sub(other.nanos)
-            .unwrap_or(Timedelta::NAT)
+            .ok_or(TemporalOverflow::new(
+                "Timestamp::sub_timestamp",
+                PandasOverflowError::OutOfBoundsDatetime,
+            ))
     }
 
     /// NaT-aware semantic equality: two NaT Timestamps are equal to each
@@ -8101,6 +8265,149 @@ mod tests {
         let vals = vec![iv(0.0, 1.0), iv(f64::NAN, 5.0)];
         assert_eq!(super::nanargmin(&vals), None);
         assert_eq!(super::nanargmax(&vals), None);
+    }
+
+    /// br-frankenpandas-fyr1z-policy-carrier-f29nz: the load-bearing guarantee
+    /// of this bead is NO DEFAULT BEHAVIOR CHANGE. Prove it rather than assert
+    /// it: over a seeded corpus that deliberately straddles the i64 boundary
+    /// and the NaT sentinel, every infallible helper must equal its fallible
+    /// sibling resolved under the default `SurfaceNat` policy — which is also
+    /// exactly what the pre-f29nz bodies computed.
+    #[test]
+    fn overflow_policy_carrier_preserves_default_behavior_f29nz() {
+        // Seeded LCG, no rand dependency (see [[differential-test-coverage]]).
+        let mut state: u64 = 0x5DEE_CE66_D125_1F00;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state
+        };
+        // Edge values first, then random ones. i64::MIN is the NaT sentinel.
+        let mut corpus: Vec<i64> = vec![
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            i64::MAX,
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MAX - 1,
+            i64::MAX / 2,
+            -(i64::MAX / 2),
+        ];
+        for _ in 0..400 {
+            let raw = next() as i64;
+            corpus.push(raw);
+            corpus.push(raw / 3);
+        }
+
+        let policy = super::OverflowPolicy::default();
+        assert_eq!(
+            policy,
+            super::OverflowPolicy::SurfaceNat,
+            "default must not move"
+        );
+
+        for &a in &corpus {
+            for &b in &corpus {
+                // Timedelta::add / sub / mul_scalar
+                assert_eq!(
+                    Timedelta::add(a, b),
+                    policy
+                        .resolve(Timedelta::try_add(a, b), Timedelta::NAT)
+                        .expect("SurfaceNat never errors"),
+                    "add({a}, {b}) diverged"
+                );
+                assert_eq!(
+                    Timedelta::sub(a, b),
+                    policy
+                        .resolve(Timedelta::try_sub(a, b), Timedelta::NAT)
+                        .expect("SurfaceNat never errors"),
+                    "sub({a}, {b}) diverged"
+                );
+                assert_eq!(
+                    Timedelta::mul_scalar(a, b),
+                    policy
+                        .resolve(Timedelta::try_mul_scalar(a, b), Timedelta::NAT)
+                        .expect("SurfaceNat never errors"),
+                    "mul_scalar({a}, {b}) diverged"
+                );
+
+                // Timestamp::{add,sub}_timedelta / sub_timestamp — including tz,
+                // since overflow deliberately drops it.
+                let ts = Timestamp::from_nanos(a);
+                assert_eq!(
+                    ts.add_timedelta(b),
+                    ts.try_add_timedelta(b).unwrap_or_else(|_| Timestamp::nat()),
+                    "add_timedelta({a}, {b}) diverged"
+                );
+                assert_eq!(
+                    ts.sub_timedelta(b),
+                    ts.try_sub_timedelta(b).unwrap_or_else(|_| Timestamp::nat()),
+                    "sub_timedelta({a}, {b}) diverged"
+                );
+                let other = Timestamp::from_nanos(b);
+                assert_eq!(
+                    ts.sub_timestamp(&other),
+                    ts.try_sub_timestamp(&other).unwrap_or(Timedelta::NAT),
+                    "sub_timestamp({a}, {b}) diverged"
+                );
+            }
+        }
+    }
+
+    /// The carrier must actually CARRY something: `Strict` propagates the
+    /// overflow with the right op name and the pandas error class probed from
+    /// live 2.2.3. Without this, `resolve` could ignore its policy and the
+    /// equivalence test above would still pass.
+    #[test]
+    fn overflow_policy_strict_reports_op_and_pandas_class_f29nz() {
+        use super::{OverflowPolicy, PandasOverflowError};
+
+        let strict = OverflowPolicy::Strict;
+
+        // pd.Timedelta.max + pd.Timedelta('1ns') -> OverflowError
+        let err = strict
+            .resolve(Timedelta::try_add(i64::MAX, 1), Timedelta::NAT)
+            .expect_err("must surface under Strict");
+        assert_eq!(err.op, "Timedelta::add");
+        assert_eq!(err.pandas_error, PandasOverflowError::Overflow);
+
+        // pd.Timestamp.max + pd.Timedelta('1ns') -> OutOfBoundsDatetime
+        let ts = Timestamp::from_nanos(i64::MAX);
+        let err = strict
+            .resolve(ts.try_add_timedelta(1), Timestamp::nat())
+            .expect_err("must surface under Strict");
+        assert_eq!(err.op, "Timestamp::add_timedelta");
+        assert_eq!(err.pandas_error, PandasOverflowError::OutOfBoundsDatetime);
+
+        // pd.Timestamp.min - pd.Timestamp.max -> OutOfBoundsDatetime
+        let err = strict
+            .resolve(
+                Timestamp::from_nanos(i64::MIN + 1)
+                    .try_sub_timestamp(&Timestamp::from_nanos(i64::MAX)),
+                Timedelta::NAT,
+            )
+            .expect_err("must surface under Strict");
+        assert_eq!(err.op, "Timestamp::sub_timestamp");
+        assert_eq!(err.pandas_error, PandasOverflowError::OutOfBoundsDatetime);
+
+        // A NaT operand is PROPAGATION, not overflow: Strict must still be Ok.
+        assert_eq!(
+            strict
+                .resolve(Timedelta::try_add(Timedelta::NAT, 1), Timedelta::NAT)
+                .expect("NaT propagation is not an overflow"),
+            Timedelta::NAT
+        );
+        // And a representable result is untouched under either policy.
+        assert_eq!(
+            strict
+                .resolve(Timedelta::try_add(2, 3), Timedelta::NAT)
+                .expect("no overflow"),
+            5
+        );
     }
 
     /// Mixed Datetime64 + another dtype must NOT take the typed arm — it falls
