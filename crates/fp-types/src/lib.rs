@@ -3758,76 +3758,105 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
     }
 }
 
-/// Per br-frankenpandas-j8ntk: harvest ns values from a uniformly-Timedelta64
-/// input as f64 (the f64 representation has 53 bits of mantissa, sufficient
-/// for ns spans up to ~104 days exactly; beyond that pandas itself loses
-/// precision the same way). A NaT-only input remains in the Timedelta family.
-/// Returns None if any non-missing value is not Timedelta64.
-/// Returns the ns backing as f64 for uniformly-temporal input, along with the
-/// constructor for the family it belongs to.
+/// Which temporal family a uniformly-temporal input belongs to, and everything
+/// needed to rebuild a `Scalar` of it from a raw i64 backing.
 ///
-/// br-frankenpandas-adv58 widened this to Datetime64. The f64 hop is inherited
-/// deliberately: quantile interpolates by a fractional weight, so its Datetime
-/// arm keeps the SAME accuracy contract its Timedelta sibling already had
-/// rather than inventing a stricter one for one dtype only.
-/// Timedelta64-ONLY view of [`collect_temporal_ns_f64`].
+/// br-frankenpandas-d7zjp replaced the previous `fn(i64) -> Scalar` constructor
+/// with this enum for one reason: a plain fn pointer CANNOT CARRY A FREQ, and a
+/// `Period` is `{ordinal, freq}`. That limitation is what blocked Period from
+/// joining median/quantile/cummax/cummin when Datetime64 did.
 ///
-/// std/var/sem keep this narrower gate on purpose: live pandas 2.2.3 RAISES
-/// `TypeError: 'DatetimeArray' ... does not support reduction 'var'` (and the
-/// same for 'sem'), so widening them to Datetime64 would invent a value pandas
-/// refuses to produce. `std` IS supported by pandas for datetimes but returns a
-/// Timedelta via an f64 computation throughout, so it needs its own accuracy
-/// contract and is deferred rather than folded in here.
-fn collect_timedelta_ns_f64(values: &[Scalar]) -> Option<Vec<f64>> {
-    match collect_temporal_ns_f64(values) {
-        Some((out, make))
-            if std::ptr::fn_addr_eq(make, Scalar::Timedelta64 as fn(i64) -> Scalar) =>
-        {
-            Some(out)
+/// The i64 payload is nanoseconds for Timedelta64/Datetime64 and an ORDINAL for
+/// Period — different units, but every operation here is pure ordering or an
+/// average over that backing, which is meaningful in both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporalFamily {
+    Timedelta,
+    Datetime,
+    /// Periods only compare within ONE freq; see [`collect_temporal_backing`].
+    Period(PeriodFreq),
+}
+
+impl TemporalFamily {
+    /// Rebuild a scalar of this family from its raw backing.
+    fn make(self, raw: i64) -> Scalar {
+        match self {
+            Self::Timedelta => Scalar::Timedelta64(raw),
+            Self::Datetime => Scalar::Datetime64(raw),
+            Self::Period(freq) => Scalar::Period(Period::new(raw, freq)),
         }
-        _ => None,
+    }
+
+    /// The family's missing sentinel, dtype preserved.
+    fn nat(self) -> Scalar {
+        self.make(i64::MIN)
     }
 }
 
-/// Builds a `Scalar` of one temporal family from its raw ns backing.
-type TemporalCtor = fn(i64) -> Scalar;
-
-fn collect_temporal_ns_f64(values: &[Scalar]) -> Option<(Vec<f64>, TemporalCtor)> {
+/// Per br-frankenpandas-j8ntk: harvest the raw backing of a uniformly-temporal
+/// input as f64 (53 bits of mantissa, exact for ns spans up to ~104 days;
+/// beyond that pandas itself loses precision the same way), together with the
+/// family to rebuild results in. A NaT-only input keeps its family.
+///
+/// Returns `None` unless every non-missing value belongs to ONE family — which
+/// for Period means one FREQ as well, because pandas refuses to order Periods
+/// of differing freq at all (`IncompatibleFrequency`) and their ordinals are
+/// not comparable across freqs.
+///
+/// br-frankenpandas-adv58 widened this to Datetime64 and d7zjp to Period. The
+/// f64 hop is inherited deliberately: quantile interpolates by a fractional
+/// weight, so the newer families keep the SAME accuracy contract the Timedelta
+/// arm already had rather than inventing a stricter one per dtype.
+fn collect_temporal_backing(values: &[Scalar]) -> Option<(Vec<f64>, TemporalFamily)> {
     let mut out = Vec::with_capacity(values.len());
-    let mut make: Option<fn(i64) -> Scalar> = None;
+    let mut family: Option<TemporalFamily> = None;
     for v in values {
-        let (ns, ctor): (i64, fn(i64) -> Scalar) = match v {
-            Scalar::Timedelta64(ns) => (*ns, Scalar::Timedelta64),
-            Scalar::Datetime64(ns) => (*ns, Scalar::Datetime64),
+        let (raw, this) = match v {
+            Scalar::Timedelta64(ns) => (*ns, TemporalFamily::Timedelta),
+            Scalar::Datetime64(ns) => (*ns, TemporalFamily::Datetime),
+            Scalar::Period(p) => (p.ordinal, TemporalFamily::Period(p.freq)),
             _ if v.is_missing() => continue,
             _ => return None,
         };
-        // A mixed Timedelta64/Datetime64 input is not a single family.
-        match make {
-            Some(existing) if !std::ptr::fn_addr_eq(existing, ctor) => return None,
-            _ => make = Some(ctor),
+        // Mixing families — or, for Period, mixing freqs — is not one family.
+        match family {
+            Some(existing) if existing != this => return None,
+            _ => family = Some(this),
         }
         if v.is_missing() {
             continue;
         }
-        out.push(ns as f64);
+        out.push(raw as f64);
     }
-    make.map(|ctor| (out, ctor))
+    family.map(|f| (out, f))
+}
+
+/// Timedelta64-ONLY view of [`collect_temporal_backing`].
+///
+/// var/sem keep this narrower gate on purpose: live pandas 2.2.3 RAISES
+/// `TypeError: 'DatetimeArray' ... does not support reduction 'var'` (and the
+/// same for 'sem', and for every one of them on Period), so widening them would
+/// invent a value pandas refuses to produce.
+fn collect_timedelta_ns_f64(values: &[Scalar]) -> Option<Vec<f64>> {
+    match collect_temporal_backing(values) {
+        Some((out, TemporalFamily::Timedelta)) => Some(out),
+        _ => None,
+    }
 }
 
 /// Clamp an f64 result into i64 range and wrap as Scalar::Timedelta64.
 fn float_ns_to_timedelta(value: f64) -> Scalar {
-    float_ns_to_temporal(value, Scalar::Timedelta64)
+    float_ns_to_temporal(value, TemporalFamily::Timedelta)
 }
 
 /// Family-generic form of [`float_ns_to_timedelta`], per br-frankenpandas-adv58:
-/// NaT for a non-finite input, otherwise the ns value in the caller's family.
-fn float_ns_to_temporal(value: f64, make: fn(i64) -> Scalar) -> Scalar {
+/// NaT for a non-finite input, otherwise the value in the caller's family.
+fn float_ns_to_temporal(value: f64, make: TemporalFamily) -> Scalar {
     if !value.is_finite() {
-        return make(Timedelta::NAT);
+        return make.nat();
     }
     let clamped = value.clamp(i64::MIN as f64, i64::MAX as f64);
-    make(clamped as i64)
+    make.make(clamped as i64)
 }
 
 pub fn nanmedian(values: &[Scalar]) -> Scalar {
@@ -3840,11 +3869,11 @@ pub fn nanmedian(values: &[Scalar]) -> Scalar {
     // datetime median through f64 and therefore snaps to a 256 ns grid at
     // 2020-era timestamps — returning, for an odd-count input, a Timestamp that
     // is not even one of the supplied values. See DISC-019.
-    let make: fn(i64) -> Scalar = if is_timedelta_input(values) {
-        Scalar::Timedelta64
-    } else if is_datetime_input(values) {
-        Scalar::Datetime64
-    } else {
+    // br-frankenpandas-d7zjp: Period joins via the family enum, which — unlike
+    // the fn-pointer constructor this replaced — can carry its freq. A
+    // mixed-freq input is not one family, so it falls through rather than
+    // being ordered by raw ordinal, matching pandas refusing it outright.
+    let Some((_, make)) = collect_temporal_backing(values) else {
         // Not uniformly temporal: fall through to the numeric arm below.
         return nanmedian_numeric(values);
     };
@@ -3853,9 +3882,20 @@ pub fn nanmedian(values: &[Scalar]) -> Scalar {
         .filter(|value| !value.is_missing())
         .filter_map(|value| match value {
             Scalar::Timedelta64(ns) | Scalar::Datetime64(ns) => Some(*ns),
+            Scalar::Period(p) => Some(p.ordinal),
             _ => None,
         })
         .collect();
+    if td.is_empty() {
+        // All-missing temporal input falls through to the numeric arm, which
+        // yields Null(NaN). Do NOT "improve" this to a family-typed NaT: the
+        // Null(NaN) result is pinned by the oracle test
+        // `nanmedian_matches_numeric_and_timedelta_oracle_oabhi`, and the old
+        // `is_timedelta_input` gate produced it by returning false for an
+        // all-missing input. `collect_temporal_backing` marks the family on
+        // seeing the VARIANT instead, so the fall-through has to be explicit.
+        return nanmedian_numeric(values);
+    }
     // O(n) selection instead of a full sort: order statistics depend only
     // on values, so the unstable partition yields the same middle values.
     let n = td.len();
@@ -3869,7 +3909,7 @@ pub fn nanmedian(values: &[Scalar]) -> Scalar {
     } else {
         i128::from(mid_val)
     };
-    make(median_ns as i64)
+    make.make(median_ns as i64)
 }
 
 /// Numeric (f64) median arm, split out of [`nanmedian`] by
@@ -3933,7 +3973,14 @@ pub fn nanstd(values: &[Scalar], ddof: usize) -> Scalar {
     // RAISES for datetime64 var and sem ("does not support reduction"), so
     // those keep the Timedelta-only `collect_timedelta_ns_f64` gate rather than
     // inventing a value pandas refuses to produce.
-    if let Some((td, _family)) = collect_temporal_ns_f64(values) {
+    //
+    // br-frankenpandas-d7zjp: PERIOD IS EXCLUDED HERE. pandas raises
+    // "'PeriodArray' with dtype period[M] does not support reduction 'std'",
+    // so widening std to Period alongside Datetime64 would invent a value —
+    // and the family enum makes that mistake one line away, hence the guard.
+    if let Some((td, family)) = collect_temporal_backing(values)
+        && !matches!(family, TemporalFamily::Period(_))
+    {
         if td.len() <= ddof {
             return Scalar::Timedelta64(Timedelta::NAT);
         }
@@ -4241,11 +4288,15 @@ fn nanarg_i64(values: &[Scalar], find_max: bool) -> Option<usize> {
         // br-frankenpandas-axhhk: Datetime64 joins the typed i64 families here.
         // Its ns backing orders identically, and routing it through the f64
         // path instead returned None for any 2+-element datetime input.
-        let (Scalar::Int64(candidate)
-        | Scalar::Timedelta64(candidate)
-        | Scalar::Datetime64(candidate)) = value
-        else {
-            continue;
+        //
+        // br-frankenpandas-d7zjp: Period cannot join this or-pattern — it is a
+        // STRUCT, not an i64 newtype — so it contributes its ordinal here. The
+        // caller has already established a single freq via
+        // `collect_temporal_backing`, so these ordinals are comparable.
+        let candidate = match value {
+            Scalar::Int64(raw) | Scalar::Timedelta64(raw) | Scalar::Datetime64(raw) => raw,
+            Scalar::Period(p) => &p.ordinal,
+            _ => continue,
         };
         match best {
             None => best = Some((index, *candidate)),
@@ -4301,7 +4352,7 @@ where
 fn timedelta_cumulative_extrema<F>(
     values: &[Scalar],
     sentinel: i64,
-    make: fn(i64) -> Scalar,
+    make: TemporalFamily,
     mut step: F,
 ) -> Vec<Scalar>
 where
@@ -4314,13 +4365,19 @@ where
             out.push(Scalar::Null(NullKind::NaT));
             continue;
         }
-        if let Scalar::Timedelta64(ns) | Scalar::Datetime64(ns) = v {
+        // br-frankenpandas-d7zjp: a Period contributes its ordinal.
+        let raw = match v {
+            Scalar::Timedelta64(ns) | Scalar::Datetime64(ns) => Some(*ns),
+            Scalar::Period(p) => Some(p.ordinal),
+            _ => None,
+        };
+        if let Some(ns) = raw.as_ref() {
             let new_val = match running {
                 Some(prev) => step(prev, *ns),
                 None => *ns,
             };
             running = Some(new_val);
-            out.push(make(new_val));
+            out.push(make.make(new_val));
         } else {
             out.push(Scalar::Null(NullKind::NaT));
         }
@@ -4386,19 +4443,13 @@ pub fn nancumprod(values: &[Scalar]) -> Vec<Scalar> {
 /// `Null(NaN)` without updating the running maximum. The first
 /// non-missing value initializes the running maximum.
 pub fn nancummax(values: &[Scalar]) -> Vec<Scalar> {
-    // Per br-frankenpandas-x0x91: Timedelta64 preserves dtype.
-    if is_timedelta_input(values) {
-        return timedelta_cumulative_extrema(values, i64::MAX, Scalar::Timedelta64, |acc, x| {
-            acc.max(x)
-        });
-    }
-    // br-frankenpandas-axhhk: Datetime64 running extrema are Timestamps.
-    // Without this the f64 path below errored on every element and produced an
-    // all-NaN column.
-    if is_datetime_input(values) {
-        return timedelta_cumulative_extrema(values, i64::MAX, Scalar::Datetime64, |acc, x| {
-            acc.max(x)
-        });
+    // Per br-frankenpandas-x0x91 (Timedelta64), -axhhk (Datetime64) and
+    // -d7zjp (Period): every uniformly-temporal family preserves its dtype
+    // here. Without this the f64 path below errors on every element and
+    // produces an all-NaN column. A mixed-freq Period input is not one family,
+    // so it correctly does not take this path.
+    if let Some((_, family)) = collect_temporal_backing(values) {
+        return timedelta_cumulative_extrema(values, i64::MAX, family, |acc, x| acc.max(x));
     }
     let mut out = Vec::with_capacity(values.len());
     let mut running: Option<f64> = None;
@@ -4428,15 +4479,16 @@ pub fn nancummax(values: &[Scalar]) -> Vec<Scalar> {
 pub fn nancummin(values: &[Scalar]) -> Vec<Scalar> {
     // Per br-frankenpandas-x0x91: Timedelta64 preserves dtype.
     if is_timedelta_input(values) {
-        return timedelta_cumulative_extrema(values, i64::MIN, Scalar::Timedelta64, |acc, x| {
-            acc.min(x)
-        });
+        return timedelta_cumulative_extrema(
+            values,
+            i64::MIN,
+            TemporalFamily::Timedelta,
+            |acc, x| acc.min(x),
+        );
     }
-    // br-frankenpandas-axhhk: Datetime64 sibling of the gate above.
-    if is_datetime_input(values) {
-        return timedelta_cumulative_extrema(values, i64::MIN, Scalar::Datetime64, |acc, x| {
-            acc.min(x)
-        });
+    // br-frankenpandas-axhhk / -d7zjp: Datetime64 and Period siblings.
+    if let Some((_, family)) = collect_temporal_backing(values) {
+        return timedelta_cumulative_extrema(values, i64::MIN, family, |acc, x| acc.min(x));
     }
     let mut out = Vec::with_capacity(values.len());
     let mut running: Option<f64> = None;
@@ -4471,9 +4523,9 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
     }
     // Per br-frankenpandas-5djk7: pandas td_series.quantile(q) returns
     // Timedelta64 with linear-interpolated ns. Was silently NaN before.
-    if let Some((mut td, make)) = collect_temporal_ns_f64(values) {
+    if let Some((mut td, make)) = collect_temporal_backing(values) {
         if td.is_empty() {
-            return make(Timedelta::NAT);
+            return make.nat();
         }
         let n = td.len();
         if n == 1 {
@@ -4532,7 +4584,7 @@ pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
     // adjacent Int64 values beyond the 53-bit exactness boundary.
     // br-frankenpandas-axhhk: Datetime64 belongs here too — it not only loses
     // ordering under f64, its to_f64() errors outright, so it returned None.
-    if is_timedelta_input(values) || is_int64_input(values) || is_datetime_input(values) {
+    if is_int64_input(values) || collect_temporal_backing(values).is_some() {
         return nanarg_i64(values, true);
     }
     let mut best: Option<(usize, f64)> = None;
@@ -4560,7 +4612,7 @@ pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
 pub fn nanargmin(values: &[Scalar]) -> Option<usize> {
     // See nanargmax: preserve exact ordering for typed 64-bit families
     // (Datetime64 included, per br-frankenpandas-axhhk).
-    if is_timedelta_input(values) || is_int64_input(values) || is_datetime_input(values) {
+    if is_int64_input(values) || collect_temporal_backing(values).is_some() {
         return nanarg_i64(values, false);
     }
     let mut best: Option<(usize, f64)> = None;
@@ -7756,6 +7808,71 @@ mod tests {
             "must not rank the daily period by raw ordinal"
         );
         assert!(super::nanmax(&vals).is_missing());
+    }
+
+    /// br-frankenpandas-d7zjp: the rest of the Period reduction family, which
+    /// qoabs deferred because a `fn(i64) -> Scalar` constructor cannot carry a
+    /// freq. Expectations are the probed pandas 2.2.3 answers for
+    /// `Series([2020-01, 2020-03, 2020-02], freq=M)` (ordinals 600/601/602):
+    ///   median 2020-02 · quantile(0.5) 2020-02 · idxmin 0 · idxmax 1
+    ///   cummax ends 2020-03 · cummin ends 2020-01
+    #[test]
+    fn period_full_reduction_family_matches_pandas_d7zjp() {
+        let p = |ordinal: i64| Scalar::Period(Period::new(ordinal, PeriodFreq::Monthly));
+        let vals = vec![p(600), p(602), p(601)];
+
+        assert_eq!(super::nanmedian(&vals), p(601));
+        assert_eq!(super::nanquantile(&vals, 0.5), p(601));
+        assert_eq!(super::nanargmin(&vals), Some(0));
+        assert_eq!(super::nanargmax(&vals), Some(1));
+        assert_eq!(super::nancummax(&vals), vec![p(600), p(602), p(602)]);
+        assert_eq!(super::nancummin(&vals), vec![p(600), p(600), p(600)]);
+    }
+
+    /// Even-count Period median picks by TRUNCATION TOWARD ZERO on the ordinal,
+    /// the same rule the datetime family uses. Probed: pandas gives 2020-02 for
+    /// [2020-01, 2020-04] (ordinals 600/603, midpoint 601.5) and 2020-01 for
+    /// [2020-01, 2020-02] (600/601, midpoint 600.5).
+    #[test]
+    fn period_even_count_median_truncates_toward_zero_d7zjp() {
+        let p = |ordinal: i64| Scalar::Period(Period::new(ordinal, PeriodFreq::Monthly));
+        assert_eq!(super::nanmedian(&[p(600), p(603)]), p(601));
+        assert_eq!(super::nanmedian(&[p(600), p(601)]), p(600));
+    }
+
+    /// MIXED FREQ must not be ordered by ANY of these, for the same reason as
+    /// in qoabs: pandas raises IncompatibleFrequency, and raw ordinals are not
+    /// comparable across freqs (monthly 2020-01 is 600, daily 2020-01-05 is
+    /// 18267). The family enum encodes the freq, so a mixed input is simply not
+    /// one family and never reaches a typed arm.
+    #[test]
+    fn period_mixed_freq_not_ordered_by_any_reduction_d7zjp() {
+        let month = Scalar::Period(Period::new(600, PeriodFreq::Monthly));
+        let day = Scalar::Period(Period::new(18_267, PeriodFreq::Daily));
+        let vals = vec![month, day];
+
+        assert!(super::nanmedian(&vals).is_missing());
+        assert!(super::nanquantile(&vals, 0.5).is_missing());
+        assert_eq!(super::nanargmin(&vals), None);
+        assert_eq!(super::nanargmax(&vals), None);
+        // The cumulative ops must not emit an ordered Period column either.
+        assert!(super::nancummax(&vals).iter().all(Scalar::is_missing));
+        assert!(super::nancummin(&vals).iter().all(Scalar::is_missing));
+    }
+
+    /// pandas RAISES for Period mean/sum/std/var ("does not support reduction",
+    /// and for mean explicitly "the meaning is ambiguous"). FP must not invent
+    /// values. `std` is the trap here: the family enum puts Period one line
+    /// away from the Datetime64 arm that 40ujm deliberately widened, so this
+    /// asserts the guard holds.
+    #[test]
+    fn period_unsupported_reductions_stay_missing_d7zjp() {
+        let p = |ordinal: i64| Scalar::Period(Period::new(ordinal, PeriodFreq::Monthly));
+        let vals = vec![p(600), p(602), p(601)];
+        assert!(super::nanstd(&vals, 1).is_missing(), "pandas raises std");
+        assert!(super::nanvar(&vals, 1).is_missing(), "pandas raises var");
+        assert!(super::nansem(&vals, 1).is_missing(), "pandas raises sem");
+        assert!(super::nanmean(&vals).is_missing(), "pandas raises mean");
     }
 
     /// Mixed Datetime64 + another dtype must NOT take the typed arm — it falls
