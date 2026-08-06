@@ -287,3 +287,45 @@ itself responsible for any part of that margin. This run measures FP-vs-pandas, 
 candidate-vs-reference, and a self-speedup would need two ELFs in one invocation via
 `--frankenpandas-reference-binary`. No such claim is made here. The lever remains
 justified on the correctness and strictly-less-work grounds recorded above.
+
+---
+
+## 2026-08-06 SilverDune — second decidable strings row: `str_groupby_sum_arrow` 2.984x FASTER
+
+Banked in the same quiet window, same admissible shape. This row is the stronger
+of the two evidentially, because **both arms are single-threaded** — it is an
+apples-to-apples per-core comparison with no parallelism caveat attached.
+
+| arm | p50 | CV | threads | A/A null median | null 95% CI |
+|---|---|---|---|---|---|
+| FrankenPandas | **5759.56 us** | 4.84% | 1 | **1.000309** | [0.974175, 1.012503] |
+| pandas 2.2.3 (arrow) | **17185.59 us** | 12.37% | 1 | **0.989519** | [0.975171, 1.006158] |
+
+- **ratio = 2.984, verdict = FASTER, contract_valid = true, contract_errors = []**
+- `decidable_workloads: 1`, `null_undecidable_workloads: 0`
+- FP's A/A null is 1.000309 — as close to unity as this campaign has produced —
+  with a 2x-decidable band of [0.949016, 1.053723]; the 2.984x effect is far outside it.
+- FP CV 4.84% is the tightest FP-side variance recorded on this host.
+
+Raw row: `artifacts/bench/str_groupby_sum_arrow_1M_thinkstation1_2026-08-06.json`
+
+**ELF provenance, stated precisely.** The executing FP ELF is
+`3a5a2ca16f4e848ed90b77b292dd96de419deff63736c392684942da9803fc3d`, built from
+`c4c0780019f383b8438257e01c0cd8a9637c9898`. The `git_sha` recorded in this
+artifact is `3cdf941b47088be8d21fd28f721066e0ae01f2fe`, because peer commits
+landed while the run was in flight. Everything between the two is beads, docs and
+bench artifacts plus one commit that appends 146 lines to fp-frame's test module
+(`test(fp-frame): add counted-mechanism probes for SeriesGroupBy rolling floor`).
+**No shipped kernel changed between the build and the measurement**, so the row
+stands — but the ELF's provenance is `c4c0780`, not the recorded tree sha, and it
+should be cited that way.
+
+### Yield of the window, reported honestly
+
+Seven strings workloads were attempted one-per-invocation with 12 retries each.
+**One landed; six were refused** (`str_contains_arrow`, `str_sort_arrow`,
+`str_value_counts_arrow`, `str_len`, `str_sort`, `str_value_counts`). The window
+degraded again while the batch ran. That is a 1-in-7 yield, not a solved problem:
+per-workload invocation is necessary but not sufficient, and the binding
+constraint remains other tenants on the shared host rather than anything in the
+harness or the gate.
