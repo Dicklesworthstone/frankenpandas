@@ -52330,14 +52330,15 @@ impl LazyTransposeFramePlan {
 /// sees `primary` only. Both are safe while `repeats` is unreachable, and
 /// `.2` removes the `Deref` escape hatch.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct ColumnStore {
+pub struct ColumnStore {
     primary: BTreeMap<String, Column>,
     repeats: Vec<(String, Column)>,
 }
 
 impl ColumnStore {
     /// Empty store.
-    pub(crate) const fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             primary: BTreeMap::new(),
             repeats: Vec::new(),
@@ -52355,8 +52356,7 @@ impl ColumnStore {
     /// constructor that can build a duplicate-carrying store, and today only
     /// tests use it — production paths still go through [`From<BTreeMap>`],
     /// which cannot carry one.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn from_pairs(pairs: impl IntoIterator<Item = (String, Column)>) -> Self {
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (String, Column)>) -> Self {
         let mut store = Self::new();
         for (name, column) in pairs {
             match store.primary.entry(name) {
@@ -52375,7 +52375,8 @@ impl ColumnStore {
     }
 
     /// First column stored under `name`, if any.
-    pub(crate) fn get(&self, name: &str) -> Option<&Column> {
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&Column> {
         self.primary.get(name)
     }
 
@@ -52384,8 +52385,7 @@ impl ColumnStore {
     /// This is the "lookup returns ALL matching columns" contract the parent
     /// bead names. Like [`ColumnStore::from_pairs`] it has no production
     /// caller until `.4`, and is proven by this bead's tests.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn get_all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Column> + 'a {
+    pub fn get_all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Column> + 'a {
         self.primary.get(name).into_iter().chain(
             self.repeats
                 .iter()
@@ -52397,8 +52397,8 @@ impl ColumnStore {
     /// How many columns are stored under `name` (0, 1, or more once `.4`
     /// allows repeats). No production caller until then; see
     /// [`ColumnStore::get_all`].
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn occurrences(&self, name: &str) -> usize {
+    #[must_use]
+    pub fn occurrences(&self, name: &str) -> usize {
         usize::from(self.primary.contains_key(name))
             + self
                 .repeats
@@ -52407,25 +52407,28 @@ impl ColumnStore {
                 .count()
     }
 
-    pub(crate) fn contains_key(&self, name: &str) -> bool {
+    #[must_use]
+    pub fn contains_key(&self, name: &str) -> bool {
         self.primary.contains_key(name)
     }
 
     /// Total column count, counting each repeat separately.
-    pub(crate) fn len(&self) -> usize {
+    #[must_use]
+    pub fn len(&self) -> usize {
         self.primary.len() + self.repeats.len()
     }
 
     /// Counterpart to [`ColumnStore::len`]. The lazy store answers emptiness
     /// through its own `Deref` today, so this has no in-crate caller until
     /// `.2` retargets those sites.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn is_empty(&self) -> bool {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
         self.primary.is_empty() && self.repeats.is_empty()
     }
 
     /// Name-sorted walk over every column, repeats included.
-    pub(crate) fn iter(&self) -> ColumnStoreIter<'_> {
+    #[must_use]
+    pub fn iter(&self) -> ColumnStoreIter<'_> {
         ColumnStoreIter {
             primary: self.primary.iter(),
             repeats: self.repeats.iter(),
@@ -52436,21 +52439,45 @@ impl ColumnStore {
 
     /// Name-sorted walk over column names, repeats included (so a repeated
     /// name appears once per occurrence).
-    pub(crate) fn keys(&self) -> impl Iterator<Item = &String> + '_ {
+    pub fn keys(&self) -> impl Iterator<Item = &String> + '_ {
         self.iter().map(|(name, _)| name)
     }
 
-    /// Name-sorted walk over columns, repeats included. Same story as
-    /// [`ColumnStore::is_empty`]: no in-crate caller until `.2`.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn values(&self) -> impl Iterator<Item = &Column> + '_ {
+    /// Name-sorted walk over columns, repeats included.
+    pub fn values(&self) -> impl Iterator<Item = &Column> + '_ {
         self.iter().map(|(_, column)| column)
     }
 
     /// Replace (or add) the FIRST column stored under `name`, returning the
     /// column it displaced. Mirrors `BTreeMap::insert`; repeats are untouched.
-    pub(crate) fn insert(&mut self, name: String, column: Column) -> Option<Column> {
+    pub fn insert(&mut self, name: String, column: Column) -> Option<Column> {
         self.primary.insert(name, column)
+    }
+
+    /// Remove EVERY column stored under `name`, returning the first.
+    ///
+    /// Removing only the first occurrence would leave a repeat behind with no
+    /// `primary` entry, i.e. a column that `iter` yields but `get` cannot
+    /// find — so the store would no longer be self-consistent. Dropping all
+    /// occurrences is also what pandas' `del df[name]` does on a
+    /// duplicate-labelled frame. Identical to `BTreeMap::remove` today, since
+    /// no path can build a repeat yet.
+    pub fn remove(&mut self, name: &str) -> Option<Column> {
+        let first = self.primary.remove(name);
+        if first.is_some() {
+            self.repeats.retain(|(repeat, _)| repeat != name);
+        }
+        first
+    }
+
+    /// Mutable walk over the first occurrence of each name.
+    ///
+    /// Deliberately does NOT expose repeats: handing out `&mut` to a repeat
+    /// while `primary` is the single-valued answer is how the two halves would
+    /// drift apart. `.3` folds them into one ordered vector, at which point
+    /// this can cover everything.
+    pub fn iter_mut(&mut self) -> std::collections::btree_map::IterMut<'_, String, Column> {
+        self.primary.iter_mut()
     }
 
     /// Name-sorted owned pairs, repeats included.
@@ -52468,7 +52495,7 @@ impl ColumnStore {
 /// Merging iterator behind [`ColumnStore::iter`]: walks the name-sorted
 /// `primary` map and the name-sorted `repeats` vector together, emitting the
 /// first occurrence of a name ahead of its repeats.
-pub(crate) struct ColumnStoreIter<'a> {
+pub struct ColumnStoreIter<'a> {
     primary: std::collections::btree_map::Iter<'a, String, Column>,
     repeats: std::slice::Iter<'a, (String, Column)>,
     pending_primary: Option<(&'a String, &'a Column)>,
@@ -52523,19 +52550,14 @@ impl std::ops::Index<&str> for ColumnStore {
     }
 }
 
-impl std::ops::Deref for ColumnStore {
-    type Target = BTreeMap<String, Column>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.primary
-    }
-}
-
-impl std::ops::DerefMut for ColumnStore {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.primary
-    }
-}
+// NOTE (br-frankenpandas-u387a): ColumnStore deliberately has NO `Deref` to
+// `BTreeMap<String, Column>`. `.1` carried one so the migration could land as
+// a type substitution, but it was also a silent leak — anything not answered
+// by an inherent method fell through to the map and saw `primary` only,
+// ignoring repeats. Removing it is what makes `columns()` returning
+// `&ColumnStore` an actual encapsulation rather than a rename, and it is the
+// compile-level assertion this bead asks for: if the leak ever returns, the
+// duplicate-label work in `.3`/`.4` silently loses repeats again.
 
 impl From<BTreeMap<String, Column>> for ColumnStore {
     /// Zero-cost: the map already collapsed any repeated name, so it becomes
@@ -52692,6 +52714,10 @@ impl LazyDataFrameColumns {
     // which type answers, which is what lets `.2` (br-frankenpandas-u387a)
     // retarget them without hunting through deref coercions.
 
+    fn get(&self, name: &str) -> Option<&Column> {
+        self.materialized().get(name)
+    }
+
     fn contains_key(&self, name: &str) -> bool {
         self.materialized().contains_key(name)
     }
@@ -52702,6 +52728,10 @@ impl LazyDataFrameColumns {
 
     fn insert(&mut self, name: String, column: Column) -> Option<Column> {
         self.make_eager().insert(name, column)
+    }
+
+    fn remove(&mut self, name: &str) -> Option<Column> {
+        self.make_eager().remove(name)
     }
 
     fn materialized(&self) -> &ColumnStore {
@@ -52944,19 +52974,16 @@ impl<'de> Deserialize<'de> for LazyDataFrameColumns {
     }
 }
 
+// Same reasoning as the `ColumnStore` note above: the lazy store's `Deref` to
+// `BTreeMap` is gone, so in-crate `self.columns.*` sites bind to the inherent
+// surface (which forwards to `ColumnStore`) instead of falling through to the
+// inner map.
 #[cfg(feature = "lazy-transpose-view")]
-impl std::ops::Deref for LazyDataFrameColumns {
-    type Target = BTreeMap<String, Column>;
+impl std::ops::Index<&str> for LazyDataFrameColumns {
+    type Output = Column;
 
-    fn deref(&self) -> &Self::Target {
-        self.materialized()
-    }
-}
-
-#[cfg(feature = "lazy-transpose-view")]
-impl std::ops::DerefMut for LazyDataFrameColumns {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.make_eager()
+    fn index(&self, name: &str) -> &Self::Output {
+        &self.materialized()[name]
     }
 }
 
@@ -55330,10 +55357,7 @@ fn gram_partial_rows(
 }
 
 impl DataFrame {
-    fn validate_column_lengths(
-        index: &Index,
-        columns: &BTreeMap<String, Column>,
-    ) -> Result<(), FrameError> {
+    fn validate_column_lengths(index: &Index, columns: &ColumnStore) -> Result<(), FrameError> {
         for column in columns.values() {
             if column.len() != index.len() {
                 return Err(FrameError::LengthMismatch {
@@ -55445,8 +55469,12 @@ impl DataFrame {
             .collect()
     }
 
+    // NOTE for br-frankenpandas-yion1 (.3): this still collapses repeated
+    // selectors to their last occurrence, i.e. it assumes column names are
+    // unique. Only the parameter type moved to ColumnStore here; the
+    // uniqueness assumption is .3's rewrite, not this bead's.
     fn normalize_column_order(
-        columns: &BTreeMap<String, Column>,
+        columns: &ColumnStore,
         column_order: Vec<String>,
     ) -> Result<Vec<String>, FrameError> {
         if column_order.is_empty() {
@@ -56234,10 +56262,10 @@ impl DataFrame {
         column_multiindex: Option<fp_index::MultiIndex>,
     ) -> Result<Self, FrameError>
     where
-        C: Into<BTreeMap<String, Column>>,
+        C: Into<ColumnStore>,
         O: Into<Vec<String>>,
     {
-        let columns: BTreeMap<String, Column> = columns.into();
+        let columns: ColumnStore = columns.into();
         let column_order: Vec<String> = column_order.into();
         Self::validate_column_lengths(&index, &columns)?;
         if let Some(multiindex) = row_multiindex.as_ref()
@@ -56277,10 +56305,10 @@ impl DataFrame {
         column_multiindex: Option<fp_index::MultiIndex>,
     ) -> Self
     where
-        C: Into<BTreeMap<String, Column>>,
+        C: Into<ColumnStore>,
         O: Into<Vec<String>>,
     {
-        let columns: BTreeMap<String, Column> = columns.into();
+        let columns: ColumnStore = columns.into();
         let column_order: Vec<String> = column_order.into();
         Self {
             index,
@@ -56299,13 +56327,14 @@ impl DataFrame {
         column_multiindex: Option<fp_index::MultiIndex>,
     ) -> Result<Self, FrameError>
     where
-        C: Into<BTreeMap<String, Column>>,
+        C: Into<ColumnStore>,
         O: Into<Vec<String>>,
     {
         Self::new_with_axes(index, None, columns, column_order, column_multiindex)
     }
 
-    pub fn new(index: Index, columns: BTreeMap<String, Column>) -> Result<Self, FrameError> {
+    pub fn new(index: Index, columns: impl Into<ColumnStore>) -> Result<Self, FrameError> {
+        let columns: ColumnStore = columns.into();
         let column_order: Vec<String> = columns.keys().cloned().collect();
         Self::new_with_column_order_and_multiindex(index, columns, column_order, None)
     }
@@ -56399,7 +56428,7 @@ impl DataFrame {
         column_order: O,
     ) -> Result<Self, FrameError>
     where
-        C: Into<BTreeMap<String, Column>>,
+        C: Into<ColumnStore>,
         O: Into<Vec<String>>,
     {
         Self::new_with_column_order_and_multiindex(index, columns, column_order, None)
@@ -56408,8 +56437,9 @@ impl DataFrame {
     pub fn new_with_row_multiindex(
         index: Index,
         row_multiindex: fp_index::MultiIndex,
-        columns: BTreeMap<String, Column>,
+        columns: impl Into<ColumnStore>,
     ) -> Result<Self, FrameError> {
+        let columns: ColumnStore = columns.into();
         let column_order: Vec<String> = columns.keys().cloned().collect();
         Self::new_with_axes(index, Some(row_multiindex), columns, column_order, None)
     }
@@ -57441,9 +57471,25 @@ impl DataFrame {
         self.row_multiindex.as_ref()
     }
 
+    /// Borrowed view of the column store.
+    ///
+    /// Returns [`ColumnStore`], not `&BTreeMap<String, Column>`: the concrete
+    /// map type used to be part of this crate's public API, which meant a
+    /// duplicate-tolerant store could only be exposed by materializing a map
+    /// per call — collapsing exactly the repeated labels the store exists to
+    /// carry (`br-frankenpandas-u387a`). The view offers the same reads the
+    /// map did (`get`, `contains_key`, `keys`, `values`, `iter`, `len`,
+    /// `is_empty`, and `[name]` indexing), with iteration still NAME-SORTED.
     #[must_use]
-    pub fn columns(&self) -> &BTreeMap<String, Column> {
-        &self.columns
+    pub fn columns(&self) -> &ColumnStore {
+        #[cfg(feature = "lazy-transpose-view")]
+        {
+            self.columns.materialized()
+        }
+        #[cfg(not(feature = "lazy-transpose-view"))]
+        {
+            &self.columns
+        }
     }
 
     /// Return the logical DataFrame columns index.
@@ -59257,7 +59303,7 @@ impl DataFrame {
         let sort_cols: Vec<&Column> = by
             .iter()
             .map(|name| {
-                self.columns.get(*name).ok_or_else(|| {
+                self.columns.get(name).ok_or_else(|| {
                     FrameError::CompatibilityRejected(format!("column '{name}' not found"))
                 })
             })
@@ -60323,7 +60369,7 @@ impl DataFrame {
         let drop_set: std::collections::HashSet<&str> = names.iter().copied().collect();
         let mut columns = self.columns.clone();
         for name in names {
-            columns.remove(*name);
+            columns.remove(name);
         }
         let column_order: Vec<String> = self
             .column_order
@@ -62058,7 +62104,7 @@ impl DataFrame {
             let row_pos = pos_map.get(rl).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!("row label not found: {rl:?}"))
             })?;
-            let col = self.columns.get(*cl).ok_or_else(|| {
+            let col = self.columns.get(cl).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!("column not found: {cl}"))
             })?;
             result.push(col.values()[*row_pos].clone());
@@ -185432,5 +185478,151 @@ mod column_store_b6orh {
             .to_vec();
         assert_eq!(r0, vec![1.0, 3.0], "column r0 = original row r0");
         assert_eq!(r1, vec![2.0, 4.0], "column r1 = original row r1");
+    }
+}
+
+/// `br-frankenpandas-u387a` (`.2` of `br-frankenpandas-ih4t0`):
+/// `DataFrame::columns()` no longer hands out a `&BTreeMap<String, Column>`.
+///
+/// The claim of this bead is that NOTHING observable changed — the view offers
+/// the same reads the map did, in the same (name-sorted) order — so the tests
+/// that matter most are the existing suites staying green. What is pinned here
+/// is the part a green suite would NOT catch: that the leak is actually gone,
+/// and that the view's reads still agree with the map they replaced.
+#[cfg(test)]
+mod columns_view_u387a {
+    use std::collections::BTreeMap;
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::{DType, Scalar};
+
+    use super::{ColumnStore, DataFrame};
+
+    fn column(values: &[f64]) -> Column {
+        let scalars: Vec<Scalar> = values.iter().map(|&v| Scalar::Float64(v)).collect();
+        Column::new(DType::Float64, scalars).expect("f64 column")
+    }
+
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state
+    }
+
+    fn frame(width: usize, state: &mut u64) -> (DataFrame, BTreeMap<String, Column>) {
+        let mut source: BTreeMap<String, Column> = BTreeMap::new();
+        for slot in 0..width {
+            let name = format!("c{}", lcg(state) % 24);
+            source.insert(name, column(&[slot as f64, (slot * 2) as f64]));
+        }
+        let df = DataFrame::new(
+            Index::new_known_unique_int64_unit_range(0, 2),
+            source.clone(),
+        )
+        .expect("frame");
+        (df, source)
+    }
+
+    /// THE COMPILE-LEVEL ASSERTION the bead asks for. If `ColumnStore` ever
+    /// regains a `Deref`/`Into` to `BTreeMap<String, Column>`, or `columns()`
+    /// goes back to returning one, this stops compiling — which is the point:
+    /// a silent return of the leak would make `.3`/`.4` lose repeats with no
+    /// test failure anywhere.
+    #[test]
+    fn columns_does_not_hand_out_a_btreemap() {
+        fn assert_is_column_store(_: &ColumnStore) {}
+
+        let (df, _) = frame(3, &mut 0x0387_a5eed);
+        assert_is_column_store(df.columns());
+
+        // A `&BTreeMap` cannot be produced from the view by coercion; the only
+        // way to get one is an explicit rebuild, which is what `.3`/`.4` must
+        // never silently do.
+        let rebuilt: BTreeMap<String, Column> = df
+            .columns()
+            .iter()
+            .map(|(n, c)| (n.clone(), c.clone()))
+            .collect();
+        assert_eq!(rebuilt.len(), df.columns().len());
+    }
+
+    #[test]
+    fn view_reads_agree_with_the_map_it_replaced() {
+        let mut state: u64 = 0x0387_a0000;
+        for case in 0..48_usize {
+            let (df, source) = frame(case, &mut state);
+            let view = df.columns();
+
+            assert_eq!(view.len(), source.len(), "len disagreed (case {case})");
+            assert_eq!(view.is_empty(), source.is_empty());
+
+            let view_keys: Vec<&String> = view.keys().collect();
+            let source_keys: Vec<&String> = source.keys().collect();
+            assert_eq!(view_keys, source_keys, "sorted iteration (case {case})");
+
+            let view_values: Vec<&Column> = view.values().collect();
+            let source_values: Vec<&Column> = source.values().collect();
+            assert_eq!(view_values, source_values);
+
+            for probe in 0..30_u64 {
+                let name = format!("c{probe}");
+                assert_eq!(view.get(&name), source.get(&name), "get {name}");
+                assert_eq!(view.contains_key(&name), source.contains_key(&name));
+                if let Some(expected) = source.get(&name) {
+                    assert_eq!(&view[name.as_str()], expected, "index {name}");
+                }
+            }
+        }
+    }
+
+    /// `remove` must drop EVERY occurrence: leaving a repeat behind with no
+    /// first occurrence would give a store that `iter` yields but `get`
+    /// cannot find. A naive `BTreeMap`-only removal fails this.
+    #[test]
+    fn remove_drops_every_occurrence_of_a_repeated_name() {
+        let mut store = ColumnStore::from_pairs(vec![
+            ("dup".to_string(), column(&[1.0])),
+            ("keep".to_string(), column(&[9.0])),
+            ("dup".to_string(), column(&[2.0])),
+        ]);
+        assert_eq!(store.occurrences("dup"), 2);
+
+        let removed = store.remove("dup");
+        assert_eq!(
+            removed,
+            Some(column(&[1.0])),
+            "returns the first occurrence"
+        );
+        assert_eq!(
+            store.occurrences("dup"),
+            0,
+            "no orphaned repeat may survive"
+        );
+        assert!(!store.contains_key("dup"));
+        assert_eq!(store.get("dup"), None);
+
+        // The store stays self-consistent: everything iter yields, get finds.
+        let names: Vec<&str> = store.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["keep"]);
+        assert_eq!(store.len(), 1);
+        for (name, _) in store.iter() {
+            assert!(store.get(name).is_some(), "iter yielded unfindable {name}");
+        }
+    }
+
+    /// Constructors take `impl Into<ColumnStore>`, so a plain `BTreeMap` still
+    /// works (no churn for existing callers) and a `ColumnStore` works too.
+    #[test]
+    fn constructors_accept_both_a_map_and_a_store() {
+        let index = || Index::new_known_unique_int64_unit_range(0, 1);
+        let map = BTreeMap::from([("a".to_string(), column(&[1.0]))]);
+
+        let from_map = DataFrame::new(index(), map.clone()).expect("from map");
+        let from_store = DataFrame::new(index(), ColumnStore::from(map)).expect("from store");
+
+        assert_eq!(from_map.columns().len(), from_store.columns().len());
+        assert_eq!(from_map.columns().get("a"), from_store.columns().get("a"));
     }
 }

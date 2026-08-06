@@ -73,7 +73,7 @@ use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{
     Column, ColumnError, Int64DenseCycleWitness, Utf8LowerHexSequence, ValidityMask,
 };
-use fp_frame::{FrameError, Series};
+use fp_frame::{ColumnStore, FrameError, Series};
 use fp_index::{Index, IndexLabel};
 use fp_types::{DType, NullKind, Scalar, TypeError};
 // Join build maps key on &IndexLabel / &CompositeJoinKey and are LOOKUP-only:
@@ -809,7 +809,12 @@ fn join_series_with_arena(
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergedDataFrame {
     pub index: Index,
-    pub columns: std::collections::BTreeMap<String, Column>,
+    /// br-frankenpandas-u387a: a `ColumnStore`, not a `BTreeMap`. Merge suffix
+    /// collisions are one of the pandas cases the duplicate-label work
+    /// (br-frankenpandas-ih4t0) has to support, so a map here would just be
+    /// the same leak one crate over — it cannot represent the repeated labels
+    /// a collision produces.
+    pub columns: ColumnStore,
     /// Output column order in pandas' convention (key/left columns in their
     /// source order, then right non-key columns). The `columns` map is sorted,
     /// so this Vec carries the real order for materialization — br-691lh.
@@ -1248,7 +1253,7 @@ fn ensure_merge_suffixes_for_overlaps(
 }
 
 fn insert_merged_output_column(
-    output_columns: &mut std::collections::BTreeMap<String, Column>,
+    output_columns: &mut ColumnStore,
     order: &mut Vec<String>,
     name: String,
     column: Column,
@@ -1799,7 +1804,7 @@ fn build_single_key_affine_i64_inner_merge_output(
         .collect();
     let mut i64_lanes = build_affine_inner_i64_lanes(&i64_sources, plan.len).into_iter();
     let index = Index::new_known_unique_int64_unit_range(0, plan.len);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order = Vec::with_capacity(specs.len());
     for spec in specs {
         let column = match spec.lane {
@@ -3026,7 +3031,7 @@ fn ensure_indicator_name_available(
     indicator_name: &str,
     left_col_names: &HashSet<&String>,
     right_col_names: &HashSet<&String>,
-    output_columns: &std::collections::BTreeMap<String, Column>,
+    output_columns: &ColumnStore,
 ) -> Result<(), JoinError> {
     if left_col_names
         .iter()
@@ -3698,7 +3703,7 @@ fn build_single_key_dense_i64_inner_merge_output(
         if options.require_all_left_keys_matched && !left_keys.is_empty() {
             return Ok(None);
         }
-        let mut columns = std::collections::BTreeMap::new();
+        let mut columns = ColumnStore::new();
         let mut column_order = Vec::with_capacity(order_kinds.len());
         let mut i64_it = i64_specs.into_iter();
         let mut f64_it = f64_specs.into_iter();
@@ -3807,7 +3812,7 @@ fn build_single_key_dense_i64_inner_merge_output(
     // IndexLabel::Int64, materialized on demand), pre-proven unique and
     // ascending — skips the eager Vec<IndexLabel> build for huge join outputs.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order = Vec::with_capacity(order_kinds.len());
     let mut i64_it = i64_specs.into_iter().zip(i64_lanes);
     let mut f64_it = f64_columns.into_iter();
@@ -3986,7 +3991,7 @@ fn build_single_key_dense_cycle_i64_left_merge_output(
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order = Vec::with_capacity(spec_names.len());
     for ((name, kind), source) in spec_names.into_iter().zip(spec_kinds).zip(spec_sources) {
         let column = match kind {
@@ -4140,7 +4145,7 @@ fn build_single_key_dense_i64_left_merge_output(
                 dense_cycle_probe_output_len_and_validity(left_witness, right_witness)
         {
             let index = Index::new_known_unique_int64_unit_range(0, output_len);
-            let mut columns = std::collections::BTreeMap::new();
+            let mut columns = ColumnStore::new();
             let mut column_order = Vec::with_capacity(specs.len());
             for (spec, source) in specs.into_iter().zip(sources) {
                 let column = match spec.side {
@@ -4382,7 +4387,7 @@ fn build_single_key_dense_i64_left_merge_output(
 
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order = Vec::with_capacity(specs.len());
     let mut full_iter = full_data.into_iter();
     for spec in specs {
@@ -4557,7 +4562,7 @@ fn build_single_key_dense_i64_right_merge_output(
                 dense_cycle_probe_output_len_and_validity(right_witness, left_witness)
         {
             let index = Index::new_known_unique_int64_unit_range(0, output_len);
-            let mut columns = std::collections::BTreeMap::new();
+            let mut columns = ColumnStore::new();
             let mut column_order = Vec::with_capacity(specs.len());
             for (spec, source) in specs.into_iter().zip(sources) {
                 let column = match spec.side {
@@ -4789,7 +4794,7 @@ fn build_single_key_dense_i64_right_merge_output(
 
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order = Vec::with_capacity(specs.len());
     let mut full_iter = full_data.into_iter();
     for spec in specs {
@@ -5394,7 +5399,7 @@ fn build_single_key_dense_i64_outer_merge_output(
     };
     // Assemble columns in spec order, each a lazy lane.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order = Vec::with_capacity(spec_names.len());
     for (idx, (name, kind)) in spec_names.into_iter().zip(spec_kinds.iter()).enumerate() {
         let column = match kind {
@@ -5609,7 +5614,7 @@ fn build_single_key_dense_i64_right_all_matched_merge_output(
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
     if right_keys.is_empty() {
-        let mut columns = std::collections::BTreeMap::new();
+        let mut columns = ColumnStore::new();
         let mut column_order = Vec::with_capacity(specs.len());
         for spec in specs {
             insert_merged_output_column(
@@ -5696,7 +5701,7 @@ fn build_single_key_dense_i64_right_all_matched_merge_output(
     // IndexLabel::Int64, materialized on demand), pre-proven unique and
     // ascending — skips the eager Vec<IndexLabel> build for huge join outputs.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order = Vec::with_capacity(specs.len());
     for (spec, data) in specs.into_iter().zip(output_data) {
         debug_assert_eq!(data.len(), output_len);
@@ -5840,7 +5845,7 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
         if !left_keys.is_empty() || !right_keys.is_empty() {
             return Ok(None);
         }
-        let mut columns = std::collections::BTreeMap::new();
+        let mut columns = ColumnStore::new();
         let mut column_order = Vec::with_capacity(specs.len());
         for spec in specs {
             insert_merged_output_column(
@@ -5910,7 +5915,7 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
     // IndexLabel::Int64, materialized on demand), pre-proven unique and
     // ascending — skips the eager Vec<IndexLabel> build for huge join outputs.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order = Vec::with_capacity(specs.len());
     for spec in specs {
         let FusedInt64OutputColumn { name, side, values } = spec;
@@ -6162,7 +6167,7 @@ fn build_single_key_fixed_decimal_utf8_outer_all_matched_merge_output(
 
     let run_lens: Arc<[usize]> = Arc::from(counts.clone());
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order = Vec::with_capacity(specs.len());
     for (name, lane) in specs {
         let column = match lane {
@@ -6264,7 +6269,7 @@ fn build_single_key_inner_contiguous_no_overlap_output(
         return None;
     }
 
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order =
         Vec::with_capacity(left_col_names.len() + right_col_names.len().saturating_sub(1));
     let left_selection = PositionSelection::ContiguousRange {
@@ -6446,7 +6451,7 @@ fn build_single_key_inner_merge_output_with_selections(
         }
     };
 
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::with_capacity(specs.len());
     for ((out_name, _, _), column) in specs.into_iter().zip(built) {
         insert_merged_output_column(&mut columns, &mut column_order, out_name, column)?;
@@ -6475,7 +6480,7 @@ fn build_single_key_dense_left_merge_output(
     let n = left_positions.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::new();
 
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
@@ -6546,7 +6551,7 @@ fn build_single_key_ordered_unique_left_merge_output(
     let n = left.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::new();
     let mut identity_positions = None;
 
@@ -6634,7 +6639,7 @@ fn build_single_key_ordered_unique_right_merge_output(
     let n = right.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::new();
     let mut identity_positions = None;
 
@@ -6718,7 +6723,7 @@ fn build_single_key_dense_right_merge_output(
     let n = left_positions.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::new();
 
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
@@ -6801,7 +6806,7 @@ fn build_single_key_ordered_unique_outer_merge_output(
     let n = left_positions.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::new();
 
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
@@ -7098,7 +7103,7 @@ fn build_single_key_ordered_identity_inner_merge_output(
     debug_assert_eq!(n, right.len());
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::new();
     let mut identity_positions = None;
 
@@ -9604,7 +9609,7 @@ pub fn merge_dataframes_on_with_options(
     let n = left_positions.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::new();
 
     // Collect column names to handle conflicts.
@@ -9816,7 +9821,7 @@ fn merge_dataframes_cross(
     }
 
     let index = Index::new((0..out_rows as i64).map(IndexLabel::from).collect());
-    let mut columns = std::collections::BTreeMap::new();
+    let mut columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::new();
 
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
@@ -11019,7 +11024,7 @@ fn build_asof_output(
     ensure_merge_suffixes_for_overlaps(&overlap_names, &suffixes)?;
 
     let n_out = left.len();
-    let mut out_columns = std::collections::BTreeMap::new();
+    let mut out_columns = ColumnStore::new();
     let mut column_order: Vec<String> = Vec::new();
 
     // Resolve every output column (name + build task) in order, then build the
@@ -11214,7 +11219,7 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
 #[cfg(test)]
 mod tests {
     use fp_columnar::{Column, ValidityMask};
-    use fp_frame::Series;
+    use fp_frame::{ColumnStore, Series};
     use fp_index::{Index, IndexLabel};
     use fp_types::{DType, NullKind, Scalar};
 
@@ -11251,7 +11256,7 @@ mod tests {
                 .map(|row| IndexLabel::Int64(row as i64))
                 .collect(),
         );
-        let mut columns = std::collections::BTreeMap::new();
+        let mut columns = ColumnStore::new();
         columns.insert("id".to_owned(), contiguous_utf8_column(keys));
         columns.insert(
             value_name.to_owned(),
@@ -17841,7 +17846,7 @@ mod tests {
                         .map(|row| IndexLabel::Int64(row as i64))
                         .collect(),
                 );
-                let mut columns = std::collections::BTreeMap::new();
+                let mut columns = ColumnStore::new();
                 columns.insert("k1".to_owned(), contiguous_utf8_column(k1));
                 columns.insert("k2".to_owned(), contiguous_utf8_column(k2));
                 columns.insert(
