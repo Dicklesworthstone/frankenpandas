@@ -103,11 +103,43 @@ use fp_index::{
     format_datetime_ns, validate_alignment_plan,
 };
 use fp_runtime::{
-    DecisionAction, EvidenceLedger, RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord,
+    DecisionAction, EvidenceLedger, RuntimeMode, RuntimePolicy, SemanticIndexIdentity,
+    SemanticWitnessRecord,
 };
+
+/// Map the runtime's compatibility mode onto the temporal overflow policy.
+///
+/// br-frankenpandas-5e47p (fyr1z.6). This mapping lives HERE and not in either
+/// source crate because `fp-runtime` (which owns [`RuntimeMode`]) and
+/// `fp-types` (which owns [`OverflowPolicy`]) are PARALLEL LEAVES — neither
+/// depends on the other, and `fp-frame` is the first crate that sees both.
+/// Putting it in either leaf would mean inverting a dependency edge to express
+/// a policy decision.
+///
+/// The mapping itself follows AGENTS.md's mode doctrine:
+/// - STRICT "maximize observable compatibility ... no behavior-altering
+///   repairs" → surface the failure, so a caller can raise what pandas raises.
+/// - HARDENED "preserve API contract while adding safety guards ... bounded
+///   defensive recovery" plus "deterministic audit logs for recoveries" →
+///   recover as NaT AND record it.
+///
+/// ⚠ CALLING THIS DOES NOT BY ITSELF CHANGE BEHAVIOR. Nothing routes temporal
+/// arithmetic through a policy yet; the vectorized raise arms are
+/// br-frankenpandas-fyr1z-strict-raise-arms-t7ht2, and whether STRICT should
+/// reproduce pandas' silent wrap on `Series * int` / `cumsum` is the open human
+/// decision br-frankenpandas-fyr1z-wrap-signoff-s4lkx. Until that is answered,
+/// STRICT here means "surface the failure to the caller", NOT "raise on every
+/// overflow" — see DISC-018, where a blanket raise is shown to ADD divergence.
+#[must_use]
+pub const fn overflow_policy_for_mode(mode: RuntimeMode) -> OverflowPolicy {
+    match mode {
+        RuntimeMode::Strict => OverflowPolicy::Strict,
+        RuntimeMode::Hardened => OverflowPolicy::HardenedNat,
+    }
+}
 use fp_types::{
-    DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType, Timedelta,
-    common_dtype,
+    DType, Interval, IntervalClosed, NullKind, OverflowPolicy, Period, PeriodFreq, Scalar,
+    SparseDType, Timedelta, common_dtype,
 };
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -94681,7 +94713,9 @@ mod tests {
         )
         .unwrap();
 
-        let kept = s.value_counts_with_options(false, true, false, false).unwrap();
+        let kept = s
+            .value_counts_with_options(false, true, false, false)
+            .unwrap();
         assert_eq!(
             kept.index().labels(),
             &[
@@ -94696,7 +94730,9 @@ mod tests {
         );
 
         // Dropping nulls leaves the bool labels typed and untouched.
-        let dropped = s.value_counts_with_options(false, true, false, true).unwrap();
+        let dropped = s
+            .value_counts_with_options(false, true, false, true)
+            .unwrap();
         assert_eq!(
             dropped.index().labels(),
             &[IndexLabel::Bool(true), IndexLabel::Bool(false)]
@@ -185756,8 +185792,8 @@ mod sgb_rolling_build_groups_share_lyaqi {
         let index = Index::new((0..ROWS).map(|r| IndexLabel::Int64(r as i64)).collect());
         let values: Vec<i64> = (0..ROWS).map(|r| (r as i64 * 7) % 1_000).collect();
         let keys: Vec<i64> = (0..ROWS).map(|r| (r as i64) % GROUPS).collect();
-        let values = Series::new("v", index.clone(), Column::from_i64_values(values))
-            .expect("value series");
+        let values =
+            Series::new("v", index.clone(), Column::from_i64_values(values)).expect("value series");
         let keys = Series::new("k", index, Column::from_i64_values(keys)).expect("key series");
         (values, keys)
     }
@@ -185826,13 +185862,17 @@ mod sgb_rolling_build_groups_share_lyaqi {
     fn build_groups_share_of_rolling_mean_utf8_keys() {
         let index = Index::new((0..ROWS).map(|r| IndexLabel::Int64(r as i64)).collect());
         let values: Vec<i64> = (0..ROWS).map(|r| (r as i64 * 7) % 1_000).collect();
-        let values = Series::new("v", index.clone(), Column::from_i64_values(values))
-            .expect("value series");
+        let values =
+            Series::new("v", index.clone(), Column::from_i64_values(values)).expect("value series");
         let key_values: Vec<Scalar> = (0..ROWS)
             .map(|r| Scalar::Utf8(format!("grp{:05}", (r as i64) % GROUPS)))
             .collect();
-        let keys = Series::new("k", index, Column::from_values(key_values).expect("utf8 column"))
-            .expect("keys");
+        let keys = Series::new(
+            "k",
+            index,
+            Column::from_values(key_values).expect("utf8 column"),
+        )
+        .expect("keys");
 
         let mut total = Vec::with_capacity(REPS);
         for _ in 0..REPS {
@@ -185863,5 +185903,69 @@ mod sgb_rolling_build_groups_share_lyaqi {
         );
         assert!(n < m, "build_groups cannot exceed the whole call");
         assert!(m > 0 && n > 0, "probe must observe nonzero time");
+    }
+}
+
+#[cfg(test)]
+mod overflow_policy_mode_mapping_5e47p {
+    use fp_runtime::RuntimeMode;
+    use fp_types::{OverflowPolicy, Timedelta, overflow_audit};
+
+    use super::overflow_policy_for_mode;
+
+    /// br-frankenpandas-5e47p: STRICT surfaces the failure so a caller can
+    /// raise what pandas raises; HARDENED recovers as NaT and records it.
+    #[test]
+    fn maps_each_runtime_mode_to_its_documented_policy() {
+        assert_eq!(
+            overflow_policy_for_mode(RuntimeMode::Strict),
+            OverflowPolicy::Strict
+        );
+        assert_eq!(
+            overflow_policy_for_mode(RuntimeMode::Hardened),
+            OverflowPolicy::HardenedNat
+        );
+        // Neither mode maps to the bare default: SurfaceNat is the
+        // no-mode-selected behavior, and silently reusing it for HARDENED
+        // would drop the audit trail vllv6 exists to provide.
+        assert_ne!(
+            overflow_policy_for_mode(RuntimeMode::Hardened),
+            OverflowPolicy::SurfaceNat
+        );
+    }
+
+    /// End-to-end through the mapping: HARDENED recovers to the SAME value
+    /// STRICT would have failed on, and leaves an audit entry naming the op and
+    /// the operands. This is the behaviour the mode split is supposed to buy.
+    #[test]
+    fn hardened_mode_recovers_and_audits_while_strict_surfaces() {
+        overflow_audit::enable();
+        let _ = overflow_audit::drain();
+
+        let strict = overflow_policy_for_mode(RuntimeMode::Strict)
+            .resolve(Timedelta::try_add(i64::MAX, 1), Timedelta::NAT);
+        assert!(strict.is_err(), "STRICT must surface the failure");
+        assert!(
+            overflow_audit::drain().is_empty(),
+            "STRICT must not write the recovery trail"
+        );
+
+        let hardened = overflow_policy_for_mode(RuntimeMode::Hardened)
+            .resolve(Timedelta::try_add(i64::MAX, 1), Timedelta::NAT);
+        assert_eq!(
+            hardened.expect("HARDENED recovers"),
+            Timedelta::NAT,
+            "HARDENED must recover as NaT, unchanged from today"
+        );
+        let entries = overflow_audit::drain();
+        assert_eq!(
+            entries.len(),
+            1,
+            "HARDENED must record exactly one recovery"
+        );
+        assert_eq!(entries[0].op, "Timedelta::add");
+        assert_eq!(entries[0].operands, Some((i64::MAX, 1)));
+
+        overflow_audit::disable();
     }
 }
