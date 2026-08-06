@@ -90,13 +90,58 @@ def scalar_equal(a: Any, b: Any) -> bool:
     return a == b
 
 
+# "str"/"string" are serde ALIASES for the canonical "utf8" string kind (see
+# fp-types Scalar: #[serde(alias = "string", alias = "str")], and the matching
+# comment in pandas_oracle.scalar_from_json). Comparing the kind literally made
+# every {"kind": "str"} fixture read as a divergence from a live
+# {"kind": "utf8"} carrying the SAME value — ~25 spurious rows across the
+# string-op packets, none of them real. Normalize before comparing.
+KIND_ALIASES = {"str": "utf8", "string": "utf8"}
+
+
+def normalize_kind(value: dict) -> dict:
+    kind = value.get("kind")
+    if kind in KIND_ALIASES:
+        normalized = dict(value)
+        normalized["kind"] = KIND_ALIASES[kind]
+        return normalized
+    return value
+
+
 def dict_equal(a: dict, b: dict) -> bool:
+    a = normalize_kind(a)
+    b = normalize_kind(b)
     if set(a.keys()) != set(b.keys()):
         return False
     for key in a:
         if not scalar_equal(a[key], b[key]):
             return False
     return True
+
+
+def frame_column_order(frame: dict) -> tuple[list, bool]:
+    """Return (column names, whether the frame RECORDED an explicit order).
+
+    Most fixtures store `expected_frame` as {"index": [...], "columns": {...}}
+    with no `column_order` key at all. The previous code did
+    `pinned.get("column_order", [])` and compared that empty default against the
+    live oracle's populated list, so every such fixture reported a
+    `column_order mismatch: [] vs [...]` — 269 of the 420 flagged rows, none of
+    them real.
+
+    Worse, the value-comparison loop below iterates `pinned_cols`, so when that
+    default was empty it compared NO VALUES AT ALL. A fixture whose order
+    happened to match would have been declared equal without a single value
+    being checked. Deriving the names from the `columns` mapping fixes both the
+    false positive and the silent no-op.
+    """
+    order = frame.get("column_order")
+    if isinstance(order, list) and order:
+        return list(order), True
+    columns = frame.get("columns")
+    if isinstance(columns, dict):
+        return list(columns.keys()), False
+    return [], False
 
 
 def series_equal(pinned: dict, live: dict) -> tuple[bool, str]:
@@ -122,11 +167,21 @@ def series_equal(pinned: dict, live: dict) -> tuple[bool, str]:
 
 
 def frame_equal(pinned: dict, live: dict) -> tuple[bool, str]:
-    pinned_cols = pinned.get("column_order", [])
-    live_cols = live.get("column_order", [])
+    pinned_cols, pinned_explicit = frame_column_order(pinned)
+    live_cols, live_explicit = frame_column_order(live)
 
-    if pinned_cols != live_cols:
-        return False, f"column_order mismatch: {pinned_cols} vs {live_cols}"
+    # Order is only a divergence when BOTH sides actually recorded an order.
+    # If either side's order was derived from a `columns` mapping, compare the
+    # column SET instead — a derived order carries no ordering claim, and
+    # asserting one manufactures a mismatch out of nothing.
+    if pinned_explicit and live_explicit:
+        if pinned_cols != live_cols:
+            return False, f"column_order mismatch: {pinned_cols} vs {live_cols}"
+    elif set(pinned_cols) != set(live_cols):
+        return (
+            False,
+            f"column set mismatch: {sorted(pinned_cols)} vs {sorted(live_cols)}",
+        )
 
     pinned_index = pinned.get("index", [])
     live_index = live.get("index", [])
@@ -212,17 +267,24 @@ def run_live_oracle(packet: dict, legacy_root: Path, oracle_path: Path) -> dict 
         tmp_path = tmp.name
 
     try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(oracle_path),
-                "--legacy-root", str(legacy_root),
-                "--allow-system-pandas-fallback",
-            ],
-            stdin=open(tmp_path),
-            capture_output=True,
-            timeout=30,
-        )
+        # PRE-EXISTING, fixed in passing (br-frankenpandas-live-oracle-passes-
+        # by-skip-l7r1p): `stdin=open(tmp_path)` leaked one file descriptor per
+        # oracle invocation. That is 1258 leaked handles in a full corpus run —
+        # squarely inside the default 1024 soft limit, so a whole-corpus sweep
+        # can die of fd exhaustion partway through and report a truncated
+        # comparison as if it were complete.
+        with open(tmp_path) as stdin_handle:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(oracle_path),
+                    "--legacy-root", str(legacy_root),
+                    "--allow-system-pandas-fallback",
+                ],
+                stdin=stdin_handle,
+                capture_output=True,
+                timeout=30,
+            )
 
         if result.returncode != 0:
             return None
