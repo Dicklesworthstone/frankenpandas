@@ -3636,6 +3636,15 @@ pub fn nanmin(values: &[Scalar]) -> Scalar {
                     min = Some(v)
                 }
             }
+            // br-frankenpandas-axhhk: Datetime64 needs the same arm for the
+            // same reason — its to_f64() errors too. Without it a 2+-element
+            // datetime column returned Null(NaN), while a 1-element one
+            // returned the right answer via the (None, _) seed above.
+            (Some(Scalar::Datetime64(a)), Scalar::Datetime64(b)) => {
+                if b < a {
+                    min = Some(v)
+                }
+            }
             (Some(a), b) => match (a.to_f64(), b.to_f64()) {
                 (Ok(af), Ok(bf)) if bf < af => min = Some(v),
                 (Ok(_), Ok(_)) => {}
@@ -3681,6 +3690,12 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
             // the catch-all below would silently return NaN. Compare ns
             // representations directly; NAT is already filtered above.
             (Some(Scalar::Timedelta64(a)), Scalar::Timedelta64(b)) => {
+                if b > a {
+                    max = Some(v)
+                }
+            }
+            // br-frankenpandas-axhhk: Datetime64 sibling of the arm above.
+            (Some(Scalar::Datetime64(a)), Scalar::Datetime64(b)) => {
                 if b > a {
                     max = Some(v)
                 }
@@ -3862,6 +3877,26 @@ pub fn nansem(values: &[Scalar], ddof: usize) -> Scalar {
 /// Matches `np.ptp` behavior on nan-safe inputs. Returns `Null(NaN)`
 /// for empty or all-missing inputs.
 pub fn nanptp(values: &[Scalar]) -> Scalar {
+    // br-frankenpandas-axhhk: Datetime64 ptp is NOT a dtype-preserving sibling
+    // of the Timedelta64 arm below — the span between two instants is a
+    // DURATION, so pandas returns a Timedelta here (`s.max() - s.min()` on a
+    // datetime64 Series). Subtract in i128 and narrow through the shared
+    // opz27 helper so an unrepresentable span becomes NaT rather than a
+    // fabricated extreme. Previously to_f64() errored on every element, `seen`
+    // stayed false, and this returned Null(NaN).
+    if is_datetime_input(values) {
+        let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+        for value in values {
+            if value.is_missing() {
+                continue;
+            }
+            if let Scalar::Datetime64(ns) = value {
+                lo = lo.min(*ns);
+                hi = hi.max(*ns);
+            }
+        }
+        return timedelta_ns_to_scalar(i128::from(hi) - i128::from(lo));
+    }
     // Preserve every nanosecond in the uniformly-Timedelta64 case. Converting
     // to f64 before subtracting loses ranges below one f64 ULP beyond 104 days.
     // The Scalar fallback below retains mixed-family behavior.
@@ -4022,6 +4057,26 @@ fn is_timedelta_input(values: &[Scalar]) -> bool {
     saw_td
 }
 
+/// Sibling of [`is_timedelta_input`] for Datetime64, per br-frankenpandas-axhhk.
+///
+/// `Datetime64::to_f64()` errors exactly like `Timedelta64::to_f64()` does, so
+/// every reduction that routed datetimes through the f64 catch-all silently
+/// produced `Null(NaN)`. Datetime64 orders exactly like its i64 nanosecond
+/// backing, and NaT (`Timestamp::NAT`) is already filtered by `is_missing`.
+fn is_datetime_input(values: &[Scalar]) -> bool {
+    let mut saw_dt = false;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Datetime64(_) => saw_dt = true,
+            _ => return false,
+        }
+    }
+    saw_dt
+}
+
 /// Returns true for uniformly-Int64 input with optional missing markers.
 fn is_int64_input(values: &[Scalar]) -> bool {
     let mut saw_int = false;
@@ -4044,7 +4099,13 @@ fn nanarg_i64(values: &[Scalar], find_max: bool) -> Option<usize> {
         if value.is_missing() {
             continue;
         }
-        let (Scalar::Int64(candidate) | Scalar::Timedelta64(candidate)) = value else {
+        // br-frankenpandas-axhhk: Datetime64 joins the typed i64 families here.
+        // Its ns backing orders identically, and routing it through the f64
+        // path instead returned None for any 2+-element datetime input.
+        let (Scalar::Int64(candidate)
+        | Scalar::Timedelta64(candidate)
+        | Scalar::Datetime64(candidate)) = value
+        else {
             continue;
         };
         match best {
@@ -4095,7 +4156,15 @@ where
 /// uniformly-Timedelta64 input. `sentinel` is the identity element
 /// (i64::MAX for min, i64::MIN for max) used until the first
 /// non-missing value initializes the accumulator.
-fn timedelta_cumulative_extrema<F>(values: &[Scalar], sentinel: i64, mut step: F) -> Vec<Scalar>
+/// `make` builds the output scalar from the running ns value, so the same
+/// walk serves Timedelta64 and — per br-frankenpandas-axhhk — Datetime64,
+/// whose running extrema are Timestamps rather than durations.
+fn timedelta_cumulative_extrema<F>(
+    values: &[Scalar],
+    sentinel: i64,
+    make: fn(i64) -> Scalar,
+    mut step: F,
+) -> Vec<Scalar>
 where
     F: FnMut(i64, i64) -> i64,
 {
@@ -4106,13 +4175,13 @@ where
             out.push(Scalar::Null(NullKind::NaT));
             continue;
         }
-        if let Scalar::Timedelta64(ns) = v {
+        if let Scalar::Timedelta64(ns) | Scalar::Datetime64(ns) = v {
             let new_val = match running {
                 Some(prev) => step(prev, *ns),
                 None => *ns,
             };
             running = Some(new_val);
-            out.push(Scalar::Timedelta64(new_val));
+            out.push(make(new_val));
         } else {
             out.push(Scalar::Null(NullKind::NaT));
         }
@@ -4180,7 +4249,17 @@ pub fn nancumprod(values: &[Scalar]) -> Vec<Scalar> {
 pub fn nancummax(values: &[Scalar]) -> Vec<Scalar> {
     // Per br-frankenpandas-x0x91: Timedelta64 preserves dtype.
     if is_timedelta_input(values) {
-        return timedelta_cumulative_extrema(values, i64::MAX, |acc, x| acc.max(x));
+        return timedelta_cumulative_extrema(values, i64::MAX, Scalar::Timedelta64, |acc, x| {
+            acc.max(x)
+        });
+    }
+    // br-frankenpandas-axhhk: Datetime64 running extrema are Timestamps.
+    // Without this the f64 path below errored on every element and produced an
+    // all-NaN column.
+    if is_datetime_input(values) {
+        return timedelta_cumulative_extrema(values, i64::MAX, Scalar::Datetime64, |acc, x| {
+            acc.max(x)
+        });
     }
     let mut out = Vec::with_capacity(values.len());
     let mut running: Option<f64> = None;
@@ -4210,7 +4289,15 @@ pub fn nancummax(values: &[Scalar]) -> Vec<Scalar> {
 pub fn nancummin(values: &[Scalar]) -> Vec<Scalar> {
     // Per br-frankenpandas-x0x91: Timedelta64 preserves dtype.
     if is_timedelta_input(values) {
-        return timedelta_cumulative_extrema(values, i64::MIN, |acc, x| acc.min(x));
+        return timedelta_cumulative_extrema(values, i64::MIN, Scalar::Timedelta64, |acc, x| {
+            acc.min(x)
+        });
+    }
+    // br-frankenpandas-axhhk: Datetime64 sibling of the gate above.
+    if is_datetime_input(values) {
+        return timedelta_cumulative_extrema(values, i64::MIN, Scalar::Datetime64, |acc, x| {
+            acc.min(x)
+        });
     }
     let mut out = Vec::with_capacity(values.len());
     let mut running: Option<f64> = None;
@@ -4304,7 +4391,9 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
 pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
     // Compare typed 64-bit families directly: f64 coercion loses ordering for
     // adjacent Int64 values beyond the 53-bit exactness boundary.
-    if is_timedelta_input(values) || is_int64_input(values) {
+    // br-frankenpandas-axhhk: Datetime64 belongs here too — it not only loses
+    // ordering under f64, its to_f64() errors outright, so it returned None.
+    if is_timedelta_input(values) || is_int64_input(values) || is_datetime_input(values) {
         return nanarg_i64(values, true);
     }
     let mut best: Option<(usize, f64)> = None;
@@ -4330,8 +4419,9 @@ pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
 ///
 /// Matches `np.nanargmin`. Returns `None` if every value is missing.
 pub fn nanargmin(values: &[Scalar]) -> Option<usize> {
-    // See nanargmax: preserve exact ordering for typed 64-bit families.
-    if is_timedelta_input(values) || is_int64_input(values) {
+    // See nanargmax: preserve exact ordering for typed 64-bit families
+    // (Datetime64 included, per br-frankenpandas-axhhk).
+    if is_timedelta_input(values) || is_int64_input(values) || is_datetime_input(values) {
         return nanarg_i64(values, false);
     }
     let mut best: Option<(usize, f64)> = None;
@@ -7207,6 +7297,117 @@ mod tests {
         assert_eq!(out[0], Scalar::Timedelta64(sec));
         assert!(out[1].is_missing());
         assert_eq!(out[2], Scalar::Timedelta64(3 * sec));
+    }
+
+    const DAY_NS: i64 = 86_400 * 1_000_000_000;
+    /// 2020-01-01T00:00:00Z in epoch nanoseconds.
+    const DT_2020: i64 = 1_577_836_800_000_000_000;
+
+    /// br-frankenpandas-axhhk: every one of these returned `Null(NaN)` (or
+    /// `None`) before the Datetime64 arms existed, because `Datetime64::to_f64()`
+    /// errors and each reduction fell through to the f64 catch-all. Expectations
+    /// are the live pandas 2.2.3 answers for
+    /// `Series([2020-01-01, +60d, +31d])`:
+    ///   min 2020-01-01 · max 2020-03-01 · ptp Timedelta 60 days
+    ///   argmin 0 · argmax 1 · cummax/cummin Timestamps
+    #[test]
+    fn datetime64_ordering_reductions_match_pandas_axhhk() {
+        let d = Scalar::Datetime64;
+        let vals = vec![
+            d(DT_2020),
+            d(DT_2020 + 60 * DAY_NS),
+            d(DT_2020 + 31 * DAY_NS),
+        ];
+
+        assert_eq!(super::nanmin(&vals), d(DT_2020));
+        assert_eq!(super::nanmax(&vals), d(DT_2020 + 60 * DAY_NS));
+        assert_eq!(super::nanargmin(&vals), Some(0));
+        assert_eq!(super::nanargmax(&vals), Some(1));
+
+        // ptp of two INSTANTS is a DURATION: Timedelta64, not Datetime64.
+        let span = super::nanptp(&vals);
+        assert_eq!(span, Scalar::Timedelta64(60 * DAY_NS));
+        assert_eq!(span.dtype(), DType::Timedelta64);
+
+        assert_eq!(
+            super::nancummax(&vals),
+            vec![
+                d(DT_2020),
+                d(DT_2020 + 60 * DAY_NS),
+                d(DT_2020 + 60 * DAY_NS)
+            ]
+        );
+        assert_eq!(
+            super::nancummin(&vals),
+            vec![d(DT_2020), d(DT_2020), d(DT_2020)]
+        );
+    }
+
+    /// The size-dependence is the part that made this bug quiet, so pin it
+    /// explicitly rather than only asserting the headline. A ONE-element
+    /// datetime slice was always correct (the `(None, _)` arm seeds `min`
+    /// before any comparison runs); TWO elements hit the catch-all and
+    /// returned NaN. A regression that drops the Datetime64 arm would still
+    /// pass a single-element test.
+    #[test]
+    fn datetime64_min_max_size_dependence_pinned_axhhk() {
+        let d = Scalar::Datetime64;
+        let one = vec![d(DT_2020)];
+        assert_eq!(super::nanmin(&one), d(DT_2020));
+        assert_eq!(super::nanmax(&one), d(DT_2020));
+
+        let two = vec![d(DT_2020 + DAY_NS), d(DT_2020)];
+        let got_min = super::nanmin(&two);
+        assert!(
+            !got_min.is_missing(),
+            "2-element datetime min must not be missing, got {got_min:?}"
+        );
+        assert_eq!(got_min, d(DT_2020));
+        assert_eq!(super::nanmax(&two), d(DT_2020 + DAY_NS));
+    }
+
+    /// NaT still skips, and a datetime span too large for i64 surfaces NaT via
+    /// the shared opz27 narrowing rather than a fabricated extreme.
+    #[test]
+    fn datetime64_reductions_skip_nat_and_guard_span_overflow_axhhk() {
+        let d = Scalar::Datetime64;
+        let with_nat = vec![
+            d(Timestamp::NAT),
+            d(DT_2020 + 31 * DAY_NS),
+            d(DT_2020),
+            d(Timestamp::NAT),
+        ];
+        assert_eq!(super::nanmin(&with_nat), d(DT_2020));
+        assert_eq!(super::nanmax(&with_nat), d(DT_2020 + 31 * DAY_NS));
+        assert_eq!(super::nanptp(&with_nat), Scalar::Timedelta64(31 * DAY_NS));
+        // argmin/argmax report positions in the ORIGINAL slice, NaT skipped.
+        assert_eq!(super::nanargmin(&with_nat), Some(2));
+        assert_eq!(super::nanargmax(&with_nat), Some(1));
+
+        // Span exceeding i64 ns: NaT, never a fabricated Timedelta.max.
+        let huge = vec![d(i64::MIN + 1), d(i64::MAX)];
+        let span = super::nanptp(&huge);
+        assert!(span.is_missing(), "unrepresentable span must be NaT");
+        assert_ne!(span, Scalar::Timedelta64(i64::MAX));
+    }
+
+    /// Mixed Datetime64 + another dtype must NOT take the typed arm — it falls
+    /// back exactly as before, so this fix cannot change cross-type behavior.
+    #[test]
+    fn datetime64_mixed_input_still_falls_back_axhhk() {
+        let vals = vec![Scalar::Datetime64(DT_2020), Scalar::Int64(5)];
+        // `is_datetime_input` is false here, so both keep their PRE-EXISTING
+        // cross-type behavior, which differs between the two by construction:
+        //   nanmin  — the catch-all compares via to_f64(); the Datetime64 side
+        //             errors, so it bails to Null(NaN).
+        //   nanptp  — its f64 loop SKIPS values whose to_f64() errors, so the
+        //             datetime is dropped and the range is taken over the lone
+        //             Int64 => Float64(0.0). Same shape as the documented
+        //             mixed-timedelta fallback in ..._620mj (which yields 5.0).
+        // Neither is changed by this bead; pinning both stops the new typed arm
+        // from silently widening to mixed input later.
+        assert!(super::nanmin(&vals).is_missing());
+        assert_eq!(super::nanptp(&vals), Scalar::Float64(0.0));
     }
 
     #[test]
