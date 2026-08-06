@@ -245,6 +245,13 @@ class HostWideExclusivityGate:
     """Fail closed unless every online host CPU is quiet before each arm."""
     expected_cpu_ids: list[int]
     observations: list[dict[str, Any]] = field(default_factory=list)
+    # br-frankenpandas-ooivn: the reason for the most recent fail-closed exit.
+    # Recorded so the caller can BANK rows the gate already blessed before it
+    # propagates the failure. This does not soften anything: every rejection
+    # still raises SystemExit(2) exactly as before, and the recorded detail is
+    # written into the artifact so a rejected invocation is self-describing
+    # rather than silently absent.
+    last_rejection: dict[str, Any] | None = None
 
     def _sample(self, phase: str, role: str) -> dict[str, Any]:
         try:
@@ -275,6 +282,15 @@ class HostWideExclusivityGate:
                 f"busy={observation['busy_cpu_ids_above_limit']}",
                 file=sys.stderr,
             )
+            self.last_rejection = {
+                "phase": phase,
+                "kind": "adjudicating_checkpoint_not_clear",
+                "missing_cpu_ids": observation["missing_cpu_ids"],
+                "busy_cpu_ids_above_limit": observation[
+                    "busy_cpu_ids_above_limit"
+                ],
+                "maximum_busy_fraction": MAX_HOST_WIDE_BUSY_FRACTION,
+            }
             raise SystemExit(2)
         print(
             "host_wide_quiescence="
@@ -323,6 +339,13 @@ class HostWideExclusivityGate:
             f"{QUIESCENCE_WAIT_MAX_ATTEMPTS} attempts",
             file=sys.stderr,
         )
+        self.last_rejection = {
+            "phase": phase,
+            "kind": "no_clear_readiness_window",
+            "attempts": QUIESCENCE_WAIT_MAX_ATTEMPTS,
+            "retry_seconds": QUIESCENCE_WAIT_RETRY_SECONDS,
+            "maximum_busy_fraction": MAX_HOST_WIDE_BUSY_FRACTION,
+        }
         raise SystemExit(2)
 
     def artifact(self) -> dict[str, Any]:
@@ -3057,8 +3080,17 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                  exclusivity_gate: HostWideExclusivityGate,
                  fp_binary: Path | None = None,
                  fp_reference_binary: Path | None = None,
-                 workload_filter: set[str] | None = None) -> list[dict[str, Any]]:
-    """Run all workloads in a category for given sizes and dtypes."""
+                 workload_filter: set[str] | None = None,
+                 result_sink: list[dict[str, Any]] | None = None,
+                 ) -> list[dict[str, Any]]:
+    """Run all workloads in a category for given sizes and dtypes.
+
+    `result_sink`, per br-frankenpandas-ooivn, receives each comparison AS IT
+    COMPLETES rather than only via the return value. A gate rejection on a later
+    row raises `SystemExit` out of this function, which used to discard every
+    row measured before it — they lived only in the local list below. Rows
+    reaching the sink have already passed their own pre/post measurement guards.
+    """
     results = []
     workloads = PANDAS_WORKLOADS.get(category, {})
     if workload_filter is not None:
@@ -3216,6 +3248,10 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                             "verdict": "CONTRACT_INVALID",
                         }
                 results.append(comparison)
+                if result_sink is not None:
+                    # br-frankenpandas-ooivn: publish immediately so a later
+                    # rejection cannot take this row down with it.
+                    result_sink.append(comparison)
                 cell_index += 1
 
                 verdict = comparison.get("verdict", "N/A")
@@ -3501,43 +3537,72 @@ def main():
         print(f"pandas version: {pd.__version__}")
         print()
 
-        for category in categories:
-            weight = CATEGORIES.get(category)
-            label = (
-                f"weight: {weight}" if weight is not None
-                else "outside the weighted score"
-            )
-            print(f"\n[{category.upper()}] ({label})")
-            results = run_category(
-                category,
-                sizes,
-                dtypes,
-                tmp_path,
-                fingerprint,
-                args.thread_count,
-                exclusivity_gate,
-                args.frankenpandas_binary,
-                args.frankenpandas_reference_binary,
-                workload_filter,
-            )
-            for result in results:
-                result["invocation_id"] = invocation_id
-                if args.frankenpandas_build_worker is not None:
-                    result["frankenpandas"]["executable"]["build_worker"] = (
-                        args.frankenpandas_build_worker
-                    )
-                if (
-                    args.frankenpandas_reference_build_worker is not None
-                    and "whole_binary_reference" in result
-                ):
-                    result["whole_binary_reference"]["frankenpandas"][
-                        "executable"
-                    ]["build_worker"] = (
-                        args.frankenpandas_reference_build_worker
-                    )
-            all_results.extend(results)
+        # br-frankenpandas-ooivn: rows land in `all_results` as they complete
+        # (via result_sink), so a rejection part-way through a category keeps
+        # everything measured before it. The rejection is still fatal below.
+        invocation_rejection: dict[str, Any] | None = None
 
-        exclusivity_gate.require_quiet("invocation_postflight")
+        def annotate(result: dict[str, Any]) -> None:
+            """Stamp invocation/build provenance onto a completed row."""
+            result["invocation_id"] = invocation_id
+            if args.frankenpandas_build_worker is not None:
+                result["frankenpandas"]["executable"]["build_worker"] = (
+                    args.frankenpandas_build_worker
+                )
+            if (
+                args.frankenpandas_reference_build_worker is not None
+                and "whole_binary_reference" in result
+            ):
+                result["whole_binary_reference"]["frankenpandas"][
+                    "executable"
+                ]["build_worker"] = args.frankenpandas_reference_build_worker
+
+        try:
+            for category in categories:
+                weight = CATEGORIES.get(category)
+                label = (
+                    f"weight: {weight}" if weight is not None
+                    else "outside the weighted score"
+                )
+                print(f"\n[{category.upper()}] ({label})")
+                # Rows are published into all_results by run_category as each
+                # one completes, so nothing here re-extends it.
+                run_category(
+                    category,
+                    sizes,
+                    dtypes,
+                    tmp_path,
+                    fingerprint,
+                    args.thread_count,
+                    exclusivity_gate,
+                    args.frankenpandas_binary,
+                    args.frankenpandas_reference_binary,
+                    workload_filter,
+                    result_sink=all_results,
+                )
+            exclusivity_gate.require_quiet("invocation_postflight")
+        except SystemExit:
+            invocation_rejection = exclusivity_gate.last_rejection or {
+                "phase": "unknown",
+                "kind": "unrecorded",
+            }
+        # Annotate whatever survived, including rows banked before a rejection.
+        for result in all_results:
+            annotate(result)
+
+        # br-frankenpandas-ooivn: a gate rejection anywhere above — inside a
+        # category, or at invocation_postflight — used to abort BEFORE this
+        # artifact was written, discarding rows whose OWN phases were all clear.
+        # Two df_transpose @100k rows were lost that way, one to a rejection on
+        # an unrelated row and one to this very postflight check, after both had
+        # already measured cleanly.
+        #
+        # The rejection is still fatal and the process still exits 2. What
+        # changes is only that evidence the gate already blessed gets banked
+        # first, with the rejection recorded IN the artifact so the run is
+        # self-describing. No threshold, phase or verdict is altered, and no row
+        # is promoted: a row whose own phases were not clear never reaches
+        # `all_results` in the first place.
         output = {
             "schema_version": "v4",
             "timestamp": timestamp,
@@ -3667,6 +3732,11 @@ def main():
             },
             "results": all_results,
             "summary": compute_summary(all_results),
+            # br-frankenpandas-ooivn: null on a fully clean run. When present,
+            # the invocation FAILED CLOSED and the rows below are only those the
+            # gate had already blessed individually — never treat such an
+            # artifact as a complete run.
+            "invocation_rejection": invocation_rejection,
         }
 
         if args.output:
@@ -3683,6 +3753,20 @@ def main():
                 "bench_result_json="
                 + json.dumps(output, separators=(",", ":"), sort_keys=True)
             )
+
+        # br-frankenpandas-ooivn: fail closed, AFTER the blessed rows are safely
+        # on disk. The exit status is unchanged from before this fix — a
+        # rejected invocation is still an error — so every caller that checks
+        # the exit code keeps behaving exactly as it did.
+        if invocation_rejection is not None:
+            print(
+                "ERROR: invocation failed closed at "
+                f"phase={invocation_rejection.get('phase')}; "
+                f"{len(all_results)} gate-clean row(s) were still written, "
+                "and the artifact records the rejection",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
 
 
 def compute_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
