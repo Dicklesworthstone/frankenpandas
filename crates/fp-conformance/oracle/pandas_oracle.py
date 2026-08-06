@@ -2026,7 +2026,16 @@ def op_series_at_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "expected_series": {
-            "index": [label_to_json(v.isoformat()) for v in out.index.tolist()],
+            # br-frankenpandas-fixture-divergence-triage-9s0c4: was
+            # `label_to_json(v.isoformat())`, which renders a Timestamp as
+            # '2024-01-15T09:30:00'. pandas renders a DatetimeIndex label as
+            # `str(ts)` -> '2024-01-15 09:30:00' (SPACE), and that is what
+            # `label_to_json` already produces and what the DataFrame at_time /
+            # between_time handlers emit via dataframe_to_json. The explicit
+            # .isoformat() made the SERIES path disagree with both pandas and
+            # its own DataFrame sibling, regardless of how the fixture spelled
+            # its input labels.
+            "index": [label_to_json(v) for v in out.index.tolist()],
             "values": [scalar_to_json(v) for v in out.tolist()],
         }
     }
@@ -2054,7 +2063,16 @@ def op_series_between_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "expected_series": {
-            "index": [label_to_json(v.isoformat()) for v in out.index.tolist()],
+            # br-frankenpandas-fixture-divergence-triage-9s0c4: was
+            # `label_to_json(v.isoformat())`, which renders a Timestamp as
+            # '2024-01-15T09:30:00'. pandas renders a DatetimeIndex label as
+            # `str(ts)` -> '2024-01-15 09:30:00' (SPACE), and that is what
+            # `label_to_json` already produces and what the DataFrame at_time /
+            # between_time handlers emit via dataframe_to_json. The explicit
+            # .isoformat() made the SERIES path disagree with both pandas and
+            # its own DataFrame sibling, regardless of how the fixture spelled
+            # its input labels.
+            "index": [label_to_json(v) for v in out.index.tolist()],
             "values": [scalar_to_json(v) for v in out.tolist()],
         }
     }
