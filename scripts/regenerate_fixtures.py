@@ -94,41 +94,66 @@ def differing_leaves(pinned: Any, live: Any, path: str = "") -> list[tuple[str, 
     return []
 
 
-def classify_move(pinned: Any, live: Any) -> tuple[str, str]:
-    """Bucket a moved value into a countable class.
+def classify_move(pinned: Any, live: Any) -> tuple[list[str], str]:
+    """Bucket a moved value into countable classes.
 
-    Returns (class, example). Classification is STRUCTURAL — it walks the trees
-    rather than parsing a human-readable mismatch string — so the counts do not
-    depend on message formatting.
+    Returns (classes, example). Classification is STRUCTURAL — it walks the
+    trees rather than parsing a human-readable mismatch string — so the counts
+    do not depend on message formatting.
+
+    TWO RULES, both from the maintainer and both about not letting one
+    attribution stand in for two mechanisms:
+
+    1. DIRECTION IS PART OF THE CLASS. `null->na_n` and `na_n->null` may have
+       entirely different explanations, so they are different classes. The same
+       test is applied to every class here: `int64->float64` is not
+       `float64->int64`, a key the oracle ADDED is not a key it DROPPED, and a
+       sequence that grew is not one that shrank.
+
+    2. A FIXTURE WITH SEVERAL MECHANISMS IS COUNTED IN EACH. Returning only the
+       first class would file a fixture exhibiting both a dtype promotion and a
+       null-marker change under one of them, and the other mechanism would
+       vanish from the counts entirely. Callers therefore count (fixture, class)
+       pairs, and the class totals may exceed the number of moved fixtures.
     """
     # Compare the kind-normalized trees so serde aliases never register.
     leaves = differing_leaves(normalize_structural(pinned), normalize_structural(live))
     if not leaves:
-        return "NORMALIZES_EQUAL", ""
+        return ["NORMALIZES_EQUAL"], ""
 
-    kinds: set[str] = set()
-    for path, p, l in leaves:
-        # A differing {"kind": ...} pair is the signal we care about; walk up by
-        # inspecting the sibling structures the leaf came from.
-        if path.endswith(".kind") and isinstance(p, str) and isinstance(l, str):
-            kinds.add(f"{p}->{l}")
-        elif path.endswith(".value"):
-            kinds.add("value")
     path, p, l = leaves[0]
     example = f"{path}: {p!r} vs {l!r}"
+    classes: set[str] = set()
 
-    promo = {k for k in kinds if "->" in k and k != "null->null"}
-    if promo:
-        # e.g. int64->float64: dtype promotion, DISC-011 territory.
-        return f"KIND {sorted(promo)[0]}", example
-    if any(path.endswith(".value") for path, _, _ in leaves) and _null_marker_move(leaves):
-        direction = _null_marker_move(leaves)
-        return f"NULL_MARKER {direction}", example
-    if any(p == "<absent>" or l == "<absent>" for _, p, l in leaves):
-        return "SHAPE absent-key", example
-    if any(path.endswith("[len]") for path, _, _ in leaves):
-        return "SHAPE length", example
-    return "VALUE", example
+    for leaf_path, lp, ll in leaves:
+        # Dtype changes, directional: int64->float64 is not float64->int64.
+        if leaf_path.endswith(".kind") and isinstance(lp, str) and isinstance(ll, str):
+            classes.add(f"KIND {lp}->{ll}")
+        # Null discriminator, directional: null->na_n is not na_n->null.
+        elif (
+            leaf_path.endswith(".value")
+            and isinstance(lp, str)
+            and isinstance(ll, str)
+            and lp in NULL_MARKERS
+            and ll in NULL_MARKERS
+        ):
+            classes.add(f"NULL_MARKER {lp}->{ll}")
+        # Key presence, directional: a key the oracle ADDED is a different
+        # mechanism from one it DROPPED.
+        elif ll == "<absent>":
+            classes.add("SHAPE key-dropped-by-oracle")
+        elif lp == "<absent>":
+            classes.add("SHAPE key-added-by-oracle")
+        # Sequence length, directional for the same reason.
+        elif leaf_path.endswith("[len]") and isinstance(lp, int) and isinstance(ll, int):
+            classes.add("SHAPE longer" if ll > lp else "SHAPE shorter")
+        else:
+            classes.add("VALUE")
+
+    return sorted(classes), example
+
+
+NULL_MARKERS = {"null", "na_n", "nan"}
 
 
 def _null_marker_move(leaves: list[tuple[str, Any, Any]]) -> str:
@@ -349,15 +374,22 @@ def main() -> int:
             else:
                 # Classify structurally so the attribution pass can work by
                 # CLASS rather than by eyeballing whatever sorts first.
-                klass, example = "UNCLASSIFIED", ""
+                classes: list[str] = []
+                example = ""
                 for key in verdict["moved"]:
                     if key in fixture and key in response:
-                        klass, example = classify_move(fixture[key], response[key])
-                        break
+                        found, ex = classify_move(fixture[key], response[key])
+                        classes.extend(found)
+                        example = example or ex
+                classes = sorted(set(classes)) or ["UNCLASSIFIED"]
                 moved_unattributed.append(
                     (name, verdict["moved"], verdict["detail"].get("semantic", "")[:110],
-                     klass, example))
-                move_classes[klass] += 1
+                     classes, example))
+                # A fixture exhibiting several mechanisms is counted in EACH, so
+                # no mechanism can hide behind another. Totals therefore exceed
+                # the moved-fixture count; the report says so.
+                for klass in classes:
+                    move_classes[klass] += 1
         elif verdict["provenance_stale"]:
             prov_only += 1
         else:
@@ -380,14 +412,23 @@ def main() -> int:
         # COUNTS FIRST, and over every move — not a slice. A truncated listing
         # silently over-weights whatever sorts first, which is exactly how an
         # attribution pass ends up mis-sized.
-        print(f"\nMOVE CLASSES (all {len(moved_unattributed)}, largest first):")
+        total_labels = sum(move_classes.values())
+        print(
+            f"\nMOVE CLASSES over all {len(moved_unattributed)} moved fixtures, largest first."
+        )
+        print(
+            "  Direction is part of the class (a->b is not b->a), and a fixture with several\n"
+            "  mechanisms is counted in EACH, so these total "
+            f"{total_labels} labels across {len(moved_unattributed)} fixtures."
+        )
         for klass, count in move_classes.most_common():
             share = 100.0 * count / len(moved_unattributed)
-            print(f"  {count:5d}  {share:5.1f}%  {klass}")
-        print(f"\nUNATTRIBUTED MOVES (first {args.list_limit} of "
-              f"{len(moved_unattributed)}; use --report-json for all):")
-        for name, keys, why, klass, example in moved_unattributed[: args.list_limit]:
-            print(f"  [{klass}] {name}: {', '.join(keys)}  {why or example}")
+            print(f"  {count:5d}  {share:5.1f}% of fixtures  {klass}")
+        if args.list_limit:
+            print(f"\nUNATTRIBUTED MOVES (first {args.list_limit} of "
+                  f"{len(moved_unattributed)}; use --report-json for all):")
+            for name, keys, why, classes, example in moved_unattributed[: args.list_limit]:
+                print(f"  [{'+'.join(classes)}] {name}: {', '.join(keys)}  {why or example}")
     if unsupported:
         print("\nUNSUPPORTED OPERATION (first 10):")
         for name, msg in unsupported[:10]:
@@ -402,7 +443,7 @@ def main() -> int:
                     "agree_provenance_only": prov_only,
                     "move_classes": dict(move_classes),
                     "moved_unattributed": [
-                        {"fixture": n, "keys": k, "why": w, "class": c, "example": e}
+                        {"fixture": n, "keys": k, "why": w, "classes": c, "example": e}
                         for n, k, w, c, e in moved_unattributed
                     ],
                     "moved_attributed": [
