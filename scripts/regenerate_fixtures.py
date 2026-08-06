@@ -94,6 +94,24 @@ def differing_leaves(pinned: Any, live: Any, path: str = "") -> list[tuple[str, 
     return []
 
 
+def ignored_by_adjudicator(leaf_path: str, pinned: Any, live: Any) -> bool:
+    """True for leaves `fixture_differ.frame_equal` deliberately does not count.
+
+    Mirrors ONE named rule rather than re-deriving equality: `frame_column_order`
+    treats a missing or empty `column_order` as "this side recorded no ordering
+    claim", and `frame_equal` then compares the column SET instead. Most fixtures
+    store no `column_order` at all while the live oracle always emits one, so
+    counting that leaf labelled 61 fixtures `SHAPE key-added-by-oracle` and put a
+    non-difference in the example line as the exemplar of the move.
+
+    That default-vs-populated comparison is the exact bug that produced 269 of
+    the differ's 420 phantom rows. It is not repeated here.
+    """
+    if not leaf_path.endswith((".column_order", ".column_order[len]")):
+        return False
+    return any(side == "<absent>" or side == [] or side == 0 for side in (pinned, live))
+
+
 def classify_move(pinned: Any, live: Any) -> tuple[list[str], str]:
     """Bucket a moved value into countable classes.
 
@@ -116,8 +134,16 @@ def classify_move(pinned: Any, live: Any) -> tuple[list[str], str]:
        vanish from the counts entirely. Callers therefore count (fixture, class)
        pairs, and the class totals may exceed the number of moved fixtures.
     """
-    # Compare the kind-normalized trees so serde aliases never register.
-    leaves = differing_leaves(normalize_structural(pinned), normalize_structural(live))
+    # Compare the kind-normalized trees so serde aliases never register, then
+    # drop the leaves the ADJUDICATOR does not count as differences. Classifying
+    # a leaf `compare_expected` deliberately ignores invents a mechanism out of
+    # a non-difference, and an attribution pass would then "explain" fixtures
+    # that never moved on that key.
+    leaves = [
+        leaf
+        for leaf in differing_leaves(normalize_structural(pinned), normalize_structural(live))
+        if not ignored_by_adjudicator(*leaf)
+    ]
     if not leaves:
         return ["NORMALIZES_EQUAL"], ""
 
@@ -156,13 +182,82 @@ def classify_move(pinned: Any, live: Any) -> tuple[list[str], str]:
 NULL_MARKERS = {"null", "na_n", "nan"}
 
 
-def _null_marker_move(leaves: list[tuple[str, Any, Any]]) -> str:
-    """Direction of a null-discriminator move, or empty string if not one."""
-    markers = {"null", "na_n", "nan"}
-    for _, p, l in leaves:
-        if isinstance(p, str) and isinstance(l, str) and p in markers and l in markers:
-            return f"{p}->{l}"
-    return ""
+# "nan" and "na_n" decode to the SAME value (`scalar_from_json` maps both to
+# float('nan')), so they must not read as different markers here.
+MARKER_ALIASES = {"nan": "na_n"}
+
+
+def canonical_marker(marker: str) -> str:
+    return MARKER_ALIASES.get(marker, marker)
+
+
+def input_null_markers(fixture: dict[str, Any]) -> set[str]:
+    """Null markers the oracle was HANDED, from the fixture's inputs only.
+
+    Deliberately excludes every `expected*` block: reading the pinned answer
+    back in would make every null-marker move look like a round-trip loss,
+    which is the exact false positive this discriminator exists to avoid.
+    """
+    markers: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "null" and isinstance(node.get("value"), str):
+                markers.add(canonical_marker(node["value"]))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for key, value in fixture.items():
+        if key.startswith("expected") or key in (PROVENANCE_KEY, "retired"):
+            continue
+        walk(value)
+    return markers
+
+
+def roundtrip_implicated(fixture: dict[str, Any], classes: list[str]) -> list[str]:
+    """Null-marker classes whose PINNED marker was already in the fixture's input.
+
+    THE DISCRIMINATOR THIS TOOL WAS MISSING, and the reason the 85-fixture
+    `NULL_MARKER null->na_n` class must not take one attribution:
+
+      - marker present in the input -> the oracle could not return a marker it
+        was GIVEN. On an identity-shaped op that is a read/write asymmetry in
+        the oracle, provable without pandas at all, and the pinned value is
+        right by construction.
+      - marker absent from the input -> the missing value was INTRODUCED by the
+        operation (alignment, outer merge, reindex). Nothing here says who is
+        right; that one still needs a live-pandas probe of its own.
+
+    OBSERVED, which is what licenses adding a check at all: fp_p2c_010_series_
+    head_with_nulls_hardened pins `{"kind":"null","value":"null"}` at values[1]
+    of BOTH its input and its expectation -- `head(3)` does not touch that
+    element -- and the oracle emits `na_n`. `series_dtype_for_payload_values`
+    maps int64+null to nullable `Int64` (which round-trips as pd.NA) but
+    float64+null to plain `float64`, where None collapses to nan and `na_n`
+    becomes the only marker the oracle can write. Same read/write asymmetry
+    shape as the bool-label bug fixed in 6bqfr, one dtype family over.
+
+    Direction is load-bearing: a fixture whose input carries only `na_n` does
+    NOT explain a pinned `null`, so the PINNED side of the class is what gets
+    looked up, never merely "some marker appeared in the input".
+    """
+    if not classes:
+        return []
+    available = input_null_markers(fixture)
+    implicated: list[str] = []
+    for klass in classes:
+        if not klass.startswith("NULL_MARKER "):
+            continue
+        direction = klass[len("NULL_MARKER "):]
+        pinned, _, live = direction.partition("->")
+        if not live:
+            continue
+        if canonical_marker(pinned) in available:
+            implicated.append(klass)
+    return sorted(implicated)
 
 
 def normalize_structural(node: Any) -> Any:
@@ -333,8 +428,9 @@ def main() -> int:
 
     agreed = prov_only = 0
     moved_attributed: list[tuple[str, str]] = []
-    moved_unattributed: list[tuple[str, list[str], str, str, str]] = []
+    moved_unattributed: list[tuple[str, list[str], str, str, str, list[str]]] = []
     move_classes: collections.Counter[str] = collections.Counter()
+    roundtrip_classes: collections.Counter[str] = collections.Counter()
     retired: list[tuple[str, str]] = []
     unsupported: list[tuple[str, str]] = []
     other_errors: list[tuple[str, str]] = []
@@ -382,14 +478,20 @@ def main() -> int:
                         classes.extend(found)
                         example = example or ex
                 classes = sorted(set(classes)) or ["UNCLASSIFIED"]
+                # Split each null-marker class by whether the pinned marker came
+                # from this fixture's own input, so one attribution cannot cover
+                # two mechanisms with opposite verdicts.
+                implicated = roundtrip_implicated(fixture, classes)
                 moved_unattributed.append(
                     (name, verdict["moved"], verdict["detail"].get("semantic", "")[:110],
-                     classes, example))
+                     classes, example, implicated))
                 # A fixture exhibiting several mechanisms is counted in EACH, so
                 # no mechanism can hide behind another. Totals therefore exceed
                 # the moved-fixture count; the report says so.
                 for klass in classes:
                     move_classes[klass] += 1
+                for klass in implicated:
+                    roundtrip_classes[klass] += 1
         elif verdict["provenance_stale"]:
             prov_only += 1
         else:
@@ -423,12 +525,28 @@ def main() -> int:
         )
         for klass, count in move_classes.most_common():
             share = 100.0 * count / len(moved_unattributed)
-            print(f"  {count:5d}  {share:5.1f}% of fixtures  {klass}")
+            roundtrip = roundtrip_classes.get(klass, 0)
+            suffix = ""
+            if klass.startswith("NULL_MARKER "):
+                suffix = (f"   [{roundtrip} round-trip, "
+                          f"{count - roundtrip} op-introduced]")
+            print(f"  {count:5d}  {share:5.1f}% of fixtures  {klass}{suffix}")
+        if roundtrip_classes:
+            print(
+                "\n  ROUND-TRIP means the pinned marker was in the fixture's own INPUT and the\n"
+                "  oracle could not return it — an oracle read/write asymmetry, provable without\n"
+                "  pandas. OP-INTRODUCED means the operation created the missing value, which is\n"
+                "  a separate question and still needs its own live-pandas probe. The two must\n"
+                "  not share one attribution."
+            )
         if args.list_limit:
             print(f"\nUNATTRIBUTED MOVES (first {args.list_limit} of "
                   f"{len(moved_unattributed)}; use --report-json for all):")
-            for name, keys, why, classes, example in moved_unattributed[: args.list_limit]:
-                print(f"  [{'+'.join(classes)}] {name}: {', '.join(keys)}  {why or example}")
+            for name, keys, why, classes, example, implicated in (
+                moved_unattributed[: args.list_limit]
+            ):
+                mark = " ROUND-TRIP" if implicated else ""
+                print(f"  [{'+'.join(classes)}]{mark} {name}: {', '.join(keys)}  {why or example}")
     if unsupported:
         print("\nUNSUPPORTED OPERATION (first 10):")
         for name, msg in unsupported[:10]:
@@ -442,9 +560,11 @@ def main() -> int:
                     "agree_current": agreed,
                     "agree_provenance_only": prov_only,
                     "move_classes": dict(move_classes),
+                    "roundtrip_classes": dict(roundtrip_classes),
                     "moved_unattributed": [
-                        {"fixture": n, "keys": k, "why": w, "classes": c, "example": e}
-                        for n, k, w, c, e in moved_unattributed
+                        {"fixture": n, "keys": k, "why": w, "classes": c, "example": e,
+                         "roundtrip_implicated": r}
+                        for n, k, w, c, e, r in moved_unattributed
                     ],
                     "moved_attributed": [
                         {"fixture": n, "divergence": d} for n, d in moved_attributed

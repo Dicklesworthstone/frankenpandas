@@ -1,28 +1,32 @@
 {
   "fixtures_examined": 1258,
   "agree_current": 0,
-  "agree_provenance_only": 970,
+  "agree_provenance_only": 972,
   "move_classes": {
-    "KIND int64->float64": 58,
+    "KIND int64->float64": 57,
     "NULL_MARKER null->na_n": 85,
     "NULL_MARKER na_n->null": 9,
-    "SHAPE key-added-by-oracle": 61,
     "KIND float64->null": 2,
     "KIND null->float64": 6,
     "VALUE": 43,
     "SHAPE shorter": 2,
     "KIND timedelta64->null": 1,
-    "KIND float64->int64": 10,
-    "KIND int64->bool": 3,
-    "KIND bool->int64": 2,
+    "KIND bool->int64": 1,
+    "KIND float64->int64": 6,
+    "KIND int64->bool": 1,
     "KIND utf8->int64": 3,
     "KIND float64->utf8": 1,
     "KIND int64->utf8": 1,
+    "SHAPE key-added-by-oracle": 7,
     "KIND null->utf8": 3,
     "SHAPE longer": 4,
     "KIND null->bool": 7,
     "KIND int64->null": 2,
     "SHAPE key-dropped-by-oracle": 1
+  },
+  "roundtrip_classes": {
+    "NULL_MARKER null->na_n": 50,
+    "NULL_MARKER na_n->null": 5
   },
   "moved_unattributed": [
     {
@@ -34,7 +38,8 @@
       "classes": [
         "KIND int64->float64"
       ],
-      "example": ".right_values[0].kind: 'int64' vs 'float64'"
+      "example": ".right_values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2c_005_groupby_sum_null_key_dropna_strict.json",
@@ -45,7 +50,8 @@
       "classes": [
         "KIND int64->float64"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2c_005_groupby_sum_order_strict.json",
@@ -56,7 +62,8 @@
       "classes": [
         "KIND int64->float64"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2c_010_series_head_with_nulls_hardened.json",
@@ -67,7 +74,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2c_011_groupby_std_hardened.json",
@@ -78,7 +88,10 @@
       "classes": [
         "NULL_MARKER na_n->null"
       ],
-      "example": ".values[0].value: 'na_n' vs 'null'"
+      "example": ".values[0].value: 'na_n' vs 'null'",
+      "roundtrip_implicated": [
+        "NULL_MARKER na_n->null"
+      ]
     },
     {
       "fixture": "fp_p2c_011_groupby_std_multikey_strict.json",
@@ -89,7 +102,8 @@
       "classes": [
         "NULL_MARKER na_n->null"
       ],
-      "example": ".values[1].value: 'na_n' vs 'null'"
+      "example": ".values[1].value: 'na_n' vs 'null'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2c_011_groupby_var_hardened.json",
@@ -100,7 +114,10 @@
       "classes": [
         "NULL_MARKER na_n->null"
       ],
-      "example": ".values[0].value: 'na_n' vs 'null'"
+      "example": ".values[0].value: 'na_n' vs 'null'",
+      "roundtrip_implicated": [
+        "NULL_MARKER na_n->null"
+      ]
     },
     {
       "fixture": "fp_p2c_011_groupby_var_multikey_hardened.json",
@@ -111,7 +128,10 @@
       "classes": [
         "NULL_MARKER na_n->null"
       ],
-      "example": ".values[1].value: 'na_n' vs 'null'"
+      "example": ".values[1].value: 'na_n' vs 'null'",
+      "roundtrip_implicated": [
+        "NULL_MARKER na_n->null"
+      ]
     },
     {
       "fixture": "fp_p2d_014_dataframe_concat_column_mismatch_error_strict.json",
@@ -121,10 +141,10 @@
       "why": "column 'b'[0] mismatch: {'kind': 'int64', 'value': 10} vs {'kind': 'float64', 'value': 10.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b', 'c']"
+      "example": ".columns.b[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_014_dataframe_merge_column_left_missing_hardened.json",
@@ -134,10 +154,10 @@
       "why": "column 'right_v'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['id', 'left_v', 'shared_x', 'right_v', 'shared_y']"
+      "example": ".columns.right_v[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_014_dataframe_merge_column_right_order_strict.json",
@@ -147,10 +167,10 @@
       "why": "column 'left_v'[0] mismatch: {'kind': 'int64', 'value': 22} vs {'kind': 'float64', 'value': 22.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['id', 'left_v', 'right_v']"
+      "example": ".columns.left_v[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_017_dataframe_from_series_nullable_float_alignment_hardened.json",
@@ -159,10 +179,12 @@
       ],
       "why": "column 'val'[1] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['val', 'other']"
+      "example": ".columns.other[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_017_dataframe_from_series_three_inputs_alignment_hardened.json",
@@ -174,10 +196,10 @@
         "KIND float64->null",
         "KIND null->float64",
         "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle",
         "VALUE"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b', 'c']"
+      "example": ".columns.a[1].kind: 'null' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_017_dataframe_from_series_union_align_strict.json",
@@ -189,10 +211,10 @@
         "KIND float64->null",
         "KIND null->float64",
         "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle",
         "VALUE"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[1].kind: 'null' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_017_series_constructor_bool_numeric_coerces_int_strict.json",
@@ -203,7 +225,8 @@
       "classes": [
         "KIND int64->float64"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_018_dataframe_from_records_column_order_new_column_null_hardened.json",
@@ -212,10 +235,10 @@
       ],
       "why": "column 'z'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'z']"
+      "example": ".columns.z[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_018_dataframe_from_records_sparse_keys_null_fill_hardened.json",
@@ -225,10 +248,10 @@
       "why": "column 'a'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_019_dataframe_constructor_kwargs_column_missing_null_hardened.json",
@@ -237,10 +260,10 @@
       ],
       "why": "column 'z'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['z', 'a']"
+      "example": ".columns.z[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_019_dataframe_constructor_kwargs_empty_frame_with_index_columns_strict.json",
@@ -249,10 +272,10 @@
       ],
       "why": "column 'a'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_019_dataframe_constructor_kwargs_row_and_column_projection_hardened.json",
@@ -262,10 +285,10 @@
       "why": "column 'b'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['b', 'z']"
+      "example": ".columns.b[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_019_dataframe_constructor_kwargs_row_reindex_with_missing_strict.json",
@@ -275,10 +298,10 @@
       "why": "column 'a'[0] mismatch: {'kind': 'int64', 'value': 20} vs {'kind': 'float64', 'value': 20.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_019_dataframe_constructor_kwargs_utf8_index_reindex_strict.json",
@@ -288,10 +311,10 @@
       "why": "column 'city'[1] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['city', 'score']"
+      "example": ".columns.city[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_020_dataframe_constructor_dict_of_series_column_subset_strict.json",
@@ -300,10 +323,10 @@
       ],
       "why": "index length mismatch: 3 vs 2",
       "classes": [
-        "SHAPE key-added-by-oracle",
         "SHAPE shorter"
       ],
-      "example": ".column_order: '<absent>' vs ['b']"
+      "example": ".columns.b[len]: 3 vs 2",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_020_dataframe_constructor_dict_of_series_explicit_index_reorder_hardened.json",
@@ -312,10 +335,10 @@
       ],
       "why": "column 'a'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_020_dataframe_constructor_dict_of_series_missing_column_null_fill_hardened.json",
@@ -324,10 +347,10 @@
       ],
       "why": "index length mismatch: 3 vs 2",
       "classes": [
-        "SHAPE key-added-by-oracle",
         "SHAPE shorter"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'z']"
+      "example": ".columns.a[len]: 3 vs 2",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_020_dataframe_constructor_dict_of_series_row_and_column_projection_strict.json",
@@ -336,10 +359,10 @@
       ],
       "why": "column 'a'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['b', 'a', 'm']"
+      "example": ".columns.a[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_020_dataframe_constructor_dict_of_series_union_align_strict.json",
@@ -348,10 +371,10 @@
       ],
       "why": "column 'a'[2] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[2].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_020_dataframe_constructor_scalar_null_broadcast_strict.json",
@@ -360,10 +383,12 @@
       ],
       "why": "column 'a'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_021_dataframe_constructor_list_like_short_rows_null_fill_strict.json",
@@ -373,10 +398,10 @@
       "why": "column 'b'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.b[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_021_series_to_timedelta_negative_null_hardened.json",
@@ -388,7 +413,8 @@
         "KIND timedelta64->null",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'timedelta64' vs 'null'"
+      "example": ".values[1].kind: 'timedelta64' vs 'null'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_022_dataframe_constructor_list_like_null_fill_determinism_hardened.json",
@@ -398,10 +424,12 @@
       "why": "column 'b'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.b[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_022_dataframe_constructor_list_like_ragged_three_rows_null_padding_hardened.json",
@@ -411,10 +439,10 @@
       "why": "column '1'[0] mismatch: {'kind': 'int64', 'value': 2} vs {'kind': 'float64', 'value': 2.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['0', '1', '2']"
+      "example": ".columns.1[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_022_series_timedelta_total_seconds_numeric_passthrough_strict.json",
@@ -425,68 +453,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".values[0].value: 60.0 vs 6e-08"
-    },
-    {
-      "fixture": "fp_p2d_023_dataframe_constructor_dict_of_series_dtype_float64_hardened.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column 'x'[0] mismatch: {'kind': 'float64', 'value': 1.0} vs {'kind': 'int64', 'value': 1}",
-      "classes": [
-        "KIND float64->int64",
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".column_order: '<absent>' vs ['x', 'y']"
-    },
-    {
-      "fixture": "fp_p2d_023_dataframe_constructor_kwargs_dtype_int64_strict.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column 'flag'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'bool', 'value': True}",
-      "classes": [
-        "KIND int64->bool",
-        "KIND int64->float64",
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".column_order: '<absent>' vs ['flag', 'score']"
-    },
-    {
-      "fixture": "fp_p2d_023_dataframe_constructor_list_like_dtype_float64_strict.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column '0'[0] mismatch: {'kind': 'float64', 'value': 1.0} vs {'kind': 'int64', 'value': 1}",
-      "classes": [
-        "KIND float64->int64",
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".column_order: '<absent>' vs ['0', '1']"
-    },
-    {
-      "fixture": "fp_p2d_023_dataframe_constructor_list_like_dtype_int64_from_bool_hardened.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column '0'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'bool', 'value': True}",
-      "classes": [
-        "KIND int64->bool",
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".column_order: '<absent>' vs ['0', '1']"
-    },
-    {
-      "fixture": "fp_p2d_023_dataframe_constructor_scalar_dtype_float64_hardened.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column 'a'[0] mismatch: {'kind': 'float64', 'value': 7.0} vs {'kind': 'int64', 'value': 7}",
-      "classes": [
-        "KIND float64->int64",
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".values[0].value: 60.0 vs 6e-08",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_023_dataframe_from_dict_dtype_bool_invalid_error_hardened.json",
@@ -496,10 +464,10 @@
       "why": "column 'flag'[0] mismatch: {'kind': 'bool', 'value': True} vs {'kind': 'int64', 'value': 2}",
       "classes": [
         "KIND bool->int64",
-        "SHAPE key-added-by-oracle",
         "VALUE"
       ],
-      "example": ".column_order: '<absent>' vs ['flag']"
+      "example": ".columns.flag[0].kind: 'bool' vs 'int64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_023_dataframe_from_dict_dtype_float64_strict.json",
@@ -508,10 +476,10 @@
       ],
       "why": "column 'a'[0] mismatch: {'kind': 'float64', 'value': 1.0} vs {'kind': 'int64', 'value': 1}",
       "classes": [
-        "KIND float64->int64",
-        "SHAPE key-added-by-oracle"
+        "KIND float64->int64"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].kind: 'float64' vs 'int64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_023_dataframe_from_records_dtype_int64_strict.json",
@@ -521,10 +489,10 @@
       "why": "column 'a'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}",
       "classes": [
         "KIND int64->bool",
-        "KIND int64->float64",
-        "SHAPE key-added-by-oracle"
+        "KIND int64->float64"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_023_dataframe_from_records_dtype_utf8_coerced_hardened.json",
@@ -534,10 +502,10 @@
       "why": "column 'a'[0] mismatch: {'kind': 'utf8', 'value': '1'} vs {'kind': 'int64', 'value': 1}",
       "classes": [
         "KIND utf8->int64",
-        "SHAPE key-added-by-oracle",
         "VALUE"
       ],
-      "example": ".column_order: '<absent>' vs ['a']"
+      "example": ".columns.a[0].kind: 'utf8' vs 'int64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_023_dataframe_from_series_dtype_float64_copy_true_strict.json",
@@ -546,10 +514,10 @@
       ],
       "why": "column 'a'[0] mismatch: {'kind': 'float64', 'value': 10.0} vs {'kind': 'int64', 'value': 10}",
       "classes": [
-        "KIND float64->int64",
-        "SHAPE key-added-by-oracle"
+        "KIND float64->int64"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].kind: 'float64' vs 'int64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_023_series_convert_dtypes_utf8_to_float_strict.json",
@@ -561,7 +529,8 @@
         "KIND float64->utf8",
         "VALUE"
       ],
-      "example": ".values[0].kind: 'float64' vs 'utf8'"
+      "example": ".values[0].kind: 'float64' vs 'utf8'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_023_series_convert_dtypes_utf8_to_int_strict.json",
@@ -573,31 +542,8 @@
         "KIND int64->utf8",
         "VALUE"
       ],
-      "example": ".values[0].kind: 'int64' vs 'utf8'"
-    },
-    {
-      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_boolean_uppercase_strict.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column '0'[0] mismatch: {'kind': 'bool', 'value': True} vs {'kind': 'int64', 'value': 1}",
-      "classes": [
-        "KIND bool->int64",
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".column_order: '<absent>' vs ['0', '1']"
-    },
-    {
-      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_float_alias_hardened.json",
-      "keys": [
-        "expected_frame"
-      ],
-      "why": "column '0'[0] mismatch: {'kind': 'float64', 'value': 5.0} vs {'kind': 'int64', 'value': 5}",
-      "classes": [
-        "KIND float64->int64",
-        "SHAPE key-added-by-oracle"
-      ],
-      "example": ".column_order: '<absent>' vs ['0', '1']"
+      "example": ".values[0].kind: 'int64' vs 'utf8'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_024_dataframe_from_series_dtype_f64_alias_hardened.json",
@@ -606,10 +552,10 @@
       ],
       "why": "column 'a'[0] mismatch: {'kind': 'float64', 'value': 9.0} vs {'kind': 'int64', 'value': 9}",
       "classes": [
-        "KIND float64->int64",
-        "SHAPE key-added-by-oracle"
+        "KIND float64->int64"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].kind: 'float64' vs 'int64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_025_dataframe_iloc_negative_with_columns_hardened.json",
@@ -620,7 +566,8 @@
       "classes": [
         "SHAPE key-added-by-oracle"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a: '<absent>' vs [{'kind': 'int64', 'value': 1200}, {'kind': 'int64', 'value': 1000}]",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_025_dataframe_iloc_row_column_subset_strict.json",
@@ -631,7 +578,8 @@
       "classes": [
         "SHAPE key-added-by-oracle"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b', 'c']"
+      "example": ".columns.c: '<absent>' vs [{'kind': 'utf8', 'value': 'z'}, {'kind': 'utf8', 'value': 'x'}]",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_025_dataframe_loc_duplicate_rows_hardened.json",
@@ -642,7 +590,8 @@
       "classes": [
         "SHAPE key-added-by-oracle"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b', 'c']"
+      "example": ".columns.c: '<absent>' vs [{'kind': 'utf8', 'value': 'y'}, {'kind': 'utf8', 'value': 'x'}, {'kind': 'utf8', 'value': 'y'}]",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_025_dataframe_loc_empty_column_selector_strict.json",
@@ -653,7 +602,8 @@
       "classes": [
         "SHAPE key-added-by-oracle"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a: '<absent>' vs [{'kind': 'int64', 'value': 2}]",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_025_dataframe_loc_row_column_subset_strict.json",
@@ -664,7 +614,8 @@
       "classes": [
         "SHAPE key-added-by-oracle"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b', 'c']"
+      "example": ".columns.b: '<absent>' vs [{'kind': 'int64', 'value': 300}, {'kind': 'int64', 'value': 100}]",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_025_series_clip_with_nulls_hardened.json",
@@ -676,7 +627,10 @@
         "KIND float64->int64",
         "NULL_MARKER na_n->null"
       ],
-      "example": ".values[0].kind: 'float64' vs 'int64'"
+      "example": ".values[0].kind: 'float64' vs 'int64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER na_n->null"
+      ]
     },
     {
       "fixture": "fp_p2d_028_dataframe_concat_axis1_basic_strict.json",
@@ -686,10 +640,10 @@
       "why": "column 'a'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_028_dataframe_concat_axis1_order_left_then_unseen_hardened.json",
@@ -699,10 +653,10 @@
       "why": "column 'left_col'[0] mismatch: {'kind': 'int64', 'value': 100} vs {'kind': 'float64', 'value': 100.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['left_col', 'right_col']"
+      "example": ".columns.left_col[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_028_dataframe_concat_axis1_preserves_existing_nulls_hardened.json",
@@ -712,10 +666,12 @@
       "why": "column 'left_col'[1] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['left_col', 'right_col']"
+      "example": ".columns.left_col[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_028_dataframe_concat_axis1_sparse_alignment_strict.json",
@@ -725,10 +681,10 @@
       "why": "column 'left_col'[0] mismatch: {'kind': 'int64', 'value': 11} vs {'kind': 'float64', 'value': 11.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['left_col', 'right_col']"
+      "example": ".columns.left_col[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_028_dataframe_concat_axis1_utf8_index_strict.json",
@@ -738,10 +694,10 @@
       "why": "column 'left_col'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['left_col', 'right_col']"
+      "example": ".columns.left_col[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_031_dataframe_concat_axis0_outer_basic_overlap_strict.json",
@@ -751,10 +707,10 @@
       "why": "column 'a'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b', 'c']"
+      "example": ".columns.a[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_031_dataframe_concat_axis0_outer_disjoint_columns_hardened.json",
@@ -764,10 +720,10 @@
       "why": "column 'x'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['x', 'y']"
+      "example": ".columns.x[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_031_dataframe_concat_axis0_outer_duplicate_index_hardened.json",
@@ -777,10 +733,10 @@
       "why": "column 'a'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".columns.a[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_031_dataframe_concat_axis0_outer_empty_right_schema_strict.json",
@@ -790,10 +746,10 @@
       "why": "column 'a'[0] mismatch: {'kind': 'int64', 'value': 7} vs {'kind': 'float64', 'value': 7.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a']"
+      "example": ".columns.a[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_031_dataframe_concat_axis0_outer_preserves_nulls_strict.json",
@@ -803,10 +759,12 @@
       "why": "column 'c'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b', 'c']"
+      "example": ".columns.c[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_031_dataframe_concat_axis0_outer_utf8_overlap_strict.json",
@@ -816,10 +774,10 @@
       "why": "column 'city'[1] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['city', 'score']"
+      "example": ".columns.city[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_032_dataframe_concat_axis0_outer_basic_column_order_strict.json",
@@ -831,7 +789,8 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.b[0].kind: 'int64' vs 'float64'"
+      "example": ".columns.b[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_032_dataframe_concat_axis0_outer_disjoint_column_order_hardened.json",
@@ -843,7 +802,8 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.u[0].kind: 'int64' vs 'float64'"
+      "example": ".columns.u[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_032_dataframe_concat_axis0_outer_duplicate_index_order_hardened.json",
@@ -855,7 +815,8 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.b[0].kind: 'int64' vs 'float64'"
+      "example": ".columns.b[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_032_dataframe_concat_axis0_outer_empty_left_schema_order_hardened.json",
@@ -867,7 +828,8 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.k[0].value: 'null' vs 'na_n'"
+      "example": ".columns.k[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_032_dataframe_concat_axis0_outer_empty_right_schema_order_strict.json",
@@ -879,7 +841,8 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.p[0].kind: 'int64' vs 'float64'"
+      "example": ".columns.p[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_032_dataframe_concat_axis0_outer_preserves_nulls_order_strict.json",
@@ -891,7 +854,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.b[0].kind: 'int64' vs 'float64'"
+      "example": ".columns.b[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_032_dataframe_concat_axis0_outer_utf8_column_order_strict.json",
@@ -903,7 +869,8 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.pop[0].kind: 'int64' vs 'float64'"
+      "example": ".columns.pop[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_033_dataframe_merge_composite_left_right_alias_outer_hardened.json",
@@ -912,10 +879,12 @@
       ],
       "why": "column 'lk2'[3] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}",
       "classes": [
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['lk1', 'lk2', 'left_v', 'rk1', 'rk2', 'right_v']"
+      "example": ".columns.lk2[3].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_037_dataframe_merge_sort_true_right_hardened.json",
@@ -925,10 +894,10 @@
       "why": "column 'left_v'[0] mismatch: {'kind': 'int64', 'value': 10} vs {'kind': 'float64', 'value': 10.0}",
       "classes": [
         "KIND int64->float64",
-        "NULL_MARKER null->na_n",
-        "SHAPE key-added-by-oracle"
+        "NULL_MARKER null->na_n"
       ],
-      "example": ".column_order: '<absent>' vs ['id', 'left_v', 'right_v']"
+      "example": ".columns.left_v[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_043_series_sort_values_numeric_ascending_na_last_strict.json",
@@ -940,7 +909,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_043_series_sort_values_numeric_descending_na_last_hardened.json",
@@ -952,7 +924,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_044_series_tail_negative_preserves_nulls_hardened.json",
@@ -964,7 +939,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].value: 'null' vs 'na_n'"
+      "example": ".values[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_046_series_dropna_mixed_missing_strict.json",
@@ -975,7 +953,8 @@
       "classes": [
         "KIND int64->float64"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_046_series_fillna_numeric_basic_strict.json",
@@ -986,7 +965,8 @@
       "classes": [
         "KIND int64->float64"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_056_dataframe_merge_asof_forward_strict.json",
@@ -995,10 +975,10 @@
       ],
       "why": "column 'right_val'[0] mismatch: {'kind': 'int64', 'value': 20} vs {'kind': 'float64', 'value': 20.0}",
       "classes": [
-        "KIND int64->float64",
-        "SHAPE key-added-by-oracle"
+        "KIND int64->float64"
       ],
-      "example": ".column_order: '<absent>' vs ['time', 'left_val', 'right_val']"
+      "example": ".columns.right_val[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_056_merge_asof.json",
@@ -1007,10 +987,10 @@
       ],
       "why": "column 'right_val'[1] mismatch: {'kind': 'int64', 'value': 40} vs {'kind': 'float64', 'value': 40.0}",
       "classes": [
-        "KIND int64->float64",
-        "SHAPE key-added-by-oracle"
+        "KIND int64->float64"
       ],
-      "example": ".column_order: '<absent>' vs ['time', 'left_val', 'right_val']"
+      "example": ".columns.right_val[1].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_088_series_at_time_match_strict.json",
@@ -1021,7 +1001,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".index[0].value: '2024-01-15 09:30:00' vs '2024-01-15T09:30:00'"
+      "example": ".index[0].value: '2024-01-15 09:30:00' vs '2024-01-15T09:30:00'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_089_series_between_time_match_strict.json",
@@ -1032,7 +1013,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".index[0].value: '2024-01-15 09:30:00' vs '2024-01-15T09:30:00'"
+      "example": ".index[0].value: '2024-01-15 09:30:00' vs '2024-01-15T09:30:00'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_091_series_to_datetime_timestamp_origin_strict.json",
@@ -1043,7 +1025,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".values[0].value: -315573903876543211 vs -315573904000000000"
+      "example": ".values[0].value: -315573903876543211 vs -315573904000000000",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_091_series_to_datetime_unix_epoch_strict.json",
@@ -1054,7 +1037,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".values[1].value: 1704067200000000000 vs 1704067200"
+      "example": ".values[1].value: 1704067200000000000 vs 1704067200",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_095_dataframe_at_time_iso_format_hardened.json",
@@ -1063,10 +1047,10 @@
       ],
       "why": "index[0] mismatch: {'kind': 'utf8', 'value': '2024-01-15T10:30:00'} vs {'kind': 'utf8', 'value': '2024-01-15 1",
       "classes": [
-        "SHAPE key-added-by-oracle",
         "VALUE"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".index[0].value: '2024-01-15T10:30:00' vs '2024-01-15 10:30:00'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_096_dataframe_between_time_iso_format_hardened.json",
@@ -1075,10 +1059,10 @@
       ],
       "why": "index[0] mismatch: {'kind': 'utf8', 'value': '2024-01-15T14:30:00'} vs {'kind': 'utf8', 'value': '2024-01-15 1",
       "classes": [
-        "SHAPE key-added-by-oracle",
         "VALUE"
       ],
-      "example": ".column_order: '<absent>' vs ['a', 'b']"
+      "example": ".index[0].value: '2024-01-15T14:30:00' vs '2024-01-15 14:30:00'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_100_dataframe_groupby_idxmin_single_group_strict.json",
@@ -1088,10 +1072,10 @@
       "why": "column 'val'[0] mismatch: {'kind': 'utf8', 'value': '1'} vs {'kind': 'int64', 'value': 1}",
       "classes": [
         "KIND utf8->int64",
-        "SHAPE key-added-by-oracle",
         "VALUE"
       ],
-      "example": ".column_order: '<absent>' vs ['val']"
+      "example": ".columns.val[0].kind: 'utf8' vs 'int64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_101_dataframe_groupby_idxmax_single_group_strict.json",
@@ -1101,10 +1085,10 @@
       "why": "column 'val'[0] mismatch: {'kind': 'utf8', 'value': '0'} vs {'kind': 'int64', 'value': 0}",
       "classes": [
         "KIND utf8->int64",
-        "SHAPE key-added-by-oracle",
         "VALUE"
       ],
-      "example": ".column_order: '<absent>' vs ['val']"
+      "example": ".columns.val[0].kind: 'utf8' vs 'int64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_112_dataframe_groupby_ngroup_descending_strict.json",
@@ -1115,7 +1099,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".values[0].value: 2 vs 0"
+      "example": ".values[0].value: 2 vs 0",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_124_series_map_unmapped_nan_strict.json",
@@ -1126,7 +1111,8 @@
       "classes": [
         "KIND int64->float64"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_127_dataframe_get_dummies_column_order_strict.json",
@@ -1137,7 +1123,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".column_order[1]: 'color_red' vs 'size'"
+      "example": ".column_order[1]: 'color_red' vs 'size'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_127_dataframe_pivot_table_margins_strict.json",
@@ -1148,7 +1135,8 @@
       "classes": [
         "KIND float64->int64"
       ],
-      "example": ".columns.All[0].kind: 'float64' vs 'int64'"
+      "example": ".columns.All[0].kind: 'float64' vs 'int64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_127_series_str_get_dummies_hardened.json",
@@ -1159,7 +1147,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".column_order[0]: 'b' vs 'a'"
+      "example": ".column_order[0]: 'b' vs 'a'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_127_series_unstack_strict.json",
@@ -1170,7 +1159,8 @@
       "classes": [
         "KIND int64->float64"
       ],
-      "example": ".columns.A[0].kind: 'int64' vs 'float64'"
+      "example": ".columns.A[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_128_dataframe_get_dummies_nulls_strict.json",
@@ -1181,7 +1171,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".column_order[1]: 'color_red' vs 'size'"
+      "example": ".column_order[1]: 'color_red' vs 'size'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_130_dataframe_clip_nulls_hardened.json",
@@ -1193,7 +1184,10 @@
         "KIND float64->int64",
         "NULL_MARKER na_n->null"
       ],
-      "example": ".columns.a[0].kind: 'float64' vs 'int64'"
+      "example": ".columns.a[0].kind: 'float64' vs 'int64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER na_n->null"
+      ]
     },
     {
       "fixture": "fp_p2d_136_dataframe_reindex_duplicate_requested_labels_strict.json",
@@ -1204,7 +1198,8 @@
       "classes": [
         "KIND int64->float64"
       ],
-      "example": ".columns.a[0].kind: 'int64' vs 'float64'"
+      "example": ".columns.a[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_142_dataframe_where_df_null_condition_hardened.json",
@@ -1216,7 +1211,8 @@
         "KIND null->float64",
         "VALUE"
       ],
-      "example": ".columns.a[0].kind: 'null' vs 'float64'"
+      "example": ".columns.a[0].kind: 'null' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_143_dataframe_mask_df_null_condition_hardened.json",
@@ -1228,7 +1224,8 @@
         "KIND null->float64",
         "VALUE"
       ],
-      "example": ".columns.a[0].kind: 'null' vs 'float64'"
+      "example": ".columns.a[0].kind: 'null' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_148_dataframe_idxmax_nonnumeric_nan_strict.json",
@@ -1240,7 +1237,8 @@
         "KIND null->utf8",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'utf8'"
+      "example": ".values[1].kind: 'null' vs 'utf8'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_148_dataframe_idxmin_nonnumeric_nan_strict.json",
@@ -1252,7 +1250,8 @@
         "KIND null->utf8",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'utf8'"
+      "example": ".values[1].kind: 'null' vs 'utf8'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_152_dataframe_sum_skips_nonnumeric_order_strict.json",
@@ -1263,7 +1262,8 @@
       "classes": [
         "SHAPE longer"
       ],
-      "example": ".index[len]: 2 vs 3"
+      "example": ".index[len]: 2 vs 3",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_156_dataframe_min_skips_nonnumeric_strict.json",
@@ -1274,7 +1274,8 @@
       "classes": [
         "SHAPE longer"
       ],
-      "example": ".index[len]: 2 vs 3"
+      "example": ".index[len]: 2 vs 3",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_157_dataframe_max_skips_nonnumeric_order_strict.json",
@@ -1285,7 +1286,8 @@
       "classes": [
         "SHAPE longer"
       ],
-      "example": ".index[len]: 2 vs 3"
+      "example": ".index[len]: 2 vs 3",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_164_dataframe_memory_usage_mixed_dtypes_strict.json",
@@ -1296,7 +1298,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".values[4].value: 0 vs 32"
+      "example": ".values[4].value: 0 vs 32",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_169_series_str_lower_with_null_hardened.json",
@@ -1307,7 +1310,8 @@
       "classes": [
         "NULL_MARKER na_n->null"
       ],
-      "example": ".values[1].value: 'na_n' vs 'null'"
+      "example": ".values[1].value: 'na_n' vs 'null'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_171_series_str_capitalize_unicode_strict.json",
@@ -1318,7 +1322,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".values[2].value: 'SSharp' vs 'Ssharp'"
+      "example": ".values[2].value: 'SSharp' vs 'Ssharp'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_172_series_str_strip_with_null_hardened.json",
@@ -1329,7 +1334,8 @@
       "classes": [
         "NULL_MARKER na_n->null"
       ],
-      "example": ".values[1].value: 'na_n' vs 'null'"
+      "example": ".values[1].value: 'na_n' vs 'null'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_288_series_str_findall_null_hardened.json",
@@ -1340,7 +1346,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[2].value: 'null' vs 'na_n'"
+      "example": ".values[2].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_289_series_str_contains_any_null_hardened.json",
@@ -1351,7 +1360,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_290_series_str_startswith_any_empty_patterns_hardened.json",
@@ -1362,7 +1374,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[2].value: 'null' vs 'na_n'"
+      "example": ".values[2].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_291_series_str_endswith_any_null_hardened.json",
@@ -1373,7 +1388,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_292_series_str_split_count_null_hardened.json",
@@ -1385,7 +1403,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_293_series_str_split_get_oob_hardened.json",
@@ -1396,7 +1417,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].value: 'null' vs 'na_n'"
+      "example": ".values[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_294_series_str_rsplit_get_null_hardened.json",
@@ -1407,7 +1431,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_296_series_str_count_matches_null_hardened.json",
@@ -1419,7 +1446,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_297_series_str_count_literal_null_hardened.json",
@@ -1431,7 +1461,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_299_series_str_index_of_null_hardened.json",
@@ -1442,7 +1475,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_300_series_str_rindex_of_null_hardened.json",
@@ -1453,7 +1489,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_310_series_dt_strftime_null_hardened.json",
@@ -1464,7 +1503,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_314_series_dt_is_month_start_null_hardened.json",
@@ -1476,7 +1518,8 @@
         "KIND null->bool",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'bool'"
+      "example": ".values[1].kind: 'null' vs 'bool'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_315_series_dt_is_month_end_null_hardened.json",
@@ -1488,7 +1531,8 @@
         "KIND null->bool",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'bool'"
+      "example": ".values[1].kind: 'null' vs 'bool'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_316_series_dt_is_year_start_null_hardened.json",
@@ -1500,7 +1544,8 @@
         "KIND null->bool",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'bool'"
+      "example": ".values[1].kind: 'null' vs 'bool'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_317_series_dt_is_year_end_null_hardened.json",
@@ -1512,7 +1557,8 @@
         "KIND null->bool",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'bool'"
+      "example": ".values[1].kind: 'null' vs 'bool'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_318_series_dt_is_quarter_start_null_hardened.json",
@@ -1524,7 +1570,8 @@
         "KIND null->bool",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'bool'"
+      "example": ".values[1].kind: 'null' vs 'bool'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_319_series_dt_is_quarter_end_null_hardened.json",
@@ -1536,7 +1583,8 @@
         "KIND null->bool",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'bool'"
+      "example": ".values[1].kind: 'null' vs 'bool'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_320_series_dt_is_leap_year_null_hardened.json",
@@ -1548,7 +1596,8 @@
         "KIND null->bool",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'bool'"
+      "example": ".values[1].kind: 'null' vs 'bool'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_321_series_dt_days_in_month_null_hardened.json",
@@ -1560,7 +1609,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_322_series_dt_date_null_hardened.json",
@@ -1572,7 +1624,8 @@
         "KIND null->utf8",
         "VALUE"
       ],
-      "example": ".values[1].kind: 'null' vs 'utf8'"
+      "example": ".values[1].kind: 'null' vs 'utf8'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_323_series_dt_dayofyear_null_hardened.json",
@@ -1584,7 +1637,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_325_series_dt_year_null_hardened.json",
@@ -1596,7 +1652,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_326_series_dt_hour_null_hardened.json",
@@ -1608,7 +1667,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_327_series_dt_minute_null_hardened.json",
@@ -1620,7 +1682,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_328_series_dt_second_null_hardened.json",
@@ -1632,7 +1697,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_329_series_dt_dayofweek_null_hardened.json",
@@ -1644,7 +1712,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_330_series_dt_quarter_null_hardened.json",
@@ -1656,7 +1727,10 @@
         "KIND int64->float64",
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_331_series_dt_month_name_null_hardened.json",
@@ -1667,7 +1741,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_332_series_dt_day_name_null_hardened.json",
@@ -1678,7 +1755,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_333_series_dt_total_seconds_null_hardened.json",
@@ -1689,7 +1769,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_334_series_dt_to_timestamp_null_hardened.json",
@@ -1700,7 +1783,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_336_series_rolling_std_null_hardened.json",
@@ -1711,7 +1797,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].value: 'null' vs 'na_n'"
+      "example": ".values[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_339_series_rolling_var_null_hardened.json",
@@ -1722,7 +1811,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].value: 'null' vs 'na_n'"
+      "example": ".values[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_341_series_ewm_mean_null_hardened.json",
@@ -1733,7 +1825,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".values[2].value: 2.0 vs 2.6"
+      "example": ".values[2].value: 2.0 vs 2.6",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_345_dataframe_rolling_mean_null_hardened.json",
@@ -1744,7 +1837,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.A[0].value: 'null' vs 'na_n'"
+      "example": ".columns.A[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_352_series_expanding_std_null_hardened.json",
@@ -1755,7 +1851,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].value: 'null' vs 'na_n'"
+      "example": ".values[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_353_series_expanding_var_null_hardened.json",
@@ -1766,7 +1865,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].value: 'null' vs 'na_n'"
+      "example": ".values[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_360_series_shift_null_hardened.json",
@@ -1777,7 +1879,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[0].value: 'null' vs 'na_n'"
+      "example": ".values[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_361_series_pct_change_null_hardened.json",
@@ -1790,7 +1895,10 @@
         "NULL_MARKER null->na_n",
         "VALUE"
       ],
-      "example": ".values[0].value: 'null' vs 'na_n'"
+      "example": ".values[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_362_dataframe_astype_with_nulls_hardened.json",
@@ -1801,7 +1909,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.nums[1].value: 'null' vs 'na_n'"
+      "example": ".columns.nums[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_363_dataframe_astype_str_to_float_hardened.json",
@@ -1812,7 +1923,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.a[1].value: 'null' vs 'na_n'"
+      "example": ".columns.a[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_364_dataframe_memory_usage_with_nulls_hardened.json",
@@ -1823,7 +1937,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".values[2].value: 234 vs 32"
+      "example": ".values[2].value: 234 vs 32",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_385_dataframe_diff_with_nulls_hardened.json",
@@ -1834,7 +1949,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.a[0].value: 'null' vs 'na_n'"
+      "example": ".columns.a[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_386_dataframe_pct_change_with_nulls_hardened.json",
@@ -1847,7 +1965,10 @@
         "NULL_MARKER null->na_n",
         "VALUE"
       ],
-      "example": ".columns.a[0].value: 'null' vs 'na_n'"
+      "example": ".columns.a[0].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_387_dataframe_rank_with_nulls_hardened.json",
@@ -1858,7 +1979,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".columns.a[1].value: 'null' vs 'na_n'"
+      "example": ".columns.a[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_389_series_str_len_with_nulls_hardened.json",
@@ -1869,7 +1993,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_412_series_str_rfind_with_nulls_hardened.json",
@@ -1880,7 +2007,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_413_series_str_encode_with_nulls_hardened.json",
@@ -1891,7 +2021,10 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": [
+        "NULL_MARKER null->na_n"
+      ]
     },
     {
       "fixture": "fp_p2d_415_series_dt_microsecond_basic_strict.json",
@@ -1904,7 +2037,8 @@
         "KIND int64->null",
         "VALUE"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_416_series_dt_nanosecond_basic_strict.json",
@@ -1917,7 +2051,8 @@
         "KIND int64->null",
         "VALUE"
       ],
-      "example": ".values[0].kind: 'int64' vs 'float64'"
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_417_series_categorical_from_codes_missing_strict.json",
@@ -1928,7 +2063,8 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".values[1].value: 'null' vs 'na_n'"
+      "example": ".values[1].value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_419_series_asof_datetime_like_before_start_nat_strict.json",
@@ -1939,7 +2075,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".value: 'na_t' vs 'na_n'"
+      "example": ".value: 'na_t' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_419_series_asof_utf8_before_start_null_strict.json",
@@ -1950,7 +2087,8 @@
       "classes": [
         "NULL_MARKER null->na_n"
       ],
-      "example": ".value: 'null' vs 'na_n'"
+      "example": ".value: 'null' vs 'na_n'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_429_csv_read_frame_parse_dates_mixed_timezone_strict.json",
@@ -1961,7 +2099,8 @@
       "classes": [
         "VALUE"
       ],
-      "example": ".columns.ts[1].value: '2024-01-15 10:30:00+00:00' vs '2024-01-15T10:30:00Z'"
+      "example": ".columns.ts[1].value: '2024-01-15 10:30:00+00:00' vs '2024-01-15T10:30:00Z'",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_430_dataframe_groupby_agg_multi_strict.json",
@@ -1973,7 +2112,8 @@
         "SHAPE key-added-by-oracle",
         "SHAPE key-dropped-by-oracle"
       ],
-      "example": ".column_order: '<absent>' vs [\"('x', 'sum')\", \"('x', 'mean')\", \"('y', 'count')\"]"
+      "example": ".columns.('x', 'mean'): '<absent>' vs [{'kind': 'float64', 'value': 2.0}, {'kind': 'float64', 'value': 15.0}]",
+      "roundtrip_implicated": []
     },
     {
       "fixture": "fp_p2d_431_series_str_split_expand_n_padding_strict.json",
@@ -1987,7 +2127,8 @@
         "SHAPE longer",
         "VALUE"
       ],
-      "example": ".column_order[len]: 2 vs 3"
+      "example": ".column_order[len]: 2 vs 3",
+      "roundtrip_implicated": []
     }
   ],
   "moved_attributed": [],
@@ -2201,6 +2342,26 @@
     {
       "fixture": "fp_p2d_022_dataframe_constructor_list_like_row_width_exceeds_columns_by_two_strict.json",
       "error": "oracle error: dataframe_constructor_list_like failed: 2 columns passed, passed data had 4 columns"
+    },
+    {
+      "fixture": "fp_p2d_023_dataframe_constructor_list_like_dtype_int64_lossy_float_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: Trying to coerce float values to integers"
+    },
+    {
+      "fixture": "fp_p2d_023_dataframe_constructor_list_like_dtype_unknown_error_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: unsupported constructor dtype 'object'"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_boolean_pyarrow_unsupported_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: unsupported constructor dtype 'boolean[pyarrow]'"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_datetime64_unsupported_error_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: unsupported constructor dtype 'datetime64[ns]'"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_uint64_unsupported_error_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: unsupported constructor dtype 'uint64'"
     },
     {
       "fixture": "fp_p2d_025_dataframe_iloc_out_of_bounds_error_strict.json",
@@ -2484,7 +2645,7 @@
     }
   ],
   "uncompared_keys": {
-    "expected_error_contains": 17
+    "expected_error_contains": 12
   },
   "coverage": {
     "SEMANTIC": 1114,
