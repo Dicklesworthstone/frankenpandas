@@ -185628,3 +185628,149 @@ mod columns_view_u387a {
         assert_eq!(from_map.columns().get("a"), from_store.columns().get("a"));
     }
 }
+
+/// `br-frankenpandas-lyaqi`: COUNTED-MECHANISM probe for the claim that
+/// `SeriesGroupBy` rolling is dominated by a serial `build_groups` floor.
+///
+/// Why counted rather than a ratio: the original finding was a 12.20ms vs
+/// 12.29ms A/B — a 0.7% delta with no A/A null control, which the perf-ledger
+/// preflight correctly REFUSED ("negative verdict lacks exact numeric A/A or
+/// counted-mechanism evidence"). A 0.7% delta is not separable from noise on
+/// this fleet. The gate also accepts an exact counted mechanism, which does
+/// not depend on the timing delta at all, so that is what this measures:
+/// how many nanoseconds of a `sgb.rolling(w).mean()` call are spent inside
+/// `build_groups`.
+///
+/// This is a measurement probe, not a behavioural test: it asserts only the
+/// structural conclusion (whether `build_groups` is or is not the dominant
+/// share), and prints the exact counts for the ledger. Run it with
+/// `--ignored --nocapture` to reproduce the banked numbers.
+#[cfg(test)]
+mod sgb_rolling_build_groups_share_lyaqi {
+    use std::time::Instant;
+
+    use fp_columnar::Column;
+    use fp_index::{Index, IndexLabel};
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    // The fixture the bead names: 200k rows / 2000 groups / window 10, i64.
+    const ROWS: usize = 200_000;
+    const GROUPS: i64 = 2_000;
+    const WINDOW: usize = 10;
+    const REPS: usize = 15;
+
+    fn fixture() -> (Series, Series) {
+        let index = Index::new((0..ROWS).map(|r| IndexLabel::Int64(r as i64)).collect());
+        let values: Vec<i64> = (0..ROWS).map(|r| (r as i64 * 7) % 1_000).collect();
+        let keys: Vec<i64> = (0..ROWS).map(|r| (r as i64) % GROUPS).collect();
+        let values = Series::new("v", index.clone(), Column::from_i64_values(values))
+            .expect("value series");
+        let keys = Series::new("k", index, Column::from_i64_values(keys)).expect("key series");
+        (values, keys)
+    }
+
+    fn median_ns(mut samples: Vec<u128>) -> u128 {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    #[test]
+    #[ignore = "timing probe: run explicitly with --ignored --nocapture"]
+    fn build_groups_share_of_rolling_mean() {
+        let (values, keys) = fixture();
+
+        // M: the whole grouped-rolling call.
+        let mut total = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            let gb = values.groupby(&keys).expect("groupby");
+            let start = Instant::now();
+            let out = gb.rolling(WINDOW).mean().expect("rolling mean");
+            total.push(start.elapsed().as_nanos());
+            assert_eq!(out.len(), ROWS);
+        }
+
+        // N: just build_groups, on an identically-constructed groupby, so the
+        // subtraction is like-for-like.
+        let mut groups_only = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            let gb = values.groupby(&keys).expect("groupby");
+            let start = Instant::now();
+            let built = gb.build_groups();
+            groups_only.push(start.elapsed().as_nanos());
+            assert_eq!(built.2.len(), GROUPS as usize);
+        }
+
+        let m = median_ns(total);
+        let n = median_ns(groups_only);
+        let share = (n as f64) / (m as f64) * 100.0;
+        println!(
+            "lyaqi_counted_mechanism rows={ROWS} groups={GROUPS} window={WINDOW} reps={REPS} \
+             total_median_ns={m} build_groups_median_ns={n} build_groups_share_pct={share:.2} \
+             remainder_ns={}",
+            m.saturating_sub(n)
+        );
+
+        // The structural claim under test. A dominant serial floor means most
+        // of the call is build_groups; if it is a small slice, the original
+        // "build_groups floor" explanation for the failed parallelisation is
+        // WRONG and the bead's conclusion has to be rewritten rather than
+        // banked. Either outcome is a valid result — this asserts only that we
+        // measured something coherent.
+        assert!(n < m, "build_groups cannot exceed the whole call");
+        assert!(m > 0 && n > 0, "probe must observe nonzero time");
+    }
+
+    /// Same count, but with UTF-8 group keys.
+    ///
+    /// The Int64-keyed probe above takes `build_groups`' hash-free dense-gid
+    /// fast path (bounded all-valid Int64 key), so it cannot speak to the
+    /// bead's "per-call SipHash" premise. This arm forces the hashed path,
+    /// which is the only one that premise could describe. Both arms are
+    /// needed before saying anything about a build_groups floor, because the
+    /// answer is key-dtype dependent.
+    #[test]
+    #[ignore = "timing probe: run explicitly with --ignored --nocapture"]
+    fn build_groups_share_of_rolling_mean_utf8_keys() {
+        let index = Index::new((0..ROWS).map(|r| IndexLabel::Int64(r as i64)).collect());
+        let values: Vec<i64> = (0..ROWS).map(|r| (r as i64 * 7) % 1_000).collect();
+        let values = Series::new("v", index.clone(), Column::from_i64_values(values))
+            .expect("value series");
+        let key_values: Vec<Scalar> = (0..ROWS)
+            .map(|r| Scalar::Utf8(format!("grp{:05}", (r as i64) % GROUPS)))
+            .collect();
+        let keys = Series::new("k", index, Column::from_values(key_values).expect("utf8 column"))
+            .expect("keys");
+
+        let mut total = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            let gb = values.groupby(&keys).expect("groupby");
+            let start = Instant::now();
+            let out = gb.rolling(WINDOW).mean().expect("rolling mean");
+            total.push(start.elapsed().as_nanos());
+            assert_eq!(out.len(), ROWS);
+        }
+
+        let mut groups_only = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            let gb = values.groupby(&keys).expect("groupby");
+            let start = Instant::now();
+            let built = gb.build_groups();
+            groups_only.push(start.elapsed().as_nanos());
+            assert_eq!(built.2.len(), GROUPS as usize);
+        }
+
+        let m = median_ns(total);
+        let n = median_ns(groups_only);
+        let share = (n as f64) / (m as f64) * 100.0;
+        println!(
+            "lyaqi_counted_mechanism_utf8 rows={ROWS} groups={GROUPS} window={WINDOW} reps={REPS} \
+             total_median_ns={m} build_groups_median_ns={n} build_groups_share_pct={share:.2} \
+             remainder_ns={}",
+            m.saturating_sub(n)
+        );
+        assert!(n < m, "build_groups cannot exceed the whole call");
+        assert!(m > 0 && n > 0, "probe must observe nonzero time");
+    }
+}
