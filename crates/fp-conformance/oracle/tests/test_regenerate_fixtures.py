@@ -157,6 +157,81 @@ def test_corpus_anchor_merge_missing_is_op_introduced():
     assert regenerate_fixtures.roundtrip_implicated(fixture, [NULL_TO_NAN]) == []
 
 
+# --- "stale" vs "never generated" are different findings -------------------
+#
+# p6srr is titled "the corpus is stale against its oracle", which presumes the
+# pinned values were once that oracle's output. For the concat family they were
+# not: the fixture's own named oracle (sha f38b2fca…, = pandas_oracle.py at
+# 9aa1ed6fe) emits float64 + na_n today, same as the current one, while the
+# fixture pins int64 + null. Regeneration is the remedy for one and destroys
+# evidence in the other, so the verdicts must never share a total.
+
+
+def test_named_oracle_reproduces_the_fixture_means_genuinely_stale():
+    assert (
+        regenerate_fixtures.provenance_verdict(True, False)
+        == regenerate_fixtures.GENUINELY_STALE
+    )
+
+
+def test_named_oracle_agreeing_with_today_means_the_stamp_is_fiction():
+    """NEGATIVE: this is the case a 'stale corpus' framing gets wrong."""
+    assert (
+        regenerate_fixtures.provenance_verdict(False, True)
+        == regenerate_fixtures.PROVENANCE_FICTION
+    )
+
+
+def test_named_oracle_agreeing_with_neither_is_its_own_bucket():
+    assert (
+        regenerate_fixtures.provenance_verdict(False, False)
+        == regenerate_fixtures.BOTH_MOVED
+    )
+
+
+def test_reproducing_the_fixture_wins_over_matching_today():
+    """Degenerate input: if it matches the fixture, the fixture is what matters."""
+    assert (
+        regenerate_fixtures.provenance_verdict(True, True)
+        == regenerate_fixtures.GENUINELY_STALE
+    )
+
+
+def test_the_verdicts_are_distinct_labels():
+    labels = {
+        regenerate_fixtures.GENUINELY_STALE,
+        regenerate_fixtures.PROVENANCE_FICTION,
+        regenerate_fixtures.BOTH_MOVED,
+        regenerate_fixtures.STAMP_IMPOSSIBLE,
+        regenerate_fixtures.STAMP_ERRORED,
+    }
+    assert len(labels) == 5
+
+
+def test_named_oracle_refusing_the_operation_is_an_impossible_stamp():
+    """An oracle that cannot run the op cannot have generated the fixture."""
+    assert (
+        regenerate_fixtures.named_oracle_verdict(
+            "unsupported operation: 'dataframe_mask_df'"
+        )
+        == regenerate_fixtures.STAMP_IMPOSSIBLE
+    )
+
+
+def test_other_named_oracle_failures_are_reported_not_dropped():
+    """NEGATIVE: a crash is NOT evidence the stamp is impossible — different bucket.
+
+    Both must still be reported. A silently dropped non-answer is the differ bug
+    this tool exists downstream of.
+    """
+    verdict = regenerate_fixtures.named_oracle_verdict(
+        "dataframe_mask_df failed: bad operand type for unary ~: 'NoneType'"
+    )
+    assert verdict == regenerate_fixtures.STAMP_ERRORED
+    assert verdict != regenerate_fixtures.STAMP_IMPOSSIBLE
+    assert verdict, "a non-answer must never be the empty string"
+
+
 # --- The classifier must not count leaves the adjudicator ignores ----------
 
 
