@@ -3536,6 +3536,22 @@ pub fn nanmean(values: &[Scalar]) -> Scalar {
         // inputs is always representable; the narrowing is defensive only.
         return timedelta_ns_to_scalar(sum / count as i128);
     }
+    // br-frankenpandas-adv58: Datetime64 mean is the mean of the epoch-ns
+    // backing, re-read as an instant. Accumulated in i128 and divided with
+    // Rust's toward-zero integer division, which is exactly the rounding pandas
+    // shows where it is exact ([0,1] -> 0, [0,3] -> 1, [-3,0] -> -1; floor and
+    // ties-to-even are both refuted). Where pandas is NOT exact it snaps to its
+    // f64 grid — even for a constant series — and FP stays exact. See DISC-019.
+    if let Some((sum, count)) = collect_datetime_ns(values) {
+        if count == 0 {
+            return Scalar::Datetime64(Timestamp::NAT);
+        }
+        let mean = sum / count as i128;
+        if mean > i128::from(i64::MAX) || mean <= i128::from(i64::MIN) {
+            return Scalar::Datetime64(Timestamp::NAT);
+        }
+        return Scalar::Datetime64(mean as i64);
+    }
     // Fused single-pass fold (see `nansum`): accumulate sum + count of finite
     // values in one scan. Bit-identical to the prior `collect_finite` two-pass:
     // count == nums.len(), sum folds the same values in the same order.
@@ -3718,71 +3734,119 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
 /// for ns spans up to ~104 days exactly; beyond that pandas itself loses
 /// precision the same way). A NaT-only input remains in the Timedelta family.
 /// Returns None if any non-missing value is not Timedelta64.
+/// Returns the ns backing as f64 for uniformly-temporal input, along with the
+/// constructor for the family it belongs to.
+///
+/// br-frankenpandas-adv58 widened this to Datetime64. The f64 hop is inherited
+/// deliberately: quantile interpolates by a fractional weight, so its Datetime
+/// arm keeps the SAME accuracy contract its Timedelta sibling already had
+/// rather than inventing a stricter one for one dtype only.
+/// Timedelta64-ONLY view of [`collect_temporal_ns_f64`].
+///
+/// std/var/sem keep this narrower gate on purpose: live pandas 2.2.3 RAISES
+/// `TypeError: 'DatetimeArray' ... does not support reduction 'var'` (and the
+/// same for 'sem'), so widening them to Datetime64 would invent a value pandas
+/// refuses to produce. `std` IS supported by pandas for datetimes but returns a
+/// Timedelta via an f64 computation throughout, so it needs its own accuracy
+/// contract and is deferred rather than folded in here.
 fn collect_timedelta_ns_f64(values: &[Scalar]) -> Option<Vec<f64>> {
+    match collect_temporal_ns_f64(values) {
+        Some((out, make))
+            if std::ptr::fn_addr_eq(make, Scalar::Timedelta64 as fn(i64) -> Scalar) =>
+        {
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Builds a `Scalar` of one temporal family from its raw ns backing.
+type TemporalCtor = fn(i64) -> Scalar;
+
+fn collect_temporal_ns_f64(values: &[Scalar]) -> Option<(Vec<f64>, TemporalCtor)> {
     let mut out = Vec::with_capacity(values.len());
-    let mut saw_td = false;
+    let mut make: Option<fn(i64) -> Scalar> = None;
     for v in values {
-        match v {
-            Scalar::Timedelta64(ns) => {
-                saw_td = true;
-                if v.is_missing() {
-                    continue;
-                }
-                out.push(*ns as f64);
-            }
+        let (ns, ctor): (i64, fn(i64) -> Scalar) = match v {
+            Scalar::Timedelta64(ns) => (*ns, Scalar::Timedelta64),
+            Scalar::Datetime64(ns) => (*ns, Scalar::Datetime64),
             _ if v.is_missing() => continue,
             _ => return None,
+        };
+        // A mixed Timedelta64/Datetime64 input is not a single family.
+        match make {
+            Some(existing) if !std::ptr::fn_addr_eq(existing, ctor) => return None,
+            _ => make = Some(ctor),
         }
+        if v.is_missing() {
+            continue;
+        }
+        out.push(ns as f64);
     }
-    if saw_td { Some(out) } else { None }
+    make.map(|ctor| (out, ctor))
 }
 
 /// Clamp an f64 result into i64 range and wrap as Scalar::Timedelta64.
 fn float_ns_to_timedelta(value: f64) -> Scalar {
+    float_ns_to_temporal(value, Scalar::Timedelta64)
+}
+
+/// Family-generic form of [`float_ns_to_timedelta`], per br-frankenpandas-adv58:
+/// NaT for a non-finite input, otherwise the ns value in the caller's family.
+fn float_ns_to_temporal(value: f64, make: fn(i64) -> Scalar) -> Scalar {
     if !value.is_finite() {
-        return Scalar::Timedelta64(Timedelta::NAT);
+        return make(Timedelta::NAT);
     }
     let clamped = value.clamp(i64::MIN as f64, i64::MAX as f64);
-    Scalar::Timedelta64(clamped as i64)
+    make(clamped as i64)
 }
 
 pub fn nanmedian(values: &[Scalar]) -> Scalar {
-    // Preserve exact nanosecond ordering for uniformly-Timedelta64 input.
+    // Preserve exact nanosecond ordering for uniformly-temporal input.
     // Converting to f64 loses distinct ticks beyond the 53-bit boundary.
-    let mut timedeltas = Vec::with_capacity(values.len());
-    let mut saw_timedelta = false;
-    let mut all_timedelta = true;
-    for value in values {
-        if value.is_missing() {
-            continue;
-        }
-        match value {
-            Scalar::Timedelta64(ns) => {
-                saw_timedelta = true;
-                timedeltas.push(*ns);
-            }
-            _ => {
-                all_timedelta = false;
-                break;
-            }
-        }
-    }
-    if all_timedelta && saw_timedelta {
-        // O(n) selection instead of a full sort: order statistics depend only
-        // on values, so the unstable partition yields the same middle values.
-        let mut td = timedeltas;
-        let n = td.len();
-        let mid = n / 2;
-        let (left, mid_ref, _right) = td.select_nth_unstable(mid);
-        let mid_val = *mid_ref;
-        let median_ns = if n.is_multiple_of(2) {
-            let lower = left.iter().copied().fold(i64::MIN, i64::max);
-            (i128::from(lower) + i128::from(mid_val)) / 2
-        } else {
-            i128::from(mid_val)
-        };
-        return Scalar::Timedelta64(median_ns as i64);
-    }
+    //
+    // br-frankenpandas-adv58: Datetime64 joins Timedelta64 here, and keeps the
+    // SAME exact i128 treatment its Timedelta sibling already had. Note that
+    // this makes FP strictly more precise than pandas 2.2.3, which routes
+    // datetime median through f64 and therefore snaps to a 256 ns grid at
+    // 2020-era timestamps — returning, for an odd-count input, a Timestamp that
+    // is not even one of the supplied values. See DISC-019.
+    let make: fn(i64) -> Scalar = if is_timedelta_input(values) {
+        Scalar::Timedelta64
+    } else if is_datetime_input(values) {
+        Scalar::Datetime64
+    } else {
+        // Not uniformly temporal: fall through to the numeric arm below.
+        return nanmedian_numeric(values);
+    };
+    let mut td: Vec<i64> = values
+        .iter()
+        .filter(|value| !value.is_missing())
+        .filter_map(|value| match value {
+            Scalar::Timedelta64(ns) | Scalar::Datetime64(ns) => Some(*ns),
+            _ => None,
+        })
+        .collect();
+    // O(n) selection instead of a full sort: order statistics depend only
+    // on values, so the unstable partition yields the same middle values.
+    let n = td.len();
+    let mid = n / 2;
+    let (left, mid_ref, _right) = td.select_nth_unstable(mid);
+    let mid_val = *mid_ref;
+    let median_ns = if n.is_multiple_of(2) {
+        let lower = left.iter().copied().fold(i64::MIN, i64::max);
+        // Toward-zero division, matching pandas where pandas is exact.
+        (i128::from(lower) + i128::from(mid_val)) / 2
+    } else {
+        i128::from(mid_val)
+    };
+    make(median_ns as i64)
+}
+
+/// Numeric (f64) median arm, split out of [`nanmedian`] by
+/// br-frankenpandas-adv58 so the temporal arm can return early. Also the
+/// fall-through for non-uniform input, e.g. mixed Datetime64 + Int64.
+fn nanmedian_numeric(values: &[Scalar]) -> Scalar {
     let mut nums = collect_finite(values);
     if nums.is_empty() {
         return Scalar::Null(NullKind::NaN);
@@ -4055,6 +4119,40 @@ fn is_timedelta_input(values: &[Scalar]) -> bool {
         }
     }
     saw_td
+}
+
+/// Datetime64 mirror of [`collect_timedelta_ns`], per br-frankenpandas-adv58.
+///
+/// Note the deliberate difference from [`is_datetime_input`]: the family is
+/// marked on seeing the *variant*, before the missing check, so an ALL-NaT
+/// datetime input still reports as the Datetime family with `count == 0`. That
+/// is what lets `nanmean` return `Datetime64(NaT)` — preserving dtype the way
+/// pandas does — instead of degrading to a numeric NaN. `collect_timedelta_ns`
+/// has used this convention all along; matching it keeps the two families
+/// symmetric.
+fn collect_datetime_ns(values: &[Scalar]) -> Option<(i128, usize)> {
+    let mut sum: i128 = 0;
+    let mut count: usize = 0;
+    let mut saw_datetime = false;
+    for v in values {
+        match v {
+            Scalar::Datetime64(ns) => {
+                saw_datetime = true;
+                if v.is_missing() {
+                    continue;
+                }
+                sum += i128::from(*ns);
+                count += 1;
+            }
+            _ if v.is_missing() => continue,
+            _ => return None,
+        }
+    }
+    if saw_datetime {
+        Some((sum, count))
+    } else {
+        None
+    }
 }
 
 /// Sibling of [`is_timedelta_input`] for Datetime64, per br-frankenpandas-axhhk.
@@ -4332,13 +4430,13 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
     }
     // Per br-frankenpandas-5djk7: pandas td_series.quantile(q) returns
     // Timedelta64 with linear-interpolated ns. Was silently NaN before.
-    if let Some(mut td) = collect_timedelta_ns_f64(values) {
+    if let Some((mut td, make)) = collect_temporal_ns_f64(values) {
         if td.is_empty() {
-            return Scalar::Timedelta64(Timedelta::NAT);
+            return make(Timedelta::NAT);
         }
         let n = td.len();
         if n == 1 {
-            return float_ns_to_timedelta(td[0]);
+            return float_ns_to_temporal(td[0], make);
         }
         let pos = q * (n - 1) as f64;
         let lo = pos.floor() as usize;
@@ -4356,7 +4454,7 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
             let weight = pos - lo as f64;
             lo_val + (hi_val - lo_val) * weight
         };
-        return float_ns_to_timedelta(ns);
+        return float_ns_to_temporal(ns, make);
     }
     let mut nums = collect_finite(values);
     if nums.is_empty() {
@@ -7389,6 +7487,106 @@ mod tests {
         let span = super::nanptp(&huge);
         assert!(span.is_missing(), "unrepresentable span must be NaT");
         assert_ne!(span, Scalar::Timedelta64(i64::MAX));
+    }
+
+    /// br-frankenpandas-adv58: mean/median/quantile returned `Null(NaN)` for
+    /// datetime input. Expectations are the live pandas 2.2.3 answers for
+    /// `Series([2020-01-01, +60d, +31d])`, which at day granularity pandas
+    /// computes exactly:
+    ///   mean 2020-01-31T08:00 · median 2020-02-01 · q0.5 2020-02-01
+    ///   q0.25 2020-01-16T12:00
+    #[test]
+    fn datetime64_averaging_reductions_match_pandas_adv58() {
+        let d = Scalar::Datetime64;
+        let vals = vec![
+            d(DT_2020),
+            d(DT_2020 + 60 * DAY_NS),
+            d(DT_2020 + 31 * DAY_NS),
+        ];
+        // 1580457600e9 / 1580515200e9 / 1579176000e9, straight from the probe.
+        assert_eq!(super::nanmean(&vals), d(1_580_457_600_000_000_000));
+        assert_eq!(super::nanmedian(&vals), d(1_580_515_200_000_000_000));
+        assert_eq!(super::nanquantile(&vals, 0.5), d(1_580_515_200_000_000_000));
+        assert_eq!(
+            super::nanquantile(&vals, 0.25),
+            d(1_579_176_000_000_000_000)
+        );
+    }
+
+    /// The even-count rounding rule, probed at 1 ns granularity where pandas is
+    /// exact. It is TRUNCATION TOWARD ZERO — plain Rust integer division.
+    /// `floor` would give -1 for [-1,0]; ties-to-even would give 2 for [1,2].
+    /// Both are refuted by these cases, so this test discriminates against the
+    /// two rounding rules a reimplementation is most likely to pick.
+    #[test]
+    fn datetime64_mean_median_round_toward_zero_adv58() {
+        let d = Scalar::Datetime64;
+        for (a, b, want) in [
+            (0_i64, 1_i64, 0_i64),
+            (0, 3, 1),
+            (1, 2, 1),
+            (-1, 0, 0),
+            (-3, 0, -1),
+            (-2, -1, -1),
+            (0, 2, 1),
+            (-2, 0, -1),
+        ] {
+            let vals = vec![d(a), d(b)];
+            assert_eq!(
+                super::nanmean(&vals),
+                d(want),
+                "mean of [{a}, {b}] should be {want}"
+            );
+            assert_eq!(
+                super::nanmedian(&vals),
+                d(want),
+                "median of [{a}, {b}] should be {want}"
+            );
+        }
+    }
+
+    /// NaT is skipped, and an all-NaT datetime input stays in the Datetime
+    /// family rather than degrading to a numeric NaN.
+    #[test]
+    fn datetime64_averaging_skips_nat_adv58() {
+        let d = Scalar::Datetime64;
+        let vals = vec![d(DT_2020), d(Timestamp::NAT), d(DT_2020 + 2 * DAY_NS)];
+        // pandas: mean == median == 2020-01-02, count 2.
+        assert_eq!(super::nanmean(&vals), d(DT_2020 + DAY_NS));
+        assert_eq!(super::nanmedian(&vals), d(DT_2020 + DAY_NS));
+
+        let all_nat = vec![d(Timestamp::NAT), d(Timestamp::NAT)];
+        let got = super::nanmean(&all_nat);
+        assert!(
+            got.is_missing(),
+            "all-NaT mean must be missing, got {got:?}"
+        );
+        assert_eq!(got.dtype(), DType::Datetime64, "must stay Datetime64");
+    }
+
+    /// FP is EXACT here and pandas is not: pandas routes datetime
+    /// mean/median/quantile through f64, so at 2020-era magnitudes (~1.58e18,
+    /// f64 ULP 256 ns) it snaps to a 256 ns grid — it returns B+0 for the mean
+    /// of the CONSTANT series [B+1, B+1], and for an odd-count median it can
+    /// return a Timestamp that is not even one of the inputs. FP keeps the
+    /// exact i128 treatment its Timedelta sibling already had. DISC-019.
+    #[test]
+    fn datetime64_averaging_is_exact_where_pandas_snaps_adv58() {
+        let d = Scalar::Datetime64;
+
+        // Constant series: the answer is unambiguous; pandas still loses it.
+        let constant = vec![d(DT_2020 + 1), d(DT_2020 + 1)];
+        assert_eq!(super::nanmean(&constant), d(DT_2020 + 1));
+        assert_eq!(super::nanmedian(&constant), d(DT_2020 + 1));
+
+        // Odd-count median is a SELECTION: the result must be an input value.
+        let odd = vec![d(DT_2020), d(DT_2020 + 129), d(DT_2020 + 258)];
+        let med = super::nanmedian(&odd);
+        assert_eq!(med, d(DT_2020 + 129));
+        assert!(
+            odd.contains(&med),
+            "odd-count median must be one of the inputs; pandas returns B+256, which is not"
+        );
     }
 
     /// Mixed Datetime64 + another dtype must NOT take the typed arm — it falls
