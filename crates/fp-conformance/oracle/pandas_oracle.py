@@ -4889,6 +4889,38 @@ def normalize_groupby_ohlc_frame(frame):
     return out
 
 
+def apply_column_selector(frame, payload: dict[str, Any], op_name: str):
+    """Apply the `column_order` COLUMN SELECTOR for loc/iloc, if one was sent.
+
+    br-frankenpandas-fixture-divergence-triage-9s0c4. For the selection ops
+    `column_order` is a SELECTOR, not a cosmetic ordering: neither op_dataframe_loc
+    nor op_dataframe_iloc read it, so both returned every column of the frame and
+    five fixtures whose whole purpose is column subsetting compared a subset
+    against the full frame. Verified on
+    fp_p2d_025_dataframe_iloc_row_column_subset_strict: `iloc[[2,0]]` alone gives
+    columns a,b,c, while `iloc[[2,0], [b,a]]` reproduces the pinned values exactly
+    (index [2,0], b=[300,100], a=[30,10]). The fixtures were right.
+
+    ABSENT and PRESENT-BUT-EMPTY mean different things and must stay distinct:
+    absent means "no selection", while `[]` is a deliberate empty selection
+    (fp_p2d_025_dataframe_loc_empty_column_selector_strict pins zero columns).
+    Hence the `is not None` test rather than a truthiness test.
+
+    Note the same key means something else for the CONSTRUCTOR ops, where it is
+    the `columns=` argument; that is why this is applied per-op rather than
+    globally.
+    """
+    selector = payload.get("column_order")
+    if selector is None:
+        return frame
+    if not isinstance(selector, list):
+        raise OracleError(f"{op_name} column_order must be a list when provided")
+    missing = [name for name in selector if name not in frame.columns]
+    if missing:
+        raise OracleError(f"{op_name} column_order names absent from frame: {missing}")
+    return frame.loc[:, selector]
+
+
 def op_dataframe_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     loc_labels = payload.get("loc_labels")
@@ -4911,6 +4943,7 @@ def op_dataframe_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if not hasattr(out, "columns"):
         raise OracleError("dataframe_loc currently requires DataFrame-shaped selections")
 
+    out = apply_column_selector(out, payload, "dataframe_loc")
     return {"expected_frame": dataframe_to_json(out)}
 
 
@@ -4962,6 +4995,7 @@ def op_dataframe_iloc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except IndexError as exc:
         raise OracleError(f"dataframe_iloc position lookup failed: {exc}") from exc
 
+    out = apply_column_selector(out, payload, "dataframe_iloc")
     return {"expected_frame": dataframe_to_json(out)}
 
 

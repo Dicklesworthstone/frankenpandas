@@ -159,3 +159,49 @@ def test_known_unread_entries_are_still_unread(key: str, reason: str):
         f"{key} is now read by the oracle ({reason}). Remove it from "
         "KNOWN_UNREAD so the guard covers it."
     )
+
+
+# ---------------------------------------------------------------------------
+# options that ARE read somewhere but not APPLIED where they matter
+# ---------------------------------------------------------------------------
+
+
+def test_column_order_is_applied_as_a_selector_for_loc_and_iloc(oracle, pd):
+    """`column_order` is a SELECTOR for the selection ops, not decoration.
+
+    br-frankenpandas-fixture-divergence-triage-9s0c4. Neither op_dataframe_loc
+    nor op_dataframe_iloc read it, so both returned every column of the frame
+    and five fixtures whose entire purpose is column subsetting were comparing a
+    subset against the full frame.
+
+    This is the second member of a class the payload-key guard above CANNOT
+    catch: `column_order` is read elsewhere (the constructors use it as the
+    `columns=` argument), so it appears in the source and the guard is satisfied.
+    Only a behavioural test or the differ finds an option that is read somewhere
+    and dropped where it counts. `constructor_dtype` was the first.
+    """
+    frame = pd.DataFrame({"a": [10, 20], "b": [100, 200], "c": ["x", "y"]})
+
+    selected = oracle.apply_column_selector(frame, {"column_order": ["b", "a"]}, "t")
+    assert list(selected.columns) == ["b", "a"]
+
+    # ABSENT means "no selection" — the frame passes through untouched.
+    assert list(oracle.apply_column_selector(frame, {}, "t").columns) == ["a", "b", "c"]
+    assert (
+        list(oracle.apply_column_selector(frame, {"column_order": None}, "t").columns)
+        == ["a", "b", "c"]
+    )
+
+    # PRESENT-BUT-EMPTY is a deliberate empty selection and must NOT be confused
+    # with absent — fp_p2d_025_dataframe_loc_empty_column_selector_strict pins
+    # zero columns, so a truthiness test here would silently return all three.
+    assert list(oracle.apply_column_selector(frame, {"column_order": []}, "t").columns) == []
+
+
+def test_column_selector_rejects_names_not_in_the_frame(oracle, pd):
+    """The negative control: a bad selector must raise, not silently pass through."""
+    import pytest as _pytest
+
+    frame = pd.DataFrame({"a": [1]})
+    with _pytest.raises(oracle.OracleError):
+        oracle.apply_column_selector(frame, {"column_order": ["nope"]}, "t")
