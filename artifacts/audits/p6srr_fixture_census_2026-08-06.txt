@@ -1,0 +1,49 @@
+
+REFUSING to treat unattributed moves as regenerable. Each must be traced to a named divergence or left failing.
+fixtures examined            : 1258
+  agree, fully current       : 0
+  agree, provenance-only     : 970
+  MOVED, attributed          : 0
+  MOVED, UNATTRIBUTED        : 166   <-- stay failing fixtures
+  oracle: unsupported op     : 17   <-- retire candidates
+  oracle: other errors       : 105
+
+comparison coverage          : 1114 semantic, 13 structural
+  UNCOMPARED KEYS (never counted as agreement):
+    expected_error_contains: 17
+
+UNATTRIBUTED MOVES (first 20):
+  fp_p2c_004_series_join_left_missing_strict.json: expected_join  
+  fp_p2c_005_groupby_sum_null_key_dropna_strict.json: expected_series  values[0] mismatch: {'kind': 'int64', 'value': 8} vs {'kind': 'float64', 'value': 8.0}
+  fp_p2c_005_groupby_sum_order_strict.json: expected_series  values[0] mismatch: {'kind': 'int64', 'value': 6} vs {'kind': 'float64', 'value': 6.0}
+  fp_p2c_010_series_head_with_nulls_hardened.json: expected_series  values[1] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}
+  fp_p2c_011_groupby_std_hardened.json: expected_series  values[0] mismatch: {'kind': 'null', 'value': 'na_n'} vs {'kind': 'null', 'value': 'null'}
+  fp_p2c_011_groupby_std_multikey_strict.json: expected_series  values[1] mismatch: {'kind': 'null', 'value': 'na_n'} vs {'kind': 'null', 'value': 'null'}
+  fp_p2c_011_groupby_var_hardened.json: expected_series  values[0] mismatch: {'kind': 'null', 'value': 'na_n'} vs {'kind': 'null', 'value': 'null'}
+  fp_p2c_011_groupby_var_multikey_hardened.json: expected_series  values[1] mismatch: {'kind': 'null', 'value': 'na_n'} vs {'kind': 'null', 'value': 'null'}
+  fp_p2d_014_dataframe_concat_column_mismatch_error_strict.json: expected_frame  column 'b'[0] mismatch: {'kind': 'int64', 'value': 10} vs {'kind': 'float64', 'value': 10.0}
+  fp_p2d_014_dataframe_merge_column_left_missing_hardened.json: expected_frame  column 'right_v'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}
+  fp_p2d_014_dataframe_merge_column_right_order_strict.json: expected_frame  column 'left_v'[0] mismatch: {'kind': 'int64', 'value': 22} vs {'kind': 'float64', 'value': 22.0}
+  fp_p2d_017_dataframe_from_series_nullable_float_alignment_hardened.json: expected_frame  column 'val'[1] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}
+  fp_p2d_017_dataframe_from_series_three_inputs_alignment_hardened.json: expected_frame  index[1] mismatch: {'kind': 'int64', 'value': 2} vs {'kind': 'int64', 'value': 3}
+  fp_p2d_017_dataframe_from_series_union_align_strict.json: expected_frame  index[1] mismatch: {'kind': 'int64', 'value': 2} vs {'kind': 'int64', 'value': 3}
+  fp_p2d_017_series_constructor_bool_numeric_coerces_int_strict.json: expected_series  values[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}
+  fp_p2d_018_dataframe_from_records_column_order_new_column_null_hardened.json: expected_frame  column 'z'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}
+  fp_p2d_018_dataframe_from_records_sparse_keys_null_fill_hardened.json: expected_frame  column 'a'[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}
+  fp_p2d_019_dataframe_constructor_kwargs_column_missing_null_hardened.json: expected_frame  column 'z'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}
+  fp_p2d_019_dataframe_constructor_kwargs_empty_frame_with_index_columns_strict.json: expected_frame  column 'a'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}
+  fp_p2d_019_dataframe_constructor_kwargs_row_and_column_projection_hardened.json: expected_frame  column 'b'[0] mismatch: {'kind': 'null', 'value': 'null'} vs {'kind': 'null', 'value': 'na_n'}
+
+UNSUPPORTED OPERATION (first 10):
+  fp_p2c_009_dtype_float64_strict.json: oracle error: unsupported operation: 'column_dtype_check'
+  fp_p2c_009_dtype_int64_strict.json: oracle error: unsupported operation: 'column_dtype_check'
+  fp_p2d_017_column_dtype_check_bool_float_promotes_float_strict.json: oracle error: unsupported operation: 'column_dtype_check'
+  fp_p2d_017_column_dtype_check_int_only_hardened.json: oracle error: unsupported operation: 'column_dtype_check'
+  fp_p2d_017_column_dtype_check_utf8_only_strict.json: oracle error: unsupported operation: 'column_dtype_check'
+  fp_p2d_017_series_dtype_categorical_strict.json: oracle error: unsupported operation: 'series_dtype_check'
+  fp_p2d_017_series_dtype_sparse_strict.json: oracle error: unsupported operation: 'series_dtype_check'
+  fp_p2d_129_excel_round_trip_basic_strict.json: oracle error: unsupported operation: 'excel_round_trip'
+  fp_p2d_129_feather_round_trip_basic_strict.json: oracle error: unsupported operation: 'feather_round_trip'
+  fp_p2d_129_ipc_stream_round_trip_basic_strict.json: oracle error: unsupported operation: 'ipc_stream_round_trip'
+
+DRY RUN — nothing written.
