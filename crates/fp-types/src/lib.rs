@@ -4311,6 +4311,58 @@ fn is_int64_input(values: &[Scalar]) -> bool {
 }
 
 /// First-position arg-extremum over a uniformly i64-backed scalar family.
+/// True when every non-missing value is an Interval, per br-frankenpandas-2h9dm.
+fn is_interval_input(values: &[Scalar]) -> bool {
+    let mut saw_interval = false;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Interval(_) => saw_interval = true,
+            _ => return false,
+        }
+    }
+    saw_interval
+}
+
+/// Positional extreme over a uniformly-Interval input, per br-frankenpandas-2h9dm.
+///
+/// Intervals cannot use [`nanarg_i64`] (they are two f64s, not an i64 newtype)
+/// and cannot use the f64 fallback in the callers (`to_f64` errors on them), so
+/// they get this dedicated lexicographic (left, right) walk. `closed` is not
+/// part of the comparison, for the reasons documented on `nanmin`.
+///
+/// Returns `None` if any bound is NaN: such an interval is not orderable and
+/// pandas will not even construct one, so an arbitrary index would be worse
+/// than declining. This is also why the comparison is a plain `<`/`>` on a
+/// tuple rather than `partial_cmp().unwrap()`, which would panic.
+fn nanarg_interval(values: &[Scalar], find_max: bool) -> Option<usize> {
+    let mut best: Option<(usize, (f64, f64))> = None;
+    for (index, value) in values.iter().enumerate() {
+        if value.is_missing() {
+            continue;
+        }
+        let Scalar::Interval(iv) = value else {
+            continue;
+        };
+        if iv.left.is_nan() || iv.right.is_nan() {
+            return None;
+        }
+        let key = (iv.left, iv.right);
+        match best {
+            None => best = Some((index, key)),
+            // Strict comparison keeps the FIRST occurrence of a duplicated
+            // extreme, which is what pandas' idxmin/idxmax return.
+            Some((_, current)) if (find_max && key > current) || (!find_max && key < current) => {
+                best = Some((index, key));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
 fn nanarg_i64(values: &[Scalar], find_max: bool) -> Option<usize> {
     let mut best: Option<(usize, i64)> = None;
     for (index, value) in values.iter().enumerate() {
@@ -4619,6 +4671,12 @@ pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
     if is_int64_input(values) || collect_temporal_backing(values).is_some() {
         return nanarg_i64(values, true);
     }
+    // br-frankenpandas-2h9dm: Intervals order lexicographically by
+    // (left, right) and fit neither the i64 walk above nor the f64 fallback
+    // below, whose to_f64() errors on them — so they returned None.
+    if is_interval_input(values) {
+        return nanarg_interval(values, true);
+    }
     let mut best: Option<(usize, f64)> = None;
     for (i, v) in values.iter().enumerate() {
         if v.is_missing() {
@@ -4646,6 +4704,10 @@ pub fn nanargmin(values: &[Scalar]) -> Option<usize> {
     // (Datetime64 included, per br-frankenpandas-axhhk).
     if is_int64_input(values) || collect_temporal_backing(values).is_some() {
         return nanarg_i64(values, false);
+    }
+    // br-frankenpandas-2h9dm: Interval sibling of the branch in `nanargmax`.
+    if is_interval_input(values) {
+        return nanarg_interval(values, false);
     }
     let mut best: Option<(usize, f64)> = None;
     for (i, v) in values.iter().enumerate() {
@@ -7970,6 +8032,55 @@ mod tests {
             super::nancummax(&vals).iter().all(Scalar::is_missing),
             "pandas NotImplementedErrors cummax"
         );
+    }
+
+    /// br-frankenpandas-2h9dm: Interval argmin/argmax returned None, because
+    /// `Interval::to_f64()` errors and the f64 fallback skipped every element.
+    /// All four expectations are probed pandas 2.2.3 `idxmin`/`idxmax`.
+    #[test]
+    fn interval_argmin_argmax_match_pandas_2h9dm() {
+        let iv = |l: f64, r: f64| Scalar::Interval(Interval::new(l, r, IntervalClosed::Right));
+        // pandas: idxmin 1, idxmax 0
+        let vals = vec![iv(4.0, 5.0), iv(0.0, 1.0), iv(2.0, 3.0)];
+        assert_eq!(super::nanargmin(&vals), Some(1));
+        assert_eq!(super::nanargmax(&vals), Some(0));
+
+        // Left-tie resolves by RIGHT. pandas: idxmin 1, idxmax 2. An
+        // implementation comparing only `left` keeps index 0 for both.
+        let tie = vec![iv(0.0, 5.0), iv(0.0, 2.0), iv(0.0, 9.0)];
+        assert_eq!(super::nanargmin(&tie), Some(1));
+        assert_eq!(super::nanargmax(&tie), Some(2));
+    }
+
+    /// Duplicated extreme returns the FIRST occurrence (pandas idxmin 0 on
+    /// [(0,1),(0,1),(9,9)]), and missing entries are skipped while the returned
+    /// index stays a position in the ORIGINAL slice (pandas idxmin 2 / idxmax 0
+    /// on [(4,5), None, (0,1)]).
+    #[test]
+    fn interval_arg_first_occurrence_and_missing_2h9dm() {
+        let iv = |l: f64, r: f64| Scalar::Interval(Interval::new(l, r, IntervalClosed::Right));
+        let dup = vec![iv(0.0, 1.0), iv(0.0, 1.0), iv(9.0, 9.0)];
+        assert_eq!(
+            super::nanargmin(&dup),
+            Some(0),
+            "first occurrence, not last"
+        );
+        assert_eq!(super::nanargmax(&dup), Some(2));
+
+        let with_missing = vec![iv(4.0, 5.0), Scalar::Null(NullKind::NaN), iv(0.0, 1.0)];
+        assert_eq!(super::nanargmin(&with_missing), Some(2));
+        assert_eq!(super::nanargmax(&with_missing), Some(0));
+    }
+
+    /// A NaN bound is not orderable, so decline rather than return an arbitrary
+    /// index — and critically, do not panic the way `partial_cmp().unwrap()`
+    /// would.
+    #[test]
+    fn interval_arg_nan_bound_declines_2h9dm() {
+        let iv = |l: f64, r: f64| Scalar::Interval(Interval::new(l, r, IntervalClosed::Right));
+        let vals = vec![iv(0.0, 1.0), iv(f64::NAN, 5.0)];
+        assert_eq!(super::nanargmin(&vals), None);
+        assert_eq!(super::nanargmax(&vals), None);
     }
 
     /// Mixed Datetime64 + another dtype must NOT take the typed arm — it falls
