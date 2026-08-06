@@ -266,12 +266,58 @@ sibling — are now correct agreements because of `a1239a9f0` (loc/iloc apply th
 selector). My ad-hoc count of 11 was taken before that commit; the tool's 9 is after it. Compare
 buckets within one pass, not across passes.
 
+## The 27 remaining errors, triaged into families
+
+The last untriaged bucket. Nine families, and none is a mystery:
+
+| n | family | reading |
+|---:|---|---|
+| 10 | reductions raise on object columns | **belongs to `zx21n`** |
+| 4 | `constructor_list_like` / `from_records` column-count mismatch | fixture expects null-padding of ragged rows; pandas raises |
+| 2 | oracle dtype policy causes a hard error | see below |
+| 2 | `str.startswith`/`endswith` empty pattern | **oracle over-restriction** |
+| 2 | `dt.to_pydatetime(warn=…)` | kwarg does not exist in pinned pandas 2.2.3 |
+| 2 | `dataframe_asof` `'<' not supported between int and Timestamp` | oracle builds mismatched index/label types |
+| 2 | `xs` single-match | oracle self-declared limitation ("currently requires…") |
+| 2 | `series_filter` null mask | pandas refuses a mask with NA; fixture expects a value |
+| 1 | `from_series` duplicate name non-identical values | oracle refuses to represent it |
+
+**The 10 reductions are `zx21n`'s mechanism one op-family over, with the opposite symptom.**
+`zx21n` records that `sum`/`min`/`max` behave as `numeric_only=True` while pandas 2.x includes
+object columns — a *concealed* agreement. For `mean`, `median`, `std`, `var`, `sem`, `skew` (×2),
+`kurtosis`, `quantile` and `prod`, pandas 2.x does not silently include the object column, it
+**raises** (`could not convert string to float: 'alpha'`). Same default, two symptom classes: three
+fixtures conceal it, ten more surface it as an oracle error. Reported on `zx21n`; not closing a
+peer's bead.
+
+**The oracle's dtype policy does not only move values — it makes the oracle fail outright.**
+This is a third symptom of the `series_dtype_for_payload_values` mechanism, after moved values (45
+fixtures) and unrepresentable null markers (50):
+
+- `fp_p2d_056_dataframe_merge_asof_backward_nan_left_key`: the left `time` column has a null so it
+  infers nullable `Int64`; the right `time` has none so it infers plain `int64`; `merge_asof` then
+  raises `incompatible merge keys … must be the same type`. Reproduced exactly.
+- `fp_p2d_025_series_clip_array_bounds_missing_entries`: the bounds series carries a null → `Int64`,
+  and clip's `-inf` fill cannot be stored in it → `Invalid value '-inf' for dtype Int64`.
+
+⚠️ **But fixing the dtype policy would not rescue the `merge_asof` fixture.** Probed: with both
+sides forced to a uniform `float64`, pandas raises a *different* error — `Merge keys contain null
+values on left side`. **pandas refuses a null merge key under any dtype**, so the fixture pins a
+frame pandas will never produce. The dtype mismatch is masking the real divergence rather than
+being it. Worth stating because the obvious fix here looks like it closes a fixture and does not.
+
+**`str.startswith`/`endswith` with an empty pattern is an oracle over-restriction.** The handler
+rejects an empty `regex_pattern` outright; pandas is happy to answer (`s.str.startswith('')` is
+`True` everywhere). The fixture is legitimate and the oracle refuses to run it.
+
 ## What is NOT concluded
 
 - **Nothing attributed.** All 163 stay failing.
-- **27 oracle errors remain untriaged** and are deliberately excluded from every total above. (The
-  other 85 are now adjudicated as expected-error agreements; the count fell from 110 by triage, not
-  by folding anything into a total.)
+- **The 27 are now triaged into families above, but none is RESOLVED.** They stay in the
+  `other_errors` bucket and out of every agreement total until each family's owner acts: 10 belong
+  to `zx21n`, the oracle-side ones (`startswith`/`endswith`, `to_pydatetime(warn=)`, `asof` type
+  mismatch, `xs`) belong to the conformance lane's file, and the rest need the FP side run.
+  Triaged is not fixed, and a family label is not an attribution.
 - The 9 `ERROR expected-but-succeeded` fixtures are newly VISIBLE, not newly resolved. Each needs
   the FP side run before anyone decides whether FP is over-strict or pandas is too permissive.
 - The four fixture-side divergences above are probed against pandas but **not yet confirmed against
