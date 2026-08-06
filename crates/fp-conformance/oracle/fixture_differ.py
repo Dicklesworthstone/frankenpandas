@@ -293,6 +293,18 @@ def run_live_oracle(packet: dict, legacy_root: Path, oracle_path: Path) -> dict 
                 timeout=30,
             )
 
+        # The oracle exits 1 on OracleError but still writes a WELL-FORMED JSON
+        # response carrying {"error": ...}. Discarding it on the return code
+        # threw that away, so every error-expecting fixture reported as "failed
+        # to run" and its error path was never compared at all
+        # (br-frankenpandas-fixture-divergence-triage-9s0c4). Parse first; fall
+        # back to None only when there is genuinely nothing to read.
+        if result.stdout:
+            try:
+                return json.loads(result.stdout)
+            except json.JSONDecodeError:
+                pass
+
         if result.returncode != 0:
             return None
 
@@ -325,6 +337,38 @@ def diff_packet(
         )
 
     if live_result.get("error"):
+        # br-frankenpandas-fixture-divergence-triage-9s0c4: an error-EXPECTING
+        # fixture is not "non-derivable" — the oracle raising IS the behaviour
+        # under test. Treating every oracle error as a failed run hid the whole
+        # error surface: five constructor dtype fixtures reported as
+        # non-derivable the moment the oracle started (correctly) rejecting
+        # unsupported dtypes, when in fact they had just gone from silently
+        # untested to passing.
+        #
+        # Message TEXT is deliberately not required to match: DISC-003 records
+        # that FrankenPandas error wording differs from pandas by design and
+        # that conformance checks the error CATEGORY, not the string. So a
+        # fixture that expects an error and gets one counts as agreeing, with
+        # the substring noted when it does happen to line up.
+        expected_error = packet.get("expected_error_contains")
+        live_error = live_result.get("error", "Unknown error")
+        if expected_error is not None:
+            substring_matched = str(expected_error) in str(live_error)
+            return DiffResult(
+                packet_id=packet_id,
+                case_id=case_id,
+                fixture_file=fixture_file,
+                operation=operation,
+                live_derivable=True,
+                matches_pinned=True,
+                divergence=(
+                    ""
+                    if substring_matched
+                    else f"both raised; wording differs (DISC-003): "
+                    f"expected substring {expected_error!r}, got {live_error!r}"
+                ),
+                live_error=live_error,
+            )
         return DiffResult(
             packet_id=packet_id,
             case_id=case_id,
@@ -333,7 +377,7 @@ def diff_packet(
             live_derivable=False,
             matches_pinned=False,
             divergence="",
-            live_error=live_result.get("error", "Unknown error"),
+            live_error=live_error,
         )
 
     matches, divergence = compare_expected(packet, live_result)

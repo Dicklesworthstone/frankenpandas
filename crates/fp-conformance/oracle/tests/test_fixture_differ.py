@@ -146,3 +146,62 @@ def test_explicit_order_difference_is_still_a_divergence(differ):
     equal, message = differ.frame_equal(pinned, live)
     assert not equal
     assert "column_order mismatch" in message
+
+
+def test_error_expecting_fixture_counts_as_derivable_and_matching(differ, monkeypatch):
+    """An oracle error is the BEHAVIOUR UNDER TEST for these fixtures.
+
+    br-frankenpandas-fixture-divergence-triage-9s0c4. Two bugs combined to hide
+    the entire error surface: `run_live_oracle` discarded the oracle's response
+    whenever it exited non-zero (it exits 1 on OracleError but still writes a
+    well-formed JSON body carrying the message), and `diff_packet` then treated
+    that as "failed to run". So a fixture pinning an expected error was reported
+    as non-derivable and its error path was never compared at all.
+    """
+    monkeypatch.setattr(
+        differ, "run_live_oracle", lambda *a, **k: {"error": "unsupported constructor dtype 'uint64'"}
+    )
+    packet = {
+        "packet_id": "X",
+        "case_id": "x",
+        "operation": "dataframe_constructor_list_like",
+        "expected_error_contains": "unsupported constructor dtype 'uint64'",
+    }
+    result = differ.diff_packet(packet, "/nonexistent", "oracle.py", fixture_file="x.json")
+    assert result.live_derivable
+    assert result.matches_pinned
+    assert result.divergence == ""
+
+
+def test_error_wording_difference_still_matches_but_is_noted(differ, monkeypatch):
+    """DISC-003: conformance checks the error CATEGORY, not the exact string."""
+    monkeypatch.setattr(
+        differ, "run_live_oracle", lambda *a, **k: {"error": "Trying to coerce float values to integers"}
+    )
+    packet = {
+        "packet_id": "X",
+        "case_id": "x",
+        "operation": "dataframe_constructor_list_like",
+        "expected_error_contains": "cannot cast float 1.5 to int64 without loss",
+    }
+    result = differ.diff_packet(packet, "/nonexistent", "oracle.py", fixture_file="x.json")
+    assert result.matches_pinned
+    assert "DISC-003" in result.divergence
+
+
+def test_unexpected_oracle_error_is_still_non_derivable(differ, monkeypatch):
+    """The negative control: a VALUE fixture that errors is not a pass.
+
+    Without this, the change above would turn every oracle failure into a
+    silent success — the exact shape of bug this whole bead is about.
+    """
+    monkeypatch.setattr(differ, "run_live_oracle", lambda *a, **k: {"error": "boom"})
+    packet = {
+        "packet_id": "X",
+        "case_id": "x",
+        "operation": "series_head",
+        "expected_series": {"index": [], "values": []},
+    }
+    result = differ.diff_packet(packet, "/nonexistent", "oracle.py", fixture_file="x.json")
+    assert not result.live_derivable
+    assert not result.matches_pinned

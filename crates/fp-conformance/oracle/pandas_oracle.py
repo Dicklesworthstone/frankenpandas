@@ -1722,6 +1722,50 @@ def op_dataframe_from_records(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(frame)}
 
 
+def _frame_with_optional_dtype(pd, data, index, columns, dtype):
+    """`pd.DataFrame(...)`, passing `dtype=` only when the fixture asked for one.
+
+    Passing `dtype=None` explicitly is NOT equivalent for every input shape, so
+    the argument is omitted rather than defaulted.
+    """
+    if dtype is None:
+        return pd.DataFrame(data, index=index, columns=columns)
+    return pd.DataFrame(data, index=index, columns=columns, dtype=dtype)
+
+
+def resolve_constructor_dtype(payload: dict[str, Any], op_name: str) -> Any:
+    """The `dtype=` a DataFrame constructor fixture asked for, if any.
+
+    br-frankenpandas-fixture-divergence-triage-9s0c4: the whole
+    dataframe_constructor_* / from_* family accepted `constructor_dtype` in the
+    fixture and then never passed it to `pd.DataFrame(...)`. Twelve fixtures
+    named `..._dtype_float64_...` and friends therefore pinned float64 while the
+    oracle returned int64 — the fixtures were RIGHT and the oracle was building
+    a differently-typed frame.
+
+    This slipped past the payload-key guard in
+    tests/test_payload_keys_are_read.py because `constructor_dtype` IS read
+    elsewhere (dataframe_astype, series_astype), and that guard deliberately
+    only asks whether a key appears at all. Its docstring says as much: catching
+    a key that is mentioned but not consumed needs the differ, which is exactly
+    what surfaced this.
+
+    Normalization is NOT optional here and must reuse
+    `pandas_dtype_from_constructor_spec`, the same normalizer `dataframe_astype`
+    uses. Several of these fixtures exist specifically to pin it — e.g.
+    `..._dtype_int64_trimmed_strict` sends the literal `"  INT64  "`, and
+    `..._dtype_float_alias_hardened` sends `"f64"`. Passing the raw string
+    straight to `pd.DataFrame(dtype=...)` makes pandas raise on exactly the
+    cases those fixtures were written to cover.
+    """
+    raw = payload.get("constructor_dtype")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise OracleError(f"{op_name} constructor_dtype must be a string")
+    return pandas_dtype_from_constructor_spec(raw)
+
+
 def op_dataframe_constructor_kwargs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -1732,7 +1776,10 @@ def op_dataframe_constructor_kwargs(pd, payload: dict[str, Any]) -> dict[str, An
     index = parse_constructor_index(payload, "dataframe_constructor_kwargs")
 
     try:
-        out = pd.DataFrame(frame, index=index, columns=column_order)
+        out = _frame_with_optional_dtype(
+            pd, frame, index, column_order,
+            resolve_constructor_dtype(payload, "dataframe_constructor_kwargs"),
+        )
     except Exception as exc:
         raise OracleError(f"dataframe_constructor_kwargs failed: {exc}") from exc
 
@@ -1749,7 +1796,10 @@ def op_dataframe_constructor_scalar(pd, payload: dict[str, Any]) -> dict[str, An
     index = parse_constructor_index(payload, "dataframe_constructor_scalar")
 
     try:
-        out = pd.DataFrame(fill_value, index=index, columns=column_order)
+        out = _frame_with_optional_dtype(
+            pd, fill_value, index, column_order,
+            resolve_constructor_dtype(payload, "dataframe_constructor_scalar"),
+        )
     except Exception as exc:
         raise OracleError(f"dataframe_constructor_scalar failed: {exc}") from exc
 
@@ -1773,7 +1823,10 @@ def op_dataframe_constructor_dict_of_series(pd, payload: dict[str, Any]) -> dict
         data[str(series.name)] = series
 
     try:
-        out = pd.DataFrame(data, index=index, columns=column_order)
+        out = _frame_with_optional_dtype(
+            pd, data, index, column_order,
+            resolve_constructor_dtype(payload, "dataframe_constructor_dict_of_series"),
+        )
     except Exception as exc:
         raise OracleError(
             f"dataframe_constructor_dict_of_series failed: {exc}"
@@ -1788,7 +1841,10 @@ def op_dataframe_constructor_list_like(pd, payload: dict[str, Any]) -> dict[str,
     index = parse_constructor_index(payload, "dataframe_constructor_list_like")
 
     try:
-        out = pd.DataFrame(matrix_rows, index=index, columns=column_order)
+        out = _frame_with_optional_dtype(
+            pd, matrix_rows, index, column_order,
+            resolve_constructor_dtype(payload, "dataframe_constructor_list_like"),
+        )
     except Exception as exc:
         raise OracleError(f"dataframe_constructor_list_like failed: {exc}") from exc
 
