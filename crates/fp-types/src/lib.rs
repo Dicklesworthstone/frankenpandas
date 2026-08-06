@@ -1971,6 +1971,39 @@ impl Timedelta {
         Self::try_mul_scalar(a, factor).unwrap_or(Self::NAT)
     }
 
+    /// Multiply a Timedelta by an integer factor under an explicit policy.
+    ///
+    /// br-frankenpandas-fyr1z-wrap-signoff-s4lkx, DECIDED BY THE MAINTAINER:
+    /// **STRICT REPRODUCES PANDAS' SILENT WRAP.** The rationale is that this is
+    /// a PORT — STRICT means bit-for-bit observable parity with the incumbent
+    /// *including its quirks*, so the wrap is a deliberately reproduced pandas
+    /// behaviour, not a defect of ours.
+    ///
+    /// Verified against live pandas 2.2.3: `Series([Timedelta.max]) * 2` returns
+    /// `-2` ns (displayed `-1 days +23:59:59.999999998`), which is exactly
+    /// `i64::MAX.wrapping_mul(2)`. Rust's wrapping arithmetic reproduces numpy's
+    /// int64 wraparound bit-for-bit, so no emulation is needed.
+    ///
+    /// The wrap is INTEGER-MULTIPLIER ONLY: `Series * 2.0` returns NaT in
+    /// pandas, so a float multiplier must not route here.
+    ///
+    /// Every other policy keeps today's behaviour — NaT, with HARDENED also
+    /// recording the recovery. So the fail-open shape br-frankenpandas-lgyy8
+    /// removed is reachable ONLY when a caller explicitly asks for STRICT
+    /// incumbent parity, never by default. See DISC-020.
+    #[must_use]
+    pub fn mul_scalar_with_policy(a: i64, factor: i64, policy: OverflowPolicy) -> i64 {
+        if a == Self::NAT {
+            return Self::NAT;
+        }
+        if matches!(policy, OverflowPolicy::Strict) {
+            return a.wrapping_mul(factor);
+        }
+        policy
+            .resolve_recording(Self::try_mul_scalar(a, factor), Self::NAT, Self::NAT)
+            .unwrap_or(Self::NAT)
+    }
+
     /// Multiply a Timedelta value by an integer factor, reporting overflow.
     ///
     /// # Errors
@@ -4848,6 +4881,47 @@ where
 /// Matches `np.nancumsum` / `pd.Series.cumsum()`. Missing input positions
 /// pass through as `Null(NaN)` in the output; the running sum ignores
 /// those positions when accumulating.
+/// Cumulative sum under an explicit overflow policy.
+///
+/// br-frankenpandas-fyr1z-wrap-signoff-s4lkx, DECIDED BY THE MAINTAINER: under
+/// [`OverflowPolicy::Strict`] this REPRODUCES pandas' silent int64 wraparound,
+/// because STRICT means bit-for-bit observable parity with the incumbent
+/// including its quirks.
+///
+/// Verified against live pandas 2.2.3:
+/// `Series([Timedelta.max, Timedelta.max]).cumsum()` returns
+/// `[9223372036854775807, -2]` and the three-element case
+/// `[max, -2, 9223372036854775805]` — exactly `wrapping_add` accumulation in
+/// i64. Note the third element proves the accumulator KEEPS WRAPPING rather
+/// than sticking: it is `(-2).wrapping_add(max)`.
+///
+/// Under every other policy this delegates to [`nancumsum`], which keeps the
+/// exact-i128 accumulation and NaT-on-unrepresentable behaviour from
+/// br-frankenpandas-opz27. See DISC-020.
+#[must_use]
+pub fn nancumsum_with_policy(values: &[Scalar], policy: OverflowPolicy) -> Vec<Scalar> {
+    if !matches!(policy, OverflowPolicy::Strict) || !is_timedelta_input(values) {
+        return nancumsum(values);
+    }
+    let mut out = Vec::with_capacity(values.len());
+    let mut running: i64 = 0;
+    for value in values {
+        if value.is_missing() {
+            out.push(Scalar::Null(NullKind::NaT));
+            continue;
+        }
+        if let Scalar::Timedelta64(ns) = value {
+            // Deliberately WRAPPING, not checked: this is the incumbent's
+            // observable behaviour and STRICT exists to reproduce it.
+            running = running.wrapping_add(*ns);
+            out.push(Scalar::Timedelta64(running));
+        } else {
+            out.push(Scalar::Null(NullKind::NaT));
+        }
+    }
+    out
+}
+
 pub fn nancumsum(values: &[Scalar]) -> Vec<Scalar> {
     // Per br-frankenpandas-x0x91: when input is uniformly Timedelta64 (with
     // optional NaT/Null missing markers), preserve Timedelta dtype to match
@@ -8776,6 +8850,103 @@ mod tests {
             overflow_audit::drain().is_empty(),
             "disabled must not record"
         );
+    }
+
+    /// br-frankenpandas-fyr1z-wrap-signoff-s4lkx.
+    ///
+    /// THIS TEST PINS A PANDAS QUIRK THAT WE REPRODUCE ON PURPOSE. The values
+    /// below are NOT what a careful implementation would choose: multiplying a
+    /// positive duration by 2 yields a NEGATIVE one. They are what live pandas
+    /// 2.2.3 returns, because numpy int64 wraps silently, and the maintainer
+    /// decided that STRICT means bit-for-bit observable parity with the
+    /// incumbent INCLUDING its quirks — this being a port.
+    ///
+    /// So: if this test fails, do NOT "fix" the wrap. Either pandas changed, or
+    /// someone routed a non-STRICT caller into the STRICT path. Both need
+    /// investigating rather than correcting the arithmetic.
+    ///
+    /// Oracle values, probed directly:
+    ///   Series([Timedelta.max]) * 2            -> -2 ns
+    ///   Series([max, max]).cumsum()            -> [max, -2]
+    ///   Series([max, max, max]).cumsum()       -> [max, -2, max - 2]
+    #[test]
+    fn strict_reproduces_pandas_silent_timedelta_wrap_s4lkx() {
+        use super::{OverflowPolicy, nancumsum_with_policy};
+
+        // Series * int -- pandas returns -2, i.e. i64::MAX.wrapping_mul(2).
+        assert_eq!(
+            Timedelta::mul_scalar_with_policy(i64::MAX, 2, OverflowPolicy::Strict),
+            -2,
+            "STRICT must reproduce pandas' wrap, not repair it"
+        );
+
+        // cumsum -- and the THIRD element is the important one: it proves the
+        // accumulator keeps wrapping rather than sticking at a bound.
+        let max = Scalar::Timedelta64(i64::MAX);
+        let out = nancumsum_with_policy(
+            &[max.clone(), max.clone(), max.clone()],
+            OverflowPolicy::Strict,
+        );
+        assert_eq!(
+            out,
+            vec![
+                Scalar::Timedelta64(i64::MAX),
+                Scalar::Timedelta64(-2),
+                Scalar::Timedelta64(i64::MAX - 2),
+            ],
+            "STRICT cumsum must reproduce pandas' int64 wraparound exactly"
+        );
+
+        // NaT still propagates; the wrap is about overflow, not missingness.
+        assert_eq!(
+            Timedelta::mul_scalar_with_policy(Timedelta::NAT, 2, OverflowPolicy::Strict),
+            Timedelta::NAT
+        );
+    }
+
+    /// The other half of the s4lkx decision, and the reason reproducing a
+    /// fail-open quirk is acceptable at all: it is reachable ONLY when a caller
+    /// explicitly asks for STRICT incumbent parity. Every other policy — and
+    /// crucially the DEFAULT — still refuses to fabricate a plausible value,
+    /// keeping the br-frankenpandas-lgyy8 guarantee intact.
+    #[test]
+    fn non_strict_policies_still_refuse_to_wrap_s4lkx() {
+        use super::{OverflowPolicy, nancumsum_with_policy, overflow_audit};
+
+        for policy in [OverflowPolicy::SurfaceNat, OverflowPolicy::HardenedNat] {
+            assert_eq!(
+                Timedelta::mul_scalar_with_policy(i64::MAX, 2, policy),
+                Timedelta::NAT,
+                "{policy:?} must NOT wrap"
+            );
+            assert_ne!(
+                Timedelta::mul_scalar_with_policy(i64::MAX, 2, policy),
+                -2,
+                "{policy:?} must not reproduce the pandas quirk"
+            );
+        }
+        // The bare default is SurfaceNat, so an unconfigured caller is safe.
+        assert_eq!(
+            Timedelta::mul_scalar_with_policy(i64::MAX, 2, OverflowPolicy::default()),
+            Timedelta::NAT
+        );
+
+        // cumsum likewise keeps the exact-i128 / NaT behaviour off STRICT.
+        let max = Scalar::Timedelta64(i64::MAX);
+        let soft = nancumsum_with_policy(&[max.clone(), max.clone()], OverflowPolicy::SurfaceNat);
+        assert!(soft[1].is_missing(), "non-STRICT cumsum must NaT, not wrap");
+        assert_eq!(soft, super::nancumsum(&[max.clone(), max]));
+
+        // HARDENED wrapping would be doubly wrong: it would fabricate a value
+        // AND leave nothing in the audit trail to explain it.
+        overflow_audit::enable();
+        let _ = Timedelta::mul_scalar_with_policy(i64::MAX, 2, OverflowPolicy::HardenedNat);
+        assert_eq!(
+            overflow_audit::drain().len(),
+            1,
+            "HARDENED must record the recovery it performed"
+        );
+        overflow_audit::disable();
     }
 
     /// Mixed Datetime64 + another dtype must NOT take the typed arm — it falls
