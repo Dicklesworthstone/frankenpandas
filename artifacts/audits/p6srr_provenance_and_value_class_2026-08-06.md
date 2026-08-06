@@ -125,14 +125,59 @@ the fixture encodes an option its payload never expressed.
 Note DISC-015 is ACCEPTED-with-waiver and says FP reports 32 while pandas reports 234. The oracle
 now reports 32 as well — so the fixture disagrees with the oracle *and* the waiver's framing.
 
+### The remaining `VALUE` sub-families, probed
+
+Each ran against live pandas 2.2.3 before any verdict. The class does not resolve one way: it is
+one oracle bug, one unexpressed option, and four fixture-side divergences.
+
+| fixture | live pandas 2.2.3 | verdict |
+|---|---|---|
+| `..._112_dataframe_groupby_ngroup_descending` | `ngroup(ascending=False)` → `[2,1,2,0,1,2]` = **the pinned values** | **oracle wrong** |
+| `..._091_series_to_datetime_unix_epoch` | bare ints → **ns**; the pinned values need `unit='s'` | option never expressed |
+| `..._171_series_str_capitalize_unicode` | `'ßharp'.capitalize()` → `'Ssharp'`; fixture pins `'SSharp'` | oracle right |
+| `..._419_series_asof_datetime_like_before_start_nat` | `.asof(0)` → **float `nan`**; fixture pins `na_t` | oracle right |
+| `..._341_series_ewm_mean_null` | `ewm(span=3).mean()` → `[1.0, 1.0, 2.6, …]`; fixture pins `2.0` at [2] | oracle right |
+| `..._127_dataframe_get_dummies_column_order` | dummies **appended last**: `['id','size','color_blue','color_red']` | oracle right |
+
+**`groupby_ngroup` is a 6th instance of the dropped-option-key mechanism, and it is ACTIVE.**
+`op_dataframe_groupby_ngroup` (line ~5560) calls `frame.groupby(columns).ngroup()` and never reads
+the payload's `sort_ascending: false`, so it returns the ascending answer. The fixture is right.
+Note it slips past `test_payload_keys_are_read.py` for exactly the reason that guard's docstring
+gives: `sort_ascending` appears 13 times elsewhere in the oracle, and the guard only asks whether a
+key appears *anywhere*.
+
+**`to_datetime` on bare integers is the LATENT form, and it points at a real FP divergence.**
+The payload carries no unit key at all, yet the pinned values are the `unit='s'` interpretation;
+pandas reads bare ints as **nanoseconds**. So the fixture pins an option it never sent — the same
+shape as the `memory_usage` `deep` case — and separately implies FrankenPandas interprets integer
+`to_datetime` input as seconds. That second half is a parity question worth its own bead, not a
+corpus question.
+
+The four "oracle right" rows are FrankenPandas behaviours pinned as expectations:
+
+- **`str.capitalize` on `ß`** — Python/pandas titlecase the first character (`'Ss'`); Rust's
+  `char::to_uppercase('ß')` yields `"SS"`, so a `first.to_uppercase() + rest.to_lowercase()`
+  implementation produces `'SSharp'`. A real casing divergence, and `'straße'`/`'élan'`/`'maçã'` in
+  the same fixture all agree — only the leading `ß` splits.
+- **`Series.asof` before the start** — pandas returns float `nan` even for a datetime64 series
+  (probed both object and datetime64 dtype); FP returns `NaT`, preserving dtype. FP's answer is
+  arguably better and is still a divergence.
+- **`ewm(span=3).mean()` with nulls** — pandas gives `2.6` where the fixture pins `2.0`, so FP's
+  null handling in the EWM recurrence differs.
+- **`get_dummies` column placement** — pandas appends dummy columns after all remaining originals;
+  FP substitutes them in place.
+
+None of these four is attributable to a *named* divergence today: DISCREPANCIES.md has no entry for
+casing, asof missing-value dtype, EWM null handling, or dummy column placement. They are candidate
+new entries, and each needs the FP side confirmed before anything is written down.
+
 ## What is NOT concluded
 
 - **Nothing attributed.** All 159 stay failing.
 - **The 110 oracle errors are untriaged** and deliberately excluded from every total above.
-- The remaining `VALUE` sub-families are unprobed: `to_datetime` unit/origin precision
-  (`1704067200000000000` vs `1704067200`), `get_dummies` column ordering, `str.capitalize` on `ß`
-  (`'SSharp'` vs `'Ssharp'`), `ewm_mean` with nulls, `groupby_ngroup` descending, and the
-  `na_t`→`na_n` marker in `series_asof`.
+- The four fixture-side divergences above are probed against pandas but **not yet confirmed against
+  FrankenPandas itself** — the pinned values are consistent with FP behaviour, which is not the same
+  as having run FP. That confirmation is the next step before any DISCREPANCIES entry.
 - Whether the corpus should adopt nullable `Int64`/`Float64` payload dtypes — the encoding gap
   underneath both the concat family and the 50 round-trip markers — is a design decision for the
   maintainer, not something to settle by regenerating.
