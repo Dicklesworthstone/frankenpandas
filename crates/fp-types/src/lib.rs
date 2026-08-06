@@ -1266,12 +1266,101 @@ pub struct TemporalFailure {
     pub op: &'static str,
     /// What pandas raises for this operation.
     pub pandas_error: PandasTemporalError,
+    /// The operand pair whose exact result left the representable range, when
+    /// the failing operation had one. Carried for the HARDENED audit trail
+    /// (br-frankenpandas-fyr1z-hardened-audit-vllv6) so a recovery entry can
+    /// name the range violation rather than merely that one occurred.
+    pub operands: Option<(i64, i64)>,
 }
 
 impl TemporalFailure {
     #[must_use]
     pub const fn new(op: &'static str, pandas_error: PandasTemporalError) -> Self {
-        Self { op, pandas_error }
+        Self {
+            op,
+            pandas_error,
+            operands: None,
+        }
+    }
+
+    /// Attach the operands that produced this failure.
+    #[must_use]
+    pub const fn with_operands(mut self, lhs: i64, rhs: i64) -> Self {
+        self.operands = Some((lhs, rhs));
+        self
+    }
+}
+
+/// A bounded defensive recovery that HARDENED mode performed, recorded so a run
+/// can be audited after the fact.
+///
+/// br-frankenpandas-fyr1z-hardened-audit-vllv6. AGENTS.md's security doctrine
+/// requires "deterministic audit logs for recoveries and policy overrides", and
+/// overflow-to-NaT is exactly a bounded defensive recovery. Until now it was
+/// SILENT: a caller could not distinguish a NaT produced by an overflow from a
+/// NaT that was already in the input, which is the whole substance of the
+/// DISC-018 impact statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TemporalRecovery {
+    /// The operation that overflowed.
+    pub op: &'static str,
+    /// The pandas exception this would have been under STRICT.
+    pub pandas_error: PandasTemporalError,
+    /// The operands whose exact result was unrepresentable, when known.
+    pub operands: Option<(i64, i64)>,
+    /// The value actually returned. Always the family's NaT sentinel today.
+    pub recovered_as: i64,
+}
+
+/// Deterministic, opt-in audit trail for HARDENED-mode recoveries.
+///
+/// Disabled by default and costs one `Option` check when off, so the default
+/// path is unchanged. The log is THREAD-LOCAL: FrankenPandas parallelises many
+/// kernels, and a shared log would impose a lock on hot arithmetic and make the
+/// entry ORDER nondeterministic — which would defeat the point. Each worker
+/// therefore accumulates its own deterministic sequence; a caller auditing a
+/// parallel op drains per thread.
+pub mod overflow_audit {
+    use std::cell::RefCell;
+
+    use super::TemporalRecovery;
+
+    thread_local! {
+        static LOG: RefCell<Option<Vec<TemporalRecovery>>> = const { RefCell::new(None) };
+    }
+
+    /// Begin recording on THIS thread, discarding anything already buffered.
+    pub fn enable() {
+        LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
+    }
+
+    /// Stop recording on this thread and discard the buffer.
+    pub fn disable() {
+        LOG.with(|log| *log.borrow_mut() = None);
+    }
+
+    /// Whether recording is active on this thread.
+    #[must_use]
+    pub fn is_enabled() -> bool {
+        LOG.with(|log| log.borrow().is_some())
+    }
+
+    /// Take the recorded recoveries, leaving recording enabled and empty.
+    #[must_use]
+    pub fn drain() -> Vec<TemporalRecovery> {
+        LOG.with(|log| match log.borrow_mut().as_mut() {
+            Some(entries) => std::mem::take(entries),
+            None => Vec::new(),
+        })
+    }
+
+    /// Record a recovery. A no-op — and allocation-free — when disabled.
+    pub(super) fn record(entry: TemporalRecovery) {
+        LOG.with(|log| {
+            if let Some(entries) = log.borrow_mut().as_mut() {
+                entries.push(entry);
+            }
+        });
     }
 }
 
@@ -1295,6 +1384,14 @@ pub enum OverflowPolicy {
     SurfaceNat,
     /// Reserved for fyr1z.3. Surfaces the [`TemporalFailure`] to the caller.
     Strict,
+    /// HARDENED mode (br-frankenpandas-fyr1z-hardened-audit-vllv6): returns the
+    /// SAME NaT as [`Self::SurfaceNat`], bit-for-bit, and additionally records a
+    /// [`TemporalRecovery`] into [`overflow_audit`] when that log is enabled.
+    ///
+    /// This adds observability, never semantics. AGENTS.md defines hardened
+    /// mode as "bounded defensive recovery" and requires a deterministic audit
+    /// log for exactly that.
+    HardenedNat,
 }
 
 impl OverflowPolicy {
@@ -1310,10 +1407,37 @@ impl OverflowPolicy {
         outcome: Result<T, TemporalFailure>,
         nat: T,
     ) -> Result<T, TemporalFailure> {
+        self.resolve_recording(outcome, nat, i64::MIN)
+    }
+
+    /// [`Self::resolve`] plus the sentinel value to record in the audit trail.
+    ///
+    /// Split out because the recovered value is generic (`T`) but the audit
+    /// entry needs its i64 backing; `recovered_as` supplies that without
+    /// constraining `T`.
+    ///
+    /// # Errors
+    /// Returns the [`TemporalFailure`] unchanged under [`Self::Strict`].
+    pub fn resolve_recording<T>(
+        self,
+        outcome: Result<T, TemporalFailure>,
+        nat: T,
+        recovered_as: i64,
+    ) -> Result<T, TemporalFailure> {
         match (self, outcome) {
             (_, Ok(value)) => Ok(value),
             (Self::SurfaceNat, Err(_)) => Ok(nat),
-            (Self::Strict, Err(overflow)) => Err(overflow),
+            (Self::Strict, Err(failure)) => Err(failure),
+            (Self::HardenedNat, Err(failure)) => {
+                // Same value as SurfaceNat; the ONLY difference is the record.
+                overflow_audit::record(TemporalRecovery {
+                    op: failure.op,
+                    pandas_error: failure.pandas_error,
+                    operands: failure.operands,
+                    recovered_as,
+                });
+                Ok(nat)
+            }
         }
     }
 }
@@ -1766,10 +1890,10 @@ impl Timedelta {
         if a == Self::NAT || b == Self::NAT {
             return Ok(Self::NAT);
         }
-        a.checked_add(b).ok_or(TemporalFailure::new(
-            "Timedelta::add",
-            PandasTemporalError::Overflow,
-        ))
+        a.checked_add(b).ok_or(
+            TemporalFailure::new("Timedelta::add", PandasTemporalError::Overflow)
+                .with_operands(a, b),
+        )
     }
 
     /// Add two Timedelta nanosecond values. NaT propagates; overflow → NaT.
@@ -1786,10 +1910,10 @@ impl Timedelta {
         if a == Self::NAT || b == Self::NAT {
             return Ok(Self::NAT);
         }
-        a.checked_sub(b).ok_or(TemporalFailure::new(
-            "Timedelta::sub",
-            PandasTemporalError::Overflow,
-        ))
+        a.checked_sub(b).ok_or(
+            TemporalFailure::new("Timedelta::sub", PandasTemporalError::Overflow)
+                .with_operands(a, b),
+        )
     }
 
     /// Subtract two Timedelta nanosecond values. NaT propagates; overflow → NaT.
@@ -1858,10 +1982,10 @@ impl Timedelta {
         if a == Self::NAT {
             return Ok(Self::NAT);
         }
-        a.checked_mul(factor).ok_or(TemporalFailure::new(
-            "Timedelta::mul_scalar",
-            PandasTemporalError::Overflow,
-        ))
+        a.checked_mul(factor).ok_or(
+            TemporalFailure::new("Timedelta::mul_scalar", PandasTemporalError::Overflow)
+                .with_operands(a, factor),
+        )
     }
 
     /// Floor-divide a Timedelta value by an integer divisor. NaT propagates.
@@ -1897,7 +2021,8 @@ impl Timedelta {
             return Err(TemporalFailure::new(
                 "Timedelta::div_scalar",
                 PandasTemporalError::ZeroDivision,
-            ));
+            )
+            .with_operands(a, divisor));
         }
         if a == Self::NAT {
             return Ok(Self::NAT);
@@ -2315,7 +2440,8 @@ impl Timestamp {
             None => Err(TemporalFailure::new(
                 "Timestamp::add_timedelta",
                 PandasTemporalError::OutOfBoundsDatetime,
-            )),
+            )
+            .with_operands(self.nanos, td_nanos)),
         }
     }
 
@@ -2343,7 +2469,8 @@ impl Timestamp {
             None => Err(TemporalFailure::new(
                 "Timestamp::sub_timedelta",
                 PandasTemporalError::OutOfBoundsDatetime,
-            )),
+            )
+            .with_operands(self.nanos, td_nanos)),
         }
     }
 
@@ -2364,12 +2491,13 @@ impl Timestamp {
         if self.is_nat() || other.is_nat() {
             return Ok(Timedelta::NAT);
         }
-        self.nanos
-            .checked_sub(other.nanos)
-            .ok_or(TemporalFailure::new(
+        self.nanos.checked_sub(other.nanos).ok_or(
+            TemporalFailure::new(
                 "Timestamp::sub_timestamp",
                 PandasTemporalError::OutOfBoundsDatetime,
-            ))
+            )
+            .with_operands(self.nanos, other.nanos),
+        )
     }
 
     /// NaT-aware semantic equality: two NaT Timestamps are equal to each
@@ -8541,6 +8669,112 @@ mod tests {
                 .unwrap_err()
                 .pandas_error(),
             Some(PandasTemporalError::OutOfBoundsTimedelta)
+        );
+    }
+
+    /// br-frankenpandas-fyr1z-hardened-audit-vllv6: HARDENED mode adds
+    /// observability, NEVER semantics. Every value it returns must be
+    /// bit-for-bit what SurfaceNat returns — proven over the same seeded corpus
+    /// the f29nz equivalence test uses, with the audit log ENABLED throughout so
+    /// recording cannot perturb results.
+    #[test]
+    fn hardened_audit_values_are_bit_identical_to_surface_nat_vllv6() {
+        use super::{OverflowPolicy, overflow_audit};
+
+        overflow_audit::enable();
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state
+        };
+        let mut corpus: Vec<i64> = vec![
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            i64::MAX,
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MAX - 1,
+        ];
+        for _ in 0..120 {
+            corpus.push(next() as i64);
+        }
+
+        for &a in &corpus {
+            for &b in &corpus {
+                for op in [
+                    Timedelta::try_add as fn(i64, i64) -> Result<i64, super::TemporalFailure>,
+                    Timedelta::try_sub,
+                    Timedelta::try_mul_scalar,
+                    Timedelta::try_div_scalar,
+                ] {
+                    let soft = OverflowPolicy::SurfaceNat
+                        .resolve(op(a, b), Timedelta::NAT)
+                        .expect("SurfaceNat never errors");
+                    let hard = OverflowPolicy::HardenedNat
+                        .resolve(op(a, b), Timedelta::NAT)
+                        .expect("HardenedNat never errors");
+                    assert_eq!(hard, soft, "HARDENED changed a value for ({a}, {b})");
+                }
+            }
+        }
+        overflow_audit::disable();
+    }
+
+    /// The audit trail itself: HARDENED records the op, the pandas class it
+    /// would have raised, the OPERANDS whose exact result left the
+    /// representable range, and the value actually returned — deterministically
+    /// and in order. SurfaceNat and Strict record nothing.
+    #[test]
+    fn hardened_audit_records_deterministic_recovery_entries_vllv6() {
+        use super::{OverflowPolicy, PandasTemporalError, overflow_audit};
+
+        overflow_audit::enable();
+        assert!(overflow_audit::is_enabled());
+        assert!(overflow_audit::drain().is_empty(), "starts empty");
+
+        // Two overflows and one representable result, in a fixed order.
+        let _ =
+            OverflowPolicy::HardenedNat.resolve(Timedelta::try_add(i64::MAX, 1), Timedelta::NAT);
+        let _ = OverflowPolicy::HardenedNat.resolve(Timedelta::try_add(2, 3), Timedelta::NAT);
+        let _ =
+            OverflowPolicy::HardenedNat.resolve(Timedelta::try_div_scalar(5, 0), Timedelta::NAT);
+
+        let entries = overflow_audit::drain();
+        assert_eq!(entries.len(), 2, "only the two failures are recorded");
+
+        assert_eq!(entries[0].op, "Timedelta::add");
+        assert_eq!(entries[0].pandas_error, PandasTemporalError::Overflow);
+        assert_eq!(entries[0].operands, Some((i64::MAX, 1)));
+        assert_eq!(entries[0].recovered_as, i64::MIN);
+
+        assert_eq!(entries[1].op, "Timedelta::div_scalar");
+        assert_eq!(entries[1].pandas_error, PandasTemporalError::ZeroDivision);
+        assert_eq!(entries[1].operands, Some((5, 0)));
+
+        // Draining leaves recording enabled and empty.
+        assert!(overflow_audit::drain().is_empty());
+
+        // The OTHER policies must stay silent — the audit is HARDENED-only.
+        let _ = OverflowPolicy::SurfaceNat.resolve(Timedelta::try_add(i64::MAX, 1), Timedelta::NAT);
+        let _ = OverflowPolicy::Strict.resolve(Timedelta::try_add(i64::MAX, 1), Timedelta::NAT);
+        assert!(
+            overflow_audit::drain().is_empty(),
+            "SurfaceNat/Strict must not write to the audit trail"
+        );
+
+        overflow_audit::disable();
+        assert!(!overflow_audit::is_enabled());
+        // Disabled: recording is a no-op and drain yields nothing.
+        let _ =
+            OverflowPolicy::HardenedNat.resolve(Timedelta::try_add(i64::MAX, 1), Timedelta::NAT);
+        assert!(
+            overflow_audit::drain().is_empty(),
+            "disabled must not record"
         );
     }
 
