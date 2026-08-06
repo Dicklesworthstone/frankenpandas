@@ -41742,8 +41742,10 @@ fn split_part_at(parts: &[&str], n: i64) -> Scalar {
 /// stays alive, and the caller observes the dropped result channel and
 /// re-panics, which is the behaviour `scope.spawn(..).join().expect(..)` had.
 mod str_worker_pool {
-    use std::sync::OnceLock;
-    use std::sync::mpsc::{Sender, channel};
+    use std::sync::{
+        OnceLock,
+        mpsc::{Sender, channel},
+    };
 
     type Job = Box<dyn FnOnce() + Send + 'static>;
 
