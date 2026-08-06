@@ -3661,6 +3661,26 @@ pub fn nanmin(values: &[Scalar]) -> Scalar {
                     min = Some(v)
                 }
             }
+            // br-frankenpandas-qoabs: Period, third dtype with the same
+            // to_f64() failure. Ordinals are ONLY comparable within one freq —
+            // pandas refuses mixed freq outright (IncompatibleFrequency), so a
+            // differing freq must NOT be ordered here. Comparing the raw
+            // ordinals across freqs would invent an ordering pandas rejects
+            // (monthly 2020-01 is ordinal 600, daily 2020-01-05 is 18267).
+            // br-frankenpandas-qoabs: Period, third dtype with the same
+            // to_f64() failure. Ordinals are ONLY comparable within one freq —
+            // pandas refuses mixed freq outright (IncompatibleFrequency), so a
+            // differing freq must NOT be ordered here. Comparing the raw
+            // ordinals across freqs would invent an ordering pandas rejects
+            // (monthly 2020-01 is ordinal 600, daily 2020-01-05 is 18267).
+            (Some(Scalar::Period(a)), Scalar::Period(b)) => {
+                if a.freq != b.freq {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                if b.ordinal < a.ordinal {
+                    min = Some(v)
+                }
+            }
             (Some(a), b) => match (a.to_f64(), b.to_f64()) {
                 (Ok(af), Ok(bf)) if bf < af => min = Some(v),
                 (Ok(_), Ok(_)) => {}
@@ -3713,6 +3733,15 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
             // br-frankenpandas-axhhk: Datetime64 sibling of the arm above.
             (Some(Scalar::Datetime64(a)), Scalar::Datetime64(b)) => {
                 if b > a {
+                    max = Some(v)
+                }
+            }
+            // br-frankenpandas-qoabs: Period, freq-guarded — see `nanmin`.
+            (Some(Scalar::Period(a)), Scalar::Period(b)) => {
+                if a.freq != b.freq {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                if b.ordinal > a.ordinal {
                     max = Some(v)
                 }
             }
@@ -7671,6 +7700,62 @@ mod tests {
         let vals = vec![d(DT_2020), d(DT_2020 + 60 * DAY_NS)];
         assert!(super::nanvar(&vals, 1).is_missing());
         assert!(super::nansem(&vals, 1).is_missing());
+    }
+
+    /// br-frankenpandas-qoabs: Period is the THIRD dtype whose `to_f64()`
+    /// errors, so min/max fell into the f64 catch-all and returned
+    /// `Null(NaN)`. pandas 2.2.3 on `Series([2020-01, 2020-03, 2020-02], M)`
+    /// gives min 2020-01 and max 2020-03; ordinals are 600/601/602.
+    #[test]
+    fn period_min_max_match_pandas_qoabs() {
+        let p = |ordinal: i64| Scalar::Period(Period::new(ordinal, PeriodFreq::Monthly));
+        let vals = vec![p(600), p(602), p(601)];
+        assert_eq!(super::nanmin(&vals), p(600));
+        assert_eq!(super::nanmax(&vals), p(602));
+
+        // Size-dependence, exactly as in axhhk: ONE element always worked via
+        // the `(None, _)` seed, so a test with a single value would pass even
+        // with no Period arm at all. Assert both sizes.
+        assert_eq!(super::nanmin(&[p(600)]), p(600));
+        let two = vec![p(602), p(600)];
+        assert!(!super::nanmin(&two).is_missing());
+        assert_eq!(super::nanmin(&two), p(600));
+        assert_eq!(super::nanmax(&two), p(602));
+    }
+
+    /// A Period whose ordinal is the NaT sentinel is missing and skipped, and
+    /// an all-missing Period input reports missing rather than a value.
+    #[test]
+    fn period_min_max_skip_nat_qoabs() {
+        let p = |ordinal: i64| Scalar::Period(Period::new(ordinal, PeriodFreq::Monthly));
+        let nat = Scalar::Period(Period::new(i64::MIN, PeriodFreq::Monthly));
+        let vals = vec![nat.clone(), p(602), p(600), nat.clone()];
+        assert_eq!(super::nanmin(&vals), p(600));
+        assert_eq!(super::nanmax(&vals), p(602));
+        assert!(super::nanmin(&[nat.clone(), nat]).is_missing());
+    }
+
+    /// MIXED FREQ must not be ordered. pandas refuses it outright
+    /// (`IncompatibleFrequency: Input has different freq=D from Period(freq=M)`),
+    /// so FP reports missing rather than inventing an order. This is the test
+    /// that discriminates: an implementation comparing raw ordinals would
+    /// happily return a value here, because monthly 2020-01 is ordinal 600
+    /// while daily 2020-01-05 is 18267 — it would call the daily period later.
+    #[test]
+    fn period_mixed_freq_is_not_ordered_qoabs() {
+        let month = Scalar::Period(Period::new(600, PeriodFreq::Monthly));
+        let day = Scalar::Period(Period::new(18_267, PeriodFreq::Daily));
+        let vals = vec![month.clone(), day.clone()];
+        let got_min = super::nanmin(&vals);
+        assert!(
+            got_min.is_missing(),
+            "mixed-freq Period min must not be ordered, got {got_min:?}"
+        );
+        assert_ne!(
+            got_min, day,
+            "must not rank the daily period by raw ordinal"
+        );
+        assert!(super::nanmax(&vals).is_missing());
     }
 
     /// Mixed Datetime64 + another dtype must NOT take the typed arm — it falls
