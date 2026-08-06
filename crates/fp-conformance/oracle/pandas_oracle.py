@@ -2259,8 +2259,13 @@ def op_series_map(pd, payload: dict[str, Any]) -> dict[str, Any]:
                 "series_map requires replace_to_find/replace_to_value (or map_dict) payload"
             )
         parsed_map = {_parse(k): _parse(v) for k, v in map_dict.items()}
+    # br-frankenpandas-fixture-divergence-triage-9s0c4: na_action was never
+    # read, so fp_p2d_124_series_map_na_action_ignore_strict ran with the
+    # default na_action=None — mapping NaN through the dict — when the whole
+    # point of that fixture is na_action="ignore", which leaves NaN untouched.
+    na_action = "ignore" if payload.get("na_action_ignore") else None
     try:
-        out = series.map(parsed_map)
+        out = series.map(parsed_map, na_action=na_action)
     except Exception as exc:
         raise OracleError(f"series_map failed: {exc}") from exc
     expected = series_to_expected(out)
@@ -3375,10 +3380,19 @@ def op_dataframe_corr(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame = dataframe_from_json(pd, frame_payload)
     method = payload.get("corr_method", "pearson")
     min_periods = payload.get("corr_min_periods")
+    # br-frankenpandas-fixture-divergence-triage-9s0c4: numeric_only was never
+    # read, so fp_p2d_146_dataframe_corr_numeric_only_bool_strict — a fixture
+    # whose whole purpose is to pin numeric_only=True over a frame containing a
+    # bool column — silently exercised pandas' default instead.
+    numeric_only = payload.get("corr_numeric_only")
 
     kwargs: dict[str, Any] = {"method": method}
     if min_periods is not None:
         kwargs["min_periods"] = min_periods
+    if numeric_only is not None:
+        if not isinstance(numeric_only, bool):
+            raise OracleError("dataframe_corr corr_numeric_only must be a bool")
+        kwargs["numeric_only"] = numeric_only
 
     try:
         out = frame.corr(**kwargs)
@@ -4747,11 +4761,20 @@ def op_series_str_removesuffix(pd, payload: dict[str, Any]) -> dict[str, Any]:
 def op_series_str_wrap(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     width = payload.get("str_wrap_width", 80)
+    # br-frankenpandas-fixture-divergence-triage-9s0c4: the handler took the
+    # width but never the drop_whitespace flag, so `str.wrap` always ran with
+    # pandas' default drop_whitespace=True — and
+    # fp_p2d_216_series_str_wrap_drop_whitespace_false_strict exists precisely
+    # to pin the False behaviour. The fixture was right and the oracle was
+    # silently testing the default instead.
+    drop_whitespace = payload.get("str_wrap_drop_whitespace", True)
+    if not isinstance(drop_whitespace, bool):
+        raise OracleError("series_str_wrap str_wrap_drop_whitespace must be a bool")
     if left is None:
         raise OracleError("series_str_wrap requires left payload")
     series = fixture_series_from_payload(pd, left, "series_str_wrap")
     try:
-        out = series.str.wrap(width)
+        out = series.str.wrap(width, drop_whitespace=drop_whitespace)
     except Exception as exc:
         raise OracleError(f"series_str_wrap failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}

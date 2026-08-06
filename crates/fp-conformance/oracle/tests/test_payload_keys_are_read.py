@@ -77,15 +77,18 @@ KNOWN_UNREAD = {
     "ipc_stream_input_base64": "replay-only binary IO fixture, not live-derivable",
     "parquet_input_base64": "replay-only binary IO fixture, not live-derivable",
     "requirement_level": "fixture metadata, not an operation argument",
-    # Genuine gaps of the SAME class as dt_strftime_format, each on a fixture
-    # named after the very option the oracle ignores. Tracked by
-    # br-frankenpandas-fixture-divergence-triage-9s0c4; fixing them changes
-    # oracle output, so each needs its own before/after evidence.
-    "constructor_copy": "9s0c4: fp_p2d_023_..._copy_true tests copy=True; oracle ignores it",
-    "corr_numeric_only": "9s0c4: fp_p2d_146_..._numeric_only_bool tests it; oracle ignores it",
-    "na_action_ignore": "9s0c4: fp_p2d_124_..._map_na_action_ignore tests it; oracle ignores it",
-    "compare_result_names": "9s0c4: fp_p2d_418_..._compare_result_names tests it; oracle ignores it",
-    "str_wrap_drop_whitespace": "9s0c4: fp_p2d_216_..._drop_whitespace_false tests it; oracle ignores it",
+    # The oracle has NO handler for `dataframe_compare` at all — it answers
+    # "unsupported operation: 'dataframe_compare'" — so this key is unread
+    # because the whole operation is not live-derivable, not because an option
+    # is being dropped. fp_p2d_418 is replay-only. Retiring it (with the reason
+    # recorded) versus implementing the op is a call for 9s0c4.
+    "compare_result_names": "oracle has no dataframe_compare handler; fixture is replay-only",
+    # Genuine gap of the SAME class as dt_strftime_format, still unfixed:
+    # fp_p2d_023_dataframe_constructor_list_like_copy_true pins copy=True and
+    # the constructor handler never reads it. Left for its own before/after
+    # evidence rather than a batch edit. Tracked by
+    # br-frankenpandas-fixture-divergence-triage-9s0c4.
+    "constructor_copy": "9s0c4: fp_p2d_023_..._copy_true pins copy=True; oracle ignores it",
 }
 
 
@@ -123,15 +126,24 @@ def test_every_fixture_option_key_is_read_by_the_oracle():
     )
 
 
-def test_the_two_fixed_keys_stay_fixed():
-    """Regression pins for the two this test was written from.
+@pytest.mark.parametrize(
+    "key",
+    [
+        "dt_strftime_format",
+        "rolling_window",
+        "str_wrap_drop_whitespace",
+        "corr_numeric_only",
+        "na_action_ignore",
+    ],
+)
+def test_previously_dropped_option_keys_stay_read(key: str):
+    """Regression pins for every key fixed under this class.
 
     Asserted by literal so a rename or a revert fails here rather than silently
-    resuming the default-fallback behavior.
+    resuming the default-fallback behavior — which is precisely how these went
+    unnoticed in the first place.
     """
-    source = ORACLE_SOURCE.read_text()
-    assert '"dt_strftime_format"' in source
-    assert '"rolling_window"' in source
+    assert f'"{key}"' in ORACLE_SOURCE.read_text()
 
 
 @pytest.mark.parametrize("key,reason", sorted(KNOWN_UNREAD.items()))
