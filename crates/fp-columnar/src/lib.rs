@@ -9084,7 +9084,19 @@ impl Column {
         let mut coerced: Vec<Scalar> = Vec::with_capacity(values.len());
         for value in values {
             let c = match value {
-                Scalar::Null(kind) => Scalar::Null(kind),
+                // A missing value in a FLOAT64 column is NaN — the comment above
+                // already states it ("the pandas-faithful Float64 case (float
+                // missing is always NaN)"), but the code preserved whatever kind
+                // arrived, so a `Null(Null)` survived inside a float column and
+                // showed up as a `null` marker where pandas has `nan`. Uses the
+                // same normalizer as `Column::new` so the two agree: generic
+                // Null -> NaN, explicit NaT left alone.
+                //
+                // This also makes MORE columns canonical-NaN-missing, which is
+                // the condition for the fast LazyNullableFloat64 backing below,
+                // so it should help the typed paths rather than cost them.
+                // (br-frankenpandas-nywa8)
+                value @ Scalar::Null(_) => Self::normalize_missing_for_dtype(value, DType::Float64),
                 other => cast_scalar_owned(other, DType::Float64)?,
             };
             match &c {
