@@ -5,8 +5,8 @@
   "operation": "series_add",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "c6e519c71f866379120790b7cbf098ce2876efe6f6260311ca14ac6d6799514a",
-    "generated_at": "2026-04-28T19:57:12Z"
+    "oracle_script_sha256": "dabc9ccf26d2f797a6bd609bc22134e240a2e106511ca9bf529a0011da434895",
+    "generated_at": "2026-08-08T05:28:37Z"
   },
   "left": {
     "name": "lhs",

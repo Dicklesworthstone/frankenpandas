@@ -5,8 +5,8 @@
   "operation": "groupby_max",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "c8667cf60cfe2e8998eaf9ec0b66794010a4de972f781b2c95791983362e7acb",
-    "generated_at": "2026-05-19T23:12:52Z"
+    "oracle_script_sha256": "dabc9ccf26d2f797a6bd609bc22134e240a2e106511ca9bf529a0011da434895",
+    "generated_at": "2026-08-08T05:28:46Z"
   },
   "left": {
     "name": "key",

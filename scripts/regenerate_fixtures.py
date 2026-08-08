@@ -448,6 +448,95 @@ def rebuild(fixture: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]
     return updated
 
 
+def restampable(verdict: dict[str, Any]) -> bool:
+    """May this fixture's provenance stamp be refreshed?
+
+    ONLY when the current oracle reproduced everything the fixture pins:
+
+      * nothing moved, and
+      * nothing went UNCOMPARED — a key the adjudicator could not judge means
+        the run did not verify that claim, and
+      * at least one key was actually compared.
+
+    The last two conditions are the point. `oracle_script_sha256` asserts "this
+    oracle produced these values"; stamping a fixture whose keys were skipped
+    would put that assertion on a value nothing checked — the
+    silent-non-comparison-as-success bug, committed into the corpus as
+    provenance. A fixture with zero comparable keys is therefore NOT
+    restampable, however green it looks.
+    """
+    return (
+        not verdict["moved"]
+        and not verdict["uncompared"]
+        and bool(verdict["how"])
+    )
+
+
+def restamp_text(raw: str, old: dict[str, str], new: dict[str, str]) -> str:
+    """Rewrite the provenance values IN PLACE in the fixture's own source text.
+
+    A `json.dumps(..., indent=2)` round-trip would reformat every fixture it
+    touches: the corpus writes each scalar on one line (`{ "kind": "int64",
+    "value": 0 }`) and the dumper explodes that to five. Restamping is a
+    3-line-per-file change applied to ~1000 files, so a reformat would bury the
+    only thing that actually changed under ~60 lines of noise per fixture and
+    make the diff unreviewable — precisely when reviewability is the point.
+
+    Substitution is confined to the `fixture_provenance` block (located by brace
+    matching) so a value like the pandas version cannot be rewritten where it
+    happens to appear elsewhere in the file. Each key is replaced exactly once.
+    Returns the text unchanged if the block cannot be located, and the caller's
+    verification (parse + compare) is what proves the result correct.
+    """
+    marker = f'"{PROVENANCE_KEY}"'
+    start = raw.find(marker)
+    if start == -1:
+        return raw
+    open_brace = raw.find("{", start)
+    if open_brace == -1:
+        return raw
+    depth = 0
+    end = -1
+    for idx in range(open_brace, len(raw)):
+        if raw[idx] == "{":
+            depth += 1
+        elif raw[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    if end == -1:
+        return raw
+
+    block = raw[open_brace:end]
+    for key, new_value in new.items():
+        old_value = old.get(key)
+        if old_value is None or old_value == new_value:
+            continue
+        needle = f'"{key}": {json.dumps(old_value)}'
+        replacement = f'"{key}": {json.dumps(new_value)}'
+        if needle in block:
+            block = block.replace(needle, replacement, 1)
+    return raw[:open_brace] + block + raw[end:]
+
+
+def restamp(fixture: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+    """Fixture with a refreshed provenance stamp and IDENTICAL expected values.
+
+    This is the honest remedy for the bulk of p6srr. The corpus is not mostly
+    wrong — for most fixtures the current oracle reproduces the pinned values
+    exactly and only the stamp names an older script. Rewriting the stamp there
+    makes it TRUE; it does not relax the freshness gate, and it is not
+    regeneration, because no expected value is read from the oracle at all.
+
+    Only `fixture_provenance` is touched. Callers must gate on `restampable`.
+    """
+    updated = json.loads(json.dumps(fixture))
+    if PROVENANCE_KEY in response:
+        updated[PROVENANCE_KEY] = response[PROVENANCE_KEY]
+    return updated
+
+
 def retire(fixture: dict[str, Any], reason: str) -> dict[str, Any]:
     """Mark a fixture retired IN THE FIXTURE, with its reason.
 
@@ -486,6 +575,12 @@ def main() -> int:
     parser.add_argument("--legacy-root", default="/nonexistent")
     parser.add_argument("--attributions", type=Path, help="JSON allowlist; required for --apply")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--restamp-agreeing", action="store_true",
+                        help="Refresh fixture_provenance ONLY on fixtures whose pinned values "
+                             "the current oracle reproduces exactly (nothing moved, nothing "
+                             "uncompared). Expected values are never read from the oracle in "
+                             "this mode, so it is not regeneration and needs no attributions. "
+                             "Without --apply it reports how many WOULD be restamped.")
     parser.add_argument("--glob", default="*.json")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--timeout", type=int, default=120)
@@ -505,7 +600,11 @@ def main() -> int:
                              "attribution pass driven by counts rather than by a visible slice.")
     args = parser.parse_args()
 
-    if args.apply and args.attributions is None:
+    # --restamp-agreeing rewrites no expected value, so it does not need an
+    # attribution allowlist. With no --attributions the allowlist loads empty,
+    # which means zero MOVED fixtures can be written — the bulk-regeneration ban
+    # still holds exactly as before.
+    if args.apply and args.attributions is None and not args.restamp_agreeing:
         print("--apply requires --attributions: bulk regeneration is forbidden "
               "(p6srr / maintainer ruling)", file=sys.stderr)
         return 2
@@ -547,6 +646,8 @@ def main() -> int:
         outcomes = [examine(p) for p in fixtures]
 
     agreed = prov_only = 0
+    restampable_count = restamped = 0
+    restamp_refused: list[str] = []
     moved_attributed: list[tuple[str, str]] = []
     moved_unattributed: list[tuple[str, list[str], str, str, str, list[str]]] = []
     move_classes: collections.Counter[str] = collections.Counter()
@@ -650,12 +751,49 @@ def main() -> int:
                     roundtrip_classes[klass] += 1
         elif verdict["provenance_stale"]:
             prov_only += 1
+            if restampable(verdict):
+                restampable_count += 1
+                if args.restamp_agreeing and args.apply:
+                    # Text-level rewrite so the corpus keeps its compact
+                    # formatting and the diff stays 3 lines per fixture.
+                    raw = path.read_text(encoding="utf-8")
+                    updated = restamp_text(
+                        raw,
+                        fixture.get(PROVENANCE_KEY) or {},
+                        response.get(PROVENANCE_KEY) or {},
+                    )
+                    # Verify before writing: the result must parse, must carry
+                    # the new stamp, and must leave every other key byte-equal
+                    # under the parser. A restamp that changed a value would be
+                    # regeneration, so it is refused rather than written.
+                    reparsed = json.loads(updated)
+                    stamped_ok = reparsed.get(PROVENANCE_KEY) == response.get(PROVENANCE_KEY)
+                    rest_unchanged = {
+                        k: v for k, v in reparsed.items() if k != PROVENANCE_KEY
+                    } == {k: v for k, v in fixture.items() if k != PROVENANCE_KEY}
+                    if stamped_ok and rest_unchanged:
+                        path.write_text(updated, encoding="utf-8")
+                        restamped += 1
+                    else:
+                        restamp_refused.append(name)
         else:
             agreed += 1
 
     print(f"fixtures examined            : {len(fixtures)}")
     print(f"  agree, fully current       : {agreed}")
     print(f"  agree, provenance-only     : {prov_only}")
+    print(f"    of those, RESTAMPABLE    : {restampable_count}"
+          f"   (nothing moved, nothing uncompared)")
+    print(f"    RESTAMPED this run       : {restamped}"
+          f"{'' if args.restamp_agreeing and args.apply else '   (needs --restamp-agreeing --apply)'}")
+    if restamp_refused:
+        # Never silent. A restampable fixture the writer declined is a fixture
+        # whose stamp stays stale, and an unreported one would read as covered.
+        print(f"    RESTAMP REFUSED          : {len(restamp_refused)}"
+              "   <-- richer provenance than the oracle emits; flattening it "
+              "would DROP keys (generation_command, intentional_divergence_notes)")
+        for name in restamp_refused:
+            print(f"      {name}")
     print(f"  MOVED, attributed          : {len(moved_attributed)}")
     print(f"  MOVED, UNATTRIBUTED        : {len(moved_unattributed)}   <-- stay failing fixtures")
     print(f"  oracle: unsupported op     : {len(unsupported)}   <-- retire candidates")
@@ -751,6 +889,9 @@ def main() -> int:
                     "fixtures_examined": len(fixtures),
                     "agree_current": agreed,
                     "agree_provenance_only": prov_only,
+                    "restampable": restampable_count,
+                    "restamped": restamped,
+                    "restamp_refused": restamp_refused,
                     "move_classes": dict(move_classes),
                     "roundtrip_classes": dict(roundtrip_classes),
                     "provenance_verdicts": dict(provenance_verdicts),

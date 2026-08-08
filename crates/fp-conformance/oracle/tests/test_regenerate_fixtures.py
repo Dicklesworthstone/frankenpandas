@@ -355,3 +355,70 @@ def test_a_real_value_move_is_untouched_by_the_column_order_exclusion():
     assert classes == ["KIND int64->float64"]
     # The exemplar must be the real move, not the ignored key.
     assert "column_order" not in example
+
+
+# --------------------------------------------------------------------------
+# `--restamp-agreeing`: refreshing a provenance stamp on fixtures the CURRENT
+# oracle reproduces. This is the honest bulk remedy for p6srr -- the corpus is
+# not mostly wrong, it is mostly UNSTAMPED -- so the guard that decides which
+# fixtures qualify is the thing that must not be loose.
+# --------------------------------------------------------------------------
+
+
+def test_restampable_when_everything_pinned_was_compared_and_agreed():
+    """The positive case: values verified, nothing skipped."""
+    verdict = {"moved": [], "uncompared": [], "how": {"expected_series": "SEMANTIC"}}
+    assert regenerate_fixtures.restampable(verdict)
+
+
+def test_not_restampable_when_a_value_moved():
+    verdict = {"moved": ["expected_series"], "uncompared": [],
+               "how": {"expected_series": "SEMANTIC"}}
+    assert not regenerate_fixtures.restampable(verdict)
+
+
+def test_not_restampable_when_a_key_went_uncompared():
+    """NEGATIVE CONTROL, and the whole reason this guard exists.
+
+    `oracle_script_sha256` asserts "this oracle produced these values". A key
+    the adjudicator could not judge means the run did not verify that claim, so
+    stamping it would commit the silent-non-comparison-as-success bug INTO the
+    corpus as provenance. Nothing moved here -- a naive `not verdict["moved"]`
+    check passes this fixture, which is exactly the mistake.
+    """
+    verdict = {"moved": [], "uncompared": ["expected_alignment"],
+               "how": {"expected_series": "SEMANTIC"}}
+    assert not regenerate_fixtures.restampable(verdict)
+
+
+def test_not_restampable_when_nothing_was_compared_at_all():
+    """NEGATIVE CONTROL: a fixture with zero comparable keys is not 'agreeing'.
+
+    An empty `how` means the run adjudicated nothing whatsoever. That is the
+    absence of evidence, not evidence of agreement, however green it looks.
+    """
+    assert not regenerate_fixtures.restampable({"moved": [], "uncompared": [], "how": {}})
+
+
+def test_restamp_refreshes_only_provenance_and_never_a_value():
+    """The values must come from the FIXTURE, never from the oracle response.
+
+    If `restamp` copied expected values it would be regeneration wearing a
+    different name, and would silently launder a moved fixture the moment the
+    caller's guard had a bug.
+    """
+    fixture = {
+        "expected_series": {"values": [{"kind": "utf8", "value": "pinned"}]},
+        "fixture_provenance": {"pandas_version": "2.2.3",
+                               "oracle_script_sha256": "old", "generated_at": "2026-04-22T21:02:48Z"},
+    }
+    response = {
+        "expected_series": {"values": [{"kind": "utf8", "value": "DIFFERENT"}]},
+        "fixture_provenance": {"pandas_version": "2.2.3",
+                               "oracle_script_sha256": "new", "generated_at": "2026-08-08T00:00:00Z"},
+    }
+    out = regenerate_fixtures.restamp(fixture, response)
+    assert out["fixture_provenance"]["oracle_script_sha256"] == "new"
+    assert out["expected_series"] == fixture["expected_series"]
+    # And the input fixture is not mutated in place.
+    assert fixture["fixture_provenance"]["oracle_script_sha256"] == "old"
