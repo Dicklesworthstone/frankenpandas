@@ -10192,6 +10192,38 @@ impl Series {
         None
     }
 
+    /// [`Self::asof`] as pandas observes it: the scalar `pd.Series.asof(label)`
+    /// returns, with no `Option` for the caller to interpret.
+    ///
+    /// When nothing is at or before `label`, pandas returns a plain float
+    /// **`nan`** — and it does so REGARDLESS OF DTYPE, which is the part worth
+    /// pinning. MEASURED, live pandas 2.2.3, both series indexed `[1, 2, 3]`
+    /// and asked for label `0`:
+    ///
+    /// ```text
+    /// pd.Series(['alpha','beta','gamma']).asof(0)             -> nan   (float)
+    /// pd.to_datetime([...]) as a Series      .asof(0)         -> nan   (float)
+    ///                                                            NOT NaT
+    /// ```
+    ///
+    /// A datetime64 series still answers `nan`, not `NaT`, because the return
+    /// is a bare scalar rather than an element of the column — so the column's
+    /// dtype does not get to choose the missing marker. That makes this Rule 1
+    /// (an INVENTED missing is always a float nan) in its purest form.
+    ///
+    /// This lives here rather than in the conformance harness deliberately: the
+    /// harness previously decided the marker itself, complete with a
+    /// "does this Utf8 column look datetime-like" heuristic that produced NaT.
+    /// That is the shadow-reimplementation pattern of
+    /// `br-frankenpandas-oxodo` — FrankenPandas must own its own observable
+    /// semantics. (br-frankenpandas-nywa8)
+    #[must_use]
+    pub fn asof_value(&self, label: &IndexLabel) -> Scalar {
+        self.asof(label)
+            .cloned()
+            .unwrap_or(Scalar::Null(NullKind::NaN))
+    }
+
     /// Return a boolean mask where missing values are `true`.
     ///
     /// Matches `pd.Series.isna()`.
@@ -40673,8 +40705,20 @@ impl CategoricalAccessor<'_> {
 
     /// Materialize the categorical back to the original values.
     ///
-    /// Replaces each code with the corresponding category value.
-    /// Missing codes (-1) become `Scalar::Null(NullKind::Null)`.
+    /// Replaces each code with the corresponding category value. A missing code
+    /// (`-1`) becomes `Scalar::Null(NullKind::NaN)`: the gap is INVENTED by the
+    /// decode — the codes array holds `-1`, not a value — so Rule 1 applies and
+    /// pandas renders it as a float `nan` even when every category is a string.
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// pd.Categorical.from_codes([0, -1, 1], categories=['low','high'])
+    ///     -> ['low', nan, 'high']            kinds ['str', 'float', 'str']
+    /// same .astype(object)                   kinds ['str', 'float', 'str']
+    /// ```
+    ///
+    /// It was `Null(NullKind::Null)`, which is a supplied-`None` marker and
+    /// belongs to Rule 2. (br-frankenpandas-nywa8)
     pub fn to_values(&self) -> Result<Series, FrameError> {
         let values: Vec<Scalar> = self
             .series
@@ -40688,7 +40732,7 @@ impl CategoricalAccessor<'_> {
                 {
                     self.meta.categories[*code as usize].clone()
                 } else {
-                    Scalar::Null(NullKind::Null)
+                    Scalar::Null(NullKind::NaN)
                 }
             })
             .collect();
@@ -152378,7 +152422,13 @@ mod tests {
 
         let values = s.cat().unwrap().to_values().unwrap();
         assert_eq!(values.values()[0], Scalar::Utf8("low".into()));
-        assert_eq!(values.values()[1], Scalar::Null(NullKind::Null));
+        // The -1 code is a gap the DECODE invents, so pandas renders it as a
+        // float nan even though every category is a string. MEASURED, live
+        // pandas 2.2.3: pd.Categorical.from_codes([0,-1,1], ['low','high'])
+        //   -> ['low', nan, 'high'], kinds ['str', 'float', 'str'].
+        // This pinned Null(NullKind::Null) — a supplied-None marker, which is
+        // Rule 2 and the wrong rule here. (br-frankenpandas-nywa8)
+        assert_eq!(values.values()[1], Scalar::Null(NullKind::NaN));
         assert_eq!(values.values()[2], Scalar::Utf8("high".into()));
     }
 
@@ -152671,13 +152721,17 @@ mod tests {
             ]
         );
         let materialized = sorted.cat().unwrap().to_values().unwrap();
+        // The -1 code decodes to a float nan, not a generic Null — see
+        // `categorical_from_codes_allows_missing_code` for the pandas
+        // measurement. Sorting does not change which marker the decode mints.
+        // (br-frankenpandas-nywa8)
         assert_eq!(
             materialized.values(),
             &[
                 Scalar::Utf8("low".into()),
                 Scalar::Utf8("medium".into()),
                 Scalar::Utf8("high".into()),
-                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
             ]
         );
     }

@@ -87,7 +87,6 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use fp_columnar::{ArithmeticOp, Column};
 use fp_expr::{eval_str_with_locals, parse_expr, query_str, query_str_with_locals};
 use fp_frame::{
@@ -16513,10 +16512,12 @@ fn execute_series_asof_fixture_operation(fixture: &PacketFixture) -> Result<Scal
     let left = build_series(require_left_series(fixture)?)
         .map_err(|err| format!("series build failed: {err}"))?;
     let label = require_asof_label(fixture)?;
-    Ok(left
-        .asof(label)
-        .cloned()
-        .unwrap_or_else(|| series_asof_missing_scalar(&left)))
+    // Delegates to FrankenPandas rather than deciding the missing marker here.
+    // This helper used to map `None` itself, via a "does this Utf8 column look
+    // datetime-like" heuristic that produced NaT — a marker pandas never
+    // returns from `asof`, and a harness-side reimplementation of semantics FP
+    // owns (br-frankenpandas-oxodo, br-frankenpandas-nywa8).
+    Ok(left.asof_value(label))
 }
 
 fn execute_series_autocorr_fixture_operation(fixture: &PacketFixture) -> Result<Scalar, String> {
@@ -16534,43 +16535,6 @@ fn float_result_scalar(value: f64) -> Scalar {
     } else {
         Scalar::Float64(value)
     }
-}
-
-fn series_asof_missing_scalar(series: &Series) -> Scalar {
-    match series.dtype() {
-        DType::Utf8 if series_asof_looks_datetime_like(series) => Scalar::Null(NullKind::NaT),
-        dtype => Scalar::missing_for_dtype(dtype),
-    }
-}
-
-fn series_asof_looks_datetime_like(series: &Series) -> bool {
-    let mut saw_non_missing = false;
-    for value in series.column().values() {
-        match value {
-            Scalar::Utf8(text) => {
-                let trimmed = text.trim();
-                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("nat") {
-                    continue;
-                }
-                saw_non_missing = true;
-                if !utf8_value_looks_datetime_like(trimmed) {
-                    return false;
-                }
-            }
-            _ if value.is_missing() => {}
-            _ => return false,
-        }
-    }
-    saw_non_missing
-}
-
-fn utf8_value_looks_datetime_like(value: &str) -> bool {
-    DateTime::parse_from_rfc3339(value).is_ok()
-        || NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").is_ok()
-        || NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f").is_ok()
-        || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").is_ok()
-        || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
-        || NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
 }
 
 fn execute_series_clip_fixture_operation(

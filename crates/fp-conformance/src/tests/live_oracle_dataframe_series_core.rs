@@ -15226,10 +15226,10 @@ fn live_oracle_series_asof_int_index_match() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let label = fixture.asof_label.as_ref().expect("asof_label");
-    let actual = series
-        .asof(label)
-        .cloned()
-        .unwrap_or_else(|| super::series_asof_missing_scalar(&series));
+    // Delegates the missing-marker decision to FrankenPandas
+    // (br-frankenpandas-nywa8): pandas' asof returns a float nan when nothing
+    // is at or before the label, in EVERY dtype.
+    let actual = series.asof_value(label);
     super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
 }
 
@@ -25043,10 +25043,10 @@ fn live_oracle_series_asof_intermediate_label() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let label = fixture.asof_label.as_ref().expect("asof_label");
-    let actual = series
-        .asof(label)
-        .cloned()
-        .unwrap_or_else(|| super::series_asof_missing_scalar(&series));
+    // Delegates the missing-marker decision to FrankenPandas
+    // (br-frankenpandas-nywa8): pandas' asof returns a float nan when nothing
+    // is at or before the label, in EVERY dtype.
+    let actual = series.asof_value(label);
     super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
 }
 
@@ -39805,10 +39805,10 @@ fn live_oracle_series_asof_string_index() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let label = fixture.asof_label.as_ref().expect("asof_label");
-    let actual = series
-        .asof(label)
-        .cloned()
-        .unwrap_or_else(|| super::series_asof_missing_scalar(&series));
+    // Delegates the missing-marker decision to FrankenPandas
+    // (br-frankenpandas-nywa8): pandas' asof returns a float nan when nothing
+    // is at or before the label, in EVERY dtype.
+    let actual = series.asof_value(label);
     super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
 }
 

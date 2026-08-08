@@ -5,22 +5,46 @@
   "operation": "series_asof",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "512aa5a6dc18d97eea4245a5baaa3aaf15893279b1ea861b10b7cc7ee4f04297",
+    "generated_at": "2026-08-08T19:29:16Z"
   },
-  "asof_label": { "kind": "int64", "value": 0 },
+  "asof_label": {
+    "kind": "int64",
+    "value": 0
+  },
   "left": {
     "name": "values",
     "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 4 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-02-29" },
-      { "kind": "utf8", "value": "2024-03-01" },
-      { "kind": "utf8", "value": "2024-03-02T12:34:56" }
+      {
+        "kind": "utf8",
+        "value": "2024-02-29"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-03-01"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-03-02T12:34:56"
+      }
     ]
   },
-  "expected_scalar": { "kind": "null", "value": "na_t" }
+  "expected_scalar": {
+    "kind": "null",
+    "value": "na_n"
+  }
 }
