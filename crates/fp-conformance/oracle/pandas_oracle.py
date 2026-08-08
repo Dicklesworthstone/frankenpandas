@@ -3622,6 +3622,34 @@ def op_dataframe_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def reduction_numeric_only_kwargs(
+    payload: dict[str, Any], key: str, op_name: str
+) -> dict[str, Any]:
+    """Read a reduction's ``numeric_only`` option, if the fixture supplies one.
+
+    Returns kwargs to splat into the pandas call: ``{}`` when the key is absent,
+    so an existing fixture keeps exercising pandas' own default and no banked
+    value moves. Mirrors the ``corr_numeric_only`` handling above rather than
+    inventing a second convention.
+
+    WHY THIS EXISTS (br-frankenpandas-reductions-numeric-only-default-zx21n).
+    Thirteen fixtures cannot currently be corrected because they have no way to
+    SAY which path they mean. Ten of them are named ``..._skips_nonnumeric_...``
+    and pin the ``numeric_only=True`` result, but the oracle never passed the
+    option, so it took pandas 2.x's default and DIED on the object column —
+    those are the ten oracle errors in p6srr's untriaged bucket. With this key
+    they can pin ``numeric_only: true`` and be regenerated truthfully instead of
+    being converted into error fixtures, which would delete the only coverage
+    the numeric_only=True path has.
+    """
+    value = payload.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, bool):
+        raise OracleError(f"{op_name} {key} must be a bool")
+    return {"numeric_only": value}
+
+
 def op_dataframe_sem(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3631,9 +3659,12 @@ def op_dataframe_sem(pd, payload: dict[str, Any]) -> dict[str, Any]:
     axis = payload.get("sem_axis", 0)
     skipna = payload.get("sem_skipna", True)
     ddof = payload.get("sem_ddof", 1)
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "sem_numeric_only", "dataframe_sem"
+    )
 
     try:
-        out = frame.sem(axis=axis, skipna=skipna, ddof=ddof)
+        out = frame.sem(axis=axis, skipna=skipna, ddof=ddof, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_sem failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3670,8 +3701,12 @@ def op_dataframe_skew(pd, payload: dict[str, Any]) -> dict[str, Any]:
     axis = payload.get("skew_axis", 0)
     skipna = payload.get("skew_skipna", True)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "skew_numeric_only", "dataframe_skew"
+    )
+
     try:
-        out = frame.skew(axis=axis, skipna=skipna)
+        out = frame.skew(axis=axis, skipna=skipna, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_skew failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3686,8 +3721,12 @@ def op_dataframe_kurtosis(pd, payload: dict[str, Any]) -> dict[str, Any]:
     axis = payload.get("kurtosis_axis", 0)
     skipna = payload.get("kurtosis_skipna", True)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "kurtosis_numeric_only", "dataframe_kurtosis"
+    )
+
     try:
-        out = frame.kurtosis(axis=axis, skipna=skipna)
+        out = frame.kurtosis(axis=axis, skipna=skipna, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_kurtosis failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3702,8 +3741,12 @@ def op_dataframe_prod(pd, payload: dict[str, Any]) -> dict[str, Any]:
     axis = payload.get("prod_axis", 0)
     skipna = payload.get("prod_skipna", True)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "prod_numeric_only", "dataframe_prod"
+    )
+
     try:
-        out = frame.prod(axis=axis, skipna=skipna)
+        out = frame.prod(axis=axis, skipna=skipna, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_prod failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3730,8 +3773,12 @@ def op_dataframe_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
     axis = payload.get("sum_axis", 0)
     skipna = payload.get("sum_skipna", True)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "sum_numeric_only", "dataframe_sum"
+    )
+
     try:
-        out = frame.sum(axis=axis, skipna=skipna)
+        out = frame.sum(axis=axis, skipna=skipna, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_sum failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3746,8 +3793,12 @@ def op_dataframe_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
     axis = payload.get("mean_axis", 0)
     skipna = payload.get("mean_skipna", True)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "mean_numeric_only", "dataframe_mean"
+    )
+
     try:
-        out = frame.mean(axis=axis, skipna=skipna)
+        out = frame.mean(axis=axis, skipna=skipna, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_mean failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3763,8 +3814,12 @@ def op_dataframe_std(pd, payload: dict[str, Any]) -> dict[str, Any]:
     skipna = payload.get("std_skipna", True)
     ddof = payload.get("std_ddof", 1)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "std_numeric_only", "dataframe_std"
+    )
+
     try:
-        out = frame.std(axis=axis, skipna=skipna, ddof=ddof)
+        out = frame.std(axis=axis, skipna=skipna, ddof=ddof, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_std failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3780,8 +3835,12 @@ def op_dataframe_var(pd, payload: dict[str, Any]) -> dict[str, Any]:
     skipna = payload.get("var_skipna", True)
     ddof = payload.get("var_ddof", 1)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "var_numeric_only", "dataframe_var"
+    )
+
     try:
-        out = frame.var(axis=axis, skipna=skipna, ddof=ddof)
+        out = frame.var(axis=axis, skipna=skipna, ddof=ddof, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_var failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3796,8 +3855,12 @@ def op_dataframe_min(pd, payload: dict[str, Any]) -> dict[str, Any]:
     axis = payload.get("min_axis", 0)
     skipna = payload.get("min_skipna", True)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "min_numeric_only", "dataframe_min"
+    )
+
     try:
-        out = frame.min(axis=axis, skipna=skipna)
+        out = frame.min(axis=axis, skipna=skipna, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_min failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3812,8 +3875,12 @@ def op_dataframe_max(pd, payload: dict[str, Any]) -> dict[str, Any]:
     axis = payload.get("max_axis", 0)
     skipna = payload.get("max_skipna", True)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "max_numeric_only", "dataframe_max"
+    )
+
     try:
-        out = frame.max(axis=axis, skipna=skipna)
+        out = frame.max(axis=axis, skipna=skipna, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_max failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3828,8 +3895,12 @@ def op_dataframe_median(pd, payload: dict[str, Any]) -> dict[str, Any]:
     axis = payload.get("median_axis", 0)
     skipna = payload.get("median_skipna", True)
 
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "median_numeric_only", "dataframe_median"
+    )
+
     try:
-        out = frame.median(axis=axis, skipna=skipna)
+        out = frame.median(axis=axis, skipna=skipna, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_median failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3875,6 +3946,19 @@ def op_dataframe_nunique(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame = dataframe_from_json(pd, frame_payload)
     axis = payload.get("nunique_axis", 0)
     dropna = payload.get("nunique_dropna", True)
+    # nunique is the ONE reduction in this family that has no numeric_only
+    # option at all. MEASURED, live pandas 2.2.3:
+    #   df.nunique(numeric_only=True)
+    #     -> TypeError: DataFrame.nunique() got an unexpected keyword argument
+    # It always counts every column. Fail loudly rather than accept a key we
+    # would have to ignore, which is how a fixture ends up believing it pinned
+    # an option that was never applied — the corr_numeric_only defect that
+    # br-frankenpandas-fixture-divergence-triage-9s0c4 found.
+    if payload.get("nunique_numeric_only") is not None:
+        raise OracleError(
+            "dataframe_nunique has no numeric_only option in pandas 2.2.3; "
+            "nunique counts every column regardless of dtype"
+        )
 
     try:
         out = frame.nunique(axis=axis, dropna=dropna)
@@ -3897,9 +3981,12 @@ def op_dataframe_quantile(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame = dataframe_from_json(pd, frame_payload)
     q = payload.get("quantile_q", 0.5)
     axis = payload.get("quantile_axis", 0)
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "quantile_numeric_only", "dataframe_quantile"
+    )
 
     try:
-        out = frame.quantile(q=q, axis=axis)
+        out = frame.quantile(q=q, axis=axis, **numeric_only)
     except Exception as exc:
         raise OracleError(f"dataframe_quantile failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -5878,7 +5965,15 @@ def op_dataframe_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("dataframe_count requires frame payload")
 
     frame = dataframe_from_json(pd, frame_payload)
-    out = frame.count(axis=0, numeric_only=False)
+    # count DOES take numeric_only and its default is False (every column
+    # counted) — measured: df.count() -> {'b': 2, 'label': 3, 'a': 3} while
+    # numeric_only=True drops 'label'. The literal False was already pandas'
+    # default, so reading the key changes nothing for existing fixtures and
+    # lets a new one pin the other path. (zx21n)
+    numeric_only = reduction_numeric_only_kwargs(
+        payload, "count_numeric_only", "dataframe_count"
+    )
+    out = frame.count(axis=0, **{"numeric_only": False, **numeric_only})
     return {
         "expected_series": {
             "index": [label_to_json(v) for v in out.index.tolist()],

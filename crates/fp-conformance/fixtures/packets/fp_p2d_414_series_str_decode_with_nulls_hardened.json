@@ -5,8 +5,8 @@
   "operation": "series_str_decode",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "512aa5a6dc18d97eea4245a5baaa3aaf15893279b1ea861b10b7cc7ee4f04297",
-    "generated_at": "2026-08-08T16:50:45Z"
+    "oracle_script_sha256": "3cdeb85691852e7f69bb7f1f4b6d4b0f3465de9532f223444c12b5e377220f31",
+    "generated_at": "2026-08-08T19:50:20Z"
   },
   "left": {
     "name": "text",
