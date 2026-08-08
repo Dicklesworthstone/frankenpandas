@@ -12013,10 +12013,30 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
     /// MR-REINDEX1: reindex over a unique index is a label-keyed gather — for
-    /// each target label present in the source, the output row equals the
-    /// source row at that label (value, null kind); for an absent label, the
-    /// output row is all-null. Hardens the label-lookup gather path that the
-    /// primitive-gather kernel (fi6zx) also feeds.
+    /// each target label present in the source, the output row holds the source
+    /// row's VALUE at that label; for an absent label, the output row is null.
+    /// Hardens the label-lookup gather path that the primitive-gather kernel
+    /// (fi6zx) also feeds.
+    ///
+    /// The two targets are checked separately because pandas treats them
+    /// differently, and the difference is the whole point of the property.
+    /// MEASURED, live pandas 2.2.3, on `pd.DataFrame({'v': [0, 0]}, index=[0, 1])`:
+    ///
+    /// ```text
+    /// df.reindex([1, 0])      -> int64    [0, 0]              no gap, dtype kept
+    /// df.reindex([1, 0, 2])   -> float64  [0.0, 0.0, nan]     gap WIDENS the column
+    /// ```
+    ///
+    /// and the same widening on other dtypes — object stays object (`['b','a',nan]`),
+    /// bool becomes object (`[False, True, nan]`), float64 is already wide. So an
+    /// introduced gap may change the present rows' TYPE, never their value: a
+    /// numpy int64 array cannot hold the `nan`, so the whole column widens.
+    ///
+    /// This property previously demanded bit-identical `Scalar`s across the
+    /// gap-introducing target, which is pandas' behaviour for no dtype at all.
+    /// It failed on the smallest possible input — `([Int64(0), Int64(1)],
+    /// [Int64(0), Int64(0)])` giving `Float64(0.0) != src Int64(0)` — and the
+    /// FrankenPandas side was correct. (br-frankenpandas-coaq8)
     #[test]
     fn prop_dataframe_reindex_gathers_present_nulls_absent(
         (labels, vals) in (2_usize..=10)
@@ -12030,25 +12050,55 @@ proptest! {
             Ok(d) => d,
             Err(_) => return Ok(()),
         };
-        // Target: source labels reversed (a permutation) plus one absent label.
+        let src = df.column("v").unwrap().values().to_vec();
+        let reversed: Vec<IndexLabel> = labels.iter().rev().cloned().collect();
+
+        // (a) Pure PERMUTATION — no gap, so nothing may widen and the source
+        // Scalar must survive bit-identically. The old property never covered
+        // this case; it is the half where strictness is actually warranted.
+        if let Ok(permuted) = df.reindex(reversed.clone()) {
+            prop_assert_eq!(permuted.index().len(), reversed.len(), "permute output row count");
+            let out = permuted.column("v").unwrap().values().to_vec();
+            for (i, lab) in reversed.iter().enumerate() {
+                let pos = labels.iter().position(|l| l == lab).expect("permutation label");
+                prop_assert_eq!(
+                    &out[i], &src[pos],
+                    "reindex permutation must not alter {:?} (no gap is introduced)", lab
+                );
+            }
+        }
+
+        // (b) Permutation plus one ABSENT label — a gap is introduced, so the
+        // column may widen. Present rows keep their VALUE; the absent row is null.
         let absent = fresh_missing_index_label(&labels, 0);
-        let mut target: Vec<IndexLabel> = labels.iter().rev().cloned().collect();
+        let mut target = reversed;
         target.push(absent);
         let reixed = match df.reindex(target.clone()) {
             Ok(r) => r,
             Err(_) => return Ok(()),
         };
         prop_assert_eq!(reixed.index().len(), target.len(), "reindex output row count");
-        let src = df.column("v").unwrap().values().to_vec();
         let out = reixed.column("v").unwrap().values().to_vec();
         for (i, lab) in target.iter().enumerate() {
             match labels.iter().position(|l| l == lab) {
                 Some(pos) => {
                     let s = &src[pos];
                     let o = &out[i];
-                    let same = s == o
-                        || (matches!(s, Scalar::Float64(f) if f.is_nan()) && o.is_missing());
-                    prop_assert!(same, "reindex present {:?}: {:?} != src {:?}", lab, o, s);
+                    let same = match (s, o) {
+                        // A missing source row stays missing; the KIND may be
+                        // renormalized by the widening (Null -> NaN in a float
+                        // column), so compare missingness, not the marker.
+                        _ if s.is_missing() => o.is_missing(),
+                        // The documented widening: int64 -> float64, same value.
+                        #[allow(clippy::cast_precision_loss)]
+                        (Scalar::Int64(n), Scalar::Float64(f)) => *f == *n as f64,
+                        _ => s == o,
+                    };
+                    prop_assert!(
+                        same,
+                        "reindex present {:?}: {:?} is neither src {:?} nor its int64->float64 widening",
+                        lab, o, s
+                    );
                 }
                 None => {
                     prop_assert!(out[i].is_missing(), "reindex absent {:?} should be null, got {:?}", lab, out[i]);
