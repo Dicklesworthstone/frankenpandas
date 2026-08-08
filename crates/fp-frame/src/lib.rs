@@ -51724,12 +51724,63 @@ pub fn concat_series_with_ignore_index(
     Series::new(name, index, column)
 }
 
+/// Build a concatenated column, applying pandas' int64 -> float64 promotion when
+/// the concat INVENTED a gap in it.
+///
+/// The promotion lives here, at the site that knows it is inventing a missing
+/// value, rather than in `infer_dtype`. Inferring Float64 from a NaN-kind missing
+/// centrally looks tidier and is wrong: `NullKind::NaN` is FrankenPandas' generic
+/// missing marker, not a claim of floatness, so a central rule reclassifies
+/// legitimately-Int64 columns (measured: it broke 19 fp-columnar tests, ffill
+/// returning Float64(1.0) where Int64(1) was pinned). Only the introducer knows
+/// the difference. (br-frankenpandas-nywa8)
+///
+/// Utf8 and the temporal dtypes are deliberately left alone: pandas keeps an
+/// object column object and uses NaT rather than NaN for datetime64/timedelta64.
+///
+/// ⚠️ THE PROMOTION IS CONDITIONAL ON THE SOURCE HAVING BEEN ALL-VALID, which is
+/// the part the fixtures caught. An int column that ALREADY held a missing value
+/// is a NULLABLE Int64 (that is how the payload is constructed — see DISC-019),
+/// and a nullable Int64 can hold the invented gap, so pandas keeps it int64 with
+/// an NA rather than widening. Measured on a single fixture that contains both
+/// cases side by side, `fp_p2d_031_..._outer_preserves_nulls_strict`:
+///
+/// ```text
+///   a: left [None, 2], absent right -> [null, 2, null]     int64, NOT promoted
+///   c: absent left, right [300]     -> [NaN, NaN, 300.0]   float64, promoted
+/// ```
+///
+/// `a` and `c` differ only in whether the source column already carried a
+/// missing value. Promoting both was my first version and it was wrong.
+///
+/// The caller's doc comment for [`concat_dataframes`] follows this function; do
+/// not insert anything between them.
+fn concat_column_with_invented_gaps(
+    values: Vec<Scalar>,
+    invented_a_gap: bool,
+    source_was_all_valid: bool,
+) -> Result<Column, FrameError> {
+    if invented_a_gap && source_was_all_valid {
+        let surviving_is_int = values.iter().any(|value| matches!(value, Scalar::Int64(_)))
+            && values
+                .iter()
+                .all(|value| matches!(value, Scalar::Int64(_)) || value.is_missing());
+        if surviving_is_int {
+            return Column::new(DType::Float64, values).map_err(Into::into);
+        }
+    }
+    Column::from_values(values).map_err(Into::into)
+}
+
 /// Concatenate DataFrames along axis 0 (row-wise).
 ///
 /// Matches `pd.concat([df1, df2, ...], axis=0)` semantics:
 /// - Output columns are the union of input columns (`join='outer'`).
 /// - Index labels are concatenated in order (duplicates preserved).
-/// - Missing cells materialize as `Scalar::Null`.
+/// - A cell INVENTED for a column absent from one frame is `NaN`, and an
+///   all-valid int64 column widens to float64; a column that already carried a
+///   missing value is nullable and keeps its dtype with a `Null` gap. See
+///   [`concat_column_with_invented_gaps`] (br-frankenpandas-nywa8).
 /// - Empty input returns an empty DataFrame.
 pub fn concat_dataframes(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
     concat_dataframes_with_ignore_index(frames, false)
@@ -51881,17 +51932,46 @@ pub fn concat_dataframes_with_ignore_index(
             }
             continue;
         }
+        // FIRST PASS decides the KIND of the gaps before any are minted. A source
+        // column that already carried a missing value is nullable, and pandas
+        // fills a nullable column with pd.NA (a Null-kind missing) while keeping
+        // its dtype; an all-valid numpy int column gets a NaN and widens to
+        // float64. Measured side by side on
+        // fp_p2d_031_dataframe_concat_axis0_outer_preserves_nulls_strict:
+        //   a: left [None, 2], absent right -> [null, 2, null]   int64
+        //   c: absent left, right [300]      -> [NaN, NaN, 300.0] float64
+        // (br-frankenpandas-nywa8)
+        let source_was_all_valid = frames.iter().all(|frame| {
+            frame
+                .column(col_name)
+                .is_none_or(|column| !column.values().iter().any(fp_types::Scalar::is_missing))
+        });
+        // Only counts as invented if a row actually gets one. An EMPTY frame
+        // contributes no rows, so a column absent from it is not widened —
+        // measured: concat of {} with {'a': [50, 60]} keeps int64.
+        let invented_a_gap = frames
+            .iter()
+            .any(|frame| frame.column(col_name).is_none() && !frame.is_empty());
+        let gap = if source_was_all_valid {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            Scalar::Null(NullKind::Null)
+        };
+
         let mut values = Vec::with_capacity(total_len);
         for frame in frames {
             if let Some(column) = frame.column(col_name) {
                 values.extend_from_slice(column.values());
             } else {
                 for _ in 0..frame.len() {
-                    values.push(Scalar::Null(NullKind::Null));
+                    values.push(gap.clone());
                 }
             }
         }
-        columns.insert(col_name.clone(), Column::from_values(values)?);
+        columns.insert(
+            col_name.clone(),
+            concat_column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+        );
     }
 
     DataFrame::new_with_column_order(index, columns, union_columns)
@@ -52025,17 +52105,46 @@ pub fn concat_dataframes_with_keys(
             columns.insert(col_name.clone(), Column::from_f64_values(out));
             continue;
         }
+        // FIRST PASS decides the KIND of the gaps before any are minted. A source
+        // column that already carried a missing value is nullable, and pandas
+        // fills a nullable column with pd.NA (a Null-kind missing) while keeping
+        // its dtype; an all-valid numpy int column gets a NaN and widens to
+        // float64. Measured side by side on
+        // fp_p2d_031_dataframe_concat_axis0_outer_preserves_nulls_strict:
+        //   a: left [None, 2], absent right -> [null, 2, null]   int64
+        //   c: absent left, right [300]      -> [NaN, NaN, 300.0] float64
+        // (br-frankenpandas-nywa8)
+        let source_was_all_valid = frames.iter().all(|frame| {
+            frame
+                .column(col_name)
+                .is_none_or(|column| !column.values().iter().any(fp_types::Scalar::is_missing))
+        });
+        // Only counts as invented if a row actually gets one. An EMPTY frame
+        // contributes no rows, so a column absent from it is not widened —
+        // measured: concat of {} with {'a': [50, 60]} keeps int64.
+        let invented_a_gap = frames
+            .iter()
+            .any(|frame| frame.column(col_name).is_none() && !frame.is_empty());
+        let gap = if source_was_all_valid {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            Scalar::Null(NullKind::Null)
+        };
+
         let mut values = Vec::with_capacity(total_len);
         for frame in frames {
             if let Some(column) = frame.column(col_name) {
                 values.extend_from_slice(column.values());
             } else {
                 for _ in 0..frame.len() {
-                    values.push(Scalar::Null(NullKind::Null));
+                    values.push(gap.clone());
                 }
             }
         }
-        columns.insert(col_name.clone(), Column::from_values(values)?);
+        columns.insert(
+            col_name.clone(),
+            concat_column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+        );
     }
 
     // Per br-frankenpandas-3k1qf: concat with keys produces a MultiIndex in
@@ -92365,13 +92474,91 @@ mod tests {
             out.column("a").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2)]
         );
+        // A column present in only ONE frame gets a gap the concat INVENTED, and
+        // pandas makes that gap a NaN with the column promoted to float64.
+        // Measured on 2.2.3, concat axis=0 over disjoint columns:
+        //   x -> [1.0, NaN] float64      y -> [NaN, 2.0] float64
+        // This test previously pinned [Int64(10), Null(Null)], which is what
+        // FrankenPandas used to produce (br-frankenpandas-nywa8).
         assert_eq!(
             out.column("b").unwrap().values(),
-            &[Scalar::Int64(10), Scalar::Null(NullKind::Null)]
+            &[Scalar::Float64(10.0), Scalar::Null(NullKind::NaN)]
         );
         assert_eq!(
             out.column("c").unwrap().values(),
-            &[Scalar::Null(NullKind::Null), Scalar::Int64(20)]
+            &[Scalar::Null(NullKind::NaN), Scalar::Float64(20.0)]
+        );
+        // 'a' is present in BOTH frames, so nothing was invented and it stays
+        // int64 — the negative control for the promotion above.
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    /// The condition that makes the promotion correct rather than merely
+    /// plausible, and the one the corpus caught me getting wrong.
+    ///
+    /// A column that ALREADY held a missing value is nullable, and a nullable
+    /// int column can hold the invented gap — so pandas keeps it int64 with an NA
+    /// instead of widening. Measured on the fixture that contains both cases side
+    /// by side, fp_p2d_031_dataframe_concat_axis0_outer_preserves_nulls_strict:
+    ///
+    /// ```text
+    ///   a: left [None, 2], absent right -> [null, 2, null]   int64, NOT promoted
+    ///   c: absent left, right [300]     -> [NaN, NaN, 300.0] float64, promoted
+    /// ```
+    ///
+    /// They differ ONLY in whether the source already carried a missing value.
+    /// (br-frankenpandas-nywa8)
+    #[test]
+    fn concat_does_not_promote_a_column_that_was_already_nullable() {
+        let left = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Null(NullKind::Null), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(&["c"], vec![("c", vec![Scalar::Int64(300)])]).unwrap();
+
+        let out = concat_dataframes(&[&left, &right]).unwrap();
+
+        // 'a' had a pre-existing null -> nullable -> stays int64, gap is Null.
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+        // 'c' was all-valid int64 -> numpy -> promotes, gaps are NaN.
+        assert_eq!(
+            out.column("c").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(300.0)
+            ]
+        );
+    }
+
+    /// An EMPTY frame contributes no rows, so a column absent from it has no gap
+    /// invented and must not widen. Measured: concat of {} with {'a': [50, 60]}
+    /// keeps int64. This was a plain bug in the first version of the flag, which
+    /// set it from "the frame lacks the column" rather than "a row got a gap".
+    #[test]
+    fn concat_with_an_empty_frame_invents_nothing_and_does_not_promote() {
+        let empty = DataFrame::from_dict(&[], vec![]).unwrap();
+        let right = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(50), Scalar::Int64(60)])],
+        )
+        .unwrap();
+
+        let out = concat_dataframes(&[&empty, &right]).unwrap();
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(50), Scalar::Int64(60)]
         );
     }
 

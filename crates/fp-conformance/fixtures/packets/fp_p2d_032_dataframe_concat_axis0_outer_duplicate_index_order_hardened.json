@@ -5,59 +5,138 @@
   "operation": "dataframe_concat",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T12:41:11Z"
   },
   "concat_axis": 0,
   "concat_join": "outer",
   "frame": {
     "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
-    "column_order": ["b", "a"],
+    "column_order": [
+      "b",
+      "a"
+    ],
     "columns": {
       "a": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
+        {
+          "kind": "int64",
+          "value": 10
+        },
+        {
+          "kind": "int64",
+          "value": 20
+        }
       ],
       "b": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        }
       ]
     }
   },
   "frame_right": {
-    "index": [{ "kind": "int64", "value": 1 }],
-    "column_order": ["c", "a"],
+    "index": [
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "column_order": [
+      "c",
+      "a"
+    ],
     "columns": {
-      "a": [{ "kind": "int64", "value": 30 }],
-      "c": [{ "kind": "int64", "value": 3 }]
+      "a": [
+        {
+          "kind": "int64",
+          "value": 30
+        }
+      ],
+      "c": [
+        {
+          "kind": "int64",
+          "value": 3
+        }
+      ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
-    "column_order": ["b", "a", "c"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 },
-        { "kind": "int64", "value": 30 }
-      ],
       "b": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "float64",
+          "value": 1.0
+        },
+        {
+          "kind": "float64",
+          "value": 2.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
+      ],
+      "a": [
+        {
+          "kind": "int64",
+          "value": 10
+        },
+        {
+          "kind": "int64",
+          "value": 20
+        },
+        {
+          "kind": "int64",
+          "value": 30
+        }
       ],
       "c": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 3 }
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "float64",
+          "value": 3.0
+        }
       ]
-    }
+    },
+    "column_order": [
+      "b",
+      "a",
+      "c"
+    ]
   }
 }

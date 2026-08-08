@@ -914,6 +914,19 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
     let mut saw_datetime = false;
     let mut saw_non_utf8_non_null = false;
 
+    // NOTE (br-frankenpandas-nywa8): inferring Float64 from a NaN-KIND missing
+    // looks like the right central fix for pandas' int64 -> float64 promotion,
+    // and it is NOT. `NullKind::NaN` is used throughout FrankenPandas as the
+    // GENERIC missing marker, not specifically as "a float NaN" — e.g. short-row
+    // padding and `missing_for_dtype(Float64)` both produce it. Promoting on it
+    // broke 19 pre-existing fp-columnar tests (ffill returning Float64(1.0)
+    // where Int64(1) was pinned, isin flipping a bool) because those columns are
+    // legitimately Int64 with a generic missing. Measured, then reverted.
+    //
+    // The promotion has to be applied where a gap is INTRODUCED and the
+    // introducer knows it is inventing one — see `concat_dataframes_*`, which
+    // promotes locally. Do not move it back here without first giving
+    // "pandas-introduced gap" a marker distinct from generic missingness.
     for value in values {
         match value.dtype() {
             DType::Null => {}

@@ -5,44 +5,98 @@
   "operation": "dataframe_concat",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T12:41:11Z"
   },
   "concat_axis": 0,
   "concat_join": "outer",
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
     "columns": {}
   },
   "frame_right": {
-    "index": [{ "kind": "int64", "value": 2 }],
-    "column_order": ["k", "m"],
+    "index": [
+      {
+        "kind": "int64",
+        "value": 2
+      }
+    ],
+    "column_order": [
+      "k",
+      "m"
+    ],
     "columns": {
-      "k": [{ "kind": "int64", "value": 6 }],
-      "m": [{ "kind": "int64", "value": 5 }]
+      "k": [
+        {
+          "kind": "int64",
+          "value": 6
+        }
+      ],
+      "m": [
+        {
+          "kind": "int64",
+          "value": 5
+        }
+      ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
-    "column_order": ["k", "m"],
     "columns": {
       "k": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 6 }
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "float64",
+          "value": 6.0
+        }
       ],
       "m": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 5 }
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "float64",
+          "value": 5.0
+        }
       ]
-    }
+    },
+    "column_order": [
+      "k",
+      "m"
+    ]
   }
 }
