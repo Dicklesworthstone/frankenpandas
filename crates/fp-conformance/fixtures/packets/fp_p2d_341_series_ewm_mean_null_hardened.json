@@ -5,41 +5,101 @@
   "operation": "series_ewm_mean",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "91254e08fa66bca71d3bb11dadaf0864aa67a643e51bba0b6b3b9f1fa5cfa78b",
+    "generated_at": "2026-08-08T22:36:33Z"
   },
   "ewm_span": 3.0,
   "left": {
     "name": "values",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 },
-      { "kind": "int64", "value": 4 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      }
     ],
     "values": [
-      { "kind": "float64", "value": 1.0 },
-      { "kind": "null", "value": "null" },
-      { "kind": "float64", "value": 3.0 },
-      { "kind": "float64", "value": 4.0 },
-      { "kind": "float64", "value": 5.0 }
+      {
+        "kind": "float64",
+        "value": 1.0
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "float64",
+        "value": 3.0
+      },
+      {
+        "kind": "float64",
+        "value": 4.0
+      },
+      {
+        "kind": "float64",
+        "value": 5.0
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 },
-      { "kind": "int64", "value": 4 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      }
     ],
     "values": [
-      { "kind": "float64", "value": 1.0 },
-      { "kind": "float64", "value": 1.0 },
-      { "kind": "float64", "value": 2.0 },
-      { "kind": "float64", "value": 3.0 },
-      { "kind": "float64", "value": 4.0 }
+      {
+        "kind": "float64",
+        "value": 1.0
+      },
+      {
+        "kind": "float64",
+        "value": 1.0
+      },
+      {
+        "kind": "float64",
+        "value": 2.6
+      },
+      {
+        "kind": "float64",
+        "value": 3.4615384615384617
+      },
+      {
+        "kind": "float64",
+        "value": 4.310344827586207
+      }
     ]
   }
 }

@@ -92805,6 +92805,62 @@ mod tests {
         }
     }
 
+    /// `ewm(span=3).mean()` over a gap: the gap still DECAYS the prior weight,
+    /// it does not restart or average.
+    ///
+    /// MEASURED, live pandas 2.2.3, on `pd.Series([1.0, None, 3.0, 4.0, 5.0])`
+    /// with `span=3` (so `alpha = 2/(span+1) = 0.5`):
+    ///
+    /// ```text
+    /// .ewm(span=3).mean()                  -> [1.0, 1.0, 2.6, 3.461538, 4.310345]
+    /// .ewm(span=3, ignore_na=True).mean()  -> [1.0, 1.0, 2.333333, 3.285714, 4.2]
+    /// ```
+    ///
+    /// The default is `ignore_na=False`, and index 2 is the discriminator. Hand
+    /// check: the surviving observations are x0 at t=0 and x2 at t=2, so with
+    /// two periods elapsed x0 carries weight `(1-a)^2 = 0.25`:
+    /// `(0.25*1 + 1*3) / (0.25 + 1) = 2.6`. Under `ignore_na=True` the gap is
+    /// skipped entirely and x0 weighs `(1-a)^1 = 0.5`, giving `2.333…`. An
+    /// unweighted `(1+3)/2 = 2.0` is neither, and is the value the fixture
+    /// pinned. (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn ewm_mean_decays_the_prior_weight_across_a_gap() {
+        let subject = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+
+        let got: Vec<f64> = subject
+            .ewm(Some(3.0), None)
+            .mean()
+            .unwrap()
+            .values()
+            .iter()
+            .map(|v| v.to_f64().expect("ewm emits floats"))
+            .collect();
+        let want = [
+            1.0,
+            1.0,
+            2.6,
+            3.461_538_461_538_461_5,
+            4.310_344_827_586_207,
+        ];
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-12,
+                "ewm index {i}: got {g}, pandas gives {w} (full output {got:?})"
+            );
+        }
+    }
+
     /// `get_dummies` SORTS its categories, and the DataFrame form APPENDS the
     /// encoded columns rather than leaving them in place.
     ///
