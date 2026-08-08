@@ -45297,22 +45297,96 @@ impl DatetimeAccessor<'_> {
         }
     }
 
-    /// Helper: apply a datetime extraction function to each value.
-    fn extract_component<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    /// Promote a NUMERIC `.dt` component result from Int64 to Float64 when the
+    /// column contains a gap.
+    ///
+    /// MEASURED, live pandas 2.2.3, on
+    /// `pd.Series(pd.to_datetime(['2021-01-05 03:04:05', None, '2022-07-31 23:59:59']))`
+    /// — every numeric component, uniformly:
+    ///
+    /// ```text
+    /// dt.year / month / day / hour / minute / second / microsecond /
+    /// nanosecond / dayofweek / dayofyear / quarter / days_in_month
+    ///     -> dtype=float64, [2021.0, nan, 2022.0]
+    /// ```
+    ///
+    /// With no NaT the same accessors are integer-typed. A numpy int array
+    /// cannot hold the gap, so the whole column widens — the null MARKER was
+    /// already right here, only the dtype was not. (br-frankenpandas-02ijn)
+    ///
+    /// Only `Int64` cells are rewritten, so the string-valued components that
+    /// share these helpers (`dt.tz`, `dt.month_name`, `dt.strftime`, ...) and
+    /// the `Datetime64`-valued ones pass through untouched. The boolean `dt.is_*`
+    /// family is on a separate helper for the opposite reason — see
+    /// [`Self::extract_component_bool`].
+    fn promote_numeric_component_on_missing(out: &mut [Scalar]) {
+        if !out.iter().any(Scalar::is_missing) {
+            return;
+        }
+        for scalar in out {
+            if let Scalar::Int64(i) = scalar {
+                *scalar = Scalar::Float64(*i as f64);
+            }
+        }
+    }
+
+    /// Shared body of the string-backed `.dt` extraction, WITHOUT the numeric
+    /// promotion. Only `weekofyear` wants this directly — see
+    /// [`Self::extract_component_nullable_int`].
+    fn extract_component_raw<F>(&self, func: F) -> Result<Vec<Scalar>, FrameError>
     where
         F: Fn(&str) -> Scalar,
     {
         self.validate_datetime_dtype()?;
-        let vals = self.series.column().values();
-        let out: Vec<Scalar> = vals
+        Ok(self
+            .series
+            .column()
+            .values()
             .iter()
             .map(|v| match v {
                 Scalar::Utf8(s) => func(s),
                 _ if v.is_missing() => Scalar::Null(NullKind::NaN),
                 _ => Scalar::Null(NullKind::NaN),
             })
-            .collect();
+            .collect())
+    }
+
+    /// Helper: apply a datetime extraction function to each value.
+    fn extract_component<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> Scalar,
+    {
+        let mut out = self.extract_component_raw(func)?;
+        Self::promote_numeric_component_on_missing(&mut out);
         // Per br-frankenpandas-8pyft: pandas .dt.<x> preserves source axis name.
+        let index = self.series.index().clone();
+        let column = Column::from_values(out)?;
+        Series::new(name.to_string(), index, column)
+    }
+
+    /// [`Self::extract_component`] for `weekofyear`, the ONE numeric `.dt`
+    /// component that does not take the float64 promotion.
+    ///
+    /// pandas 2.2.3 has no `Series.dt.weekofyear`; the value is
+    /// `dt.isocalendar().week`, whose dtype is the NULLABLE extension type
+    /// `UInt32`. That dtype can hold the gap, so pandas never has to widen.
+    /// Measured on `pd.to_datetime(['2024-01-01T00:00:00', None,
+    /// '2024-12-31T23:59:59'])`:
+    ///
+    /// ```text
+    /// s.dt.isocalendar().week  ->  dtype=UInt32, [1, <NA>, 1]
+    /// ```
+    ///
+    /// Integer values, missing gap, no float64 anywhere — the exact opposite of
+    /// every sibling in `dt_numeric_accessors_promote_to_float64_when_a_nat_is_
+    /// present`. Promoting it was tried and the conformance corpus caught it:
+    /// `fp_p2d_324_series_dt_weekofyear_null_hardened` went from agreeing with
+    /// the oracle to `Float64(1.0)` vs `Int64(1)`. (br-frankenpandas-02ijn)
+    fn extract_component_nullable_int<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> Scalar,
+    {
+        let out = self.extract_component_raw(func)?;
         let index = self.series.index().clone();
         let column = Column::from_values(out)?;
         Series::new(name.to_string(), index, column)
@@ -45388,8 +45462,20 @@ impl DatetimeAccessor<'_> {
     where
         F: Fn(&fp_types::Timestamp) -> Option<i64>,
     {
-        let out: Vec<Scalar> = self
-            .series
+        let mut out = self.extract_component_typed_raw(ts_fn);
+        Self::promote_numeric_component_on_missing(&mut out);
+        let index = self.series.index().clone();
+        let column = Column::from_values(out)?;
+        Series::new(name.to_string(), index, column)
+    }
+
+    /// Shared body of the typed `Datetime64` extraction, WITHOUT the numeric
+    /// promotion.
+    fn extract_component_typed_raw<F>(&self, ts_fn: F) -> Vec<Scalar>
+    where
+        F: Fn(&fp_types::Timestamp) -> Option<i64>,
+    {
+        self.series
             .column()
             .values()
             .iter()
@@ -45402,7 +45488,20 @@ impl DatetimeAccessor<'_> {
                 }
                 _ => Scalar::Null(NullKind::NaN),
             })
-            .collect();
+            .collect()
+    }
+
+    /// [`Self::extract_component_typed`] for `weekofyear` — the nullable-UInt32
+    /// exception documented on [`Self::extract_component_nullable_int`].
+    fn extract_component_typed_nullable_int<F>(
+        &self,
+        ts_fn: F,
+        name: &str,
+    ) -> Result<Series, FrameError>
+    where
+        F: Fn(&fp_types::Timestamp) -> Option<i64>,
+    {
+        let out = self.extract_component_typed_raw(ts_fn);
         let index = self.series.index().clone();
         let column = Column::from_values(out)?;
         Series::new(name.to_string(), index, column)
@@ -46615,9 +46714,13 @@ impl DatetimeAccessor<'_> {
             if let Some(result) = self.typed_datetime_weekofyear_all_valid(self.series.name()) {
                 return result;
             }
-            return self.extract_component_typed(|ts| ts.weekofyear(), self.series.name());
+            // NOT extract_component_typed: weekofyear is the one numeric
+            // component pandas keeps integer-typed across a gap, because
+            // isocalendar().week is nullable UInt32.
+            return self
+                .extract_component_typed_nullable_int(|ts| ts.weekofyear(), self.series.name());
         }
-        self.extract_component(
+        self.extract_component_nullable_int(
             |s| {
                 if let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) {
                     let (_, iso_week, _) = Self::iso_year_week_day(y, m, d);
@@ -122964,48 +123067,53 @@ mod tests {
         .unwrap();
         assert_eq!(s.dtype(), DType::Datetime64);
 
+        // This column carries a NaT, so every numeric component is float64 —
+        // measured on live pandas 2.2.3, see
+        // `dt_numeric_accessors_promote_to_float64_when_a_nat_is_present`
+        // (br-frankenpandas-02ijn). These rows previously pinned Int64, which
+        // was FrankenPandas' own pre-fix answer.
         let year = s.dt().year().unwrap();
-        assert_eq!(year.values()[0], Scalar::Int64(2021));
-        assert_eq!(year.values()[1], Scalar::Int64(2021));
+        assert_eq!(year.values()[0], Scalar::Float64(2021.0));
+        assert_eq!(year.values()[1], Scalar::Float64(2021.0));
         assert!(year.values()[3].is_missing()); // NaT -> NaN
         let month = s.dt().month().unwrap();
-        assert_eq!(month.values()[0], Scalar::Int64(1));
-        assert_eq!(month.values()[1], Scalar::Int64(2));
+        assert_eq!(month.values()[0], Scalar::Float64(1.0));
+        assert_eq!(month.values()[1], Scalar::Float64(2.0));
         let day = s.dt().day().unwrap();
-        assert_eq!(day.values()[0], Scalar::Int64(1));
-        assert_eq!(day.values()[1], Scalar::Int64(10));
+        assert_eq!(day.values()[0], Scalar::Float64(1.0));
+        assert_eq!(day.values()[1], Scalar::Float64(10.0));
         let hour = s.dt().hour().unwrap();
-        assert_eq!(hour.values()[0], Scalar::Int64(0));
-        assert_eq!(hour.values()[1], Scalar::Int64(1));
+        assert_eq!(hour.values()[0], Scalar::Float64(0.0));
+        assert_eq!(hour.values()[1], Scalar::Float64(1.0));
         let minute = s.dt().minute().unwrap();
-        assert_eq!(minute.values()[1], Scalar::Int64(1));
+        assert_eq!(minute.values()[1], Scalar::Float64(1.0));
         let second = s.dt().second().unwrap();
-        assert_eq!(second.values()[0], Scalar::Int64(0));
-        assert_eq!(second.values()[1], Scalar::Int64(1));
+        assert_eq!(second.values()[0], Scalar::Float64(0.0));
+        assert_eq!(second.values()[1], Scalar::Float64(1.0));
 
         // dayofweek: pandas Monday=0; 2021-01-01 is Friday (4), 2021-02-10 is
         // Wednesday (2). dayofyear: Jan-01 -> 1, Feb-10 -> 41.
         let dow = s.dt().dayofweek().unwrap();
-        assert_eq!(dow.values()[0], Scalar::Int64(4));
-        assert_eq!(dow.values()[1], Scalar::Int64(2));
+        assert_eq!(dow.values()[0], Scalar::Float64(4.0));
+        assert_eq!(dow.values()[1], Scalar::Float64(2.0));
         let doy = s.dt().dayofyear().unwrap();
-        assert_eq!(doy.values()[0], Scalar::Int64(1));
-        assert_eq!(doy.values()[1], Scalar::Int64(41));
+        assert_eq!(doy.values()[0], Scalar::Float64(1.0));
+        assert_eq!(doy.values()[1], Scalar::Float64(41.0));
         // sub-second components on ts_c (0.123456789 s).
         let micro = s.dt().microsecond().unwrap();
-        assert_eq!(micro.values()[2], Scalar::Int64(123_456));
+        assert_eq!(micro.values()[2], Scalar::Float64(123_456.0));
         let nano = s.dt().nanosecond().unwrap();
-        assert_eq!(nano.values()[2], Scalar::Int64(789));
+        assert_eq!(nano.values()[2], Scalar::Float64(789.0));
 
         // i64 + bool components on the typed Datetime64 column. ts_a = Jan 1 2021
         // (Q1, month start, quarter start, year start; not month end / leap).
         // ts_b = Feb 10 2021 (Q1, mid-month; 2021 not leap so Feb has 28 days).
         let quarter = s.dt().quarter().unwrap();
-        assert_eq!(quarter.values()[0], Scalar::Int64(1));
-        assert_eq!(quarter.values()[1], Scalar::Int64(1));
+        assert_eq!(quarter.values()[0], Scalar::Float64(1.0));
+        assert_eq!(quarter.values()[1], Scalar::Float64(1.0));
         let dim = s.dt().days_in_month().unwrap();
-        assert_eq!(dim.values()[0], Scalar::Int64(31));
-        assert_eq!(dim.values()[1], Scalar::Int64(28));
+        assert_eq!(dim.values()[0], Scalar::Float64(31.0));
+        assert_eq!(dim.values()[1], Scalar::Float64(28.0));
         let leap = s.dt().is_leap_year().unwrap();
         assert_eq!(leap.values()[0], Scalar::Bool(false));
         let ms = s.dt().is_month_start().unwrap();
@@ -123194,8 +123302,12 @@ mod tests {
         )
         .unwrap();
 
+        // Two gaps (the null and the unparseable "invalid"), so year is
+        // float64. Measured: pd.to_datetime(["2024-03-15", None, "invalid"],
+        // errors="coerce").dt.year -> float64 [2024.0, nan, nan].
+        // (br-frankenpandas-02ijn)
         let year = s.dt().year().unwrap();
-        assert_eq!(year.values()[0], Scalar::Int64(2024));
+        assert_eq!(year.values()[0], Scalar::Float64(2024.0));
         assert!(year.values()[1].is_missing());
         assert!(year.values()[2].is_missing());
     }
@@ -128787,6 +128899,120 @@ mod tests {
         )
         .unwrap();
         boqep_assert_matches_pandas("Utf8-backed", &boqep_all_accessors(&s));
+    }
+
+    fn dt_numeric_accessors(s: &Series) -> Vec<(&'static str, Series)> {
+        vec![
+            ("year", s.dt().year().unwrap()),
+            ("month", s.dt().month().unwrap()),
+            ("day", s.dt().day().unwrap()),
+            ("hour", s.dt().hour().unwrap()),
+            ("minute", s.dt().minute().unwrap()),
+            ("second", s.dt().second().unwrap()),
+            ("microsecond", s.dt().microsecond().unwrap()),
+            ("nanosecond", s.dt().nanosecond().unwrap()),
+            ("dayofweek", s.dt().dayofweek().unwrap()),
+            ("dayofyear", s.dt().dayofyear().unwrap()),
+            ("quarter", s.dt().quarter().unwrap()),
+            ("days_in_month", s.dt().days_in_month().unwrap()),
+        ]
+    }
+
+    /// A NaT widens every NUMERIC `.dt` component to float64, on both the typed
+    /// `Datetime64` backing and the Utf8-backed one.
+    ///
+    /// MEASURED, live pandas 2.2.3, on `pd.to_datetime([...NaT...])`:
+    ///
+    /// ```text
+    /// dt.year  -> dtype=float64  [2021.0, nan, 2022.0]
+    /// ```
+    ///
+    /// and identically for month/day/hour/minute/second/microsecond/nanosecond/
+    /// dayofweek/dayofyear/quarter/days_in_month. Without the NaT the same
+    /// accessors are integer-typed, so the promotion is caused by the gap, not
+    /// by the accessor. This is the `.dt` sibling of the `.str` rule in
+    /// `str_int_returning_ops_promote_to_float64_unless_the_null_is_nat`.
+    /// (br-frankenpandas-02ijn)
+    #[test]
+    fn dt_numeric_accessors_promote_to_float64_when_a_nat_is_present() {
+        const NS: i64 = 1_000_000_000;
+        let typed = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Datetime64(1_709_251_200 * NS),
+                Scalar::Datetime64(fp_types::Timestamp::NAT),
+                Scalar::Datetime64(1_710_504_000 * NS),
+            ],
+        )
+        .unwrap();
+        let utf8 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-03-01T00:00:00".to_owned()),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Utf8("2024-03-15T12:00:00".to_owned()),
+            ],
+        )
+        .unwrap();
+        for (backing, s) in [("typed Datetime64", &typed), ("Utf8-backed", &utf8)] {
+            for (op, result) in dt_numeric_accessors(s) {
+                let out = result.values();
+                assert!(
+                    out[1].is_missing(),
+                    "{backing}: dt.{op}() must leave the NaT row missing, got {out:?}"
+                );
+                assert!(
+                    matches!(out[0], Scalar::Float64(_)) && matches!(out[2], Scalar::Float64(_)),
+                    "{backing}: dt.{op}() widens to float64 when a NaT is present — a numpy int \
+                     array cannot hold the gap. Got {out:?}"
+                );
+            }
+        }
+
+        // The STRING-valued components share the same helpers and must be
+        // untouched by the promotion — they have no Int64 cell to widen, and
+        // pandas renders their gap as a float nan in an object column:
+        //   s.dt.month_name() -> object ['February', nan, ...]
+        // Executed here rather than assumed, because fixtures 331/332 are
+        // re-banked on the strength of it.
+        for (backing, s) in [("typed Datetime64", &typed), ("Utf8-backed", &utf8)] {
+            for (op, result) in [
+                ("month_name", s.dt().month_name().unwrap()),
+                ("day_name", s.dt().day_name().unwrap()),
+            ] {
+                let out = result.values();
+                assert_eq!(
+                    out[1],
+                    Scalar::Null(NullKind::NaN),
+                    "{backing}: dt.{op}() renders the gap as NaN, got {out:?}"
+                );
+                assert!(
+                    matches!(out[0], Scalar::Utf8(_)) && matches!(out[2], Scalar::Utf8(_)),
+                    "{backing}: dt.{op}() is string-valued and must not be promoted, got {out:?}"
+                );
+            }
+        }
+
+        // Control: with no NaT the very same accessors stay Int64, so the
+        // promotion above is caused by the gap and not by the accessor.
+        let all_valid = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Datetime64(1_709_251_200 * NS),
+                Scalar::Datetime64(1_710_504_000 * NS),
+            ],
+        )
+        .unwrap();
+        for (op, result) in dt_numeric_accessors(&all_valid) {
+            let out = result.values();
+            assert!(
+                out.iter().all(|v| matches!(v, Scalar::Int64(_))),
+                "dt.{op}() over an all-present column stays int64 in pandas, got {out:?}"
+            );
+        }
     }
 
     /// The all-valid fast path must keep agreeing with the nullable paths:
@@ -149374,10 +149600,13 @@ mod tests {
             ],
         )
         .unwrap();
+        // "not-a-date" is a gap, so the column is float64. Measured:
+        // pd.to_datetime([...,"not-a-date"], errors="coerce").dt.microsecond
+        //   -> float64 [123456.0, 987654.0, 0.0, nan]   (br-frankenpandas-02ijn)
         let result = s.dt().microsecond().unwrap();
-        assert_eq!(result.column().values()[0], Scalar::Int64(123_456));
-        assert_eq!(result.column().values()[1], Scalar::Int64(987_654));
-        assert_eq!(result.column().values()[2], Scalar::Int64(0));
+        assert_eq!(result.column().values()[0], Scalar::Float64(123_456.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(987_654.0));
+        assert_eq!(result.column().values()[2], Scalar::Float64(0.0));
         assert_eq!(result.column().values()[3], Scalar::Null(NullKind::NaN));
     }
 
@@ -149394,10 +149623,12 @@ mod tests {
             ],
         )
         .unwrap();
+        // Same gap, same promotion as `test_dt_microsecond`.
+        // (br-frankenpandas-02ijn)
         let result = s.dt().nanosecond().unwrap();
-        assert_eq!(result.column().values()[0], Scalar::Int64(789));
-        assert_eq!(result.column().values()[1], Scalar::Int64(321));
-        assert_eq!(result.column().values()[2], Scalar::Int64(0));
+        assert_eq!(result.column().values()[0], Scalar::Float64(789.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(321.0));
+        assert_eq!(result.column().values()[2], Scalar::Float64(0.0));
         assert_eq!(result.column().values()[3], Scalar::Null(NullKind::NaN));
     }
 

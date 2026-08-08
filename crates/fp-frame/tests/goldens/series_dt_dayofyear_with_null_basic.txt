@@ -1,4 +1,4 @@
 0    1
 1    NaN
 2    366
-Name: ts, Length: 3, dtype: Int64
+Name: ts, Length: 3, dtype: Float64

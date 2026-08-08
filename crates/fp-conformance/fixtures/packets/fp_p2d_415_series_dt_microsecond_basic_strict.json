@@ -5,36 +5,84 @@
   "operation": "series_dt_microsecond",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "512aa5a6dc18d97eea4245a5baaa3aaf15893279b1ea861b10b7cc7ee4f04297",
+    "generated_at": "2026-08-08T18:22:39Z"
   },
   "left": {
     "name": "datetimes",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-06-15 12:34:56.123456" },
-      { "kind": "utf8", "value": "2024-06-15T12:34:56.987654321" },
-      { "kind": "utf8", "value": "2024-06-15" },
-      { "kind": "utf8", "value": "not-a-date" }
+      {
+        "kind": "utf8",
+        "value": "2024-06-15 12:34:56.123456"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-06-15T12:34:56.987654321"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-06-15"
+      },
+      {
+        "kind": "utf8",
+        "value": "not-a-date"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 123456 },
-      { "kind": "int64", "value": 987654 },
-      { "kind": "int64", "value": 0 },
-      { "kind": "null", "value": "na_n" }
+      {
+        "kind": "float64",
+        "value": 123456.0
+      },
+      {
+        "kind": "null",
+        "value": "na_n"
+      },
+      {
+        "kind": "null",
+        "value": "na_n"
+      },
+      {
+        "kind": "null",
+        "value": "na_n"
+      }
     ]
   }
 }
