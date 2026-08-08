@@ -98545,6 +98545,45 @@ mod tests {
         );
     }
 
+    /// A missing value in a FLOAT64 series is NaN, and slicing keeps it that
+    /// way. This is the check the conformance suite cannot make — its frame
+    /// comparison treats any missing as equal, so
+    /// fp_p2c_010_series_head_with_nulls_hardened stayed green while the marker
+    /// was `null` where the oracle says `na_n`.
+    ///
+    /// Measured on pandas 2.2.3: pd.Series([100.0, None, 300.0, None, 500.0])
+    /// is float64 whose missing elements are float `nan`, and `.head(3)` keeps
+    /// them. (br-frankenpandas-nywa8)
+    #[test]
+    fn series_head_keeps_the_float_missing_as_nan() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(300.0),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        // The column normalizes on construction: a float column has no generic
+        // null.
+        assert_eq!(s.column().dtype(), DType::Float64);
+        assert_eq!(s.column().values()[1], Scalar::Null(NullKind::NaN));
+
+        let head = s.head(3).unwrap();
+        assert_eq!(
+            head.column().values(),
+            &[
+                Scalar::Float64(100.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(300.0)
+            ]
+        );
+    }
+
     #[test]
     fn series_head_tail() {
         let s = Series::from_values(
