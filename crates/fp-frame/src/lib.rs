@@ -74611,14 +74611,14 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.cumsum()`.
     pub fn cumsum(&self) -> Result<Self, FrameError> {
-        self.apply_cum_f64(0.0, |a, v| a + v, |s| s.cumsum())
+        self.apply_cum_f64("cumsum", 0.0, |a, v| a + v, |s| s.cumsum())
     }
 
     /// Cumulative product per column.
     ///
     /// Matches `pd.DataFrame.cumprod()`.
     pub fn cumprod(&self) -> Result<Self, FrameError> {
-        self.apply_cum_f64(1.0, |a, v| a * v, |s| s.cumprod())
+        self.apply_cum_f64("cumprod", 1.0, |a, v| a * v, |s| s.cumprod())
     }
 
     /// Cumulative maximum per column.
@@ -74626,6 +74626,7 @@ impl DataFrame {
     /// Matches `pd.DataFrame.cummax()`.
     pub fn cummax(&self) -> Result<Self, FrameError> {
         self.apply_cum_f64(
+            "cummax",
             f64::NEG_INFINITY,
             |a, v| if v > a { v } else { a },
             |s| s.cummax(),
@@ -74637,6 +74638,7 @@ impl DataFrame {
     /// Matches `pd.DataFrame.cummin()`.
     pub fn cummin(&self) -> Result<Self, FrameError> {
         self.apply_cum_f64(
+            "cummin",
             f64::INFINITY,
             |a, v| if v < a { v } else { a },
             |s| s.cummin(),
@@ -77798,8 +77800,69 @@ impl DataFrame {
     /// goes NaN (cumprod inf*0) clears its bit — bit-identical to `Series::cumX`
     /// (which the non-Float64 columns still delegate to via `series_op`). Missing
     /// output normalizes to `Null(NaN)`, matching the generic cum* Scalar arm.
+    /// Cumulative accumulation down an OBJECT (Utf8) column.
+    ///
+    /// MEASURED, live pandas 2.2.3, on `label = ['a','z','m']`:
+    ///
+    /// ```text
+    /// cumsum  -> ['a', 'az', 'azm']   RUNNING CONCATENATION
+    /// cummin  -> ['a', 'a',  'a'  ]   running LEXICOGRAPHIC min
+    /// cummax  -> ['a', 'z',  'z'  ]   running LEXICOGRAPHIC max
+    /// cumprod -> TypeError: can't multiply sequence by non-int of type 'str'
+    /// ```
+    ///
+    /// ⚠️ ANY MISSING VALUE MAKES ALL FOUR RAISE, under either `skipna`. pandas
+    /// runs the raw element-wise operator over the object array, and the gap is
+    /// a float `nan` that no string operator accepts. Measured on
+    /// `['a', None, 'm']`:
+    ///
+    /// ```text
+    /// cumsum  -> TypeError: can only concatenate str (not "float") to str
+    /// cummin  -> TypeError: '<=' not supported between 'str' and 'float'
+    /// cummax  -> TypeError: '>=' not supported between 'str' and 'float'
+    /// ```
+    ///
+    /// So this is NOT "skip the nulls and accumulate the rest" — the presence
+    /// of a gap is itself the refusal. That is the opposite of the plain
+    /// reductions, where an all-missing object column reduces quietly to `nan`.
+    /// (br-frankenpandas-reductions-numeric-only-default-zx21n)
+    fn cum_utf8_column(func: &str, name: &str, col: &Column) -> Result<Column, FrameError> {
+        let values = col.values();
+        if values.iter().any(fp_types::Scalar::is_missing) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "{func} cannot accumulate column '{name}': a missing value cannot \
+                 be combined with a string"
+            )));
+        }
+        if func == "cumprod" {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "{func} cannot accumulate non-numeric column '{name}'"
+            )));
+        }
+        let mut out: Vec<Scalar> = Vec::with_capacity(values.len());
+        let mut acc: Option<String> = None;
+        for value in values.iter() {
+            let text = match value {
+                Scalar::Utf8(text) => text.clone(),
+                other => other.to_string(),
+            };
+            acc = Some(match (acc.take(), func) {
+                (None, _) => text,
+                (Some(previous), "cumsum") => previous + &text,
+                (Some(previous), "cummin") => previous.min(text),
+                (Some(previous), "cummax") => previous.max(text),
+                (Some(previous), _) => previous,
+            });
+            out.push(Scalar::Utf8(
+                acc.as_ref().expect("accumulator is set above").clone(),
+            ));
+        }
+        Column::new(DType::Utf8, out).map_err(FrameError::from)
+    }
+
     fn apply_cum_f64<S>(
         &self,
+        func: &str,
         init: f64,
         step: impl Fn(f64, f64) -> f64 + Sync,
         series_op: S,
@@ -77833,9 +77896,16 @@ impl DataFrame {
                 // Numeric non-typed-Float64 (Int64/Bool, or an edge Float64) →
                 // Series op (matches apply_per_column's numeric arm).
                 Ok(series_op(&self.column_as_series(name)?)?.column().clone())
+            } else if col.dtype() == DType::Utf8 {
+                Self::cum_utf8_column(func, name, col)
             } else {
-                // Non-numeric (Utf8/Datetime/...) passes through unchanged, exactly
-                // as apply_per_column's gate does — cum* is not applied.
+                // Other non-numeric dtypes (Datetime64/...) still pass through
+                // unchanged, as apply_per_column's gate does. NOT verified
+                // against pandas — `cummax` on a datetime64 column does run a
+                // real accumulation there, so this arm is likely wrong too, but
+                // it is a different dtype family than the object-column
+                // question br-frankenpandas-reductions-numeric-only-default-zx21n
+                // covers and is left for its own measurement.
                 Ok(col.clone())
             }
         })?;
@@ -92673,6 +92743,67 @@ mod tests {
                 "numeric_only=true must skip the object column"
             );
         }
+    }
+
+    /// The CUMULATIVE forms accumulate an object column too — they do not pass
+    /// it through untouched, and they have no `numeric_only` option at all.
+    ///
+    /// This is the sibling sweep the bead asked for. MEASURED, live pandas
+    /// 2.2.3, on a frame with a float `b`, an object `label` = ['a','z','m']
+    /// and an int `a`:
+    ///
+    /// ```text
+    /// df.cumsum()   label -> ['a', 'az', 'azm']   RUNNING CONCATENATION
+    /// df.cummin()   label -> ['a', 'a',  'a'  ]   running LEXICOGRAPHIC min
+    /// df.cummax()   label -> ['a', 'z',  'z'  ]   running LEXICOGRAPHIC max
+    /// df.cumprod()  -> TypeError: can't multiply sequence by non-int of type 'str'
+    ///
+    /// df.cumsum(numeric_only=True)
+    ///   -> TypeError: cumsum() got an unexpected keyword argument 'numeric_only'
+    /// ```
+    ///
+    /// and the int column stays int64 in all three — no promotion, because no
+    /// gap is introduced. So the family splits the same way the plain
+    /// reductions do (three accumulate, one raises), but WITHOUT the
+    /// numeric_only escape hatch: like `nunique`, these four simply have no
+    /// such parameter.
+    /// (br-frankenpandas-reductions-numeric-only-default-zx21n)
+    #[test]
+    fn dataframe_cumulative_forms_accumulate_an_object_column() {
+        let df = numeric_only_probe_frame();
+        let label =
+            |frame: &DataFrame| -> Vec<Scalar> { frame.column("label").unwrap().values().to_vec() };
+        let utf8 = |parts: [&str; 3]| -> Vec<Scalar> {
+            parts
+                .iter()
+                .map(|s| Scalar::Utf8((*s).to_owned()))
+                .collect()
+        };
+
+        assert_eq!(
+            label(&df.cumsum().unwrap()),
+            utf8(["a", "az", "azm"]),
+            "cumsum runs a CONCATENATION down an object column; passing the \
+             column through unchanged returns the input and is a silent wrong \
+             answer"
+        );
+        assert_eq!(label(&df.cummin().unwrap()), utf8(["a", "a", "a"]));
+        assert_eq!(label(&df.cummax().unwrap()), utf8(["a", "z", "z"]));
+
+        let err = df.cumprod().unwrap_err().to_string();
+        assert!(
+            err.contains("label"),
+            "cumprod must refuse an object column and name it; got {err}"
+        );
+
+        // The numeric columns are untouched by all of this, and the int column
+        // keeps its dtype — a cumulative op introduces no gap, so nothing
+        // widens.
+        let cumsum = df.cumsum().unwrap();
+        assert_eq!(
+            cumsum.column("a").unwrap().values(),
+            &[Scalar::Int64(-1), Scalar::Int64(4), Scalar::Int64(7)]
+        );
     }
 
     /// The DEFAULT is pandas 2.x's `numeric_only=False`, and this is the test
@@ -172112,10 +172243,20 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_cumsum_string_column_still_passes_through() {
-        // Regression guard: the dtype gate widening must NOT touch Utf8
-        // columns — pandas df.cumsum() on a string column passes through
-        // (no-op).
+    fn dataframe_cumsum_string_column_concatenates() {
+        // This test asserted a PASS-THROUGH and its comment claimed "pandas
+        // df.cumsum() on a string column passes through (no-op)". That claim is
+        // false. MEASURED, live pandas 2.2.3:
+        //
+        //   pd.DataFrame({'label': ['a','b']}).cumsum()
+        //     -> ['a', 'ab']    dtype object
+        //
+        // cumsum runs a RUNNING CONCATENATION down an object column. The
+        // original assertion was pinning FrankenPandas' own no-op, and the
+        // comment turned that into a claim about pandas that nobody had
+        // measured. See `dataframe_cumulative_forms_accumulate_an_object_column`
+        // for the whole family, including the fact that any missing value makes
+        // all four raise. (br-frankenpandas-reductions-numeric-only-default-zx21n)
         let mut cols = BTreeMap::new();
         cols.insert(
             "label".to_owned(),
@@ -172134,7 +172275,7 @@ mod tests {
         let out = df.cumsum().unwrap();
         assert_eq!(
             out.column("label").unwrap().values(),
-            &[Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("ab".into())]
         );
     }
 
