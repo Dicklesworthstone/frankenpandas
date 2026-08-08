@@ -9015,6 +9015,25 @@ impl Column {
                     {
                         return Err(TypeError::LossyFloatToInt { value: *v });
                     }
+                    // Missing values are normalized to the TARGET dtype's
+                    // canonical missing here as well, not only in the
+                    // no-coercion branch below. The two arms disagreed: a
+                    // `Null(Null)` alongside Int64 values being built as Float64
+                    // took THIS path (Int64 != Float64 ⇒ coercion needed) and
+                    // survived as a generic Null inside a float column, while
+                    // the same value in an already-Float64 vec was correctly
+                    // remapped to NaN. pandas has no such asymmetry — a float64
+                    // column's missing is NaN however it was constructed.
+                    //
+                    // Utf8 is excluded because casting TO string does not keep a
+                    // missing value at all — pandas stringifies it. Measured:
+                    //   pd.Series([1.0, None, 3.0]).astype(str)
+                    //     -> ['1.0', 'nan', '3.0']   all str
+                    // so `cast_scalar_owned`'s Utf8 arm must still see the raw
+                    // missing and render it. (br-frankenpandas-nywa8)
+                    if value.is_missing() && dtype != DType::Utf8 {
+                        return Ok(Self::normalize_missing_for_dtype(value, dtype));
+                    }
                     cast_scalar_owned(value, dtype)
                 })
                 .collect::<Result<Vec<_>, _>>()?
@@ -33011,6 +33030,63 @@ mod tests {
             assert_eq!(result.values()[2], Scalar::Int64(3));
             assert_eq!(result.values()[3], Scalar::Int64(0));
             assert_eq!(result.validity().count_valid(), 4);
+        }
+
+        /// A missing value must take the TARGET dtype's canonical missing when
+        /// the column is built with coercion, not only when no coercion is
+        /// needed. The two arms of `Column::new` disagreed: `Null(Null)` beside
+        /// Int64 values built as Float64 took the coercion path and survived as a
+        /// generic Null inside a float column, while the identical value in an
+        /// already-Float64 vec was remapped to NaN. pandas has no such
+        /// asymmetry — a float64 column's missing is NaN however it was built.
+        ///
+        /// ⚠️ The conformance suite CANNOT catch this: its frame comparison
+        /// treats any missing as equal, so both fp_p2d_362 and fp_p2d_363 stayed
+        /// green while the kind was wrong. Only the differ (fixture vs oracle)
+        /// saw it. (br-frankenpandas-nywa8)
+        #[test]
+        fn coerced_missing_takes_the_target_dtypes_canonical_kind() {
+            // int64 + Null -> Float64 goes through the COERCION arm.
+            let coerced = Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(30),
+                ],
+            )
+            .expect("coerce to float64");
+            assert_eq!(coerced.values()[1], Scalar::Null(NullKind::NaN));
+
+            // Already-Float64 + Null goes through the NO-COERCION arm and must
+            // agree with it — this is the arm that was already correct.
+            let uncoerced = Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(30.0),
+                ],
+            )
+            .expect("no coercion needed");
+            assert_eq!(uncoerced.values()[1], Scalar::Null(NullKind::NaN));
+        }
+
+        /// The exclusion that makes the above safe. Casting TO string does not
+        /// keep a missing value at all — pandas stringifies it. Measured:
+        ///   pd.Series([1.0, None, 3.0]).astype(str) -> ['1.0', 'nan', '3.0']
+        /// so a missing must still reach `cast_scalar_owned`'s Utf8 arm. An
+        /// earlier version of the fix normalized first and turned "nan" back
+        /// into a missing, which a pre-existing fp-frame test caught.
+        #[test]
+        fn coercion_to_utf8_stringifies_a_missing_instead_of_normalizing_it() {
+            let cast = Column::new(
+                DType::Utf8,
+                vec![Scalar::Bool(true), Scalar::Null(NullKind::NaN)],
+            )
+            .expect("cast to utf8");
+            assert_eq!(cast.values()[0], Scalar::Utf8("True".to_string()));
+            assert_eq!(cast.values()[1], Scalar::Utf8("nan".to_string()));
         }
 
         /// CHARACTERIZATION, not an endorsement. FrankenPandas REJECTS an

@@ -5,38 +5,78 @@
   "operation": "dataframe_astype",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T15:54:20Z"
   },
   "constructor_dtype": "float64",
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
-    "column_order": ["a"],
+    "column_order": [
+      "a"
+    ],
     "columns": {
       "a": [
-        { "kind": "utf8", "value": "1.5" },
-        { "kind": "null", "value": "null" },
-        { "kind": "utf8", "value": "3.5" }
+        {
+          "kind": "utf8",
+          "value": "1.5"
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "utf8",
+          "value": "3.5"
+        }
       ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
-    "column_order": ["a"],
     "columns": {
       "a": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "null", "value": "null" },
-        { "kind": "float64", "value": 3.5 }
+        {
+          "kind": "float64",
+          "value": 1.5
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "float64",
+          "value": 3.5
+        }
       ]
-    }
+    },
+    "column_order": [
+      "a"
+    ]
   }
 }
