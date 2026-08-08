@@ -5,41 +5,89 @@
   "operation": "series_str_get_dummies",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "25b3c7e0656c91f953dd5f932fcfaed730a69e87abd4ef5a90da9c75313bafdc",
+    "generated_at": "2026-08-08T22:21:59Z"
   },
   "string_sep": "|",
   "left": {
     "name": "tokens",
     "index": [
-      { "kind": "utf8", "value": "r0" },
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
+      {
+        "kind": "utf8",
+        "value": "r0"
+      },
+      {
+        "kind": "utf8",
+        "value": "r1"
+      },
+      {
+        "kind": "utf8",
+        "value": "r2"
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "b|a" },
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "" }
+      {
+        "kind": "utf8",
+        "value": "b|a"
+      },
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "utf8",
+        "value": ""
+      }
     ]
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "r0" },
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
+      {
+        "kind": "utf8",
+        "value": "r0"
+      },
+      {
+        "kind": "utf8",
+        "value": "r1"
+      },
+      {
+        "kind": "utf8",
+        "value": "r2"
+      }
     ],
     "columns": {
-      "b": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 0 },
-        { "kind": "int64", "value": 0 }
-      ],
       "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 0 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 0
+        }
+      ],
+      "b": [
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 0
+        },
+        {
+          "kind": "int64",
+          "value": 0
+        }
       ]
     },
-    "column_order": ["b", "a"]
+    "column_order": [
+      "a",
+      "b"
+    ]
   }
 }

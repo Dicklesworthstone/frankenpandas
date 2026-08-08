@@ -5,8 +5,8 @@
   "operation": "dataframe_get_dummies",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "25b3c7e0656c91f953dd5f932fcfaed730a69e87abd4ef5a90da9c75313bafdc",
+    "generated_at": "2026-08-08T22:21:59Z"
   },
   "dummy_columns": [
     "color"
@@ -106,18 +106,18 @@
           "value": 3
         }
       ],
-      "color_red": [
+      "size": [
         {
-          "kind": "bool",
-          "value": true
+          "kind": "utf8",
+          "value": "S"
         },
         {
-          "kind": "bool",
-          "value": false
+          "kind": "utf8",
+          "value": "M"
         },
         {
-          "kind": "bool",
-          "value": true
+          "kind": "utf8",
+          "value": "S"
         }
       ],
       "color_blue": [
@@ -134,26 +134,26 @@
           "value": false
         }
       ],
-      "size": [
+      "color_red": [
         {
-          "kind": "utf8",
-          "value": "S"
+          "kind": "bool",
+          "value": true
         },
         {
-          "kind": "utf8",
-          "value": "M"
+          "kind": "bool",
+          "value": false
         },
         {
-          "kind": "utf8",
-          "value": "S"
+          "kind": "bool",
+          "value": true
         }
       ]
     },
     "column_order": [
       "id",
-      "color_red",
+      "size",
       "color_blue",
-      "size"
+      "color_red"
     ]
   }
 }

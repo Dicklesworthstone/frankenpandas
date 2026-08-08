@@ -44876,6 +44876,13 @@ impl StringAccessor<'_> {
             }
         }
         drop(all_tokens_seen);
+        // pandas SORTS the dummy columns; first-occurrence order is not the
+        // contract. MEASURED, live pandas 2.2.3:
+        //   pd.Series(['b|a', 'a', '']).str.get_dummies()
+        //     -> columns ['a', 'b']
+        // 'b' is the first token seen and still sorts second.
+        // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+        all_tokens.sort_unstable();
 
         // Per br-frankenpandas-ezqe5: pandas Series.str.get_dummies preserves
         // source axis name on the result DataFrame.
@@ -77029,10 +77036,31 @@ impl DataFrame {
                 };
             col_unique_vals.insert(col_name.clone(), seen);
         }
+        // pandas SORTS each column's categories. MEASURED, live pandas 2.2.3,
+        // on color = ['red', 'blue', 'red']:
+        //   pd.get_dummies(df, columns=['color'], dtype=bool)
+        //     -> ['id', 'size', 'color_blue', 'color_red']
+        // 'red' occurs first and still sorts second, so first-occurrence order
+        // is not the contract. Note drop_first below slices this list, and
+        // pandas drops the first SORTED category, so the sort must happen here
+        // rather than at naming time.
+        // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+        for uniques in col_unique_vals.values_mut() {
+            uniques.sort_unstable();
+        }
         let target_set: HashSet<&str> = target_cols.iter().map(String::as_str).collect();
 
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
+        // pandas APPENDS the encoded columns; the untouched ones keep their
+        // original order at the front. MEASURED, live pandas 2.2.3:
+        //   pd.get_dummies(df, columns=['color'], dtype=bool)
+        //     -> ['id', 'size', 'color_blue', 'color_red']
+        // FrankenPandas substituted in place and produced
+        // ['id', 'color_red', 'color_blue', 'size']. Encoded names are
+        // collected here and appended after the loop.
+        // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+        let mut encoded_order = Vec::new();
 
         for col_name in &self.column_order {
             if target_set.contains(col_name.as_str()) {
@@ -77136,7 +77164,7 @@ impl DataFrame {
                     // from_values(Scalar::Bool), without per-cell Scalar wrapping.
                     let column = Column::from_bool_values(std::mem::take(&mut cols[c]));
                     result_cols.insert(indicator_name.clone(), column);
-                    col_order.push(indicator_name);
+                    encoded_order.push(indicator_name);
                 }
                 if dummy_na {
                     let nan_name = format!("{col_name}{prefix_sep}nan");
@@ -77146,13 +77174,15 @@ impl DataFrame {
                             dummy_na_mask.expect("dummy_na=true initializes the null mask"),
                         ),
                     );
-                    col_order.push(nan_name);
+                    encoded_order.push(nan_name);
                 }
             } else {
                 result_cols.insert(col_name.clone(), self.columns[col_name].clone());
                 col_order.push(col_name.clone());
             }
         }
+
+        col_order.extend(encoded_order);
 
         Ok(Self {
             columns: result_cols.into(),
@@ -92773,6 +92803,81 @@ mod tests {
                 "numeric_only=true must skip the object column"
             );
         }
+    }
+
+    /// `get_dummies` SORTS its categories, and the DataFrame form APPENDS the
+    /// encoded columns rather than leaving them in place.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// pd.Series(['b|a', 'a', '']).str.get_dummies()
+    ///   columns -> ['a', 'b']            SORTED, not first-seen ('b' appears first)
+    ///
+    /// df = DataFrame({'id': [1,2,3], 'color': ['red','blue','red'],
+    ///                 'size': ['S','M','S']})
+    /// pd.get_dummies(df, columns=['color'], dtype=bool)
+    ///   columns -> ['id', 'size', 'color_blue', 'color_red']
+    ///              ^^^^^^^^^^^^^^  untouched columns keep their order
+    ///                              ^^^^^^^^^^^^^^^^^^^^^^^^^ encoded ones are
+    ///                              APPENDED, and sorted among themselves
+    /// ```
+    ///
+    /// FrankenPandas used first-occurrence order for the categories and
+    /// substituted the encoded columns IN PLACE, so it produced
+    /// `['id', 'color_red', 'color_blue', 'size']` — wrong on both axes. A null
+    /// in the source does not change either rule (measured: the same four
+    /// columns, with `dummy_na=False` simply producing no indicator for it).
+    /// (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn get_dummies_sorts_categories_and_appends_the_encoded_columns() {
+        let subject = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Utf8("b|a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8(String::new()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            subject.str().get_dummies("|").unwrap().column_names(),
+            vec!["a", "b"],
+            "tokens are SORTED; 'b' appearing first must not put it first"
+        );
+
+        let frame = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "color",
+                    vec![
+                        Scalar::Utf8("red".into()),
+                        Scalar::Utf8("blue".into()),
+                        Scalar::Utf8("red".into()),
+                    ],
+                ),
+                (
+                    "size",
+                    vec![
+                        Scalar::Utf8("S".into()),
+                        Scalar::Utf8("M".into()),
+                        Scalar::Utf8("S".into()),
+                    ],
+                ),
+            ],
+            (0..3_i64).map(IndexLabel::Int64).collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            frame.get_dummies(&["color"]).unwrap().column_names(),
+            vec!["id", "size", "color_blue", "color_red"],
+            "untouched columns keep their order; encoded ones are APPENDED and sorted"
+        );
     }
 
     /// `str.split(...).str.get(n)` carries BOTH null rules in ONE column: a
