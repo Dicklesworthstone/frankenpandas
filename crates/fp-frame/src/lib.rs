@@ -107122,6 +107122,39 @@ mod tests {
     /// and NaN is the only missing value float64 can hold. So preserving the
     /// kind here would be a NEW divergence, not the fix — these accessors must
     /// keep emitting NaN even though their string-valued siblings do not.
+    /// `str.len` and `str.rfind` are the same int-valued family, and this pins
+    /// them explicitly because two corpus fixtures pinned the OTHER answer while
+    /// the packets stayed green — the conformance frame comparison treats any
+    /// missing as equal, so it cannot see a null-kind error.
+    ///
+    /// Measured on pandas 2.2.3 with `pd.Series(['foo-bar', None, 'baz'])`:
+    ///   s.str.len()          -> float64, elements ['float','float','float']
+    ///   s.str.rfind('a')     -> float64, same
+    /// FrankenPandas already agreed (apply_str_int promotes and emits NaN); only
+    /// fp_p2d_389 / fp_p2d_405 were stale. (br-frankenpandas-nywa8)
+    #[test]
+    fn str_len_and_rfind_emit_nan_and_promote_to_float64() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("foo-bar".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("baz".into()),
+            ],
+        )
+        .unwrap();
+
+        let lens = s.str().len().unwrap();
+        assert_eq!(lens.column().dtype(), DType::Float64);
+        assert_eq!(lens.column().values()[1], Scalar::Null(NullKind::NaN));
+        assert_eq!(lens.column().values()[0], Scalar::Float64(7.0));
+
+        let rfind = s.str().rfind("a").unwrap();
+        assert_eq!(rfind.column().dtype(), DType::Float64);
+        assert_eq!(rfind.column().values()[1], Scalar::Null(NullKind::NaN));
+    }
+
     #[test]
     fn str_int_returning_ops_keep_nan_not_the_source_null_kind() {
         let s = Series::from_values(
