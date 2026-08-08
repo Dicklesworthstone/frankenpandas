@@ -60347,6 +60347,42 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
     }
 
+    /// Apply the CONSTRUCTOR's `dtype=` argument to every column.
+    ///
+    /// Matches the `dtype=` parameter of `pd.DataFrame(data, dtype=...)`, which
+    /// is deliberately NOT the same operation as [`Self::astype`] even though
+    /// both name a target dtype. Measured on pandas 2.2.3:
+    ///
+    /// ```text
+    /// pd.DataFrame([[1.5]], dtype='int64')     -> ValueError: Trying to coerce
+    ///                                             float values to integers
+    /// pd.DataFrame([[1.5]]).astype('int64')    -> [[1]]   <- TRUNCATES
+    /// pd.DataFrame([[2.0]], dtype='int64')     -> [[2]]   <- lossless is fine
+    /// ```
+    ///
+    /// So the constructor REFUSES a lossy float->int while `astype` truncates
+    /// toward zero. `Column::new` already encodes the strict rule
+    /// (br-frankenpandas-8nupg), and this is its frame-level composition.
+    ///
+    /// It exists as its own method rather than reusing `astype` because the two
+    /// only COINCIDE today: `Self::astype` currently also goes through
+    /// `Column::new` without pre-truncating, so it inherits the strict rule. The
+    /// moment `astype` is corrected to truncate, a constructor path routed
+    /// through it would silently start truncating too — a divergence nothing
+    /// would catch. Keeping them separate makes that fix safe.
+    ///
+    /// Added by br-frankenpandas-oxodo: the conformance harness had been
+    /// applying constructor `dtype=` ITSELF, so every `constructor_dtype`
+    /// fixture was green against a capability FrankenPandas did not expose.
+    pub fn with_constructor_dtype(&self, dtype: DType) -> Result<Self, FrameError> {
+        let mut columns = BTreeMap::new();
+        for (name, column) in &self.columns {
+            let coerced = Column::new(dtype, column.values().to_vec())?;
+            columns.insert(name.clone(), coerced);
+        }
+        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+    }
+
     /// Localize tz-naive datetime columns to a timezone or strip timezone info.
     ///
     /// Matches the supported subset of `pd.DataFrame.tz_localize(tz)`. Walks
@@ -91905,6 +91941,37 @@ mod tests {
             err.to_string(),
             "compatibility gate rejected operation: dataframe_from_records row width 3 exceeds columns length 2"
         );
+    }
+
+    /// The constructor's `dtype=` REFUSES a lossy float->int; pandas' `astype`
+    /// truncates. Measured on pandas 2.2.3:
+    ///   pd.DataFrame([[1.5]], dtype='int64')  -> ValueError: Trying to coerce
+    ///                                            float values to integers
+    ///   pd.DataFrame([[1.5]]).astype('int64') -> [[1]]
+    ///   pd.DataFrame([[2.0]], dtype='int64')  -> [[2]]
+    /// (br-frankenpandas-oxodo)
+    #[test]
+    fn dataframe_with_constructor_dtype_refuses_lossy_float_to_int() {
+        let lossy =
+            DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Float64(1.5)])]).expect("frame");
+        lossy
+            .with_constructor_dtype(DType::Int64)
+            .expect_err("constructor dtype= refuses a lossy float->int");
+
+        // A lossless float is accepted and lands as int64.
+        let lossless =
+            DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Float64(2.0)])]).expect("frame");
+        let cast = lossless
+            .with_constructor_dtype(DType::Int64)
+            .expect("2.0 is representable as int64");
+        assert_eq!(cast.columns["a"].values(), &[Scalar::Int64(2)]);
+
+        // int -> float64 is the ordinary widening case.
+        let widened = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])])
+            .expect("frame")
+            .with_constructor_dtype(DType::Float64)
+            .expect("int64 widens to float64");
+        assert_eq!(widened.columns["a"].values(), &[Scalar::Float64(1.0)]);
     }
 
     /// The frame shape the zx21n baseline was measured on: float 'b', object

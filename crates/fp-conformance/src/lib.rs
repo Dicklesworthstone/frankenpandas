@@ -14709,19 +14709,16 @@ fn apply_constructor_options(
         return Ok(frame);
     };
     let target_dtype = parse_constructor_dtype_spec(dtype_spec)?;
-    let column_order = frame
-        .column_names()
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut coerced_columns = BTreeMap::new();
-    for (name, column) in frame.columns() {
-        let coerced = Column::new(target_dtype, column.values().to_vec())
-            .map_err(|err| format!("{operation_name} dtype='{dtype_spec}' cast failed: {err}"))?;
-        coerced_columns.insert(name.clone(), coerced);
-    }
-    DataFrame::new_with_column_order(frame.index().clone(), coerced_columns, column_order)
-        .map_err(|err| err.to_string())
+    // DELEGATES to the real constructor-dtype operation rather than casting the
+    // columns here. br-frankenpandas-oxodo: this helper used to loop over
+    // Column::new + DataFrame::new_with_column_order itself, so every fixture
+    // carrying `constructor_dtype` was green against a capability fp-frame did
+    // not expose (there is no `dtype=` on any DataFrame constructor, and
+    // `astype` is a DIFFERENT operation — it truncates a lossy float->int where
+    // the constructor refuses it).
+    frame
+        .with_constructor_dtype(target_dtype)
+        .map_err(|err| format!("{operation_name} dtype='{dtype_spec}' cast failed: {err}"))
 }
 
 fn execute_nanop_fixture_operation(
@@ -24537,6 +24534,10 @@ pub fn write_case_evidence_jsonl(
     paths.sort();
     Ok(paths)
 }
+
+#[cfg(test)]
+#[path = "tests/harness_delegation_policy.rs"]
+mod harness_delegation_policy;
 
 #[cfg(test)]
 #[path = "tests/live_oracle_dataframe_apply_alias.rs"]
