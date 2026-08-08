@@ -422,3 +422,130 @@ def test_restamp_refreshes_only_provenance_and_never_a_value():
     assert out["expected_series"] == fixture["expected_series"]
     # And the input fixture is not mutated in place.
     assert fixture["fixture_provenance"]["oracle_script_sha256"] == "old"
+
+
+# ── error-agreement attestation & provenance supersets (p6srr) ──────────────
+#
+# The 85 expected-error fixtures could never be restamped, for two independent
+# reasons that both live here: the tool threw the oracle's error RESPONSE away
+# (so the fresh provenance was unreachable), and "the oracle also failed" was
+# treated as one fact when it is two — pandas refusing, versus the adapter
+# refusing before pandas was ever called.
+
+OLD_PROV = {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "old",
+    "generated_at": "2026-04-22T21:02:48Z",
+}
+NEW_PROV = {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "new",
+    "generated_at": "2026-08-08T00:00:00Z",
+}
+
+
+def test_a_provenance_superset_is_faithful_when_the_extra_keys_survive():
+    """The generator fixture's own evidence must not be a reason to refuse.
+
+    fp_generated_tn6qb2_... carries generation_command / input_matrix /
+    intentional_divergence_notes. The freshness gate reads three keys via .get()
+    and ignores the rest, so a superset was ALWAYS gate-legal; the old
+    whole-dict equality check was simply wrong.
+    """
+    before = {**OLD_PROV, "generation_command": "gen.py --seed 7"}
+    after = {**NEW_PROV, "generation_command": "gen.py --seed 7"}
+    assert regenerate_fixtures.provenance_write_is_faithful(before, after, NEW_PROV, {})
+
+
+def test_a_superset_that_DROPPED_its_extra_keys_is_refused():
+    """The negative control, and the whole point of the refusal that existed.
+
+    Flattening a generator fixture to the oracle's three keys destroys evidence.
+    That must stay refused — the fix widens what is ACCEPTED, not what is lost.
+    """
+    before = {**OLD_PROV, "intentional_divergence_notes": "DISC-004"}
+    assert not regenerate_fixtures.provenance_write_is_faithful(
+        before, dict(NEW_PROV), NEW_PROV, {}
+    )
+
+
+def test_a_write_that_changed_an_extra_key_is_refused():
+    before = {**OLD_PROV, "generation_command": "gen.py --seed 7"}
+    after = {**NEW_PROV, "generation_command": "gen.py --seed 999"}
+    assert not regenerate_fixtures.provenance_write_is_faithful(before, after, NEW_PROV, {})
+
+
+def test_a_stale_oracle_key_is_refused():
+    """If the sha did not actually move, the stamp is not fresh."""
+    assert not regenerate_fixtures.provenance_write_is_faithful(
+        dict(OLD_PROV), dict(OLD_PROV), NEW_PROV, {}
+    )
+
+
+def test_an_undeclared_new_key_is_refused():
+    """Only keys we deliberately added may appear."""
+    after = {**NEW_PROV, "smuggled": "surprise"}
+    assert not regenerate_fixtures.provenance_write_is_faithful(
+        dict(OLD_PROV), after, NEW_PROV, {}
+    )
+
+
+def test_the_attestation_must_be_present_when_it_was_declared():
+    added = {regenerate_fixtures.ATTESTATION_KEY:
+             regenerate_fixtures.ATTESTATION_ERROR_AGREEMENT}
+    assert regenerate_fixtures.provenance_write_is_faithful(
+        dict(OLD_PROV), {**NEW_PROV, **added}, NEW_PROV, added
+    )
+    # Declared but not written -> refused, so a weaker claim can never be made
+    # silently under the bare key.
+    assert not regenerate_fixtures.provenance_write_is_faithful(
+        dict(OLD_PROV), dict(NEW_PROV), NEW_PROV, added
+    )
+
+
+def test_restamp_text_inserts_a_key_the_fixture_does_not_have_yet():
+    """The attestation is NEW on every fixture, so the writer must insert.
+
+    It previously only replaced existing keys, which silently dropped the
+    attestation and left an error fixture stamped under the strong reading.
+    """
+    raw = json.dumps({"fixture_provenance": OLD_PROV, "expected_error_contains": "boom"},
+                     indent=2)
+    out = regenerate_fixtures.restamp_text(
+        raw,
+        OLD_PROV,
+        {**NEW_PROV, regenerate_fixtures.ATTESTATION_KEY:
+         regenerate_fixtures.ATTESTATION_ERROR_AGREEMENT},
+    )
+    reparsed = json.loads(out)
+    prov = reparsed["fixture_provenance"]
+    assert prov["oracle_script_sha256"] == "new"
+    assert prov[regenerate_fixtures.ATTESTATION_KEY] == \
+        regenerate_fixtures.ATTESTATION_ERROR_AGREEMENT
+    # and nothing else moved
+    assert reparsed["expected_error_contains"] == "boom"
+
+
+def test_restamp_text_insertion_preserves_extra_provenance_keys():
+    before = {**OLD_PROV, "generation_command": "gen.py --seed 7"}
+    raw = json.dumps({"fixture_provenance": before}, indent=2)
+    out = regenerate_fixtures.restamp_text(
+        raw,
+        before,
+        {**NEW_PROV, regenerate_fixtures.ATTESTATION_KEY: "error_agreement"},
+    )
+    prov = json.loads(out)["fixture_provenance"]
+    assert prov["generation_command"] == "gen.py --seed 7"
+    assert prov["oracle_script_sha256"] == "new"
+
+
+def test_only_a_pandas_origin_is_attestable():
+    """The distinction the whole split rests on.
+
+    'oracle_adapter' means pandas was NEVER INVOKED — the adapter rejected the
+    arguments itself — so "this oracle also failed here" would be true and
+    vacuous. Only a refusal that came from pandas supports the claim.
+    """
+    assert regenerate_fixtures.ORIGIN_PANDAS == "pandas"
+    for not_attestable in ("oracle_adapter", "request", "unexpected", None):
+        assert not_attestable != regenerate_fixtures.ORIGIN_PANDAS

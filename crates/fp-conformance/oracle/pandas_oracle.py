@@ -68,6 +68,8 @@ def base_oracle_response() -> dict[str, Any]:
         "expected_dtype": None,
         "fixture_provenance": None,
         "error": None,
+        # Set only on the error path; see `oracle_error_origin`.
+        "error_origin": None,
     }
 
 
@@ -87,11 +89,48 @@ def build_fixture_provenance(pd_mod: Any) -> dict[str, str]:
     }
 
 
-def error_response(message: str, pd_mod: Any | None = None) -> dict[str, Any]:
+ERROR_ORIGIN_PANDAS = "pandas"
+ERROR_ORIGIN_ADAPTER = "oracle_adapter"
+ERROR_ORIGIN_REQUEST = "request"
+ERROR_ORIGIN_UNEXPECTED = "unexpected"
+
+
+def oracle_error_origin(exc: BaseException) -> str:
+    """WHERE the refusal came from — pandas, or this adapter before it got there.
+
+    An error response says only "this did not produce a value". That is not
+    enough to conclude anything about pandas, and the difference decides whether
+    a fixture's expected-error can be attested against the oracle at all:
+
+      * every site that wraps an engine call uses
+        `try: <pandas call> / except Exception as exc: raise OracleError(...) from exc`,
+        so a `__cause__` means something the adapter CALLED refused -> pandas
+      * a bare `raise OracleError("... requires ... payload")` is this adapter's
+        own argument validation and PANDAS WAS NEVER INVOKED. "The oracle also
+        failed here" would be true but vacuous: it never asked the question.
+      * the stdin decode wrapper is neither; the request itself was malformed.
+
+    Only ERROR_ORIGIN_PANDAS supports an error-agreement attestation.
+    (br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr)
+    """
+    cause = exc.__cause__
+    if cause is None:
+        return ERROR_ORIGIN_ADAPTER
+    if isinstance(cause, json.JSONDecodeError):
+        return ERROR_ORIGIN_REQUEST
+    return ERROR_ORIGIN_PANDAS
+
+
+def error_response(
+    message: str,
+    pd_mod: Any | None = None,
+    origin: str = ERROR_ORIGIN_UNEXPECTED,
+) -> dict[str, Any]:
     response = base_oracle_response()
     if pd_mod is not None:
         response["fixture_provenance"] = build_fixture_provenance(pd_mod)
     response["error"] = message
+    response["error_origin"] = origin
     return response
 
 
@@ -8034,10 +8073,18 @@ def main() -> int:
         json.dump(response, sys.stdout)
         return 0
     except OracleError as exc:
-        json.dump(error_response(str(exc), pd), sys.stdout)
+        json.dump(error_response(str(exc), pd, oracle_error_origin(exc)), sys.stdout)
         return 1
     except Exception as exc:  # pragma: no cover - defensive
-        json.dump(error_response(f"unexpected oracle failure: {exc}", pd), sys.stdout)
+        # Escaped every adapter try-block. It may be the engine or it may be a
+        # bug in this adapter; UNEXPECTED says so rather than guessing "pandas"
+        # and lending it an authority it has not earned.
+        json.dump(
+            error_response(
+                f"unexpected oracle failure: {exc}", pd, ERROR_ORIGIN_UNEXPECTED
+            ),
+            sys.stdout,
+        )
         return 2
 
 

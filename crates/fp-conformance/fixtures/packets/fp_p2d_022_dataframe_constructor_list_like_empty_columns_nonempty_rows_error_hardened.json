@@ -5,9 +5,10 @@
   "operation": "dataframe_constructor_list_like",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
-  },
+    "oracle_script_sha256": "ef135bb3088ad340319998b43cdc945af9754fc4d8e943dcb0137729af14fb41",
+    "generated_at": "2026-08-08T08:56:04Z",
+    "oracle_attestation": "error_agreement"
+},
   "matrix_rows": [
     [
       { "kind": "int64", "value": 1 }

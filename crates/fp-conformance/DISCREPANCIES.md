@@ -187,6 +187,14 @@
 - **Tests affected:** none (fp's error path is covered by existing RangeIndex tests; no descending slice_locs/searchsorted parity test is asserted).
 - **Review date:** 2026-07-23
 
+### DISC-018: `oracle_attestation` — what a provenance stamp on an EXPECTED-ERROR fixture claims
+- **Reference:** `fixture_provenance.oracle_script_sha256` normally asserts *"running this oracle script on this input reproduced these expected VALUES"*. An expected-error fixture pins no values, so the same stamp cannot mean the same thing there.
+- **Our impl:** error fixtures whose refusal came from pandas now carry an explicit `fixture_provenance.oracle_attestation: "error_agreement"`, meaning only *"running this oracle script on this input made PANDAS raise too"*. **Absence of the key keeps the strong value-reproduction reading**, so nothing about the other 977 stamps changed. The message text is deliberately NOT part of the claim: `expected_error_contains` pins FrankenPandas's wording (checked by the Rust harness) while the oracle surfaces pandas' own English, and the two were never meant to match.
+- **Impact:** 49 of the 85 expected-error fixtures qualify. The other **36 are deliberately left unstamped and still count as red**: 31 were refused by the oracle *adapter's own argument validation* (e.g. `dataframe_concat concat_axis must be 0 or 1, got 2`) and 5 escaped as `unexpected`, so **pandas was never invoked** and there is no agreement to attest — the claim would be true and vacuous. The split is structural, from `pandas_oracle.oracle_error_origin` (an `OracleError` raised `from exc` wrapped an engine call; a bare one is adapter validation), never a substring match on the message. The 31 adapter refusals are better read as oracle coverage gaps.
+- **Resolution:** ACCEPTED (BlueRobin, 2026-08-08, br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr). The alternative — restamping all 85 under the bare key — was rejected as silently widening what `oracle_script_sha256` means corpus-wide to make a number go down. `scripts/check_fixture_freshness.sh` is untouched and reads only the three oracle keys via `.get()`, so a provenance **superset is already gate-legal**; that is also why the generator fixture `fp_generated_tn6qb2_...` now restamps in place with its `generation_command` / `input_matrix` / `intentional_divergence_notes` preserved instead of being refused.
+- **Tests affected:** `oracle/tests/test_error_origin.py` (7 cases: origin classification, fail-closed default, provenance on the error path); `oracle/tests/test_regenerate_fixtures.py` (superset faithful / dropped-extras refused / changed-extra refused / stale-sha refused / undeclared-key refused / attestation required / text insertion).
+- **Review date:** 2026-08-08
+
 ## Rules
 
 1. Every divergence gets a sequential ID (DISC-NNN)

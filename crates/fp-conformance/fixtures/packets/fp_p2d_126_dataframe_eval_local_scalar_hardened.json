@@ -5,8 +5,8 @@
   "operation": "dataframe_eval",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "dabc9ccf26d2f797a6bd609bc22134e240a2e106511ca9bf529a0011da434895",
-    "generated_at": "2026-08-08T05:30:04Z"
+    "oracle_script_sha256": "ef135bb3088ad340319998b43cdc945af9754fc4d8e943dcb0137729af14fb41",
+    "generated_at": "2026-08-08T08:56:39Z"
   },
   "expr": "price - @discount",
   "locals": {

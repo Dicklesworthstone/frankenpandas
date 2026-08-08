@@ -68,6 +68,28 @@ SEMANTIC_KEYS = ("expected_series", "expected_frame", "expected_scalar", "expect
 ERROR_KEY = "expected_error_contains"
 ERROR_EXPECTED_BUT_SUCCEEDED = "ERROR expected-but-succeeded"
 
+# Where an oracle refusal came from; see `oracle_error_origin` in
+# pandas_oracle.py. Only PANDAS supports an error-agreement attestation.
+ORIGIN_KEY = "error_origin"
+ORIGIN_PANDAS = "pandas"
+
+# What a fixture's provenance stamp CLAIMS was verified.
+#
+# Absent  -> the default and strongest reading: "running this oracle script on
+#            this input reproduced these expected VALUES".
+# Present -> a weaker, explicitly-named claim. `ATTESTATION_ERROR_AGREEMENT`
+#            means "running this oracle script on this input made PANDAS raise
+#            too". It says nothing about the message: `expected_error_contains`
+#            pins FrankenPandas's wording, checked by the Rust harness, while
+#            the oracle surfaces pandas' own English, and the two were never
+#            meant to match.
+#
+# Naming it in the artifact is the whole point. Restamping error fixtures under
+# the bare key would silently widen what oracle_script_sha256 means across the
+# corpus; this makes the weaker claim legible instead.
+ATTESTATION_KEY = "oracle_attestation"
+ATTESTATION_ERROR_AGREEMENT = "error_agreement"
+
 
 def fixture_expects_error(fixture: dict[str, Any]) -> bool:
     """Does this fixture assert that the operation must fail?
@@ -509,15 +531,121 @@ def restamp_text(raw: str, old: dict[str, str], new: dict[str, str]) -> str:
         return raw
 
     block = raw[open_brace:end]
+    inserts: list[tuple[str, Any]] = []
     for key, new_value in new.items():
         old_value = old.get(key)
-        if old_value is None or old_value == new_value:
+        if old_value is None:
+            # A key the fixture does not carry yet (the attestation). Collected
+            # and appended below rather than skipped, so a weaker claim can be
+            # written EXPLICITLY instead of being implied by silence.
+            if key not in old:
+                inserts.append((key, new_value))
+            continue
+        if old_value == new_value:
             continue
         needle = f'"{key}": {json.dumps(old_value)}'
         replacement = f'"{key}": {json.dumps(new_value)}'
         if needle in block:
             block = block.replace(needle, replacement, 1)
+
+    for key, value in inserts:
+        # Append inside the block, after the last existing entry. Indentation is
+        # copied from the final line so the corpus keeps its own formatting.
+        closing = block.rfind("}")
+        head, tail = block[:closing], block[closing:]
+        stripped = head.rstrip()
+        indent = ""
+        last_newline = stripped.rfind("\n")
+        if last_newline != -1:
+            indent = stripped[last_newline + 1 :][
+                : len(stripped[last_newline + 1 :])
+                - len(stripped[last_newline + 1 :].lstrip())
+            ]
+        entry = f'{stripped},\n{indent}"{key}": {json.dumps(value)}\n'
+        block = entry + tail
     return raw[:open_brace] + block + raw[end:]
+
+
+def provenance_write_is_faithful(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    oracle_provenance: dict[str, Any],
+    added: dict[str, Any],
+) -> bool:
+    """Did the provenance rewrite say exactly what it was supposed to say?
+
+    Replaces a whole-dict `after == oracle_provenance` equality, which was
+    strictly WRONG for any fixture carrying richer provenance than the oracle
+    emits. `fp_generated_tn6qb2_...` records generation_command, input_matrix and
+    intentional_divergence_notes; the oracle's stamp has three keys, so whole-dict
+    equality could only be satisfied by DESTROYING that evidence, and the writer
+    (correctly) refused rather than flatten it.
+
+    The freshness gate never required flattening: check_fixture_freshness.sh
+    reads pandas_version / oracle_script_sha256 / generated_at through
+    `provenance.get()` and ignores every other key. A provenance SUPERSET is
+    already gate-tolerable — the limitation was here, in the verifier.
+
+    This is also STRICTER than the equality it replaces, because it additionally
+    proves nothing was dropped:
+      * every oracle-emitted key now carries the oracle's value
+      * every other pre-existing key survives byte-identical
+      * nothing appeared except the keys we deliberately added
+    """
+    for key, value in oracle_provenance.items():
+        if after.get(key) != value:
+            return False
+
+    preserved = set(before) - set(oracle_provenance)
+    for key in preserved:
+        if after.get(key) != before[key]:
+            return False
+
+    for key, value in added.items():
+        if after.get(key) != value:
+            return False
+
+    return set(after) == set(before) | set(oracle_provenance) | set(added)
+
+
+def write_restamp(
+    path: Path,
+    fixture: dict[str, Any],
+    response: dict[str, Any],
+    attestation: str | None = None,
+) -> bool:
+    """Refresh one fixture's provenance IN PLACE. True if written.
+
+    Text-level so the corpus keeps its compact formatting and the diff stays a
+    few lines per fixture (a json.dumps round-trip would reformat ~1000 files).
+    VERIFIED BEFORE IT LANDS: the result must parse, must satisfy
+    `provenance_write_is_faithful`, and must leave every non-provenance key
+    equal under the parser. A rewrite that moved an expected value would be
+    regeneration, so it is refused rather than written.
+    """
+    raw = path.read_text(encoding="utf-8")
+    before = fixture.get(PROVENANCE_KEY) or {}
+    oracle_provenance = response.get(PROVENANCE_KEY) or {}
+    added = {ATTESTATION_KEY: attestation} if attestation else {}
+
+    updated = restamp_text(raw, before, {**oracle_provenance, **added})
+    try:
+        reparsed = json.loads(updated)
+    except json.JSONDecodeError:
+        return False
+
+    after = reparsed.get(PROVENANCE_KEY)
+    if not isinstance(after, dict):
+        return False
+    if not provenance_write_is_faithful(before, after, oracle_provenance, added):
+        return False
+    if {k: v for k, v in reparsed.items() if k != PROVENANCE_KEY} != {
+        k: v for k, v in fixture.items() if k != PROVENANCE_KEY
+    }:
+        return False
+
+    path.write_text(updated, encoding="utf-8")
+    return True
 
 
 def restamp(fixture: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
@@ -621,7 +749,12 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             return path, fixture, None, str(exc)[:160]
         if response.get("error"):
-            return path, fixture, None, f"oracle error: {response['error']}"
+            # The RESPONSE is carried through even on the error path. It holds a
+            # fresh fixture_provenance (error_response builds one) and the
+            # error_origin that decides whether an expected-error fixture can be
+            # attested at all. Returning None here is what kept the 85
+            # expected-error agreements permanently unstampable.
+            return path, fixture, response, f"oracle error: {response['error']}"
         return path, fixture, response, None
 
     def named_oracle_response(
@@ -656,7 +789,10 @@ def main() -> int:
     retired: list[tuple[str, str]] = []
     unsupported: list[tuple[str, str]] = []
     other_errors: list[tuple[str, str]] = []
-    expected_error_agreements: list[tuple[str, str]] = []
+    expected_error_agreements: list[tuple[str, str, str | None]] = []
+    error_agreement_pandas = 0
+    error_agreement_stamped = 0
+    error_agreement_not_pandas: list[tuple[str, str]] = []
     uncompared_keys: collections.Counter[str] = collections.Counter()
     how_counts: collections.Counter[str] = collections.Counter()
 
@@ -680,7 +816,25 @@ def main() -> int:
                 # Rust harness checks; the oracle raises pandas' own English and
                 # the two were never meant to match ('out of bounds' vs pandas'
                 # 'out-of-bounds' is the shape of that trap).
-                expected_error_agreements.append((name, msg))
+                #
+                # BUT "the oracle failed" is not one fact. Only a refusal that
+                # came from PANDAS says anything about pandas; a refusal from the
+                # adapter's own argument validation means pandas was never
+                # invoked, and stamping it would attest agreement on a question
+                # nobody asked. Split by origin and stamp only the first kind.
+                origin = (response or {}).get(ORIGIN_KEY)
+                expected_error_agreements.append((name, msg, origin))
+                if origin == ORIGIN_PANDAS:
+                    error_agreement_pandas += 1
+                    if args.restamp_agreeing and args.apply and response:
+                        if write_restamp(
+                            path, fixture, response, ATTESTATION_ERROR_AGREEMENT
+                        ):
+                            error_agreement_stamped += 1
+                        else:
+                            restamp_refused.append(name)
+                else:
+                    error_agreement_not_pandas.append((name, origin or "unknown"))
             else:
                 other_errors.append((name, msg))
             continue
@@ -754,25 +908,7 @@ def main() -> int:
             if restampable(verdict):
                 restampable_count += 1
                 if args.restamp_agreeing and args.apply:
-                    # Text-level rewrite so the corpus keeps its compact
-                    # formatting and the diff stays 3 lines per fixture.
-                    raw = path.read_text(encoding="utf-8")
-                    updated = restamp_text(
-                        raw,
-                        fixture.get(PROVENANCE_KEY) or {},
-                        response.get(PROVENANCE_KEY) or {},
-                    )
-                    # Verify before writing: the result must parse, must carry
-                    # the new stamp, and must leave every other key byte-equal
-                    # under the parser. A restamp that changed a value would be
-                    # regeneration, so it is refused rather than written.
-                    reparsed = json.loads(updated)
-                    stamped_ok = reparsed.get(PROVENANCE_KEY) == response.get(PROVENANCE_KEY)
-                    rest_unchanged = {
-                        k: v for k, v in reparsed.items() if k != PROVENANCE_KEY
-                    } == {k: v for k, v in fixture.items() if k != PROVENANCE_KEY}
-                    if stamped_ok and rest_unchanged:
-                        path.write_text(updated, encoding="utf-8")
+                    if write_restamp(path, fixture, response):
                         restamped += 1
                     else:
                         restamp_refused.append(name)
@@ -799,6 +935,21 @@ def main() -> int:
     print(f"  oracle: unsupported op     : {len(unsupported)}   <-- retire candidates")
     print(f"  expected-error, BOTH failed: {len(expected_error_agreements)}   "
           "<-- legitimate expected-error fixtures, NOT defects")
+    print(f"    of those, PANDAS raised  : {error_agreement_pandas}"
+          "   (attestable as error-agreement)")
+    print(f"    ERROR-AGREEMENT STAMPED  : {error_agreement_stamped}"
+          f"{'' if args.restamp_agreeing and args.apply else '   (needs --restamp-agreeing --apply)'}")
+    if error_agreement_not_pandas:
+        # Never a silent remainder. These are NOT stampable and the reason is
+        # not "we ran out of time" — pandas was never invoked, so there is no
+        # agreement to attest. Several look like adapter coverage gaps.
+        by_origin: collections.Counter[str] = collections.Counter(
+            origin for _, origin in error_agreement_not_pandas
+        )
+        print(f"    NOT attestable           : {len(error_agreement_not_pandas)}"
+              "   <-- pandas NEVER INVOKED; adapter refused first")
+        for origin, count in by_origin.most_common():
+            print(f"      origin={origin}: {count}")
     print(f"  oracle: other errors       : {len(other_errors)}   <-- untriaged")
     print(f"\ncomparison coverage          : "
           f"{how_counts['SEMANTIC']} semantic, {how_counts['STRUCTURAL']} structural")
@@ -908,7 +1059,13 @@ def main() -> int:
                     ],
                     "other_errors": [{"fixture": n, "error": m} for n, m in other_errors],
                     "expected_error_agreements": [
-                        {"fixture": n, "error": m} for n, m in expected_error_agreements
+                        {"fixture": n, "error": m, "origin": o}
+                        for n, m, o in expected_error_agreements
+                    ],
+                    "error_agreement_pandas": error_agreement_pandas,
+                    "error_agreement_stamped": error_agreement_stamped,
+                    "error_agreement_not_attestable": [
+                        {"fixture": n, "origin": o} for n, o in error_agreement_not_pandas
                     ],
                     "uncompared_keys": dict(uncompared_keys),
                     "coverage": dict(how_counts),
