@@ -6,7 +6,7 @@
   "fixture_provenance": {
     "pandas_version": "2.2.3",
     "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
-    "generated_at": "2026-08-08T10:38:12Z"
+    "generated_at": "2026-08-08T16:11:27Z"
   },
   "groupby_columns": ["grp"],
   "group_name": "a",

@@ -6,7 +6,7 @@
   "fixture_provenance": {
     "pandas_version": "2.2.3",
     "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
-    "generated_at": "2026-08-08T10:37:34Z"
+    "generated_at": "2026-08-08T16:10:45Z"
   },
   "csv_input": "id,score,active,tag\n1,95.5,true,gold\n2,87.0,false,silver\n3,100,true,platinum\n",
   "expected_bool": true
