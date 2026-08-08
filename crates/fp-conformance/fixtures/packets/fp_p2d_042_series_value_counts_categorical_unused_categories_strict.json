@@ -5,8 +5,8 @@
   "operation": "series_value_counts",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "25b3c7e0656c91f953dd5f932fcfaed730a69e87abd4ef5a90da9c75313bafdc",
-    "generated_at": "2026-08-08T21:23:57Z"
+    "oracle_script_sha256": "91254e08fa66bca71d3bb11dadaf0864aa67a643e51bba0b6b3b9f1fa5cfa78b",
+    "generated_at": "2026-08-08T22:28:26Z"
   },
   "left": {
     "name": "rating",

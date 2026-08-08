@@ -5859,9 +5859,28 @@ def op_dataframe_groupby_ngroup(pd, payload: dict[str, Any]) -> dict[str, Any]:
             )
         columns.append(entry.strip())
 
+    # `sort_ascending` was never read here, so
+    # fp_p2d_112_dataframe_groupby_ngroup_descending_strict — a fixture whose
+    # whole purpose is the descending numbering — silently exercised pandas'
+    # ascending default. MEASURED, live pandas 2.2.3, on
+    # grp = ['a','b','a','c','b','a']:
+    #     .ngroup()                  -> [0, 1, 0, 2, 1, 0]
+    #     .ngroup(ascending=False)   -> [2, 1, 2, 0, 1, 2]
+    # The fixture pins the second and FrankenPandas produces it; the oracle was
+    # the only party disagreeing.
+    #
+    # This is the latent shape test_payload_keys_are_read.py cannot catch and
+    # says so in its own docstring: `sort_ascending` IS read elsewhere in this
+    # file (series_argsort, sort_values, ...), so the key-appears check passes
+    # while this handler ignores it. (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    ascending = payload.get("sort_ascending")
+    if ascending is not None and not isinstance(ascending, bool):
+        raise OracleError("dataframe_groupby_ngroup sort_ascending must be a bool")
+
     frame = dataframe_from_json(pd, frame_payload)
     try:
-        out = frame.groupby(columns).ngroup()
+        grouped = frame.groupby(columns)
+        out = grouped.ngroup() if ascending is None else grouped.ngroup(ascending=ascending)
     except Exception as exc:
         raise OracleError(f"dataframe_groupby_ngroup failed: {exc}") from exc
 

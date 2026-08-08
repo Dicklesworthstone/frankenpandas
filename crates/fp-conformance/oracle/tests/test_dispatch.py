@@ -492,3 +492,50 @@ def test_groupby_std_renders_an_undefined_group_as_nan_not_none(oracle, pd):
         "kind": "null",
         "value": "na_n",
     }
+
+
+def test_groupby_ngroup_honours_sort_ascending(oracle, pd):
+    """The descending numbering must reach pandas, not be silently defaulted.
+
+    br-frankenpandas-fixture-divergence-triage-9s0c4. op_dataframe_groupby_ngroup
+    called .ngroup() with no ascending argument, so a fixture carrying
+    sort_ascending=False exercised pandas' ascending DEFAULT instead.
+
+    MEASURED, live pandas 2.2.3, on grp = ['a','b','a','c','b','a']:
+        .ngroup()                -> [0, 1, 0, 2, 1, 0]
+        .ngroup(ascending=False) -> [2, 1, 2, 0, 1, 2]
+
+    test_payload_keys_are_read.py cannot catch this and says so in its own
+    docstring: sort_ascending IS read elsewhere in the oracle, so the
+    key-appears check passes while this one handler ignores it.
+    """
+    frame = {
+        "index": [{"kind": "int64", "value": i} for i in range(6)],
+        "column_order": ["grp", "val"],
+        "columns": {
+            "grp": [
+                {"kind": "utf8", "value": v} for v in ["a", "b", "a", "c", "b", "a"]
+            ],
+            "val": [
+                {"kind": "int64", "value": v} for v in [10, 20, 30, 40, 50, 60]
+            ],
+        },
+    }
+    base = {
+        "operation": "dataframe_groupby_ngroup",
+        "frame": frame,
+        "groupby_columns": ["grp"],
+    }
+
+    def values(payload):
+        out = oracle.dispatch(pd, payload)["expected_series"]["values"]
+        return [v["value"] for v in out]
+
+    assert values(base) == [0, 1, 0, 2, 1, 0], "no key supplied -> pandas' default"
+    assert values({**base, "sort_ascending": True}) == [0, 1, 0, 2, 1, 0]
+    assert values({**base, "sort_ascending": False}) == [2, 1, 2, 0, 1, 2], (
+        "sort_ascending=False must reach pandas as ngroup(ascending=False)"
+    )
+
+    with pytest.raises(oracle.OracleError, match="must be a bool"):
+        oracle.dispatch(pd, {**base, "sort_ascending": "no"})
