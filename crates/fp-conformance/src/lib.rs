@@ -14878,14 +14878,15 @@ fn execute_dataframe_constructor_scalar_fixture_operation(
         .clone()
         .ok_or_else(|| "column_order is required for dataframe_constructor_scalar".to_owned())?;
 
-    let mut columns = BTreeMap::new();
-    for name in &target_columns {
-        let values = vec![fill_value.clone(); target_index.len()];
-        let column = Column::from_values(values).map_err(|err| err.to_string())?;
-        columns.insert(name.clone(), column);
-    }
-
-    let frame = DataFrame::new_with_column_order(Index::new(target_index), columns, target_columns)
+    // DELEGATES to the real constructor rather than broadcasting here.
+    // br-frankenpandas-oxodo: this arm used to build the frame itself with
+    // Column::from_values + DataFrame::new_with_column_order, so all eight
+    // dataframe_constructor_scalar fixtures were green against an operation
+    // FrankenPandas did not expose at all.
+    // `column_order` was already required above, so Some(..) here is the
+    // "columns were supplied" case — including an explicitly EMPTY list, which
+    // pandas accepts as shape (n, 0).
+    let frame = DataFrame::from_scalar(&fill_value, target_index, Some(&target_columns))
         .map_err(|err| err.to_string())?;
     apply_constructor_options(fixture, "dataframe_constructor_scalar", frame)
 }

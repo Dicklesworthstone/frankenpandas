@@ -57001,6 +57001,64 @@ impl DataFrame {
     /// Matches the rectangular tuple/list subset of
     /// `pd.DataFrame.from_records(data, columns=...)`. Each inner Vec is a row;
     /// all rows must have the same length as `columns`.
+    /// Construct a DataFrame by BROADCASTING one scalar over an index and a
+    /// column set.
+    ///
+    /// Matches `pd.DataFrame(scalar, index=..., columns=...)`. Measured on
+    /// pandas 2.2.3:
+    /// ```text
+    /// pd.DataFrame(5,    index=[0,1], columns=['a','b']) -> [[5,5],[5,5]] int64
+    /// pd.DataFrame(2.5,  index=[0,1], columns=['a'])     -> [[2.5],[2.5]] float64
+    /// pd.DataFrame('x',  index=[0,1], columns=['a'])     -> [['x'],['x']] object
+    /// pd.DataFrame(True, index=[0],   columns=['a'])     -> [[True]] bool
+    /// pd.DataFrame(5,    index=[],    columns=['a'])     -> shape (0,1), int64
+    /// pd.DataFrame(5,    index=[1,2], columns=[])        -> shape (2,0)
+    /// pd.DataFrame(5,    index=[0,1])                    -> ValueError:
+    ///     "DataFrame constructor not properly called!"   <- columns OMITTED
+    /// ```
+    ///
+    /// `columns` is `Option` because pandas draws a real distinction that a bare
+    /// slice cannot express: an EXPLICIT empty list is legal and yields shape
+    /// (n, 0), while OMITTING columns is an error — a bare scalar carries no
+    /// labels to infer. Collapsing the two would make one of those two measured
+    /// behaviours unreachable.
+    ///
+    /// Added by br-frankenpandas-oxodo. The conformance harness had been
+    /// building this frame ITSELF for eight `dataframe_constructor_scalar`
+    /// fixtures, so the packet was green against an operation FrankenPandas did
+    /// not actually expose.
+    pub fn from_scalar(
+        value: &Scalar,
+        index_labels: Vec<IndexLabel>,
+        column_order: Option<&[String]>,
+    ) -> Result<Self, FrameError> {
+        let Some(column_order) = column_order else {
+            return Err(FrameError::CompatibilityRejected(
+                "dataframe_constructor_scalar: DataFrame constructor not properly called! \
+                 columns are required to broadcast a scalar"
+                    .to_string(),
+            ));
+        };
+
+        let mut seen = BTreeSet::new();
+        for name in column_order {
+            if !seen.insert(name.clone()) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "duplicate column selector: '{name}'"
+                )));
+            }
+        }
+
+        let row_count = index_labels.len();
+        let mut columns = BTreeMap::new();
+        for name in column_order {
+            let values = vec![value.clone(); row_count];
+            columns.insert(name.clone(), Column::from_values(values)?);
+        }
+
+        Self::new_with_column_order(Index::new(index_labels), columns, column_order.to_vec())
+    }
+
     pub fn from_tuples(records: Vec<Vec<Scalar>>, columns: &[&str]) -> Result<Self, FrameError> {
         if records.is_empty() {
             let cols: BTreeMap<String, Column> = columns
@@ -91655,6 +91713,73 @@ mod tests {
             err.to_string(),
             "compatibility gate rejected operation: dataframe_from_records row width 3 exceeds columns length 2"
         );
+    }
+
+    /// `pd.DataFrame(scalar, index=..., columns=...)` broadcasts. Measured on
+    /// pandas 2.2.3 — the dtype follows the scalar, and an empty index keeps the
+    /// columns (br-frankenpandas-oxodo).
+    #[test]
+    fn dataframe_from_scalar_broadcasts_like_pandas() {
+        let columns = vec!["a".to_owned(), "b".to_owned()];
+        let df = DataFrame::from_scalar(
+            &Scalar::Int64(5),
+            vec![0_i64.into(), 1_i64.into()],
+            Some(&columns),
+        )
+        .expect("scalar broadcast");
+        assert_eq!(df.column_names(), vec!["a", "b"]);
+        assert_eq!(df.index().len(), 2);
+        assert_eq!(
+            df.columns["a"].values(),
+            &[Scalar::Int64(5), Scalar::Int64(5)]
+        );
+        assert_eq!(
+            df.columns["b"].values(),
+            &[Scalar::Int64(5), Scalar::Int64(5)]
+        );
+
+        // Utf8 broadcasts as object, matching pandas' dtype=object.
+        let one = vec!["a".to_owned()];
+        let text = DataFrame::from_scalar(
+            &Scalar::Utf8("x".into()),
+            vec![0_i64.into(), 1_i64.into()],
+            Some(&one),
+        )
+        .expect("utf8 broadcast");
+        assert_eq!(
+            text.columns["a"].values(),
+            &[Scalar::Utf8("x".into()), Scalar::Utf8("x".into())]
+        );
+
+        // An empty index keeps the columns: pandas gives shape (0, 1).
+        let empty = DataFrame::from_scalar(&Scalar::Int64(5), Vec::new(), Some(&one))
+            .expect("empty index keeps columns");
+        assert_eq!(empty.index().len(), 0);
+        assert_eq!(empty.column_names(), vec!["a"]);
+        assert!(empty.columns["a"].values().is_empty());
+    }
+
+    /// The distinction a bare slice cannot express, and the reason `columns` is
+    /// an Option. Measured on pandas 2.2.3:
+    ///   `pd.DataFrame(5, index=[1,2], columns=[])` -> shape (2, 0), LEGAL
+    ///   `pd.DataFrame(5, index=[1,2])`             -> ValueError:
+    ///        DataFrame constructor not properly called!
+    /// Conflating them makes one of the two unreachable — which is exactly what
+    /// an earlier draft of this constructor did, turning the green fixture
+    /// fp_p2d_020_dataframe_constructor_scalar_empty_columns_strict red.
+    #[test]
+    fn dataframe_from_scalar_empty_columns_is_legal_but_omitted_is_not() {
+        let explicit_empty = DataFrame::from_scalar(
+            &Scalar::Int64(9),
+            vec![0_i64.into(), 1_i64.into()],
+            Some(&[]),
+        )
+        .expect("columns=[] is legal and gives shape (2, 0)");
+        assert_eq!(explicit_empty.index().len(), 2);
+        assert!(explicit_empty.column_names().is_empty());
+
+        DataFrame::from_scalar(&Scalar::Int64(5), vec![0_i64.into(), 1_i64.into()], None)
+            .expect_err("OMITTING columns is pandas' ValueError");
     }
 
     /// pandas lets the index win when there are NO rows. Measured on 2.2.3:
