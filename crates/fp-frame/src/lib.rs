@@ -57196,10 +57196,21 @@ impl DataFrame {
             }
         }
 
+        // Broadcasting a MISSING scalar invents every cell, so the gap is NaN
+        // rather than whatever null kind was handed in. Measured on pandas
+        // 2.2.3: pd.DataFrame(None, index=[1,2], columns=['a','b']) is object
+        // dtype whose elements are float `nan`, not None.
+        // (br-frankenpandas-nywa8)
+        let broadcast = if value.is_missing() {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            value.clone()
+        };
+
         let row_count = index_labels.len();
         let mut columns = BTreeMap::new();
         for name in column_order {
-            let values = vec![value.clone(); row_count];
+            let values = vec![broadcast.clone(); row_count];
             columns.insert(name.clone(), Column::from_values(values)?);
         }
 

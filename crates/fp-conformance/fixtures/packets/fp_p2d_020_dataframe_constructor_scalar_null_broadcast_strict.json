@@ -5,29 +5,63 @@
   "operation": "dataframe_constructor_scalar",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T14:59:38Z"
   },
-  "fill_value": { "kind": "null", "value": "null" },
+  "fill_value": {
+    "kind": "null",
+    "value": "null"
+  },
   "index": [
-    { "kind": "int64", "value": 1 },
-    { "kind": "int64", "value": 2 }
+    {
+      "kind": "int64",
+      "value": 1
+    },
+    {
+      "kind": "int64",
+      "value": 2
+    }
   ],
-  "column_order": ["a", "b"],
+  "column_order": [
+    "a",
+    "b"
+  ],
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "columns": {
       "a": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ],
       "b": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ]
-    }
+    },
+    "column_order": [
+      "a",
+      "b"
+    ]
   }
 }
