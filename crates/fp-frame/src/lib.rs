@@ -62684,6 +62684,14 @@ impl DataFrame {
         self.prod()
     }
 
+    /// `df.product(numeric_only=...)`, the alias's sibling of
+    /// [`Self::prod_with_numeric_only`]. An alias must offer the same options
+    /// as the method it aliases, or callers get a silently narrower API on one
+    /// spelling. (br-frankenpandas-reductions-numeric-only-default-zx21n)
+    pub fn product_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.prod_with_numeric_only(numeric_only)
+    }
+
     /// Dict-like column lookup.
     ///
     /// Matches `pd.DataFrame.get(key)` by returning `None` instead of an
@@ -72833,11 +72841,22 @@ impl DataFrame {
     }
 
     fn reduce_numeric(&self, func: &str) -> Result<Series, FrameError> {
-        // NOTE (br-frankenpandas-reductions-numeric-only-default-zx21n): this is
-        // the `numeric_only=TRUE` path, and it is currently also the DEFAULT.
-        // pandas 2.x defaults to numeric_only=FALSE. The default is deliberately
-        // NOT flipped here — see `reduce_with_numeric_only` for why.
-        self.reduce_with_numeric_only(func, true)
+        // THE DEFAULT IS numeric_only=FALSE, matching pandas 2.x
+        // (br-frankenpandas-reductions-numeric-only-default-zx21n). It was TRUE
+        // — pandas 1.x's behaviour, which silently dropped object columns from
+        // `df.sum()`. MEASURED, live pandas 2.2.3, on a frame with a float `b`,
+        // an object `label` and an int `a`:
+        //
+        //   df.sum()   -> {'b': -4.0, 'label': 'azm', 'a': 5}   object INCLUDED
+        //                                                       and 'a' stays int64
+        //   df.sum(numeric_only=True)
+        //              -> {'b': -4.0,                'a': 5.0}  'a' PROMOTED
+        //
+        // The flip was blocked until the 13 fixtures that pin the
+        // numeric_only=TRUE result could SAY so; they now carry
+        // `<op>_numeric_only: true` and are honoured on both the oracle and the
+        // harness side, so they no longer depend on whatever the default is.
+        self.reduce_with_numeric_only(func, false)
     }
 
     /// Reduce each column, optionally restricting to numeric columns.
@@ -72912,11 +72931,27 @@ impl DataFrame {
             // The 8 raise-ops. pandas surfaces the engine's own conversion
             // failure; FrankenPandas names the column so the message is
             // actionable, and the harness compares FP's wording anyway.
+            //
+            // ⚠️ A column with NO PRESENT VALUES DOES NOT RAISE. pandas' refusal
+            // comes from converting the actual values, so an all-missing object
+            // column converts vacuously and reduces to nan. MEASURED, live
+            // pandas 2.2.3, on pd.DataFrame({'a': [None, None], 'b': [1.0, 2.0]})
+            // where 'a' is dtype object:
+            //
+            //   mean / median / std / var  ->  {'a': nan, 'b': ...}   NO raise
+            //   sum                        ->  {'a': 0,   'b': ...}
+            //   min / max                  ->  {'a': None,'b': ...}
+            //
+            // Gating the raise on dtype alone therefore over-refuses. Caught by
+            // the metamorphic properties, whose generator produces all-null
+            // columns that infer DType::Null — 14 of them went red on the first
+            // version of this flip. (br-frankenpandas-reductions-numeric-only-default-zx21n)
             if let Some(offender) = allowed.iter().find(|name| {
+                let column = &self.columns[name.as_str()];
                 !matches!(
-                    self.columns[name.as_str()].dtype(),
+                    column.dtype(),
                     DType::Int64 | DType::Float64 | DType::Timedelta64
-                )
+                ) && column.values().iter().any(|v| !v.is_missing())
             }) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "could not convert column '{offender}' to numeric for {func}"
@@ -72938,6 +72973,16 @@ impl DataFrame {
                 let present: Vec<&Scalar> =
                     column.values().iter().filter(|v| !v.is_missing()).collect();
                 return Ok(match func {
+                    // An all-missing column sums to the integer 0, NOT to the
+                    // empty concatenation. MEASURED, live pandas 2.2.3, on
+                    // pd.DataFrame({'a': [None, None]}) with 'a' object:
+                    //   df.sum() -> {'a': 0}
+                    // pandas' empty sum is the additive identity even in an
+                    // object column; it does not become "". Caught by
+                    // prop_dataframe_sum_is_translation_covariant, which
+                    // rejected the Utf8("") this arm produced.
+                    // (br-frankenpandas-reductions-numeric-only-default-zx21n)
+                    "sum" if present.is_empty() => Scalar::Int64(0),
                     "sum" => {
                         let mut joined = String::new();
                         for value in &present {
@@ -72972,6 +73017,15 @@ impl DataFrame {
                         }
                         best.cloned().unwrap_or(Scalar::Null(NullKind::NaN))
                     }
+                    // An all-missing non-numeric column reduces to NaN rather
+                    // than refusing — pandas' refusal comes from converting the
+                    // VALUES, and there are none. Measured on
+                    // pd.DataFrame({'a': [None, None]}) with 'a' object:
+                    // mean/median/std/var all give nan. The dtype-only gate
+                    // above already let this column through; this arm is what
+                    // actually answers for it.
+                    // (br-frankenpandas-reductions-numeric-only-default-zx21n)
+                    _ if present.is_empty() => Scalar::Null(NullKind::NaN),
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "{func} cannot reduce non-numeric column '{name}'"
@@ -92597,7 +92651,7 @@ mod tests {
     /// default: `df.sum()` and `df.sum_with_numeric_only(true)` must agree, and
     /// neither may mention the object column.
     #[test]
-    fn dataframe_reductions_numeric_only_true_is_unchanged_and_is_still_the_default() {
+    fn dataframe_reductions_numeric_only_true_still_skips_the_object_column() {
         let df = numeric_only_probe_frame();
         let has_label = |s: &Series| {
             s.index()
@@ -92606,21 +92660,90 @@ mod tests {
                 .any(|l| matches!(l, IndexLabel::Utf8(t) if t == "label"))
         };
 
-        for (default, explicit) in [
-            (df.sum().unwrap(), df.sum_with_numeric_only(true).unwrap()),
-            (df.mean().unwrap(), df.mean_with_numeric_only(true).unwrap()),
-            (
-                df.min_agg().unwrap(),
-                df.min_agg_with_numeric_only(true).unwrap(),
-            ),
-            (
-                df.std_agg().unwrap(),
-                df.std_agg_with_numeric_only(true).unwrap(),
-            ),
+        // numeric_only=TRUE still skips the object column and still promotes
+        // the int column to float64 — the path the 13 corrected fixtures pin.
+        for explicit in [
+            df.sum_with_numeric_only(true).unwrap(),
+            df.mean_with_numeric_only(true).unwrap(),
+            df.min_agg_with_numeric_only(true).unwrap(),
+            df.std_agg_with_numeric_only(true).unwrap(),
         ] {
-            assert!(!has_label(&default), "default must skip the object column");
-            assert!(!has_label(&explicit));
-            assert_eq!(default.column().values(), explicit.column().values());
+            assert!(
+                !has_label(&explicit),
+                "numeric_only=true must skip the object column"
+            );
+        }
+    }
+
+    /// The DEFAULT is pandas 2.x's `numeric_only=False`, and this is the test
+    /// that would have caught the old behaviour.
+    ///
+    /// MEASURED, live pandas 2.2.3, on a frame with a float `b`, an object
+    /// `label` and an int `a`:
+    ///
+    /// ```text
+    /// df.sum()   -> {'b': -4.0, 'label': 'azm', 'a': 5}   object CONCATENATED,
+    ///                                                     'a' stays int64
+    /// df.min()   -> {'b': -7.5, 'label': 'a',   'a': -1}  object LEXICOGRAPHIC
+    /// df.max()   -> {'b':  2.0, 'label': 'z',   'a': 5}
+    /// df.mean()  -> TypeError: Could not convert ['azm'] to numeric
+    /// ```
+    ///
+    /// and the same TypeError for prod / median / std / var / sem / skew /
+    /// kurt. `df.sum()` is one of the most-used calls in the API, so this was
+    /// not an edge case: FrankenPandas silently returned the pandas-1.x answer.
+    /// (br-frankenpandas-reductions-numeric-only-default-zx21n)
+    #[test]
+    fn dataframe_reductions_default_to_numeric_only_false_like_pandas_2x() {
+        let df = numeric_only_probe_frame();
+        let cell = |s: &Series, want: &str| -> Option<Scalar> {
+            s.index()
+                .labels()
+                .iter()
+                .position(|l| matches!(l, IndexLabel::Utf8(t) if t == want))
+                .map(|i| s.column().values()[i].clone())
+        };
+
+        // The three that INCLUDE the object column.
+        let sum = df.sum().unwrap();
+        assert_eq!(
+            cell(&sum, "label"),
+            Some(Scalar::Utf8("azm".to_owned())),
+            "sum CONCATENATES an object column in row order"
+        );
+        assert!(
+            matches!(cell(&sum, "a"), Some(Scalar::Int64(_))),
+            "under the default the int column stays int64 — the float64 the old \
+             fixtures pinned is specifically the numeric_only=true path"
+        );
+        assert_eq!(
+            cell(&df.min_agg().unwrap(), "label"),
+            Some(Scalar::Utf8("a".to_owned())),
+            "min compares an object column lexicographically"
+        );
+        assert_eq!(
+            cell(&df.max_agg().unwrap(), "label"),
+            Some(Scalar::Utf8("z".to_owned()))
+        );
+
+        // The eight that RAISE. These are the negative control: a wrong default
+        // on sum/min/max still yields a plausible number, but here it yields an
+        // exception, so they cannot pass by accident.
+        for (op, result) in [
+            ("mean", df.mean().unwrap_err()),
+            ("prod", df.prod_agg().unwrap_err()),
+            ("median", df.median_agg().unwrap_err()),
+            ("std", df.std_agg().unwrap_err()),
+            ("var", df.var_agg().unwrap_err()),
+            ("sem", df.sem_agg().unwrap_err()),
+            ("skew", df.skew_agg().unwrap_err()),
+            ("kurtosis", df.kurtosis_agg().unwrap_err()),
+        ] {
+            let message = result.to_string();
+            assert!(
+                message.contains("label"),
+                "df.{op}() must refuse the object column and name it; got {message}"
+            );
         }
     }
 
@@ -155861,7 +155984,21 @@ mod tests {
     fn dataframe_qn0bj_metadata_aliases_cover_t_values_product_and_get() {
         let df = nk54a_df();
         assert_eq!(df.T().unwrap(), df.transpose().unwrap());
-        assert_eq!(df.product().unwrap().values(), df.prod().unwrap().values());
+        // `product` is an alias of `prod`, so it must agree on BOTH paths. This
+        // frame carries a Utf8 column, and since
+        // br-frankenpandas-reductions-numeric-only-default-zx21n the default is
+        // pandas 2.x's numeric_only=False, under which prod RAISES
+        // ("can't multiply sequence by non-int of type 'str'"). Comparing the
+        // refusals as well as the values keeps this an ALIAS test rather than
+        // one that quietly re-pins a reduction default.
+        assert_eq!(
+            df.product().unwrap_err().to_string(),
+            df.prod().unwrap_err().to_string()
+        );
+        assert_eq!(
+            df.product_with_numeric_only(true).unwrap().values(),
+            df.prod_with_numeric_only(true).unwrap().values()
+        );
 
         let values = df.values();
         assert_eq!(values.len(), 3);

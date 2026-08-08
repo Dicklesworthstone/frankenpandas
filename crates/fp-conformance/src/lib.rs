@@ -1952,6 +1952,38 @@ pub struct PacketFixture {
     pub corr_min_periods: Option<usize>,
     #[serde(default)]
     pub corr_numeric_only: Option<bool>,
+    /// pandas 2.x `numeric_only` for the DataFrame reduction family.
+    /// Absent = pandas' own default, which is what every fixture predating
+    /// br-frankenpandas-reductions-numeric-only-default-zx21n relies on.
+    /// Paired with the oracle's `reduction_numeric_only_kwargs`, so a
+    /// fixture states the path once and BOTH sides honour it — an option
+    /// only one side reads is the latent defect 9s0c4 catalogued.
+    #[serde(default)]
+    pub sum_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub mean_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub min_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub max_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub prod_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub median_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub std_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub var_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub sem_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub skew_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub kurtosis_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub count_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub quantile_numeric_only: Option<bool>,
     #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
@@ -3478,6 +3510,38 @@ struct OracleRequest {
     pub corr_min_periods: Option<usize>,
     #[serde(default)]
     pub corr_numeric_only: Option<bool>,
+    /// pandas 2.x `numeric_only` for the DataFrame reduction family.
+    /// Absent = pandas' own default, which is what every fixture predating
+    /// br-frankenpandas-reductions-numeric-only-default-zx21n relies on.
+    /// Paired with the oracle's `reduction_numeric_only_kwargs`, so a
+    /// fixture states the path once and BOTH sides honour it — an option
+    /// only one side reads is the latent defect 9s0c4 catalogued.
+    #[serde(default)]
+    pub sum_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub mean_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub min_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub max_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub prod_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub median_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub std_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub var_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub sem_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub skew_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub kurtosis_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub count_numeric_only: Option<bool>,
+    #[serde(default)]
+    pub quantile_numeric_only: Option<bool>,
     #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
@@ -10722,28 +10786,68 @@ fn run_fixture_operation(
             let actual = match fixture.operation {
                 FixtureOperation::DataFrameIdxmin => frame.idxmin().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameSem => frame.sem_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameSem => match fixture.sem_numeric_only {
+                    Some(numeric_only) => frame.sem_agg_with_numeric_only(numeric_only),
+                    None => frame.sem_agg(),
+                }
+                .map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameApplySemAxis0 => {
                     execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
-                FixtureOperation::DataFrameSkew => frame.skew_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameKurtosis => {
-                    frame.kurtosis_agg().map_err(|err| err.to_string())
+                FixtureOperation::DataFrameSkew => match fixture.skew_numeric_only {
+                    Some(numeric_only) => frame.skew_agg_with_numeric_only(numeric_only),
+                    None => frame.skew_agg(),
                 }
-                FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameKurtosis => match fixture.kurtosis_numeric_only {
+                    Some(numeric_only) => frame.kurtosis_agg_with_numeric_only(numeric_only),
+                    None => frame.kurtosis_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameProd => match fixture.prod_numeric_only {
+                    Some(numeric_only) => frame.prod_with_numeric_only(numeric_only),
+                    None => frame.prod_agg(),
+                }
+                .map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameApplyProdAxis1
                 | FixtureOperation::DataFrameApplyProductAxis1 => {
                     execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
-                FixtureOperation::DataFrameSum => frame.sum().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameStd => frame.std_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameVar => frame.var_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMin => frame.min_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMax => frame.max_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMedian => {
-                    frame.median_agg().map_err(|err| err.to_string())
+                FixtureOperation::DataFrameSum => match fixture.sum_numeric_only {
+                    Some(numeric_only) => frame.sum_with_numeric_only(numeric_only),
+                    None => frame.sum(),
                 }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMean => match fixture.mean_numeric_only {
+                    Some(numeric_only) => frame.mean_with_numeric_only(numeric_only),
+                    None => frame.mean(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameStd => match fixture.std_numeric_only {
+                    Some(numeric_only) => frame.std_agg_with_numeric_only(numeric_only),
+                    None => frame.std_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameVar => match fixture.var_numeric_only {
+                    Some(numeric_only) => frame.var_agg_with_numeric_only(numeric_only),
+                    None => frame.var_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMin => match fixture.min_numeric_only {
+                    Some(numeric_only) => frame.min_agg_with_numeric_only(numeric_only),
+                    None => frame.min_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMax => match fixture.max_numeric_only {
+                    Some(numeric_only) => frame.max_agg_with_numeric_only(numeric_only),
+                    None => frame.max_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMedian => match fixture.median_numeric_only {
+                    Some(numeric_only) => frame.median_with_numeric_only(numeric_only),
+                    None => frame.median_agg(),
+                }
+                .map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameAny => frame.any().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameAll => frame.all().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameNunique => {
@@ -13177,6 +13281,19 @@ fn capture_live_oracle_expected(
         corr_method: fixture.corr_method.clone(),
         corr_min_periods: fixture.corr_min_periods,
         corr_numeric_only: fixture.corr_numeric_only,
+        sum_numeric_only: fixture.sum_numeric_only,
+        mean_numeric_only: fixture.mean_numeric_only,
+        min_numeric_only: fixture.min_numeric_only,
+        max_numeric_only: fixture.max_numeric_only,
+        prod_numeric_only: fixture.prod_numeric_only,
+        median_numeric_only: fixture.median_numeric_only,
+        std_numeric_only: fixture.std_numeric_only,
+        var_numeric_only: fixture.var_numeric_only,
+        sem_numeric_only: fixture.sem_numeric_only,
+        skew_numeric_only: fixture.skew_numeric_only,
+        kurtosis_numeric_only: fixture.kurtosis_numeric_only,
+        count_numeric_only: fixture.count_numeric_only,
+        quantile_numeric_only: fixture.quantile_numeric_only,
         sort_column: fixture.sort_column.clone(),
         sort_ascending: fixture.sort_ascending,
         value_counts_normalize: fixture.value_counts_normalize,
@@ -20167,28 +20284,68 @@ fn execute_and_compare_differential(
             let actual = match fixture.operation {
                 FixtureOperation::DataFrameIdxmin => frame.idxmin().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameSem => frame.sem_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameSem => match fixture.sem_numeric_only {
+                    Some(numeric_only) => frame.sem_agg_with_numeric_only(numeric_only),
+                    None => frame.sem_agg(),
+                }
+                .map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameApplySemAxis0 => {
                     execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
-                FixtureOperation::DataFrameSkew => frame.skew_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameKurtosis => {
-                    frame.kurtosis_agg().map_err(|err| err.to_string())
+                FixtureOperation::DataFrameSkew => match fixture.skew_numeric_only {
+                    Some(numeric_only) => frame.skew_agg_with_numeric_only(numeric_only),
+                    None => frame.skew_agg(),
                 }
-                FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameKurtosis => match fixture.kurtosis_numeric_only {
+                    Some(numeric_only) => frame.kurtosis_agg_with_numeric_only(numeric_only),
+                    None => frame.kurtosis_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameProd => match fixture.prod_numeric_only {
+                    Some(numeric_only) => frame.prod_with_numeric_only(numeric_only),
+                    None => frame.prod_agg(),
+                }
+                .map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameApplyProdAxis1
                 | FixtureOperation::DataFrameApplyProductAxis1 => {
                     execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
-                FixtureOperation::DataFrameSum => frame.sum().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameStd => frame.std_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameVar => frame.var_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMin => frame.min_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMax => frame.max_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMedian => {
-                    frame.median_agg().map_err(|err| err.to_string())
+                FixtureOperation::DataFrameSum => match fixture.sum_numeric_only {
+                    Some(numeric_only) => frame.sum_with_numeric_only(numeric_only),
+                    None => frame.sum(),
                 }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMean => match fixture.mean_numeric_only {
+                    Some(numeric_only) => frame.mean_with_numeric_only(numeric_only),
+                    None => frame.mean(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameStd => match fixture.std_numeric_only {
+                    Some(numeric_only) => frame.std_agg_with_numeric_only(numeric_only),
+                    None => frame.std_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameVar => match fixture.var_numeric_only {
+                    Some(numeric_only) => frame.var_agg_with_numeric_only(numeric_only),
+                    None => frame.var_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMin => match fixture.min_numeric_only {
+                    Some(numeric_only) => frame.min_agg_with_numeric_only(numeric_only),
+                    None => frame.min_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMax => match fixture.max_numeric_only {
+                    Some(numeric_only) => frame.max_agg_with_numeric_only(numeric_only),
+                    None => frame.max_agg(),
+                }
+                .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMedian => match fixture.median_numeric_only {
+                    Some(numeric_only) => frame.median_with_numeric_only(numeric_only),
+                    None => frame.median_agg(),
+                }
+                .map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameAny => frame.any().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameAll => frame.all().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameNunique => {
