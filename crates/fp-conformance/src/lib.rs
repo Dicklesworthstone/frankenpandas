@@ -14831,27 +14831,38 @@ fn materialize_dataframe_constructor_projection(
             .collect()
     });
 
-    let mut first_position = HashMap::new();
-    for (position, label) in frame.index().labels().iter().enumerate() {
-        first_position.entry(label.clone()).or_insert(position);
-    }
+    // DELEGATES to DataFrame::reindex for the row projection instead of
+    // reimplementing it. br-frankenpandas-oxodo: this helper used to build a
+    // label -> first-position map and gather through it, which made it BOTH a
+    // shadow of a tuned FP path AND the place that minted the missing cells —
+    // so the eight constructor_kwargs / dict_of_series rows on
+    // br-frankenpandas-nywa8 could not be fixed in FrankenPandas at all.
+    //
+    // Delegating also drops a permissiveness the shadow had: `first_position`
+    // silently took the first of a duplicated source label, while both pandas
+    // and DataFrame::reindex reject a duplicated axis ("cannot reindex on an
+    // axis with duplicate labels"). No fixture exercised that, so the shadow's
+    // extra tolerance was never observed — which is exactly how a harness ends
+    // up certifying behaviour the library does not have.
+    let projected = frame
+        .reindex(target_index.clone())
+        .map_err(|err| err.to_string())?;
 
+    // Column selection stays here: it must ADD a column the frame lacks (named
+    // in `columns=` but absent from the data), which is the constructor's own
+    // semantics rather than a reindex. pandas gives such a column all-NaN
+    // float64 — measured, DataFrame({'a':[1,2]}).reindex(columns=['a','z'])
+    // -> a int64, z float64 NaN (br-frankenpandas-nywa8).
     let mut columns = BTreeMap::new();
     for name in &target_columns {
-        let values = if let Some(source_column) = frame.column(name) {
-            target_index
-                .iter()
-                .map(|label| {
-                    first_position
-                        .get(label)
-                        .map(|&position| source_column.values()[position].clone())
-                        .unwrap_or(Scalar::Null(NullKind::Null))
-                })
-                .collect()
-        } else {
-            vec![Scalar::Null(NullKind::Null); target_index.len()]
+        let column = match projected.column(name) {
+            Some(existing) => existing.clone(),
+            None => Column::new(
+                DType::Float64,
+                vec![Scalar::Null(NullKind::NaN); target_index.len()],
+            )
+            .map_err(|err| err.to_string())?,
         };
-        let column = Column::from_values(values).map_err(|err| err.to_string())?;
         columns.insert(name.clone(), column);
     }
 

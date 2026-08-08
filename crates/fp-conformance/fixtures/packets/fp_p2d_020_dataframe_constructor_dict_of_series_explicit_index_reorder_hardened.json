@@ -5,8 +5,8 @@
   "operation": "dataframe_constructor_dict_of_series",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T14:37:34Z"
   },
   "left": {
     "name": "a",
@@ -79,7 +79,7 @@
       "a": [
         {
           "kind": "null",
-          "value": "null"
+          "value": "na_n"
         },
         {
           "kind": "float64",
@@ -93,9 +93,13 @@
         },
         {
           "kind": "null",
-          "value": "null"
+          "value": "na_n"
         }
       ]
-    }
+    },
+    "column_order": [
+      "a",
+      "b"
+    ]
   }
 }

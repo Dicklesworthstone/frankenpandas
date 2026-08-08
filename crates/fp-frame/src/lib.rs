@@ -67214,6 +67214,25 @@ impl DataFrame {
                     fp_columnar::ValidityMask::from_words(words, new_len),
                 ))
             } else {
+                // A row reindex INVENTS is NaN (already the case here), and an
+                // all-valid int64 column widens to float64 to hold it — numpy
+                // int64 has no NaN. Measured on pandas 2.2.3:
+                //   pd.Series([1,2]).reindex([0,1,2]) -> [1.0, 2.0, nan] float64
+                //   pd.DataFrame({'a':[1,2]}).reindex(columns=['a','z'])
+                //     -> a int64 (no gap), z all-NaN float64
+                // A column that ALREADY carried a missing value is nullable, can
+                // hold the gap, and keeps its dtype with a Null gap — the same
+                // condition as the concat/constructor sites.
+                // (br-frankenpandas-nywa8)
+                let invented_a_gap = positions_ref.iter().any(Option::is_none);
+                let source_was_all_valid = !col.values().iter().any(fp_types::Scalar::is_missing);
+                if invented_a_gap && source_was_all_valid && col.dtype() == DType::Int64 {
+                    let widened = col.astype(DType::Float64)?;
+                    return Ok(widened.reindex_by_positions_with_absent_scalar(
+                        positions_ref,
+                        Scalar::Null(NullKind::NaN),
+                    )?);
+                }
                 Ok(col.reindex_by_positions_with_absent_scalar(
                     positions_ref,
                     Scalar::Null(NullKind::NaN),
@@ -68152,10 +68171,48 @@ impl DataFrame {
             None => self.reindex(labels)?,
         };
         if let Some(fill_value) = fill_value {
+            // ⚠️ The fill happens AFTER reindex, which invents NaN gaps and
+            // widens an all-valid int64 column to float64 (nywa8). pandas does
+            // NOT widen when a fill_value or method is supplied, because no NaN
+            // ever lands. Measured on 2.2.3 over a gapped daily index:
+            //   df.asfreq('D', fill_value=0) -> [10, 0, 30]    int64
+            //   df.asfreq('D', method='ffill')-> [10, 10, 30]  int64
+            //   df.asfreq('D')                -> [10.0, nan, 30.0] float64
+            // So restore the source dtype for any column the fill leaves with no
+            // missing values. Only columns whose dtype the reindex widened are
+            // touched, and only when the fill actually removed every gap.
             result = result.fillna(&fill_value)?;
+            result = result.restore_dtypes_after_gapless_fill(self)?;
         }
         result.index = result.index.set_names(self.index.name());
         Ok(result)
+    }
+
+    /// Restore each column's dtype from `source` where a fill has left the column
+    /// with no missing values.
+    ///
+    /// Undoes the int64 -> float64 widening that `reindex` applies when it
+    /// invents a NaN gap, for the case where the caller immediately fills every
+    /// gap and pandas therefore never widens at all. Only columns that are now
+    /// gapless AND whose source dtype differs are cast, so a column that keeps a
+    /// genuine missing value stays widened. (br-frankenpandas-nywa8)
+    fn restore_dtypes_after_gapless_fill(&self, source: &Self) -> Result<Self, FrameError> {
+        let mut out = self.clone();
+        for name in &self.column_order {
+            let Some(original) = source.columns.get(name) else {
+                continue;
+            };
+            let current = &self.columns[name];
+            if current.dtype() == original.dtype() {
+                continue;
+            }
+            if current.values().iter().any(fp_types::Scalar::is_missing) {
+                continue;
+            }
+            let restored = current.astype(original.dtype())?;
+            out.columns.insert(name.clone(), restored);
+        }
+        Ok(out)
     }
 
     /// Select rows where the time component of the index is between two times.
