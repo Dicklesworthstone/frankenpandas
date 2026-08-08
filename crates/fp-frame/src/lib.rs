@@ -11315,6 +11315,36 @@ impl Series {
     /// Map values using a dict-like mapping. Unmapped values become NaN.
     ///
     /// Matches `pd.Series.map(dict)`.
+    /// Finalize a `map` result, applying pandas' widening when an unmapped key
+    /// invented a gap.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// pd.Series([1, 2, 99]).map({1: 10, 2: 20})
+    ///   -> [10.0, 20.0, nan]   dtype float64
+    /// pd.Series([1, 2]).map({1: 10, 2: 20})
+    ///   -> [10, 20]            dtype int64      no gap, no widening
+    /// ```
+    ///
+    /// Every `map` fast path already emits `Null(NaN)` for an unmapped key, so
+    /// the marker was right; what was missing is that `infer_dtype` ignores
+    /// nulls and therefore saw a pure-Int64 column. Only `Int64` cells are
+    /// rewritten, so a Utf8- or Float64-valued mapping is untouched.
+    /// (br-frankenpandas-nywa8)
+    fn map_output_series(&self, mut out: Vec<Scalar>) -> Result<Self, FrameError> {
+        if out.iter().any(Scalar::is_missing) {
+            for value in &mut out {
+                if let Scalar::Int64(number) = value {
+                    #[allow(clippy::cast_precision_loss)]
+                    let widened = *number as f64;
+                    *value = Scalar::Float64(widened);
+                }
+            }
+        }
+        self.with_values_preserving_index(out)
+    }
+
     pub fn map(&self, mapping: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
         // Typed all-Int64 fast path: an all-valid Int64 column with an
         // all-Int64-keyed mapping resolves over the raw `&[i64]` view with an
@@ -11470,7 +11500,7 @@ impl Series {
                         .map_or(Scalar::Null(NullKind::NaN), |s| (*s).clone())
                 })
                 .collect();
-            return self.with_values_preserving_index(out);
+            return self.map_output_series(out);
         }
         // Typed all-Float64 key fast path (br-frankenpandas-repf sister): exact Float-Float key
         // matching. All keys Float64 on a Float64 column ⇒ no cross-type (Int≡Float) is involved,
@@ -11620,7 +11650,7 @@ impl Series {
                         .map_or(Scalar::Null(NullKind::NaN), |s| (*s).clone())
                 })
                 .collect();
-            return self.with_values_preserving_index(out);
+            return self.map_output_series(out);
         }
 
         // Typed all-Utf8 key fast path (br-frankenpandas-1q4q4): an all-valid
@@ -11708,7 +11738,7 @@ impl Series {
                     _ => Scalar::Null(NullKind::NaN),
                 })
                 .collect();
-            return self.with_values_preserving_index(out);
+            return self.map_output_series(out);
         }
 
         // Per br-frankenpandas-5110c: O(n + m) hash fast path when no
@@ -11733,7 +11763,7 @@ impl Series {
             };
             out.push(mapped.unwrap_or(Scalar::Null(NullKind::NaN)));
         }
-        self.with_values_preserving_index(out)
+        self.map_output_series(out)
     }
 
     /// Map values by applying a user function element-wise.
@@ -92743,6 +92773,83 @@ mod tests {
                 "numeric_only=true must skip the object column"
             );
         }
+    }
+
+    /// An UNMAPPED key makes `Series.map` invent a gap, so an int-valued
+    /// mapping widens the whole result to float64 — Rule 1.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// pd.Series([1, 2, 99]).map({1: 10, 2: 20})
+    ///   -> [10.0, 20.0, nan]   dtype float64   kinds ['float','float','float']
+    /// ```
+    ///
+    /// The source is all-present int64 and every mapped value is an int, so the
+    /// ONLY reason the column is float64 is the gap the unmapped `99` invents —
+    /// a numpy int64 array cannot hold it. FrankenPandas emitted
+    /// `[Int64(10), Int64(20), Null(NaN)]`: the marker was already right, the
+    /// dtype was not, because `infer_dtype` ignores nulls and saw a pure-Int64
+    /// column. Same shape as the `.str`/`.dt` accessor promotions.
+    ///
+    /// The control matters as much as the case: with FULL coverage no gap is
+    /// invented and the result stays Int64, so the promotion must be caused by
+    /// the gap and not by the operation.
+    /// (br-frankenpandas-nywa8)
+    #[test]
+    fn series_map_promotes_to_float64_when_a_key_is_unmapped() {
+        let subject = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(99)],
+        )
+        .unwrap();
+        let mapping = vec![
+            (Scalar::Int64(1), Scalar::Int64(10)),
+            (Scalar::Int64(2), Scalar::Int64(20)),
+        ];
+
+        let mapped = subject.map(&mapping).unwrap();
+        assert_eq!(
+            mapped.values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Null(NullKind::NaN)
+            ],
+            "the unmapped key invents a gap, so the whole column widens to float64"
+        );
+
+        // Control: full coverage invents nothing, so nothing widens.
+        let full = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap()
+        .map(&mapping)
+        .unwrap();
+        assert_eq!(
+            full.values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)],
+            "with every key mapped there is no gap and the result stays int64"
+        );
+
+        // A Utf8-valued mapping has no int to widen: pandas keeps the column
+        // object and renders the gap as nan.
+        let utf8_mapping = vec![
+            (Scalar::Int64(1), Scalar::Utf8("ten".into())),
+            (Scalar::Int64(2), Scalar::Utf8("twenty".into())),
+        ];
+        let strings = subject.map(&utf8_mapping).unwrap();
+        assert_eq!(
+            strings.values(),
+            &[
+                Scalar::Utf8("ten".into()),
+                Scalar::Utf8("twenty".into()),
+                Scalar::Null(NullKind::NaN)
+            ]
+        );
     }
 
     /// `DataFrame::from_series` invents a gap wherever a series is absent from
