@@ -195,6 +195,15 @@
 - **Tests affected:** `oracle/tests/test_error_origin.py` (7 cases: origin classification, fail-closed default, provenance on the error path); `oracle/tests/test_regenerate_fixtures.py` (superset faithful / dropped-extras refused / changed-extra refused / stale-sha refused / undeclared-key refused / attestation required / text insertion).
 - **Review date:** 2026-08-08
 
+### DISC-019: the oracle builds NULLABLE dtypes for int+null / bool+null payloads, unlike pandas' own constructor
+- **Reference:** pandas 2.2.3 infers `pd.Series([1, None, 3])` as **float64** (values `[1.0, nan, 3.0]`) and `pd.Series([True, None])` as **object**. Nullable `Int64` / `boolean` are reached only by asking for them explicitly.
+- **Our impl:** `pandas_oracle.series_dtype_for_payload_values` returns `"Int64"` for an all-int payload containing a null, and `"boolean"` for an all-bool payload containing a null — so the oracle constructs a column pandas' own constructor would never build from the same data.
+- **Impact:** ACCEPTED, and it is **load-bearing rather than a defect**, which is the opposite of how it reads. The fixture format tags **every value** with its own `kind`; a float64 column would rewrite each `{"kind":"int64"}` into `{"kind":"float64"}` on the way out, so the nullable dtype is what preserves the payload's kinds across the round trip. Measured 2026-08-08 over the whole corpus, switching both arms to pandas' inference: `agree` 977 → 947 (−30), `moved, unattributed` 151 → 181 (+30), and the `KIND int64->float64` move class 57 → 86 (+29). The change makes the corpus strictly worse and **grows the very class it was expected to shrink**.
+- **Consequences worth knowing:** (a) an int+null column is nullable `Int64`, so `fillna` with an incompatible scalar RAISES rather than promoting to object — that is why `fp_p2d_050_dataframe_fillna_cast_error_strict` records an error pandas-native would not produce, and why the fillna half of `br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1` cannot be settled by relaxing FrankenPandas alone; (b) `kinds <= {bool,int64,float64}` returns `float64`, while pandas infers **object** for a genuine `bool`+`int` mix (`pd.Series([True, 2])`), a third arm with the same shape and no fixture exercising it.
+- **Resolution:** ACCEPTED (BlueRobin, 2026-08-08, br-frankenpandas-9ooer). The real question is not "which dtype should the oracle pick" but **whether the fixture format should carry a column dtype instead of per-value kinds** — the current format cannot express pandas' constructor promotion at all, and the dtype forcing is the compensation. Re-opening this should start from that, not from the dtype table.
+- **Tests affected:** none changed. The negative result is recorded in `series_dtype_for_payload_values`'s own docstring so the next reader does not repeat the experiment.
+- **Review date:** 2026-08-08
+
 ## Rules
 
 1. Every divergence gets a sequential ID (DISC-NNN)

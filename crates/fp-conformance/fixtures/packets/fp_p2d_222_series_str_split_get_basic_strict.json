@@ -5,8 +5,8 @@
   "operation": "series_str_split_get",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "255f7e7182be81f2f3240934dec5ef03a42f4e0ac6724d63977a43ff41b4025e",
-    "generated_at": "2026-08-08T09:41:18Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T10:38:36Z"
   },
   "str_split_pat": "_",
   "str_split_n": 0,

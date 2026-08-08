@@ -371,6 +371,21 @@ def series_dtype_for_payload_values(values: list[dict[str, Any]]) -> str | None:
     ]
     has_null = bool(null_markers)
 
+    # ⚠️ NULLABLE HERE IS LOAD-BEARING, NOT A BUG. It looks like one:
+    # pd.Series([1, None, 3]) is float64, so forcing "Int64" makes the oracle
+    # build a column pandas' own constructor would never build
+    # (br-frankenpandas-9ooer). But the fixture format tags EVERY VALUE with a
+    # kind, and float64 would rewrite `{"kind":"int64"}` into
+    # `{"kind":"float64"}` on output. The nullable dtype is what preserves the
+    # payload's own kinds through the round trip.
+    #
+    # MEASURED 2026-08-08 (BlueRobin), whole corpus, changing these two arms to
+    # pandas' inference ("float64" for int+null, object for bool+null):
+    #     agree                977 -> 947   (-30)
+    #     moved, unattributed  151 -> 181   (+30)
+    #     KIND int64->float64   57 ->  86   (+29)
+    # It makes the corpus WORSE and grows the very class it was expected to
+    # shrink. Reverted; see the bead for what the real question turned out to be.
     if kinds == {"int64"}:
         if has_null:
             return "Int64"
