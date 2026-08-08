@@ -14957,30 +14957,19 @@ fn execute_dataframe_constructor_list_like_fixture_operation(
         (0..row_count as i64).map(IndexLabel::from).collect()
     };
 
-    // Built to the INDEX length, not the row count — they differ only in the
-    // empty-rows case above, where pandas null-fills.
-    let output_row_count = index_labels.len();
-    let mut dict_columns = BTreeMap::new();
-    for (column_offset, column_name) in selected_columns.iter().enumerate() {
-        let values = (0..output_row_count)
-            .map(|row_offset| {
-                matrix_rows
-                    .get(row_offset)
-                    .and_then(|row| row.get(column_offset))
-                    .cloned()
-                    .unwrap_or(Scalar::Null(NullKind::Null))
-            })
-            .collect::<Vec<_>>();
-        dict_columns.insert(column_name.clone(), values);
-    }
-
-    let (columns, _) = collect_dict_constructor_payloads(
-        &dict_columns,
+    // DELEGATES to DataFrame::from_list_like rather than assembling the columns
+    // and null-filling them here. br-frankenpandas-oxodo: this arm was the third
+    // shadow found in this file, and unlike the others it was also MINTING the
+    // missing cells, which held three rows on br-frankenpandas-nywa8 behind it.
+    // The real constructor pads with NaN and widens the padded column to
+    // float64, matching pandas — `pd.DataFrame([[1,2],[3]])` gives col1
+    // [2, NaN] float64.
+    let frame = DataFrame::from_list_like(
+        matrix_rows.to_vec(),
         Some(&selected_columns),
-        "dataframe_constructor_list_like",
-    )?;
-    let frame =
-        DataFrame::from_dict_with_index(columns, index_labels).map_err(|err| err.to_string())?;
+        Some(index_labels),
+    )
+    .map_err(|err| err.to_string())?;
     apply_constructor_options(fixture, "dataframe_constructor_list_like", frame)
 }
 

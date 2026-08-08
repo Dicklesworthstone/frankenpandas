@@ -57037,11 +57037,71 @@ impl DataFrame {
         Self::new_with_column_order(index, columns, col_order)
     }
 
+    /// What a row-matrix constructor does with a cell no row supplied.
+    ///
+    /// The policy is per ENTRY POINT because pandas disagrees between them, even
+    /// though both land in `from_matrix_rows`. Measured on 2.2.3:
+    ///
+    /// ```text
+    /// pd.DataFrame([[1,2],[3]])                     -> col1 [2, NaN] float64
+    /// from_records(..., columns=['a','b','c'])      -> ValueError: 3 columns
+    ///   over 2-wide rows                               passed, passed data had
+    ///                                                  2 columns
+    /// ```
+    ///
+    /// So the list-like constructor pads and widens, while `from_records` with
+    /// an explicit `columns=` is an error pandas does not even reach a fill for.
+    /// FrankenPandas' `from_records` currently pads instead of raising — an
+    /// FP-defined contract with no oracle behind it — so its policy stays
+    /// `PRESERVE_NULL` until that is decided separately.
+    /// (br-frankenpandas-nywa8, br-frankenpandas-oxodo)
+    ///
+    /// Mint `NullKind::Null` and never widen — the historical behaviour.
+    const PRESERVE_NULL: bool = false;
+    /// Mint `NullKind::NaN` and widen an all-valid int64 column to float64,
+    /// matching pandas' list-like constructor.
+    const INVENT_NAN: bool = true;
+
     fn from_matrix_rows(
         matrix_rows: Vec<Vec<Scalar>>,
         column_order: Option<&[String]>,
         index_labels: Option<Vec<IndexLabel>>,
         operation_name: &str,
+    ) -> Result<Self, FrameError> {
+        Self::from_matrix_rows_with_gap_policy(
+            matrix_rows,
+            column_order,
+            index_labels,
+            operation_name,
+            Self::PRESERVE_NULL,
+        )
+    }
+
+    /// `pd.DataFrame([[...], [...]], columns=..., index=...)`.
+    ///
+    /// The list-like constructor: short rows are padded with NaN and the padded
+    /// column widens to float64, matching pandas. Added so the conformance
+    /// harness can stop building this frame itself (br-frankenpandas-oxodo).
+    pub fn from_list_like(
+        matrix_rows: Vec<Vec<Scalar>>,
+        column_order: Option<&[String]>,
+        index_labels: Option<Vec<IndexLabel>>,
+    ) -> Result<Self, FrameError> {
+        Self::from_matrix_rows_with_gap_policy(
+            matrix_rows,
+            column_order,
+            index_labels,
+            "dataframe_constructor_list_like",
+            Self::INVENT_NAN,
+        )
+    }
+
+    fn from_matrix_rows_with_gap_policy(
+        matrix_rows: Vec<Vec<Scalar>>,
+        column_order: Option<&[String]>,
+        index_labels: Option<Vec<IndexLabel>>,
+        operation_name: &str,
+        invent_nan: bool,
     ) -> Result<Self, FrameError> {
         let row_count = matrix_rows.len();
         // pandas lets the INDEX win when there are no rows at all: with no
@@ -57098,28 +57158,50 @@ impl DataFrame {
         // index is longer and pandas null-fills:
         // `pd.DataFrame([], index=[0], columns=['a'])` is shape (1, 1) holding
         // NaN. Reading rows positionally keeps the two in step.
+        // ⚠️ The whole CONSTRUCTION is an FP-only contract when an explicit
+        // `columns=` is wider than the data: pandas does not fill anything there,
+        // it raises "N columns passed, passed data had M columns" — measured for
+        // the list-like constructor as well as from_records. FrankenPandas pads
+        // instead, and no oracle can verify that padding, so such a call keeps
+        // the historical Null pad throughout rather than being widened into an
+        // answer nothing checks. Ragged rows UNDER the data's own width are a
+        // different case: pandas pads and widens those, and they are what
+        // `INVENT_NAN` is for. (br-frankenpandas-nywa8)
+        let columns_exceed_data = column_order
+            .is_some_and(|requested| requested.len() > max_row_width && !matrix_rows.is_empty());
+        let invent_gaps = invent_nan && !columns_exceed_data;
+
         let output_row_count = index.len();
         let mut columns = BTreeMap::new();
         for (column_offset, column_name) in output_order.iter().enumerate() {
-            // NOTE (br-frankenpandas-nywa8): the invented-gap rule is NOT applied
-            // on this path. Measured: doing so fixes none of the in-scope rows —
-            // the from_records fixtures that carry the divergence go through
-            // `from_record_maps`, not here — and it breaks
-            // fp_p2d_018_..._matrix_short_rows_null_fill_hardened, whose padded
-            // frame is an FP-DEFINED contract that pandas does not have at all
-            // (`from_records` with 3 column names over 2-wide rows raises
-            // "3 columns passed, passed data had 2 columns"). Changing the pad
-            // here would move an expectation with no oracle behind it.
+            // The gap policy is the CALLER's, not this function's — see
+            // `PRESERVE_NULL` / `INVENT_NAN`. Under PRESERVE_NULL this is the
+            // historical pad, which `from_records` still relies on: its padded
+            // frame is an FP-defined contract with no oracle behind it, because
+            // pandas raises "3 columns passed, passed data had 2 columns" for
+            // that input rather than filling anything.
+            let supplied = |row_offset: usize| {
+                matrix_rows
+                    .get(row_offset)
+                    .and_then(|row| row.get(column_offset))
+            };
+            let invented_a_gap =
+                invent_gaps && (0..output_row_count).any(|row| supplied(row).is_none());
+            let source_was_all_valid = (0..output_row_count)
+                .filter_map(supplied)
+                .all(|value| !value.is_missing());
+            let gap = if invented_a_gap && source_was_all_valid {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Null(NullKind::Null)
+            };
             let values = (0..output_row_count)
-                .map(|row_offset| {
-                    matrix_rows
-                        .get(row_offset)
-                        .and_then(|row| row.get(column_offset))
-                        .cloned()
-                        .unwrap_or(Scalar::Null(NullKind::Null))
-                })
+                .map(|row_offset| supplied(row_offset).cloned().unwrap_or_else(|| gap.clone()))
                 .collect::<Vec<_>>();
-            columns.insert(column_name.clone(), Column::from_values(values)?);
+            columns.insert(
+                column_name.clone(),
+                column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+            );
         }
 
         Self::new_with_column_order(index, columns, output_order)

@@ -49,7 +49,7 @@ const RAW_BUILDERS: [&str; 4] = [
 /// (`index` / `columns` / `column_order`) rather than a `DataFrame`, so the arm
 /// must reassemble one AFTER delegating. What is NOT fine is computing the
 /// answer here.
-const ALLOWED: [(&str, &str); 5] = [
+const ALLOWED: [(&str, &str); 4] = [
     (
         "execute_dataframe_merge_fixture_operation",
         "delegates to merge_dataframes_on_with_options; reassembles its parts into a DataFrame",
@@ -66,19 +66,6 @@ const ALLOWED: [(&str, &str); 5] = [
         "execute_dataframe_fixture_operation",
         "multi-op arm: builds INPUT columns for specific ops (e.g. a mask or a \
          replacement column) before calling the op under test",
-    ),
-    (
-        "execute_dataframe_constructor_list_like_fixture_operation",
-        "KNOWN SHADOW, tracked and blocking work — not an approved exception. It \
-         builds its column payloads inline and null-fills them instead of \
-         reaching DataFrame::from_matrix_rows, which holds three rows on \
-         br-frankenpandas-nywa8 behind it. Delegating is NOT mechanical: \
-         from_matrix_rows backs both this entry point and from_records, and \
-         pandas disagrees between them (DataFrame([[1,2],[3]]) pads and widens \
-         col1 to float64; from_records with columns=['a','b','c'] over 2-wide \
-         rows RAISES), so it needs a per-entry-point gap policy first. Listed \
-         here so the guard stays green and TRUTHFUL rather than being weakened; \
-         remove this entry when the arm delegates.",
     ),
 ];
 
