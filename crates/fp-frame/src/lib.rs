@@ -92821,6 +92821,113 @@ mod tests {
         }
     }
 
+    /// The rest of the Unicode case family, measured together so the
+    /// titlecase fix cannot be over-generalised.
+    ///
+    /// MEASURED, live pandas 2.2.3 (and CPython):
+    ///
+    /// ```text
+    /// swapcase   'straße' -> 'STRASSE'    ß is LOWERCASE, so it UPPERCASES to "SS"
+    ///            'Ssharp' -> 'sSHARP'
+    ///            'Élan'   -> 'éLAN'
+    ///
+    /// istitle    'Ssharp' -> True         titlecased word initial
+    ///            'SSharp' -> False        second S must be lowercase
+    ///            'Élan'   -> True
+    ///            'straße' -> False
+    ///            'o’neill'-> False        ’ ends the word, so 'n' must be upper
+    /// ```
+    ///
+    /// ⚠️ `swapcase` is the CONTROL, and it is why the titlecase change stops
+    /// at `capitalize`/`title`. Swapping the case of a lowercase `ß` gives the
+    /// UPPERCASE mapping `SS`, not the titlecase `Ss` — so `char::to_uppercase`
+    /// is correct there and must not be "fixed" to match its siblings. Three
+    /// functions share the same shape and only two of them titlecase.
+    /// (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn swapcase_uppercases_where_title_titlecases_and_istitle_agrees() {
+        let words = [
+            "straße",
+            "ßharp",
+            "Ssharp",
+            "SSharp",
+            "Élan",
+            "MAÑANA",
+            "o’neill",
+        ];
+        let subject = Series::from_values(
+            "x",
+            (0..words.len() as i64).map(IndexLabel::Int64).collect(),
+            words
+                .iter()
+                .map(|w| Scalar::Utf8((*w).to_owned()))
+                .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            subject.str().swapcase().unwrap().values(),
+            &[
+                Scalar::Utf8("STRASSE".into()),
+                Scalar::Utf8("SSHARP".into()),
+                Scalar::Utf8("sSHARP".into()),
+                Scalar::Utf8("ssHARP".into()),
+                Scalar::Utf8("éLAN".into()),
+                Scalar::Utf8("mañana".into()),
+                Scalar::Utf8("O’NEILL".into()),
+            ],
+            "swapcase UPPERCASES a lowercase ß to 'SS' — it must NOT titlecase"
+        );
+
+        assert_eq!(
+            subject.str().istitle().unwrap().values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ],
+            "istitle: 'Ssharp' is titled, 'SSharp' is not, and ’ ends a word"
+        );
+
+        // upper / lower / casefold complete the family. These EXPAND — the
+        // output is longer than the input in codepoints — which is the property
+        // a byte-wise or same-length implementation would get wrong. MEASURED:
+        //   'straße'.upper()   == 'STRASSE'    (6 chars -> 7)
+        //   'İstanbul'.lower() == 'i̇stanbul'   (8 -> 9, dot above is kept)
+        //   'ﬁre'.upper()      == 'FIRE'       ligature expands
+        //   'straße'.casefold()== 'strasse'
+        let expanding = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Utf8("straße".into()),
+                Scalar::Utf8("İstanbul".into()),
+                Scalar::Utf8("ﬁre".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            expanding.str().upper().unwrap().values(),
+            &[
+                Scalar::Utf8("STRASSE".into()),
+                Scalar::Utf8("İSTANBUL".into()),
+                Scalar::Utf8("FIRE".into()),
+            ]
+        );
+        assert_eq!(
+            expanding.str().lower().unwrap().values(),
+            &[
+                Scalar::Utf8("straße".into()),
+                Scalar::Utf8("i\u{307}stanbul".into()),
+                Scalar::Utf8("ﬁre".into()),
+            ]
+        );
+    }
+
     /// `str.title()` titlecases each WORD's first character — same
     /// titlecase-not-uppercase rule as `capitalize`, applied per word.
     ///
