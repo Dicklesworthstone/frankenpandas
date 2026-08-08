@@ -5,42 +5,78 @@
   "operation": "series_join",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "512aa5a6dc18d97eea4245a5baaa3aaf15893279b1ea861b10b7cc7ee4f04297",
+    "generated_at": "2026-08-08T19:05:05Z"
   },
   "join_type": "left",
   "left": {
     "name": "left",
     "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "utf8",
+        "value": "b"
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ]
   },
   "right": {
     "name": "right",
     "index": [
-      { "kind": "utf8", "value": "a" }
+      {
+        "kind": "utf8",
+        "value": "a"
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 10 }
+      {
+        "kind": "int64",
+        "value": 10
+      }
     ]
   },
   "expected_join": {
     "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "utf8",
+        "value": "b"
+      }
     ],
     "left_values": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "right_values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "null", "value": "null" }
+      {
+        "kind": "float64",
+        "value": 10.0
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      }
     ]
   }
 }

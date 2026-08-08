@@ -304,7 +304,35 @@ fn estimate_intermediate_bytes(output_rows: usize) -> usize {
     )
 }
 
-fn reindex_outer_join_column(
+/// Gather a join/merge output column, applying pandas' widening when the join
+/// INVENTS a gap in it.
+///
+/// MEASURED, live pandas 2.2.3. The rule is driven by whether a gap actually
+/// lands in THIS column, not by the join type:
+///
+/// ```text
+/// l = DataFrame({'l': [10, 20, 30]}, index=[1,2,3]);  r = DataFrame({'r': [200]}, index=[2])
+///   l.join(r, how='left')   -> l int64 [10,20,30]     r float64 [nan, 200.0, nan]
+///   l.join(r, how='outer')  -> l int64 [10,20,30]     r float64 [nan, 200.0, nan]
+///   l.join(r, how='right')  -> l int64 [20]           r int64   [200]
+///   l.join(r, how='inner')  -> l int64 [20]           r int64   [200]
+/// ```
+///
+/// `l` keeps int64 on a LEFT join because it gains no gap; `r` widens on both
+/// left and outer because it does. right/inner invent nothing, so nothing
+/// widens. This function was previously called only for `JoinType::Outer`,
+/// which is why a left merge left `Int64` + `Null(Null)` where pandas has
+/// `float64` + `nan`. (br-frankenpandas-nywa8)
+///
+/// The all-valid guard is the same condition concat needed: a column that
+/// ALREADY carried a missing value is nullable, and a nullable int CAN hold the
+/// gap, so pandas keeps it. Measured:
+///
+/// ```text
+/// rv as numpy int64        , left merge -> float64 [nan, 5.0, 7.0]
+/// rv as nullable  Int64    , left merge -> Int64   [<NA>, 5, <NA>]
+/// ```
+fn reindex_join_column_with_invented_gap(
     column: &Column,
     positions: &[Option<usize>],
 ) -> Result<Column, JoinError> {
@@ -319,6 +347,13 @@ fn reindex_outer_join_column(
         .iter()
         .any(|slot| slot.is_none_or(|idx| idx >= column.len()));
     if !has_missing {
+        return Ok(column.reindex_by_positions(positions)?);
+    }
+
+    // A source that already carries a gap is NULLABLE; pandas keeps the dtype
+    // and fills with NA rather than widening. Only an all-valid numpy column
+    // has to widen to hold the invented gap.
+    if column.values().iter().any(fp_types::Scalar::is_missing) {
         return Ok(column.reindex_by_positions(positions)?);
     }
 
@@ -546,7 +581,7 @@ fn reindex_outer_with_shared_utf8_plan(
     if let Some(column) = plan.and_then(|plan| reindex_eager_utf8_with_plan(column, plan)) {
         return Ok(column);
     }
-    reindex_outer_join_column(column, positions)
+    reindex_join_column_with_invented_gap(column, positions)
 }
 
 fn reindex_eager_utf8_with_plan(
@@ -673,16 +708,12 @@ fn join_series_with_global_allocator(
         sort_outer_join_rows(&mut out_labels, &mut left_positions, &mut right_positions);
     }
 
-    let left_values = if matches!(join_type, JoinType::Outer) {
-        reindex_outer_join_column(left.column(), &left_positions)?
-    } else {
-        left.column().reindex_by_positions(&left_positions)?
-    };
-    let right_values = if matches!(join_type, JoinType::Outer) {
-        reindex_outer_join_column(right.column(), &right_positions)?
-    } else {
-        right.column().reindex_by_positions(&right_positions)?
-    };
+    // Every join type, not just Outer: the widening is caused by a gap landing
+    // in THIS column, and a left join invents gaps on the right side just as an
+    // outer join does. The helper is a no-op when no gap is invented, so
+    // right/inner are unaffected. (br-frankenpandas-nywa8)
+    let left_values = reindex_join_column_with_invented_gap(left.column(), &left_positions)?;
+    let right_values = reindex_join_column_with_invented_gap(right.column(), &right_positions)?;
 
     // Per br-frankenpandas-wp0n6: pandas Series.join preserves shared
     // index name (preserved when both operands agree, None when they differ).
@@ -777,19 +808,11 @@ fn join_series_with_arena(
         );
     }
 
-    let left_values = if matches!(join_type, JoinType::Outer) {
-        reindex_outer_join_column(left.column(), left_positions.as_slice())?
-    } else {
-        left.column()
-            .reindex_by_positions(left_positions.as_slice())?
-    };
-    let right_values = if matches!(join_type, JoinType::Outer) {
-        reindex_outer_join_column(right.column(), right_positions.as_slice())?
-    } else {
-        right
-            .column()
-            .reindex_by_positions(right_positions.as_slice())?
-    };
+    // Every join type — see the sibling site above (br-frankenpandas-nywa8).
+    let left_values =
+        reindex_join_column_with_invented_gap(left.column(), left_positions.as_slice())?;
+    let right_values =
+        reindex_join_column_with_invented_gap(right.column(), right_positions.as_slice())?;
 
     // Per br-frankenpandas-ceces: pandas Series.join preserves shared
     // index name. Sister to join_series fix (wp0n6).
@@ -5085,7 +5108,7 @@ fn build_dense_cycle_outer_run_tape(
 ///   side it came from, so the coalesce is a closed form (all-valid Int64);
 /// - left lanes promote to nullable Float64 ONLY when right-only buckets
 ///   exist, right lanes ONLY when left-only rows exist — matching
-///   `reindex_outer_join_column`'s per-positions `has_missing` check (a
+///   `reindex_join_column_with_invented_gap`'s per-positions `has_missing` check (a
 ///   side with no missing rows keeps dtype Int64 via the all-present
 ///   take_positions path);
 /// - per-side shared validity masks are word-filled once from the plan and
@@ -6863,7 +6886,7 @@ fn build_single_key_ordered_unique_outer_merge_output(
     // Per-column output build is INDEPENDENT across columns and was the serial
     // hot phase of the join (~10.5ms of str_outer_join's reindex assembly at
     // n=150000, 12 Utf8 value columns). Build an ordered list of column specs
-    // (cheap), compute each column — the O(output) `reindex_outer_join_column`
+    // (cheap), compute each column — the O(output) `reindex_join_column_with_invented_gap`
     // gather / take / key-coalesce — across workers, then insert in the SAME
     // first-seen order (br-frankenpandas-uza04.102). Byte-identical: each output
     // column is the same values in the same row order, inserted in the same
@@ -9679,7 +9702,7 @@ pub fn merge_dataframes_on_with_options(
                 let key_column = if let Some(positions) = all_present_left_positions {
                     take_positions_typed(col, positions)
                 } else if matches!(join_type, JoinType::Outer) {
-                    reindex_outer_join_column(col, &left_positions)?
+                    reindex_join_column_with_invented_gap(col, &left_positions)?
                 } else {
                     col.reindex_by_positions(&left_positions)?
                 };
@@ -9695,7 +9718,7 @@ pub fn merge_dataframes_on_with_options(
         let reindexed = if let Some(positions) = all_present_left_positions {
             take_positions_typed(col, positions)
         } else if matches!(join_type, JoinType::Outer) {
-            reindex_outer_join_column(col, &left_positions)?
+            reindex_join_column_with_invented_gap(col, &left_positions)?
         } else {
             col.reindex_by_positions(&left_positions)?
         };
@@ -9722,7 +9745,7 @@ pub fn merge_dataframes_on_with_options(
         let reindexed = if let Some(positions) = all_present_right_positions {
             take_positions_typed(col, positions)
         } else if matches!(join_type, JoinType::Outer) {
-            reindex_outer_join_column(col, &right_positions)?
+            reindex_join_column_with_invented_gap(col, &right_positions)?
         } else {
             col.reindex_by_positions(&right_positions)?
         };
@@ -11357,9 +11380,16 @@ mod tests {
             Series::from_values("right", vec!["a".into()], vec![Scalar::Int64(10)]).expect("right");
 
         let out = join_series(&left, &right, JoinType::Left).expect("join");
+        // The right side gains a gap, so pandas widens it to float64 and the
+        // gap is a NaN — on a LEFT join exactly as on an outer one. MEASURED,
+        // live pandas 2.2.3, l=[10,20,30]@[1,2,3] joined with r=[200]@[2]:
+        //   how='left'  -> l int64 [10,20,30]   r float64 [nan, 200.0, nan]
+        //   how='outer' -> same
+        // This assertion previously pinned Int64 + Null(Null), which was
+        // FrankenPandas' own pre-fix answer. (br-frankenpandas-nywa8)
         assert_eq!(
             out.right_values.values(),
-            &[Scalar::Int64(10), Scalar::Null(NullKind::Null)]
+            &[Scalar::Float64(10.0), Scalar::Null(NullKind::NaN)]
         );
     }
 
@@ -11522,10 +11552,12 @@ mod tests {
             out.index.labels(),
             &[IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())]
         );
-        // "b" matched -> left=2, right=20. "c" unmatched -> left=Null, right=30.
+        // "b" matched -> left=2, right=20. "c" unmatched -> left is a gap, so
+        // the LEFT lane widens to float64 with a NaN (br-frankenpandas-nywa8;
+        // the widening follows the invented gap, not the join type).
         assert_eq!(
             out.left_values.values(),
-            &[Scalar::Int64(2), Scalar::Null(NullKind::Null)]
+            &[Scalar::Float64(2.0), Scalar::Null(NullKind::NaN)]
         );
         assert_eq!(
             out.right_values.values(),

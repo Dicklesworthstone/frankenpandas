@@ -261,9 +261,22 @@ fn series_join_golden_outputs_preserve_order_and_nulls() {
         push_join_golden_rows(name, &joined, &mut normalized);
     }
 
+    // Re-banked for br-frankenpandas-nywa8, and VERIFIED against live pandas
+    // 2.2.3 rather than regenerated on faith. The same left/right frames
+    // (left=[1,2,3,4]@[a,b,b,c], right=[20,40,21]@[b,d,b]) give, per join type:
+    //
+    //   inner   left int64    [2,2,3,3]              right int64   [20,21,20,21]
+    //   left    left int64    [1,2,2,3,3,4]          right float64 [nan,20,21,20,21,nan]
+    //   right   left float64  [2,3,nan,2,3]          right int64   [20,20,40,21,21]
+    //   outer   left float64  [1,2,2,3,3,4,nan]      right float64 [nan,20,21,20,21,nan,40]
+    //
+    // FrankenPandas now agrees dtype-for-dtype on all four. The lane that gains
+    // a gap widens and the lane that does not keeps int64 — which is why inner
+    // is unchanged and left/right each widen exactly one side. The previous
+    // hash pinned Int64 + Null(Null) on those lanes.
     assert_eq!(
         sha256_hex(normalized.as_bytes()),
-        "818864956be98df3d44cdd7fc322c5b4bf4d3410c1014cd813273066e8468c6c",
+        "c7c4963354d1a92fe234d1985c473a55efb90a8921d9aa3a79d650b84c074aba",
         "normalized join output changed:\n{normalized}"
     );
 }
