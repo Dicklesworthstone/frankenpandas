@@ -661,16 +661,32 @@ def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[
     else:
         raise OracleError(f"unsupported groupby aggregation: {agg!r}")
 
-    def groupby_agg_scalar_to_json(value: Any) -> dict[str, Any]:
-        if agg in {"std", "var"} and scalar_is_missing(value):
-            # Runtime currently models n<2 std/var as null (not NaN) for parity.
-            return {"kind": "null", "value": "null"}
-        return scalar_to_json(value)
-
+    # REMOVED (br-frankenpandas-fixture-divergence-triage-9s0c4): this used to
+    # rewrite a std/var NaN into {"kind": "null", "value": "null"}, commented
+    # "Runtime currently models n<2 std/var as null (not NaN) for parity."
+    #
+    # That is the oracle bent to FrankenPandas and then banked as truth. It was
+    # also STALE — FrankenPandas emits Scalar::Null(NullKind::NaN) for n <= 1
+    # (fp-groupby, the Var|Std arm, whose own comment reads "nanvar/nanstd with
+    # ddof=1: Null(NaN) when n <= 1"), so the adaptation was compensating for
+    # behaviour that no longer existed.
+    #
+    # MEASURED, live pandas 2.2.3, on key=['a',None,'a','b','b'] and
+    # value=[10,20,nan,40,50] — group 'a' has ONE present value, so its std is
+    # undefined:
+    #
+    #   df.groupby('key')['value'].std()
+    #     -> {'a': nan, 'b': 7.0710678118654755}   dtype float64
+    #        kinds ['float', 'float']              a float NaN, not a None
+    #
+    # All four affected fixtures (fp_p2c_011 groupby std/var, single and
+    # multikey) already pin na_n, i.e. they were RIGHT and the oracle was the
+    # only party disagreeing. Rendering now goes through the same
+    # scalar_to_json every other aggregation uses.
     return {
         "expected_series": {
             "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [groupby_agg_scalar_to_json(v) for v in out.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
         }
     }
 

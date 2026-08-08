@@ -436,3 +436,59 @@ def test_series_str_get_extracts_character(oracle, pd):
     response = oracle.dispatch(pd, payload)
     values = _expected_values(response)
     assert values == ["a", "x"]
+
+
+def test_groupby_std_renders_an_undefined_group_as_nan_not_none(oracle, pd):
+    """A one-member group's std is a float NaN, and the oracle must say so.
+
+    br-frankenpandas-fixture-divergence-triage-9s0c4. `op_groupby_agg` used to
+    rewrite a std/var NaN into {"kind": "null", "value": "null"}, commented
+    "Runtime currently models n<2 std/var as null (not NaN) for parity" — the
+    oracle bent to FrankenPandas and then banked as truth. It was stale too: FP
+    emits Null(NullKind::NaN) for n <= 1.
+
+    MEASURED, live pandas 2.2.3, key=['a',None,'a','b','b'] and
+    value=[10,20,nan,40,50] so that group 'a' has ONE present value:
+
+        df.groupby('key')['value'].std()
+          -> {'a': nan, 'b': 7.0710678118654755}   dtype float64
+
+    The four fp_p2c_011 fixtures already pinned na_n; only the oracle disagreed.
+    """
+    payload = {
+        "operation": "groupby_std",
+        "left": {
+            "name": "key",
+            "index": [{"kind": "int64", "value": i} for i in range(5)],
+            "values": [
+                {"kind": "utf8", "value": "a"},
+                {"kind": "null", "value": "null"},
+                {"kind": "utf8", "value": "a"},
+                {"kind": "utf8", "value": "b"},
+                {"kind": "utf8", "value": "b"},
+            ],
+        },
+        "right": {
+            "name": "value",
+            "index": [{"kind": "int64", "value": i} for i in range(5)],
+            "values": [
+                {"kind": "int64", "value": 10},
+                {"kind": "int64", "value": 20},
+                {"kind": "null", "value": "na_n"},
+                {"kind": "int64", "value": 40},
+                {"kind": "int64", "value": 50},
+            ],
+        },
+    }
+    values = oracle.dispatch(pd, payload)["expected_series"]["values"]
+    assert values[0] == {"kind": "null", "value": "na_n"}, (
+        "an undefined group std is a float NaN; rewriting it to a generic null "
+        "adapts the oracle to FrankenPandas instead of measuring pandas"
+    )
+    assert values[1]["kind"] == "float64"
+
+    payload["operation"] = "groupby_var"
+    assert oracle.dispatch(pd, payload)["expected_series"]["values"][0] == {
+        "kind": "null",
+        "value": "na_n",
+    }

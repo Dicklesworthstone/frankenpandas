@@ -5,8 +5,8 @@
   "operation": "series_str_wrap",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f0caa36beaa5282b3d407d520f33c16ebacf7cd9b463ff20f4e7d2c73cd0965d",
-    "generated_at": "2026-08-08T21:04:46Z"
+    "oracle_script_sha256": "25b3c7e0656c91f953dd5f932fcfaed730a69e87abd4ef5a90da9c75313bafdc",
+    "generated_at": "2026-08-08T21:24:40Z"
   },
   "str_wrap_width": 6,
   "str_wrap_drop_whitespace": false,
