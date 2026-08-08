@@ -32,7 +32,7 @@
     ],
     "values": [
       { "kind": "bool", "value": true },
-      { "kind": "null", "value": "null" },
+      { "kind": "bool", "value": false },
       { "kind": "bool", "value": false },
       { "kind": "bool", "value": true }
     ]

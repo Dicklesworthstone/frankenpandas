@@ -45244,6 +45244,43 @@ impl DatetimeAccessor<'_> {
         Series::new(name.to_string(), index, column)
     }
 
+    /// [`Self::extract_component`] for the BOOLEAN `dt.is_*` family: a missing
+    /// or unparseable row yields `Bool(false)`, never a null.
+    ///
+    /// br-frankenpandas-dt-is-family-nat-false-boqep. pandas returns a numpy
+    /// bool array from every `dt.is_*` accessor, and that dtype cannot hold a
+    /// missing value, so NaT reads as `False`. Measured on live pandas 2.2.3
+    /// over pd.to_datetime(['2024-03-01T00:00:00', None,
+    /// '2024-03-15T12:00:00', '2024-04-01T23:59:59']):
+    ///
+    /// ```text
+    /// s.dt.is_month_start  ->  [True, False, False, True]   dtype: bool
+    /// ```
+    ///
+    /// This is deliberately NOT folded into `extract_component`, which backs
+    /// the non-boolean components (`dt.year`, `dt.month`, `dt.day`, ...).
+    /// pandas promotes THOSE to float64 when a NaT is present, where NaN is
+    /// the correct missing value — so the two families need opposite policies
+    /// and get separate helpers rather than a shared one with a flag.
+    fn extract_component_bool<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> Option<bool>,
+    {
+        self.validate_datetime_dtype()?;
+        let vals = self.series.column().values();
+        let out: Vec<Scalar> = vals
+            .iter()
+            .map(|v| match v {
+                Scalar::Utf8(s) => Scalar::Bool(func(s).unwrap_or(false)),
+                _ => Scalar::Bool(false),
+            })
+            .collect();
+        // Per br-frankenpandas-8pyft: pandas .dt.<x> preserves source axis name.
+        let index = self.series.index().clone();
+        let column = Column::from_values(out)?;
+        Series::new(name.to_string(), index, column)
+    }
+
     /// Helper: apply a fallible datetime transform to each value.
     fn try_extract_component<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
     where
@@ -45313,10 +45350,29 @@ impl DatetimeAccessor<'_> {
                 Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT => {
                     match ts_fn(&fp_types::Timestamp::from_nanos(*ns)) {
                         Some(b) => Scalar::Bool(b),
-                        None => Scalar::Null(NullKind::NaN),
+                        // br-frankenpandas-dt-is-family-nat-false-boqep: see
+                        // below — the result dtype is non-nullable `bool`, so
+                        // an undecidable row is False, never a null.
+                        None => Scalar::Bool(false),
                     }
                 }
-                _ => Scalar::Null(NullKind::NaN),
+                // NaT (and any other missing input) -> False, NOT a null.
+                //
+                // br-frankenpandas-dt-is-family-nat-false-boqep: pandas returns
+                // a NUMPY BOOL ARRAY from the whole `dt.is_*` family, and that
+                // dtype cannot represent a missing value. Measured on live
+                // pandas 2.2.3 over pd.to_datetime(['2024-03-01T00:00:00',
+                // None, '2024-03-15T12:00:00', '2024-04-01T23:59:59']):
+                //
+                //   s.dt.is_month_start -> [True, False, False, True], dtype bool
+                //   element types       -> ['bool', 'bool', 'bool', 'bool']
+                //
+                // Emitting Null(NaN) here produced a THIRD value the pandas
+                // dtype has no room for. Contrast the non-boolean components
+                // (`dt.year`, `dt.month`, ...), which pandas promotes to
+                // float64 and where NaN IS the right answer — those keep using
+                // `extract_component` / `extract_component_typed` unchanged.
+                _ => Scalar::Bool(false),
             })
             .collect();
         let index = self.series.index().clone();
@@ -46647,14 +46703,8 @@ impl DatetimeAccessor<'_> {
             }
             return self.extract_component_typed_bool(|ts| ts.is_month_start(), self.series.name());
         }
-        self.extract_component(
-            |s| {
-                if let Some((_, _, d)) = Self::parse_ymd_from_datetime(s) {
-                    Scalar::Bool(d == 1)
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
-            },
+        self.extract_component_bool(
+            |s| Self::parse_ymd_from_datetime(s).map(|(_, _, d)| d == 1),
             self.series.name(),
         )
     }
@@ -46689,9 +46739,9 @@ impl DatetimeAccessor<'_> {
             }
             return self.extract_component_typed_bool(|ts| ts.is_month_end(), self.series.name());
         }
-        self.extract_component(
+        self.extract_component_bool(
             |s| {
-                if let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) {
+                Self::parse_ymd_from_datetime(s).map(|(y, m, d)| {
                     let is_leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
                     let days_in_month: [i64; 12] = [
                         31,
@@ -46707,10 +46757,8 @@ impl DatetimeAccessor<'_> {
                         30,
                         31,
                     ];
-                    Scalar::Bool(d == days_in_month[(m - 1) as usize])
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
+                    d == days_in_month[(m - 1) as usize]
+                })
             },
             self.series.name(),
         )
@@ -46730,13 +46778,10 @@ impl DatetimeAccessor<'_> {
             return self
                 .extract_component_typed_bool(|ts| ts.is_quarter_start(), self.series.name());
         }
-        self.extract_component(
+        self.extract_component_bool(
             |s| {
-                if let Some((_, m, d)) = Self::parse_ymd_from_datetime(s) {
-                    Scalar::Bool(d == 1 && (m == 1 || m == 4 || m == 7 || m == 10))
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
+                Self::parse_ymd_from_datetime(s)
+                    .map(|(_, m, d)| d == 1 && (m == 1 || m == 4 || m == 7 || m == 10))
             },
             self.series.name(),
         )
@@ -46760,18 +46805,14 @@ impl DatetimeAccessor<'_> {
             }
             return self.extract_component_typed_bool(|ts| ts.is_quarter_end(), self.series.name());
         }
-        self.extract_component(
+        self.extract_component_bool(
             |s| {
-                if let Some((_, m, d)) = Self::parse_ymd_from_datetime(s) {
-                    Scalar::Bool(
-                        (m == 3 && d == 31)
-                            || (m == 6 && d == 30)
-                            || (m == 9 && d == 30)
-                            || (m == 12 && d == 31),
-                    )
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
+                Self::parse_ymd_from_datetime(s).map(|(_, m, d)| {
+                    (m == 3 && d == 31)
+                        || (m == 6 && d == 30)
+                        || (m == 9 && d == 30)
+                        || (m == 12 && d == 31)
+                })
             },
             self.series.name(),
         )
@@ -47071,14 +47112,8 @@ impl DatetimeAccessor<'_> {
             }
             return self.extract_component_typed_bool(|ts| ts.is_leap_year(), self.series.name());
         }
-        self.extract_component(
-            |s| {
-                if let Some((y, _, _)) = Self::parse_ymd_from_datetime(s) {
-                    Scalar::Bool(Self::is_leap(y))
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
-            },
+        self.extract_component_bool(
+            |s| Self::parse_ymd_from_datetime(s).map(|(y, _, _)| Self::is_leap(y)),
             self.series.name(),
         )
     }
@@ -47096,14 +47131,8 @@ impl DatetimeAccessor<'_> {
             }
             return self.extract_component_typed_bool(|ts| ts.is_year_start(), self.series.name());
         }
-        self.extract_component(
-            |s| {
-                if let Some((_, m, d)) = Self::parse_ymd_from_datetime(s) {
-                    Scalar::Bool(m == 1 && d == 1)
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
-            },
+        self.extract_component_bool(
+            |s| Self::parse_ymd_from_datetime(s).map(|(_, m, d)| m == 1 && d == 1),
             self.series.name(),
         )
     }
@@ -47121,14 +47150,8 @@ impl DatetimeAccessor<'_> {
             }
             return self.extract_component_typed_bool(|ts| ts.is_year_end(), self.series.name());
         }
-        self.extract_component(
-            |s| {
-                if let Some((_, m, d)) = Self::parse_ymd_from_datetime(s) {
-                    Scalar::Bool(m == 12 && d == 31)
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
-            },
+        self.extract_component_bool(
+            |s| Self::parse_ymd_from_datetime(s).map(|(_, m, d)| m == 12 && d == 31),
             self.series.name(),
         )
     }
@@ -121796,15 +121819,22 @@ mod tests {
         // round("D") on ts_b (01:01:01 < noon) rounds down to midnight.
         let round_d = s.dt().round("D").unwrap();
         assert_eq!(round_d.values()[1], Scalar::Datetime64(midnight_b));
-        // NaT element stays missing across all typed components.
+        // NaT element stays missing across the typed components whose pandas
+        // dtype can hold a missing value (numeric -> float64 NaN, object ->
+        // None/NaT).
         assert!(quarter.values()[3].is_missing());
-        assert!(ms.values()[3].is_missing());
-        assert!(qe.values()[3].is_missing());
-        assert!(ye.values()[3].is_missing());
         assert!(mn.values()[3].is_missing());
         assert!(dn.values()[3].is_missing());
         assert!(date.values()[3].is_missing());
         assert!(time.values()[3].is_missing());
+        // ...but NOT the boolean `dt.is_*` family, which pandas returns as a
+        // non-nullable numpy bool array, so NaT reads as False
+        // (br-frankenpandas-dt-is-family-nat-false-boqep). This assertion
+        // previously required `is_missing()` here and so encoded the very
+        // divergence that bead was filed against.
+        assert_eq!(ms.values()[3], Scalar::Bool(false));
+        assert_eq!(qe.values()[3], Scalar::Bool(false));
+        assert_eq!(ye.values()[3], Scalar::Bool(false));
         assert!(strf.values()[3].is_missing());
         assert!(floor_d.values()[3].is_missing());
         assert!(norm.values()[3].is_missing());
@@ -127402,6 +127432,141 @@ mod tests {
         assert_eq!(end.values()[0], Scalar::Bool(false));
         assert_eq!(end.values()[1], Scalar::Bool(false));
         assert_eq!(end.values()[2], Scalar::Bool(true));
+    }
+
+    /// Expected `dt.is_*` output for the four rows used by the boqep tests,
+    /// with the NaT row at index 1. MEASURED on live pandas 2.2.3 over
+    /// `pd.to_datetime(['2024-03-01T00:00:00', None, '2024-03-15T12:00:00',
+    /// '2024-04-01T23:59:59'])` — the exact input
+    /// `fp_p2d_314_series_dt_is_month_start_null_hardened` pins:
+    ///
+    /// ```text
+    /// is_leap_year     bool [True,  False, True,  True ]
+    /// is_month_start   bool [True,  False, False, True ]
+    /// is_month_end     bool [False, False, False, False]
+    /// is_quarter_start bool [False, False, False, True ]
+    /// is_quarter_end   bool [False, False, False, False]
+    /// is_year_start    bool [False, False, False, False]
+    /// is_year_end      bool [False, False, False, False]
+    /// ```
+    ///
+    /// Every one is dtype `bool`, a NON-nullable numpy array: it cannot hold a
+    /// null, so the NaT row is `False` — not a third value.
+    const BOQEP_EXPECTED: [(&str, [bool; 4]); 7] = [
+        ("is_leap_year", [true, false, true, true]),
+        ("is_month_start", [true, false, false, true]),
+        ("is_month_end", [false, false, false, false]),
+        ("is_quarter_start", [false, false, false, true]),
+        ("is_quarter_end", [false, false, false, false]),
+        ("is_year_start", [false, false, false, false]),
+        ("is_year_end", [false, false, false, false]),
+    ];
+
+    fn boqep_all_accessors(s: &Series) -> Vec<(&'static str, Series)> {
+        vec![
+            ("is_leap_year", s.dt().is_leap_year().unwrap()),
+            ("is_month_start", s.dt().is_month_start().unwrap()),
+            ("is_month_end", s.dt().is_month_end().unwrap()),
+            ("is_quarter_start", s.dt().is_quarter_start().unwrap()),
+            ("is_quarter_end", s.dt().is_quarter_end().unwrap()),
+            ("is_year_start", s.dt().is_year_start().unwrap()),
+            ("is_year_end", s.dt().is_year_end().unwrap()),
+        ]
+    }
+
+    fn boqep_assert_matches_pandas(path: &str, results: &[(&'static str, Series)]) {
+        for (op, result) in results {
+            let expected = BOQEP_EXPECTED
+                .iter()
+                .find(|(name, _)| name == op)
+                .map(|(_, vals)| vals)
+                .expect("every accessor has a pinned pandas row");
+            for (idx, want) in expected.iter().enumerate() {
+                assert_eq!(
+                    result.values()[idx],
+                    Scalar::Bool(*want),
+                    "{path}: dt.{op}() row {idx} must match pandas (bool dtype \
+                     cannot hold a null, so the NaT row is False)"
+                );
+            }
+        }
+    }
+
+    /// br-frankenpandas-dt-is-family-nat-false-boqep, TYPED Datetime64 path.
+    ///
+    /// NEGATIVE CASE: row 1 is NaT. FrankenPandas emitted `Null(NaN)` there —
+    /// a value the `bool` dtype pandas returns cannot represent. Any
+    /// implementation that "preserves missingness" fails this row, which is the
+    /// whole point of the bead.
+    #[test]
+    fn dt_is_family_nat_is_false_typed_datetime64() {
+        const NS: i64 = 1_000_000_000;
+        // 2024-03-01T00:00:00Z = 1_709_251_200; 2024-03-15T12:00:00Z;
+        // 2024-04-01T23:59:59Z.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Datetime64(1_709_251_200 * NS),
+                Scalar::Datetime64(fp_types::Timestamp::NAT),
+                Scalar::Datetime64(1_710_504_000 * NS),
+                Scalar::Datetime64(1_712_015_999 * NS),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.dtype(), DType::Datetime64);
+        boqep_assert_matches_pandas("typed Datetime64", &boqep_all_accessors(&s));
+    }
+
+    /// Same contract on the Utf8-backed (string) path, which reaches a
+    /// different helper than the typed path — the bead's sweep requirement.
+    #[test]
+    fn dt_is_family_nat_is_false_utf8_backed() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("2024-03-01T00:00:00".to_owned()),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Utf8("2024-03-15T12:00:00".to_owned()),
+                Scalar::Utf8("2024-04-01T23:59:59".to_owned()),
+            ],
+        )
+        .unwrap();
+        boqep_assert_matches_pandas("Utf8-backed", &boqep_all_accessors(&s));
+    }
+
+    /// The all-valid fast path must keep agreeing with the nullable paths:
+    /// same rows, no NaT, identical answers. Guards against fixing the null
+    /// row by accidentally changing the non-null ones.
+    #[test]
+    fn dt_is_family_all_valid_path_unchanged() {
+        const NS: i64 = 1_000_000_000;
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Datetime64(1_709_251_200 * NS),
+                Scalar::Datetime64(1_710_504_000 * NS),
+                Scalar::Datetime64(1_712_015_999 * NS),
+            ],
+        )
+        .unwrap();
+        for (op, result) in boqep_all_accessors(&s) {
+            let expected = BOQEP_EXPECTED
+                .iter()
+                .find(|(name, _)| *name == op)
+                .map(|(_, vals)| vals)
+                .expect("pinned row exists");
+            // Rows 0, 2, 3 of the pinned pandas output are rows 0, 1, 2 here.
+            for (idx, src) in [0_usize, 2, 3].iter().enumerate() {
+                assert_eq!(
+                    result.values()[idx],
+                    Scalar::Bool(expected[*src]),
+                    "all-valid path: dt.{op}() row {idx} drifted"
+                );
+            }
+        }
     }
 
     #[test]
