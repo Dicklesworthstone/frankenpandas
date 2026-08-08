@@ -5,8 +5,8 @@
   "operation": "series_split_df",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "dabc9ccf26d2f797a6bd609bc22134e240a2e106511ca9bf529a0011da434895",
+    "generated_at": "2026-08-08T08:06:17Z"
   },
   "str_split_pat": "",
   "left": {
@@ -20,5 +20,33 @@
       { "kind": "utf8", "value": "def" }
     ]
   },
-  "expected_error_contains": "empty separator"
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "row0" },
+      { "kind": "utf8", "value": "row0" }
+    ],
+    "columns": {
+      "0": [
+        { "kind": "utf8", "value": "" },
+        { "kind": "utf8", "value": "" }
+      ],
+      "1": [
+        { "kind": "utf8", "value": "a" },
+        { "kind": "utf8", "value": "d" }
+      ],
+      "2": [
+        { "kind": "utf8", "value": "b" },
+        { "kind": "utf8", "value": "e" }
+      ],
+      "3": [
+        { "kind": "utf8", "value": "c" },
+        { "kind": "utf8", "value": "f" }
+      ],
+      "4": [
+        { "kind": "utf8", "value": "" },
+        { "kind": "utf8", "value": "" }
+      ]
+    },
+    "column_order": ["0", "1", "2", "3", "4"]
+  }
 }

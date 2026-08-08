@@ -16086,6 +16086,17 @@ impl Column {
             return Self::new(replacement_dtype, values);
         }
 
+        // NOTE (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1):
+        // pandas PROMOTES to object here for a numpy-backed dtype rather than
+        // raising — `pd.Series([10.0, None, 12.0]).fillna("oops")` is
+        // `[10.0, 'oops', 12.0]` dtype object — and raises only for a nullable
+        // extension dtype (`Invalid value 'oops' for dtype Int64`). So this
+        // rejection IS stricter than pandas. It is deliberately left in place:
+        // FrankenPandas represents [int, null, int] as numpy-backed Int64 while
+        // pandas promotes it to float64 at CONSTRUCTION, so a fillna promotion
+        // alone still yields Int64 where pandas has float64 and cannot be made
+        // green. Blocked on br-frankenpandas-9ooer (oracle dtype chooser) and
+        // the int64->float64-on-null construction divergence.
         let cast_fill = cast_scalar(fill_value, self.dtype)?;
 
         // Typed Float64 fast path (br-frankenpandas-e8vzt): fill every missing
@@ -33000,6 +33011,62 @@ mod tests {
             assert_eq!(result.values()[2], Scalar::Int64(3));
             assert_eq!(result.values()[3], Scalar::Int64(0));
             assert_eq!(result.validity().count_valid(), 4);
+        }
+
+        /// CHARACTERIZATION, not an endorsement. FrankenPandas REJECTS an
+        /// uncastable fill; pandas promotes to object on a numpy-backed dtype.
+        /// Measured on live pandas 2.2.3:
+        ///   pd.Series([10.0, None, 12.0]).fillna("oops")
+        ///     -> [10.0, 'oops', 12.0], dtype: object      <- promotes
+        ///   pd.Series([10, None, 12], dtype="Int64").fillna("oops")
+        ///     -> TypeError: Invalid value 'oops' for dtype Int64  <- raises
+        ///   pd.DataFrame({'a':[1,None,3]}).fillna("oops")
+        ///     -> a becomes object                          <- promotes
+        /// so the rejection is stricter than pandas for every NUMPY-backed
+        /// dtype (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
+        ///
+        /// It is deliberately NOT fixed here. FP builds [int, null, int] as
+        /// numpy-backed Int64 (asserted below) while pandas promotes to float64
+        /// at CONSTRUCTION, so promoting in fillna alone yields Int64 where
+        /// pandas has float64 — trading an error mismatch for a value mismatch
+        /// and turning two currently-green fixtures (fp_p2d_046, fp_p2d_050)
+        /// red with no correctable oracle answer. Blocked on
+        /// br-frankenpandas-9ooer. This test exists so the strictness is
+        /// RECORDED rather than looking intended.
+        #[test]
+        fn fillna_incompatible_scalar_currently_errors_stricter_than_pandas() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(12),
+            ])
+            .expect("col");
+
+            // The crux: FP's representation is NUMPY-backed Int64 with a
+            // validity mask, which is the dtype class pandas PROMOTES for.
+            assert_eq!(col.dtype(), DType::Int64);
+            assert!(!col.dtype().is_nullable());
+
+            col.fillna(&Scalar::Utf8("oops".to_string()))
+                .expect_err("current behaviour: rejects; pandas would promote to object");
+        }
+
+        /// Negative control for the promotion above: a fill value that DOES fit
+        /// must still take the ordinary typed path and must NOT be promoted to
+        /// object. Without this, "promote on cast failure" could silently become
+        /// "promote always".
+        #[test]
+        fn fillna_compatible_scalar_still_keeps_column_dtype() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(12),
+            ])
+            .expect("col");
+
+            let result = col.fillna(&Scalar::Int64(0)).expect("fillna");
+            assert_eq!(result.dtype(), DType::Int64);
+            assert_eq!(result.values()[1], Scalar::Int64(0));
         }
 
         #[test]

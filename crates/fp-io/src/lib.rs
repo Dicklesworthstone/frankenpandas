@@ -139,6 +139,31 @@ use thiserror::Error;
 pub enum IoError {
     #[error("csv input has no headers")]
     MissingHeaders,
+    /// A CSV row carried MORE fields than the header declares.
+    ///
+    /// Only the overlong direction is an error. pandas pads a SHORT row with
+    /// NA and raises only here — measured on 2.2.3:
+    ///   `read_csv("a,b,c\n1,2,3\n4,5\n")`   -> c = [3.0, NaN]
+    ///   `read_csv("a,b,c\n1,2,3\n4,5,6,7\n")`
+    ///     -> ParserError: Expected 3 fields in line 3, saw 4
+    /// The csv crate's own `UnequalLengths` cannot be used for this because it
+    /// fires in BOTH directions (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
+    #[error("CSV error: expected {expected} fields in line {line}, saw {found}")]
+    CsvFieldCount {
+        line: usize,
+        expected: usize,
+        found: usize,
+    },
+    /// A quoted field was never closed before end of input.
+    ///
+    /// pandas raises `ParserError: EOF inside string starting at row N` here.
+    /// The csv crate does NOT: it reads the unterminated field to EOF and
+    /// returns it. Under the strict (non-`flexible`) reader this surfaced only
+    /// incidentally, as an `UnequalLengths` field-count mismatch; once short
+    /// rows had to be padded (gtkz1) that accident disappeared, so the
+    /// condition is now detected directly.
+    #[error("CSV error: EOF inside string, unterminated quoted field")]
+    CsvUnterminatedQuote,
     #[error("csv index column '{0}' not found in headers")]
     MissingIndexColumn(String),
     #[error("duplicate column name '{0}'")]
@@ -1300,6 +1325,10 @@ fn try_read_csv_str_typed_numeric(
 
     let mut reader = ReaderBuilder::new()
         .has_headers(true)
+        // Short rows are pandas-legal and must reach the padding below, so the
+        // csv crate's two-directional UnequalLengths is disabled and the
+        // overlong direction enforced explicitly (gtkz1).
+        .flexible(true)
         .from_reader(input.as_bytes());
     let _ = reader.headers().map_err(IoError::from)?;
 
@@ -1310,6 +1339,11 @@ fn try_read_csv_str_typed_numeric(
     let mut row_count: i64 = 0;
     for row in reader.byte_records() {
         let record = row?;
+        reject_overlong_csv_record(
+            record.len(),
+            header_count,
+            (row_count as usize) + 2, // +1 for the header line, +1 for 1-based
+        )?;
         for (idx, column) in typed_columns.iter_mut().enumerate() {
             let field = record.get(idx).unwrap_or_default();
             if !push_csv_default_numeric_field(column, field) {
@@ -1435,8 +1469,14 @@ fn csv_parse_cache_store(mode: CsvParseCacheMode, input: &str, frame: &DataFrame
 }
 
 fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
+    if csv_input_has_unterminated_quote(input, b',', b'"', true, None) {
+        return Err(IoError::CsvUnterminatedQuote);
+    }
+
     let mut reader = ReaderBuilder::new()
         .has_headers(true)
+        // See `reject_overlong_csv_record`: pandas pads short rows (gtkz1).
+        .flexible(true)
         .from_reader(input.as_bytes());
 
     let headers_record = reader.headers().cloned().map_err(IoError::from)?;
@@ -1509,6 +1549,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     let mut row_count: i64 = 0;
     for row in reader.records() {
         let record = row?;
+        reject_overlong_csv_record(record.len(), header_count, (row_count as usize) + 2)?;
         for idx in 0..header_count {
             let field = record.get(idx).unwrap_or_default();
             raw_bytes[idx].extend_from_slice(field.as_bytes());
@@ -5019,6 +5060,71 @@ fn append_csv_record(
     }
 }
 
+/// True when the input ends while still inside a quoted field.
+///
+/// A quote only OPENS a field at a field boundary — start of input, or directly
+/// after a delimiter or a line break — which is how the csv crate reads it too;
+/// a quote in the middle of an unquoted field (`ab"cd`) is a literal and must
+/// not be treated as an opener, or well-formed input would be rejected. Inside a
+/// quoted field, a doubled quote (`""`) is an escaped literal and does not
+/// close, and an explicit `escape` byte consumes the character after it.
+fn csv_input_has_unterminated_quote(
+    input: &str,
+    delimiter: u8,
+    quote: u8,
+    doublequote: bool,
+    escape: Option<u8>,
+) -> bool {
+    let bytes = input.as_bytes();
+    let mut in_quotes = false;
+    let mut at_field_start = true;
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_quotes {
+            if escape == Some(byte) {
+                idx += 2;
+                continue;
+            }
+            if byte == quote {
+                if doublequote && bytes.get(idx + 1) == Some(&quote) {
+                    idx += 2;
+                    continue;
+                }
+                in_quotes = false;
+                at_field_start = false;
+            }
+        } else if byte == quote && at_field_start {
+            in_quotes = true;
+            at_field_start = false;
+        } else {
+            at_field_start = byte == b'\n' || byte == b'\r' || byte == delimiter;
+        }
+        idx += 1;
+    }
+
+    in_quotes
+}
+
+/// Reject a row with MORE fields than the header, the only ragged direction
+/// pandas treats as an error.
+///
+/// Short rows are padded by `append_csv_record`'s `record.get(idx)
+/// .unwrap_or_default()` and must reach it, so every CSV reader here runs the
+/// csv crate in `flexible(true)` mode and enforces the overlong case itself.
+/// `line` is 1-based over the whole file, matching pandas' message.
+fn reject_overlong_csv_record(found: usize, expected: usize, line: usize) -> Result<(), IoError> {
+    if found > expected {
+        return Err(IoError::CsvFieldCount {
+            line,
+            expected,
+            found,
+        });
+    }
+    Ok(())
+}
+
 fn should_skip_bad_csv_record(
     record: &StringRecord,
     expected_fields: usize,
@@ -5144,6 +5250,16 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         }
     }
 
+    if csv_input_has_unterminated_quote(
+        input,
+        options.delimiter,
+        options.quotechar,
+        options.doublequote,
+        options.escapechar,
+    ) {
+        return Err(IoError::CsvUnterminatedQuote);
+    }
+
     let mut builder = ReaderBuilder::new();
     builder
         .has_headers(false)
@@ -5151,9 +5267,11 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         .quote(options.quotechar)
         .double_quote(options.doublequote)
         .escape(options.escapechar);
-    if options.on_bad_lines != CsvOnBadLines::Error {
-        builder.flexible(true);
-    }
+    // Always flexible: a SHORT row is pandas-legal under every `on_bad_lines`
+    // setting and is padded by `append_csv_record`. Only the overlong direction
+    // is a "bad line", and it is enforced below rather than by the csv crate,
+    // whose UnequalLengths fires in both directions (gtkz1).
+    builder.flexible(true);
     if let Some(c) = options.comment {
         builder.comment(Some(c));
     }
@@ -5248,6 +5366,13 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         let record = row?;
         if should_skip_bad_csv_record(&record, columns.len(), options.on_bad_lines) {
             continue;
+        }
+        if options.on_bad_lines == CsvOnBadLines::Error {
+            reject_overlong_csv_record(
+                record.len(),
+                columns.len(),
+                (row_count as usize) + 1 + usize::from(options.has_headers) + skip,
+            )?;
         }
         append_csv_record(
             &mut columns,
@@ -14422,11 +14547,11 @@ mod tests {
         CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, Float64QuarterAffineCsvPlan,
         HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions,
         MarkdownWriteOptions, PickleProtocol, PickleWriteOptions, StataWriteOptions,
-        XmlReadOptions, XmlWriteOptions, format_pandas_float, read_csv_str,
-        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_html, read_html_str,
-        read_html_str_with_options, read_json_str, read_orc, read_orc_bytes, read_parquet_bytes,
-        read_pickle, read_pickle_bytes, read_stata, read_stata_bytes, read_xml, read_xml_str,
-        read_xml_str_with_options, write_csv_string, write_csv_string_with_options,
+        XmlReadOptions, XmlWriteOptions, csv_input_has_unterminated_quote, format_pandas_float,
+        read_csv_str, read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_html,
+        read_html_str, read_html_str_with_options, read_json_str, read_orc, read_orc_bytes,
+        read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata, read_stata_bytes, read_xml,
+        read_xml_str, read_xml_str_with_options, write_csv_string, write_csv_string_with_options,
         write_excel_bytes, write_html, write_html_string, write_html_string_with_options,
         write_json_string, write_jsonl_string, write_latex, write_latex_string,
         write_latex_string_with_options, write_latex_with_options, write_markdown,
@@ -14829,18 +14954,115 @@ mod tests {
         assert!(matches!(err, IoError::DuplicateColumnName(name) if name == "a"));
     }
 
+    /// SUPERSEDES the rejection contract br-frankenpandas-4hpid recorded here.
+    /// That bead asserted "pandas-faithful rejection on ragged rows", but the
+    /// premise is wrong in the SHORT direction. Measured on live pandas 2.2.3
+    /// with this test's own input:
+    ///   pd.read_csv(io.StringIO("a,b,c\n1,2,3\n4,5\n7,8,9\n"))
+    ///        a  b    c
+    ///     0  1  2  3.0
+    ///     1  4  5  NaN     <- padded, NOT an error
+    ///     2  7  8  9.0
+    ///   dtypes: a int64, b int64, c float64
+    /// The csv crate's UnequalLengths was firing in both directions; only the
+    /// overlong direction is a pandas error
+    /// (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
     #[test]
-    fn csv_ragged_row_returns_error_4hpid() {
-        // Per br-frankenpandas-4hpid: confirm pandas-faithful rejection on
-        // ragged rows. The underlying csv crate raises UnequalLengths
-        // (surfaced as IoError::Csv) — record.get(idx).unwrap_or_default()
-        // inside the loop is dead code because the `row?` upstream errors
-        // first. This locks in the rejection contract.
+    fn csv_short_row_pads_with_na_like_pandas_4hpid() {
         let short_row = "a,b,c\n1,2,3\n4,5\n7,8,9\n";
-        let err = read_csv_str(short_row).expect_err("short row must reject");
+        let df = read_csv_str(short_row).expect("pandas pads a short row, it does not reject");
+
+        assert_eq!(df.column_names(), vec!["a", "b", "c"]);
+        assert_eq!(
+            df.columns()["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(7)]
+        );
+        assert_eq!(
+            df.columns()["b"].values(),
+            &[Scalar::Int64(2), Scalar::Int64(5), Scalar::Int64(8)]
+        );
+        // The short row's missing 'c' is the pad.
+        //
+        // ⚠️ DTYPE DIVERGENCE, deliberately NOT fixed here: pandas promotes 'c'
+        // to float64 ([3.0, NaN, 9.0]) because introducing a null into an int
+        // column forces the promotion. FrankenPandas keeps a NULLABLE Int64 and
+        // reports [3, NA, 9]. That is the repo-wide "int64 -> float64 on null"
+        // divergence (the KIND int64->float64 class on
+        // br-frankenpandas-fixture-divergence-triage-9s0c4), not this bead's,
+        // and folding it in here would hide it. Asserted as FP ACTUALLY behaves
+        // so this test tells the truth about the current state.
+        let c = df.columns()["c"].values();
+        assert_eq!(c[0], Scalar::Int64(3));
         assert!(
-            matches!(err, IoError::Csv(_)),
-            "expected IoError::Csv (UnequalLengths from csv crate), got {err:?}"
+            c[1].is_missing(),
+            "short row pads 'c' with NA, got {:?}",
+            c[1]
+        );
+        assert_eq!(c[2], Scalar::Int64(9));
+    }
+
+    /// The OTHER thing the strict reader used to catch only by accident. pandas
+    /// raises here, measured:
+    ///   pd.read_csv(io.StringIO('a,b\n"1,2\n'))
+    ///     -> ParserError: EOF inside string starting at row 1
+    /// Once short rows are padded (gtkz1) the field-count mismatch that used to
+    /// surface this is gone, so it is detected directly. Without this the
+    /// unterminated field would silently become a padded short row.
+    #[test]
+    fn csv_unterminated_quote_still_errors_like_pandas() {
+        let err = read_csv_str("a,b\n\"open,1\n2,3\n")
+            .expect_err("an unterminated quoted field must reject");
+        assert!(matches!(err, IoError::CsvUnterminatedQuote), "got {err:?}");
+    }
+
+    /// Negative control for the scanner: quotes that are properly closed, and a
+    /// literal quote in the MIDDLE of an unquoted field, must NOT be read as an
+    /// unterminated field.
+    #[test]
+    fn csv_closed_and_literal_quotes_are_not_unterminated() {
+        assert!(!csv_input_has_unterminated_quote(
+            "a,b\n\"x,y\",2\n",
+            b',',
+            b'"',
+            true,
+            None
+        ));
+        // Doubled quote inside a quoted field is an escaped literal.
+        assert!(!csv_input_has_unterminated_quote(
+            "a\n\"he said \"\"hi\"\"\"\n",
+            b',',
+            b'"',
+            true,
+            None
+        ));
+        // A quote that is not at a field start is a literal character.
+        assert!(!csv_input_has_unterminated_quote(
+            "a,b\nab\"cd,2\n",
+            b',',
+            b'"',
+            true,
+            None
+        ));
+    }
+
+    /// The negative control, and the half of 4hpid that WAS right: a row with
+    /// MORE fields than the header is still an error. Measured:
+    ///   pd.read_csv(io.StringIO("a,b,c\n1,2,3\n4,5,6,7\n"))
+    ///     -> ParserError: Expected 3 fields in line 3, saw 4
+    #[test]
+    fn csv_overlong_row_still_errors_like_pandas() {
+        let long_row = "a,b,c\n1,2,3\n4,5,6,7\n";
+        let err = read_csv_str(long_row).expect_err("overlong row must still reject");
+        assert!(
+            matches!(
+                err,
+                IoError::CsvFieldCount {
+                    line: 3,
+                    expected: 3,
+                    found: 4
+                }
+            ),
+            "expected CsvFieldCount{{line:3,expected:3,found:4}}, got {err:?}"
         );
     }
 
@@ -16843,9 +17065,39 @@ mod tests {
 
     #[test]
     fn read_csv_typed_numeric_fast_path_preserves_ragged_row_errors() {
+        // The numeric fast path runs `flexible(true)` like every other reader,
+        // so it must enforce the overlong direction itself (gtkz1).
         let long_row = "a,b\n1,2,3\n";
         let err = read_csv_str(long_row).expect_err("long row must reject");
-        assert!(matches!(err, IoError::Csv(_)), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                IoError::CsvFieldCount {
+                    line: 2,
+                    expected: 2,
+                    found: 3
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// The same fast path must PAD a short row rather than reject it — the
+    /// gtkz1 fixture's own input (fp_p2d_016_csv_round_trip_ragged_row_error).
+    /// Measured: pd.read_csv("a,b\n1,2\n3\n") -> a=[1,3], b=[2.0, NaN].
+    /// FP pads identically but keeps 'b' as nullable Int64 rather than
+    /// promoting to float64 — see the dtype note on
+    /// `csv_short_row_pads_with_na_like_pandas_4hpid`.
+    #[test]
+    fn read_csv_typed_numeric_fast_path_pads_short_row() {
+        let df = read_csv_str("a,b\n1,2\n3\n").expect("short row pads");
+        assert_eq!(
+            df.columns()["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+        let b = df.columns()["b"].values();
+        assert_eq!(b[0], Scalar::Int64(2));
+        assert!(b[1].is_missing(), "padded 'b' must be NA, got {:?}", b[1]);
     }
 
     #[test]
@@ -19159,15 +19411,39 @@ mod tests {
         );
     }
 
+    /// Was `csv_with_malformed_row_errors`. A SHORT row is not malformed to
+    /// pandas under any `on_bad_lines` setting — it is padded (gtkz1).
     #[test]
-    fn csv_with_malformed_row_errors() {
+    fn csv_with_options_short_row_pads_not_errors() {
         let input = "a,b\n1,2\n3\n";
         let opts = CsvReadOptions::default();
 
-        let err = read_csv_with_options(input, &opts).expect_err("malformed CSV row should error");
+        let df = read_csv_with_options(input, &opts).expect("short row pads under default options");
+        assert_eq!(
+            df.columns()["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+        assert!(df.columns()["b"].values()[1].is_missing());
+    }
+
+    /// ...while an overlong row under the default `on_bad_lines=Error` still
+    /// errors, now from FrankenPandas' own check rather than the csv crate's
+    /// two-directional UnequalLengths.
+    #[test]
+    fn csv_with_options_overlong_row_errors() {
+        let opts = CsvReadOptions::default();
+        let err = read_csv_with_options("a,b\n1,2,3\n", &opts)
+            .expect_err("overlong row should still error");
         assert!(
-            matches!(&err, IoError::Csv(_)),
-            "expected CSV parser error for ragged row, got {err:?}"
+            matches!(
+                &err,
+                IoError::CsvFieldCount {
+                    line: 2,
+                    expected: 2,
+                    found: 3
+                }
+            ),
+            "got {err:?}"
         );
     }
 

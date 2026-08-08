@@ -43173,7 +43173,17 @@ impl StringAccessor<'_> {
     /// Split each string from the right and return a DataFrame.
     ///
     /// Matches `pd.Series.str.rsplit(pat, expand=True)`.
+    ///
+    /// An empty `pat` is REJECTED, matching pandas, which raises
+    /// `ValueError: empty separator` here even though it accepts the same
+    /// argument on `split`. The asymmetry is pandas' own and is reproduced
+    /// deliberately (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
     pub fn rsplit_df(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
+        if pat.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "empty separator".to_string(),
+            ));
+        }
         let split_limit = Self::checked_split_part_limit(n, "str.rsplit")?;
         let mut row_parts = Vec::new();
         let mut max_parts = 0;
@@ -43696,12 +43706,13 @@ impl StringAccessor<'_> {
     ///
     /// Analogous to `pandas.Series.str.split(pat, n=..., expand=True)`.
     /// Shorter splits are padded with NaN.
+    /// An empty `pat` is ACCEPTED, matching pandas: `s.str.split("")` splits at
+    /// every character boundary and keeps the leading/trailing empty parts
+    /// (`"abc"` -> `["", "a", "b", "c", ""]`). Rust's `str::split("")` yields
+    /// exactly that, so `split_df_n` needs no special case. Note the asymmetry
+    /// with `rsplit_df`, which pandas DOES reject
+    /// (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
     pub fn split_expand_n(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
-        if pat.is_empty() {
-            return Err(FrameError::CompatibilityRejected(
-                "empty separator".to_string(),
-            ));
-        }
         self.split_df_n(pat, n)
     }
 
@@ -56895,8 +56906,16 @@ impl DataFrame {
         operation_name: &str,
     ) -> Result<Self, FrameError> {
         let row_count = matrix_rows.len();
+        // pandas lets the INDEX win when there are no rows at all: with no
+        // `columns=`, `pd.DataFrame([], index=[0])` is shape (1, 0) — the index
+        // is honoured and the frame simply has no columns; `index=[0, 1]` gives
+        // (2, 0). Only a NON-empty row set that disagrees with the index is an
+        // error ("Length of values (2) does not match length of index (1)").
+        // FrankenPandas used to reject the empty case too
+        // (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
         if let Some(labels) = index_labels.as_ref()
             && labels.len() != row_count
+            && row_count > 0
         {
             return Err(FrameError::CompatibilityRejected(format!(
                 "{operation_name} index length {} does not match row count {row_count}",
@@ -56936,12 +56955,19 @@ impl DataFrame {
             None => range_index(row_count)?,
         };
 
+        // Every column is built to the INDEX's length, not to `matrix_rows`'s.
+        // They are equal except in the empty-rows case allowed above, where the
+        // index is longer and pandas null-fills:
+        // `pd.DataFrame([], index=[0], columns=['a'])` is shape (1, 1) holding
+        // NaN. Reading rows positionally keeps the two in step.
+        let output_row_count = index.len();
         let mut columns = BTreeMap::new();
         for (column_offset, column_name) in output_order.iter().enumerate() {
-            let values = matrix_rows
-                .iter()
-                .map(|row| {
-                    row.get(column_offset)
+            let values = (0..output_row_count)
+                .map(|row_offset| {
+                    matrix_rows
+                        .get(row_offset)
+                        .and_then(|row| row.get(column_offset))
                         .cloned()
                         .unwrap_or(Scalar::Null(NullKind::Null))
                 })
@@ -91628,6 +91654,53 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "compatibility gate rejected operation: dataframe_from_records row width 3 exceeds columns length 2"
+        );
+    }
+
+    /// pandas lets the index win when there are NO rows. Measured on 2.2.3:
+    ///   `pd.DataFrame([], index=[0])`            -> shape (1, 0), index [0]
+    ///   `pd.DataFrame([], index=[0, 1])`         -> shape (2, 0), index [0, 1]
+    ///   `pd.DataFrame([], index=[0], columns=['a'])` -> shape (1, 1), [[nan]]
+    /// FrankenPandas rejected all three with "index length 1 does not match row
+    /// count 0" (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
+    #[test]
+    fn dataframe_from_records_empty_rows_lets_index_win_like_pandas() {
+        let df = DataFrame::from_records(vec![], None, Some(vec![0_i64.into()]))
+            .expect("pandas accepts empty rows with a non-empty index");
+        assert_eq!(df.index().len(), 1);
+        assert!(df.column_names().is_empty());
+
+        let df2 = DataFrame::from_records(vec![], None, Some(vec![0_i64.into(), 1_i64.into()]))
+            .expect("two index labels, still no columns");
+        assert_eq!(df2.index().len(), 2);
+        assert!(df2.column_names().is_empty());
+
+        // With explicit columns the frame is null-filled to the index length
+        // rather than being built to the (zero) row count.
+        let columns = vec!["a".to_owned()];
+        let df3 = DataFrame::from_records(vec![], Some(&columns), Some(vec![0_i64.into()]))
+            .expect("empty rows + explicit columns null-fills");
+        assert_eq!(df3.index().len(), 1);
+        assert_eq!(df3.column_names(), vec!["a"]);
+        assert_eq!(df3.columns["a"].values(), &[Scalar::Null(NullKind::Null)]);
+    }
+
+    /// The negative control: a NON-empty row set that disagrees with the index
+    /// is still an error, exactly as pandas raises "Length of values (2) does
+    /// not match length of index (1)". Without this the fix above would read as
+    /// "drop the length check", which is not what pandas does.
+    #[test]
+    fn dataframe_from_records_nonempty_rows_still_check_index_length() {
+        let err = DataFrame::from_records(
+            vec![vec![Scalar::Int64(1)], vec![Scalar::Int64(2)]],
+            None,
+            Some(vec![0_i64.into()]),
+        )
+        .expect_err("2 rows against a 1-label index must still be rejected");
+
+        assert_eq!(
+            err.to_string(),
+            "compatibility gate rejected operation: dataframe_from_records index length 1 does not match row count 2"
         );
     }
 
@@ -141464,8 +141537,15 @@ mod tests {
         );
     }
 
+    /// pandas 2.2.3 ACCEPTS an empty separator on `split` and splits at every
+    /// character boundary, keeping the leading and trailing empty parts.
+    /// Measured directly:
+    ///   `pd.Series(["abc","def"]).str.split("", expand=True).values`
+    ///     -> [['', 'a', 'b', 'c', ''], ['', 'd', 'e', 'f', '']]
+    /// FrankenPandas used to raise "empty separator" here
+    /// (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
     #[test]
-    fn str_split_expand_empty_separator_errors() {
+    fn str_split_expand_empty_separator_splits_every_char_like_pandas() {
         let s = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into()],
@@ -141473,7 +141553,66 @@ mod tests {
         )
         .unwrap();
 
-        let err = s.str().split_expand("").unwrap_err();
+        let result = s.str().split_expand("").unwrap();
+        assert_eq!(result.column_names(), vec!["0", "1", "2", "3", "4"]);
+        let row = |i: usize| -> Vec<Scalar> {
+            result
+                .column_names()
+                .iter()
+                .map(|c| result.columns[*c].values()[i].clone())
+                .collect()
+        };
+        let utf8 = |parts: [&str; 5]| -> Vec<Scalar> {
+            parts
+                .iter()
+                .map(|p| Scalar::Utf8((*p).to_string()))
+                .collect()
+        };
+        assert_eq!(row(0), utf8(["", "a", "b", "c", ""]));
+        assert_eq!(row(1), utf8(["", "d", "e", "f", ""]));
+    }
+
+    /// The `n=` limit under an empty separator, also measured:
+    ///   `.str.split("", n=1, expand=True).values`
+    ///     -> [['', 'abc'], ['', 'def']]
+    #[test]
+    fn str_split_expand_n_empty_separator_respects_limit() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("abc".into()), Scalar::Utf8("def".into())],
+        )
+        .unwrap();
+
+        let result = s.str().split_expand_n("", Some(1)).unwrap();
+        assert_eq!(result.column_names(), vec!["0", "1"]);
+        assert_eq!(
+            result.columns["0"].values(),
+            &[Scalar::Utf8(String::new()), Scalar::Utf8(String::new())]
+        );
+        assert_eq!(
+            result.columns["1"].values(),
+            &[
+                Scalar::Utf8("abc".to_string()),
+                Scalar::Utf8("def".to_string())
+            ]
+        );
+    }
+
+    /// The other half of the asymmetry, and the negative control for the two
+    /// tests above: pandas REJECTS the same empty separator on `rsplit` with
+    /// `ValueError: empty separator`. FrankenPandas used to accept it — the
+    /// sibling sweep on gtkz1 found FP diverging in BOTH directions at once.
+    #[test]
+    fn str_rsplit_expand_empty_separator_errors_like_pandas() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("abc".into()), Scalar::Utf8("def".into())],
+        )
+        .unwrap();
+
+        let err = s.str().rsplit_df("", None).unwrap_err();
         assert!(err.to_string().contains("empty separator"));
     }
 

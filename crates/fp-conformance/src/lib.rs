@@ -14932,8 +14932,12 @@ fn execute_dataframe_constructor_list_like_fixture_operation(
         (0..max_row_width).map(|idx| idx.to_string()).collect()
     };
 
+    // Mirrors DataFrame::from_matrix_rows: pandas lets the INDEX win when there
+    // are no rows at all (`pd.DataFrame([], index=[0])` is shape (1, 0)), and
+    // errors only when a NON-empty row set disagrees
+    // (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
     let index_labels = if let Some(index) = fixture.index.clone() {
-        if index.len() != row_count {
+        if index.len() != row_count && row_count > 0 {
             return Err(format!(
                 "dataframe_constructor_list_like index length {} does not match row count {row_count}",
                 index.len()
@@ -14944,12 +14948,16 @@ fn execute_dataframe_constructor_list_like_fixture_operation(
         (0..row_count as i64).map(IndexLabel::from).collect()
     };
 
+    // Built to the INDEX length, not the row count — they differ only in the
+    // empty-rows case above, where pandas null-fills.
+    let output_row_count = index_labels.len();
     let mut dict_columns = BTreeMap::new();
     for (column_offset, column_name) in selected_columns.iter().enumerate() {
-        let values = matrix_rows
-            .iter()
-            .map(|row| {
-                row.get(column_offset)
+        let values = (0..output_row_count)
+            .map(|row_offset| {
+                matrix_rows
+                    .get(row_offset)
+                    .and_then(|row| row.get(column_offset))
                     .cloned()
                     .unwrap_or(Scalar::Null(NullKind::Null))
             })
