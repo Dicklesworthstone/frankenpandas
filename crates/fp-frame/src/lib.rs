@@ -51724,8 +51724,19 @@ pub fn concat_series_with_ignore_index(
     Series::new(name, index, column)
 }
 
-/// Build a concatenated column, applying pandas' int64 -> float64 promotion when
-/// the concat INVENTED a gap in it.
+/// Build a column, applying pandas' int64 -> float64 promotion when the
+/// operation INVENTED a gap in it.
+///
+/// Shared by the concat paths and the list-like/records constructors — every
+/// site that materialises a cell the caller never supplied. Measured for the
+/// constructors too, so the reuse is verified rather than assumed:
+///
+/// ```text
+/// DataFrame.from_records([{'a':1},{'a':2}], columns=['a','z'])
+///   -> a int64, z all-NaN float64          the absent column widens, 'a' does not
+/// DataFrame([[1,2],[3]])
+///   -> col0 [1,3] int64, col1 [2,NaN] float64   only the padded column widens
+/// ```
 ///
 /// The promotion lives here, at the site that knows it is inventing a missing
 /// value, rather than in `infer_dtype`. Inferring Float64 from a NaN-kind missing
@@ -51755,7 +51766,7 @@ pub fn concat_series_with_ignore_index(
 ///
 /// The caller's doc comment for [`concat_dataframes`] follows this function; do
 /// not insert anything between them.
-fn concat_column_with_invented_gaps(
+fn column_with_invented_gaps(
     values: Vec<Scalar>,
     invented_a_gap: bool,
     source_was_all_valid: bool,
@@ -51780,7 +51791,7 @@ fn concat_column_with_invented_gaps(
 /// - A cell INVENTED for a column absent from one frame is `NaN`, and an
 ///   all-valid int64 column widens to float64; a column that already carried a
 ///   missing value is nullable and keeps its dtype with a `Null` gap. See
-///   [`concat_column_with_invented_gaps`] (br-frankenpandas-nywa8).
+///   [`column_with_invented_gaps`] (br-frankenpandas-nywa8).
 /// - Empty input returns an empty DataFrame.
 pub fn concat_dataframes(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
     concat_dataframes_with_ignore_index(frames, false)
@@ -51970,7 +51981,7 @@ pub fn concat_dataframes_with_ignore_index(
         }
         columns.insert(
             col_name.clone(),
-            concat_column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+            column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
         );
     }
 
@@ -52143,7 +52154,7 @@ pub fn concat_dataframes_with_keys(
         }
         columns.insert(
             col_name.clone(),
-            concat_column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+            column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
         );
     }
 
@@ -52212,7 +52223,7 @@ fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, Fra
 /// A row this alignment INVENTS is NaN and widens an all-valid int64 column to
 /// float64; a column that already carried a missing value is nullable, so it
 /// keeps its dtype and takes a `Null` gap. Identical condition to
-/// [`concat_column_with_invented_gaps`] — see there for the measurement.
+/// [`column_with_invented_gaps`] — see there for the measurement.
 /// (br-frankenpandas-nywa8)
 fn reindex_concat_axis1_column(
     column: &Column,
@@ -57090,6 +57101,15 @@ impl DataFrame {
         let output_row_count = index.len();
         let mut columns = BTreeMap::new();
         for (column_offset, column_name) in output_order.iter().enumerate() {
+            // NOTE (br-frankenpandas-nywa8): the invented-gap rule is NOT applied
+            // on this path. Measured: doing so fixes none of the in-scope rows —
+            // the from_records fixtures that carry the divergence go through
+            // `from_record_maps`, not here — and it breaks
+            // fp_p2d_018_..._matrix_short_rows_null_fill_hardened, whose padded
+            // frame is an FP-DEFINED contract that pandas does not have at all
+            // (`from_records` with 3 column names over 2-wide rows raises
+            // "3 columns passed, passed data had 2 columns"). Changing the pad
+            // here would move an expectation with no oracle behind it.
             let values = (0..output_row_count)
                 .map(|row_offset| {
                     matrix_rows
@@ -57346,16 +57366,31 @@ impl DataFrame {
 
         let mut columns = BTreeMap::new();
         for name in &output_order {
+            // A key absent from a record is a gap the CONSTRUCTOR invents, and
+            // pandas fills it with NaN, widening that column to float64.
+            // Measured: from_records([{'a':1},{'a':2}], columns=['a','z'])
+            // gives a int64 and z all-NaN float64 — only the column with the gap
+            // widens. A column whose supplied values already included a missing
+            // one is nullable and keeps its dtype with a Null gap.
+            // (br-frankenpandas-nywa8)
+            let invented_a_gap = records.iter().any(|record| !record.contains_key(name));
+            let source_was_all_valid = records
+                .iter()
+                .filter_map(|record| record.get(name))
+                .all(|value| !value.is_missing());
+            let gap = if source_was_all_valid {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Null(NullKind::Null)
+            };
             let values = records
                 .iter()
-                .map(|record| {
-                    record
-                        .get(name)
-                        .cloned()
-                        .unwrap_or(Scalar::Null(NullKind::Null))
-                })
+                .map(|record| record.get(name).cloned().unwrap_or_else(|| gap.clone()))
                 .collect::<Vec<_>>();
-            columns.insert(name.clone(), Column::from_values(values)?);
+            columns.insert(
+                name.clone(),
+                column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+            );
         }
 
         let index = match index_labels {
@@ -91927,20 +91962,25 @@ mod tests {
             df.index().labels(),
             &[0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
+        // A key absent from a record is a gap the CONSTRUCTOR invents, so pandas
+        // fills NaN and widens the column to float64. Measured on 2.2.3:
+        //   pd.DataFrame.from_records([{'a':1,'b':10},{'a':2},{'b':30}])
+        //     a: [1.0, 2.0, NaN]   b: [10.0, NaN, 30.0]   both float64
+        // Previously pinned Int64 + Null(Null) (br-frankenpandas-nywa8).
         assert_eq!(
             df.column("a").unwrap().values(),
             &[
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Null(NullKind::Null),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
             ]
         );
         assert_eq!(
             df.column("b").unwrap().values(),
             &[
-                Scalar::Int64(10),
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(30),
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(30.0),
             ]
         );
     }
@@ -91960,9 +92000,17 @@ mod tests {
             .map(String::as_str)
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["a", "z"]);
+        // 'z' is named in `columns=` but supplied by no record, so every cell is
+        // invented. Measured: from_records([{'a':1},{'a':2}], columns=['a','z'])
+        // gives z as an all-NaN float64 column while 'a' stays int64
+        // (br-frankenpandas-nywa8).
         assert_eq!(
             df.column("z").unwrap().values(),
-            &[Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)]
+            &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)]
+        );
+        assert_eq!(
+            df.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
         );
     }
 

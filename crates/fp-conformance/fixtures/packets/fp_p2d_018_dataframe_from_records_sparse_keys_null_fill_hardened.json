@@ -5,38 +5,81 @@
   "operation": "dataframe_from_records",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T13:57:31Z"
   },
   "records": [
     {
-      "a": { "kind": "int64", "value": 1 },
-      "b": { "kind": "int64", "value": 10 }
+      "a": {
+        "kind": "int64",
+        "value": 1
+      },
+      "b": {
+        "kind": "int64",
+        "value": 10
+      }
     },
     {
-      "a": { "kind": "int64", "value": 2 }
+      "a": {
+        "kind": "int64",
+        "value": 2
+      }
     },
     {
-      "b": { "kind": "int64", "value": 30 }
+      "b": {
+        "kind": "int64",
+        "value": 30
+      }
     }
   ],
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "columns": {
       "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "float64",
+          "value": 1.0
+        },
+        {
+          "kind": "float64",
+          "value": 2.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ],
       "b": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 30 }
+        {
+          "kind": "float64",
+          "value": 10.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "float64",
+          "value": 30.0
+        }
       ]
-    }
+    },
+    "column_order": [
+      "a",
+      "b"
+    ]
   }
 }
