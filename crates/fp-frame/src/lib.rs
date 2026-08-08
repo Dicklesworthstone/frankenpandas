@@ -42236,6 +42236,23 @@ impl StringAccessor<'_> {
             .iter()
             .map(|v| match v {
                 Scalar::Utf8(s) => func(s),
+                // br-frankenpandas-str-null-kind-identity-lufpu: pandas passes
+                // the ORIGINAL missing object through an object-dtype `str.*`
+                // op instead of normalizing it, because `_str_map` reaches
+                // `lib.map_infer_mask` with the default `na_value=no_default`,
+                // which copies `arr[i]` at masked positions. Measured on live
+                // pandas 2.2.3 over `["Hello", <null>, "WORLD"]` (object):
+                // None -> None, nan -> nan, NaT -> NaT.
+                //
+                // Collapsing every kind to NaN here destroyed the null-kind
+                // identity br-frankenpandas-joeff established (kind-sensitive
+                // Eq/Hash, so `value_counts(dropna=False)` and pivot rows keep
+                // pandas' separate buckets), on exactly the path where object
+                // string data with real `None` values is most common.
+                Scalar::Null(kind) => Scalar::Null(*kind),
+                // Non-`Null` missing representations (a bare float NaN, NaT
+                // timestamp, ...) canonicalize to the NaN null as before —
+                // pandas' float `nan` in an object column is this same kind.
                 _ if v.is_missing() => Scalar::Null(NullKind::NaN),
                 _ => v.clone(),
             })
@@ -105890,6 +105907,112 @@ mod tests {
         let result = s.str().strip().unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("hello".into()));
         assert_eq!(result.values()[1], Scalar::Utf8("world".into()));
+    }
+
+    /// Build `["Hello", <null of `kind`>, "WORLD"]` as an object-dtype Series,
+    /// the shape `fp_p2d_169_series_str_lower_with_null_hardened` pins.
+    fn str_null_kind_series(kind: NullKind) -> Series {
+        Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("Hello".into()),
+                Scalar::Null(kind),
+                Scalar::Utf8("WORLD".into()),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// br-frankenpandas-str-null-kind-identity-lufpu.
+    ///
+    /// pandas 2.2.3 passes the ORIGINAL missing object through an object-dtype
+    /// `str.*` op rather than normalizing it. Measured on live pandas 2.2.3
+    /// with `pd.Series(["Hello", <null>, "WORLD"], dtype=object)`:
+    ///
+    /// ```text
+    /// null=None  -> s.str.lower() == ['hello', None,   'world']   (NoneType)
+    /// null=nan   -> s.str.lower() == ['hello', nan,    'world']   (float)
+    /// null=NaT   -> s.str.lower() == ['hello', NaT,    'world']   (NaTType)
+    /// ```
+    ///
+    /// FrankenPandas rewrote every kind to `NullKind::NaN`, destroying the
+    /// kind-sensitive null identity br-frankenpandas-joeff established (which
+    /// `value_counts(dropna=False)`, pivot rows and friends depend on to keep
+    /// pandas' separate buckets).
+    ///
+    /// NEGATIVE CASE: the `NullKind::Null` and `NullKind::NaT` rows are exactly
+    /// what a kernel that normalizes missing values to NaN gets wrong; the
+    /// `NullKind::NaN` row alone would pass against the buggy implementation.
+    #[test]
+    fn str_ops_preserve_null_kind() {
+        for kind in [NullKind::Null, NullKind::NaN, NullKind::NaT] {
+            let s = str_null_kind_series(kind);
+            let result = s.str().lower().unwrap();
+            assert_eq!(
+                result.values()[1],
+                Scalar::Null(kind),
+                "str.lower() must pass the {kind:?} null through unchanged"
+            );
+            // The non-null rows still transform.
+            assert_eq!(result.values()[0], Scalar::Utf8("hello".into()));
+            assert_eq!(result.values()[2], Scalar::Utf8("world".into()));
+        }
+    }
+
+    /// The two fixtures are a sample, not the boundary (lufpu scope item 4):
+    /// every string-OUTPUT accessor routes through `apply_str` for nullable
+    /// input, so the whole family must preserve the kind.
+    #[test]
+    fn str_output_family_preserves_null_kind() {
+        for kind in [NullKind::Null, NullKind::NaT] {
+            let s = str_null_kind_series(kind);
+            let cases: Vec<(&str, Series)> = vec![
+                ("lower", s.str().lower().unwrap()),
+                ("upper", s.str().upper().unwrap()),
+                ("title", s.str().title().unwrap()),
+                ("capitalize", s.str().capitalize().unwrap()),
+                ("casefold", s.str().casefold().unwrap()),
+                ("swapcase", s.str().swapcase().unwrap()),
+                ("strip", s.str().strip().unwrap()),
+                ("lstrip", s.str().lstrip().unwrap()),
+                ("rstrip", s.str().rstrip().unwrap()),
+            ];
+            for (op, result) in cases {
+                assert_eq!(
+                    result.values()[1],
+                    Scalar::Null(kind),
+                    "str.{op}() must preserve the {kind:?} null"
+                );
+            }
+        }
+    }
+
+    /// Bool-OUTPUT accessors take the same `apply_str` fallback on nullable
+    /// input. Measured on live pandas 2.2.3: `s.str.contains("o")` and
+    /// `s.str.startswith("H")` over the same object Series return dtype
+    /// `object` with the original null preserved (NOT a bool column, and NOT
+    /// NaN).
+    #[test]
+    fn str_predicate_family_preserves_null_kind() {
+        for kind in [NullKind::Null, NullKind::NaT] {
+            let s = str_null_kind_series(kind);
+            let contains = s.str().contains("o").unwrap();
+            assert_eq!(contains.values()[0], Scalar::Bool(true));
+            assert_eq!(
+                contains.values()[1],
+                Scalar::Null(kind),
+                "str.contains() must preserve the {kind:?} null"
+            );
+            assert_eq!(contains.values()[2], Scalar::Bool(false));
+
+            let starts = s.str().startswith("H").unwrap();
+            assert_eq!(
+                starts.values()[1],
+                Scalar::Null(kind),
+                "str.startswith() must preserve the {kind:?} null"
+            );
+        }
     }
 
     #[test]
