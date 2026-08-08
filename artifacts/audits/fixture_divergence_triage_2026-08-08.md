@@ -24,37 +24,61 @@ change the mechanism.
 
 ## The mechanism
 
-**In pandas the canonical missing value is a property of the COLUMN DTYPE, not of the input.**
-Measured on live pandas 2.2.3 — every one of these was given `None` in the input:
+> **CORRECTED after first publication.** The original wording of this section said the missing
+> kind is "a property of the COLUMN DTYPE" and that object columns therefore keep `None`. That is
+> true only for missing values the CALLER SUPPLIED. It is wrong for missing values pandas
+> INTRODUCES, and implementing from it would make object-column reindex/merge insert `None`, which
+> pandas never does. The corrected rule is below; the 81-row attribution is unchanged.
+
+There are **two** rules, and only the first one governs these 81 fixtures.
+
+**Rule 1 — an INTRODUCED missing value is always a float `nan`, in every dtype.** Not dtype-derived
+at all. Measured on live pandas 2.2.3, taking the element that the operation invented:
 
 ```
-object            -> element types ['str', 'NoneType', 'str']    None PRESERVED
-float64           -> ['float', 'float', 'float']                 became NaN
-Int64 (nullable)  -> ['int', 'NAType', 'int']                    became pd.NA
-datetime64[ns]    -> ['Timestamp', 'NaTType']                    became NaT
-timedelta64[ns]   -> ['Timedelta', 'NaTType']                    became NaT
+pd.Series(['a','b']).reindex([0,1,2])      dtype=object   introduced=float nan
+pd.Series([True,False]).reindex([0,1,2])   dtype=object   introduced=float nan
+pd.Series([1,2]).reindex([0,1,2])          dtype=float64  introduced=float nan
+pd.Series(['a',1]).reindex([0,1,2])        dtype=object   introduced=float nan
+df.merge(..., how='left')  missing 't'     dtype=object   ['str', 'float']
+pd.concat([...], axis=0)   missing 's'     dtype=object   ['str', 'float']
 ```
 
-FrankenPandas instead **preserves the input's null kind irrespective of the column's dtype**, so a
-`NullKind::Null` survives inside a float64 column where pandas can only hold NaN. That is why the
-round-trip and op-introduced halves are the same bug: pandas does not care which one it was, it
-normalizes to the dtype either way.
+An OBJECT column gets `nan`, not `None`. That is the part the first draft got backwards.
 
-The `KIND int64->float64` half of the signature is the same rule's other consequence: introducing a
-missing value into an int column forces float64 in pandas, because numpy int64 cannot hold a
-missing value at all.
+**Rule 2 — a SUPPLIED `None` survives only if the dtype can store it.** This is the dtype-derived
+half, and it explains the round-trip rows:
 
-Two independent confirmations, both measured:
+```
+object   -> ['str', 'NoneType', 'str']     None preserved (object can hold it)
+float64  -> ['float', 'float', 'float']    became NaN
+Int64    -> ['int', 'NAType', 'int']       became pd.NA
+datetime64[ns] / timedelta64[ns]           became NaT
+```
+
+FrankenPandas violates Rule 1 everywhere — it introduces `NullKind::Null` — and violates Rule 2 for
+every non-object dtype. Both produce the same observable, `NULL_MARKER null->na_n`, which is why the
+48 round-trip and 33 op-introduced rows land in one class.
+
+The `KIND int64->float64` half of the signature is Rule 1's corollary: numpy int64 cannot hold a
+`nan`, so introducing one forces float64.
+
+Corpus confirmation of the object case, not just the synthetic probe —
+`fp_p2d_031_dataframe_concat_axis0_outer_utf8_overlap_strict` has a `city` column of kinds
+`['utf8', 'null']` whose null is pinned `null` while the oracle emits `na_n`. A string column, an
+introduced miss, and pandas still says NaN.
 
 ```python
 pd.DataFrame.from_records([{'a':1},{'a':2}], columns=['a','z'])
-#    a    z          <- absent column 'z' is an all-NaN FLOAT64 column,
-# 0  1  NaN             not a "null-kind" column
+#    a    z          <- absent column 'z' is an all-NaN FLOAT64 column
+# 0  1  NaN
 # dtypes: a int64, z float64
-
-pd.Series([1,2], index=[0,1]).reindex([0,1,2])
-# [1.0, 2.0, nan] float64   <- int64 PROMOTED, missing is NaN
 ```
+
+⚠️ Do NOT generalise Rule 1 to "all-missing columns are float64". Measured:
+`pd.Series([None, None])` and `pd.DataFrame({'z': [None, None]})` are both **object** — that is
+SUPPLIED data under Rule 2. Only the column pandas invents (`from_records` with an absent name) is
+float64.
 
 Concrete corpus example, `fp_p2d_018_dataframe_from_records_column_order_new_column_null_hardened`:
 
@@ -67,10 +91,12 @@ ORACLE  z: [{"kind":"null","value":"na_n"}, {"kind":"null","value":"na_n"}]
 
 `br-frankenpandas-str-null-kind-identity-lufpu` fixed string ops to PRESERVE `None`, and
 `br-frankenpandas-joeff` deliberately made null kinds distinct with kind-sensitive `Eq`/`Hash`.
-Both are correct and remain correct: they concern **object-dtype** columns, which are the one case
-where pandas genuinely preserves `None`. The rule is dtype-dependent; FrankenPandas applies
-"preserve" universally, which is right for object and wrong for float64 / Int64 / datetime64 /
-timedelta64.
+Both are correct and remain correct, and the corrected rules above make the boundary sharper rather
+than blurrier: lufpu is **Rule 2** on an object column — a `None` the caller supplied, carried
+through a kernel that must not rewrite it. These 81 rows are almost all **Rule 1** — a missing value
+the OPERATION invented, which pandas makes `nan` even in an object column. Different paths, opposite
+obligations, no conflict. Preserving a supplied `None` and minting `nan` for an invented gap are both
+required.
 
 lufpu's own closeout already found the dtype-dependence from the other side — it had to route six
 int-returning accessors through `apply_str_missing_nan` because "pandas splits by RESULT DTYPE, not
@@ -96,10 +122,19 @@ produces `null` where the fixture pins `na_n`, which the rule above does not exp
 ## What must NOT be done with this
 
 These 81 rows are **not** cleared for regeneration by this document. Naming the mechanism is not the
-same as deciding the remedy, and the remedy is a real FrankenPandas change (derive a column's
-missing kind from its dtype, and promote int64 -> float64 when a missing value is introduced) — not
-a fixture rewrite. Regenerating them first would bank pandas' answer while FP still produces the old
-one, turning 81 currently-honest red rows into 81 green lies. Filed as its own bead.
+same as deciding the remedy, and the remedy is a real FrankenPandas change — mint `NullKind::NaN`
+wherever an operation INTRODUCES a missing value (Rule 1), normalise a supplied `None` to the
+dtype's storable missing (Rule 2, which `Scalar::missing_for_dtype` already tabulates correctly),
+and promote int64 -> float64 on introduction. Not a fixture rewrite. Regenerating them first would
+bank pandas' answer while FP still produces the old one, turning 81 currently-honest red rows into
+81 green lies. Filed as its own bead.
+
+**Where the machinery already is.** `Scalar::missing_for_dtype` (fp-types) is already correct:
+Float64 -> `Null(NaN)`, Datetime64/Timedelta64 -> `NAT`, Utf8/Int64 -> `Null(Null)`. And
+`Column::normalize_missing_for_dtype` (fp-columnar) already applies it, passing NaN/NaT through
+unchanged. So Rule 2 is mostly present. What is missing is Rule 1: the fill sites that invent a
+missing value hand it `NullKind::Null` instead of `NullKind::NaN`, and there is no int64 -> float64
+promotion on introduction. Start by finding the null-fill sites, not by rewriting the kind table.
 
 ## The 81 fixtures
 
