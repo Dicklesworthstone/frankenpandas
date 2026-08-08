@@ -5,52 +5,106 @@
   "operation": "dataframe_concat",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T13:31:32Z"
   },
   "concat_axis": 1,
   "frame": {
     "index": [
-      { "kind": "utf8", "value": "b" },
-      { "kind": "utf8", "value": "a" }
+      {
+        "kind": "utf8",
+        "value": "b"
+      },
+      {
+        "kind": "utf8",
+        "value": "a"
+      }
     ],
     "columns": {
       "left_col": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        }
       ]
     }
   },
   "frame_right": {
     "index": [
-      { "kind": "utf8", "value": "c" },
-      { "kind": "utf8", "value": "a" }
+      {
+        "kind": "utf8",
+        "value": "c"
+      },
+      {
+        "kind": "utf8",
+        "value": "a"
+      }
     ],
     "columns": {
       "right_col": [
-        { "kind": "int64", "value": 30 },
-        { "kind": "int64", "value": 10 }
+        {
+          "kind": "int64",
+          "value": 30
+        },
+        {
+          "kind": "int64",
+          "value": 10
+        }
       ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "b" },
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "c" }
+      {
+        "kind": "utf8",
+        "value": "b"
+      },
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "utf8",
+        "value": "c"
+      }
     ],
     "columns": {
       "left_col": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "float64",
+          "value": 1.0
+        },
+        {
+          "kind": "float64",
+          "value": 2.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ],
       "right_col": [
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 30 }
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "float64",
+          "value": 10.0
+        },
+        {
+          "kind": "float64",
+          "value": 30.0
+        }
       ]
-    }
+    },
+    "column_order": [
+      "left_col",
+      "right_col"
+    ]
   }
 }
-

@@ -52206,10 +52206,28 @@ fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, Fra
     DataFrame::new_with_column_order(index, columns, shared_columns)
 }
 
+/// Align one column onto the union index for `concat(axis=1)`, applying the same
+/// invented-gap rule as the axis=0 path.
+///
+/// A row this alignment INVENTS is NaN and widens an all-valid int64 column to
+/// float64; a column that already carried a missing value is nullable, so it
+/// keeps its dtype and takes a `Null` gap. Identical condition to
+/// [`concat_column_with_invented_gaps`] — see there for the measurement.
+/// (br-frankenpandas-nywa8)
 fn reindex_concat_axis1_column(
     column: &Column,
     positions: &[Option<usize>],
 ) -> Result<Column, FrameError> {
+    let invented_a_gap = positions.iter().any(Option::is_none);
+    let source_was_all_valid = !column.values().iter().any(fp_types::Scalar::is_missing);
+
+    if invented_a_gap && source_was_all_valid && column.dtype() == DType::Int64 {
+        // Widen first so the gap lands as a float NaN rather than an Int64 null.
+        let widened = column.astype(DType::Float64)?;
+        return Ok(widened
+            .reindex_by_positions_with_absent_scalar(positions, Scalar::Null(NullKind::NaN))?);
+    }
+
     Ok(column.reindex_by_positions(positions)?)
 }
 
@@ -92610,20 +92628,30 @@ mod tests {
             out.index().labels(),
             &[0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
+        // Both columns gain a row the ALIGNMENT invents, so both widen to
+        // float64 with NaN gaps. Measured on pandas 2.2.3 with these exact
+        // inputs — pd.concat([DataFrame({'a':[1,2]}, index=[0,1]),
+        //                     DataFrame({'b':[10,20]}, index=[1,2])], axis=1):
+        //        a     b          dtypes: a float64, b float64
+        //   0  1.0   NaN
+        //   1  2.0  10.0
+        //   2  NaN  20.0
+        // This test previously pinned Int64 + Null(Null), which is what
+        // FrankenPandas used to produce (br-frankenpandas-nywa8).
         assert_eq!(
             out.column("a").unwrap().values(),
             &[
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Null(NullKind::Null)
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN)
             ]
         );
         assert_eq!(
             out.column("b").unwrap().values(),
             &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(10),
-                Scalar::Int64(20)
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0)
             ]
         );
     }

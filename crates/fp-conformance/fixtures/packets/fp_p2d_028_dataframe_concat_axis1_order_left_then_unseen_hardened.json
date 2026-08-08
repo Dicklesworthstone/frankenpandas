@@ -5,47 +5,86 @@
   "operation": "dataframe_concat",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T13:31:31Z"
   },
   "concat_axis": 1,
   "frame": {
     "index": [
-      { "kind": "int64", "value": 5 }
+      {
+        "kind": "int64",
+        "value": 5
+      }
     ],
     "columns": {
       "left_col": [
-        { "kind": "int64", "value": 100 }
+        {
+          "kind": "int64",
+          "value": 100
+        }
       ]
     }
   },
   "frame_right": {
     "index": [
-      { "kind": "int64", "value": 4 },
-      { "kind": "int64", "value": 5 }
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "int64",
+        "value": 5
+      }
     ],
     "columns": {
       "right_col": [
-        { "kind": "int64", "value": 40 },
-        { "kind": "int64", "value": 50 }
+        {
+          "kind": "int64",
+          "value": 40
+        },
+        {
+          "kind": "int64",
+          "value": 50
+        }
       ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 4 }
+      {
+        "kind": "int64",
+        "value": 5
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      }
     ],
     "columns": {
       "left_col": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "float64",
+          "value": 100.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ],
       "right_col": [
-        { "kind": "int64", "value": 50 },
-        { "kind": "int64", "value": 40 }
+        {
+          "kind": "int64",
+          "value": 50
+        },
+        {
+          "kind": "int64",
+          "value": 40
+        }
       ]
-    }
+    },
+    "column_order": [
+      "left_col",
+      "right_col"
+    ]
   }
 }
-

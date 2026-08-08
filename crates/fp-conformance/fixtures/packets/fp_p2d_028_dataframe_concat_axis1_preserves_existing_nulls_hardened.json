@@ -5,45 +5,78 @@
   "operation": "dataframe_concat",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
+    "generated_at": "2026-08-08T13:31:32Z"
   },
   "concat_axis": 1,
   "frame": {
     "index": [
-      { "kind": "utf8", "value": "x" }
+      {
+        "kind": "utf8",
+        "value": "x"
+      }
     ],
     "columns": {
       "left_col": [
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "null",
+          "value": "null"
+        }
       ]
     }
   },
   "frame_right": {
     "index": [
-      { "kind": "utf8", "value": "y" }
+      {
+        "kind": "utf8",
+        "value": "y"
+      }
     ],
     "columns": {
       "right_col": [
-        { "kind": "int64", "value": 7 }
+        {
+          "kind": "int64",
+          "value": 7
+        }
       ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" }
+      {
+        "kind": "utf8",
+        "value": "x"
+      },
+      {
+        "kind": "utf8",
+        "value": "y"
+      }
     ],
     "columns": {
       "left_col": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ],
       "right_col": [
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 7 }
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "float64",
+          "value": 7.0
+        }
       ]
-    }
+    },
+    "column_order": [
+      "left_col",
+      "right_col"
+    ]
   }
 }
-
