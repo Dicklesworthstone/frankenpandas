@@ -136,6 +136,54 @@ unchanged. So Rule 2 is mostly present. What is missing is Rule 1: the fill site
 missing value hand it `NullKind::Null` instead of `NullKind::NaN`, and there is no int64 -> float64
 promotion on introduction. Start by finding the null-fill sites, not by rewriting the kind table.
 
+## Ownership: the 81 have FOUR owners, not one
+
+> **SECOND CORRECTION.** The single-mechanism framing above is right about the *observable*
+> (`NULL_MARKER null->na_n`) but wrong about the *owner*. Attempting to implement `nywa8` across all
+> 81 would have double-fixed rows belonging to another bead and "fixed" FrankenPandas where it is
+> already correct. Split, with the class data:
+
+| rows | owner | what it is |
+|-----:|-------|------------|
+| 32 | `nywa8` | structural, promotion + marker — `dataframe_concat` (19), `merge` (3), `constructor_kwargs` (3), `constructor_list_like` (3), `sort_values` (2), `from_records` (1), `series_tail` (1) |
+| 22 | `nywa8` | structural, marker only — `dict_of_series` (3), `constructor_kwargs` (2), `astype` (2), and singletons incl. rolling/expanding |
+| 11 | **`lwvet`** | accessor int->float64 promotion + marker (`str_count_*`, `str_split_count`, `dt_days_in_month`, …) — ALREADY FILED as "int-returning str accessors never promote to Float64" |
+| 16 | mixed | accessor, marker only — **needs per-op verification, see below** |
+
+**The 54 structural rows are the confirmed `nywa8` core** and the only subset cleared for
+implementation. Direct pandas measurement backs every one of their mechanisms (reindex, merge,
+concat, `from_records` all mint `nan`).
+
+### The 16 accessor rows are NOT uniformly FP's fault
+
+Verified per namespace, live pandas 2.2.3 on `pd.Series(['Hello', None, 'WORLD'], dtype=object)`:
+
+```
+str.lower / strip / contains / startswith / findall  -> ['...', 'NoneType', '...']   None PRESERVED
+dt.strftime / dt.month_name (on a NaT input)         -> ['str', 'float']             nan
+dt.days_in_month                                     -> float64 nan
+```
+
+So `str.*` on object input **preserves None** — lufpu was right, including for the bool-returning
+family — while `dt.*` maps a NaT input to `nan` in the derived output. The dt rows are genuine; the
+str rows mostly are not.
+
+Three are outright **oracle defects, with FrankenPandas correct**: `contains_any`, `startswith_any`,
+`endswith_any` go through `_str_any_op`, which does `.fillna(False)` per pattern and then restores
+missingness with `.where(series.notna())` — and `Series.where` inserts **NaN**, which cannot restore
+a `None`. Measured:
+
+```
+s.str.contains('oo', regex=False)                    -> ['bool', 'NoneType', 'bool', 'bool']
+same .fillna(False).where(s.notna())                 -> ['bool', 'float',    'bool', 'bool']
+```
+
+Filed as `br-frankenpandas-6e6ag`. **Do not change FP for these three.**
+
+`index_of` / `rindex_of` are a third case again: `_index_of_result` builds nan-on-absent
+*deliberately*, documented as modelling FP's own nullable-int contract for ops pandas has no
+equivalent of. Read it before touching it.
+
 ## The 81 fixtures
 
 Case ids, sorted. These are the rows `br-frankenpandas-nywa8` must fix in FrankenPandas
