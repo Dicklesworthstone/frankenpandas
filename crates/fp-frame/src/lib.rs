@@ -92775,6 +92775,77 @@ mod tests {
         }
     }
 
+    /// `str.split(...).str.get(n)` carries BOTH null rules in ONE column: a
+    /// supplied `None` survives, while an out-of-bounds index invents a `nan`.
+    ///
+    /// MEASURED, live pandas 2.2.3, on
+    /// `pd.Series(['a_b_c', None, 'single', 'a_b_c_d_e_f'], dtype=object)`:
+    ///
+    /// ```text
+    /// s.str.split('_').str.get(5)  -> [nan, None, nan, 'f']
+    ///                                  kinds ['float', 'NoneType', 'float', 'str']
+    ///                                  dtype object
+    /// ```
+    ///
+    /// Index 1 is the caller's `None` and stays `None` (Rule 2, and what
+    /// br-frankenpandas-str-null-kind-identity-lufpu established). Indices 0
+    /// and 2 are positions the OPERATION could not fill, and those are float
+    /// `nan` (Rule 1). The same column holds both markers, which is the
+    /// sharpest available statement that the two rules are distinct and that
+    /// collapsing either one onto the other is wrong.
+    ///
+    /// The `rsplit` sibling is the control: with `n = 0` nothing is out of
+    /// bounds, so the only missing is the supplied one and it stays `None` —
+    /// measured `['a', None, '', 'no_slash']`. (br-frankenpandas-nywa8)
+    #[test]
+    fn str_split_get_keeps_a_supplied_none_but_invents_nan_out_of_bounds() {
+        let subject = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Utf8("a_b_c".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("single".into()),
+                Scalar::Utf8("a_b_c_d_e_f".into()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            subject.str().split_get("_", 5).unwrap().values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("f".into()),
+            ],
+            "out-of-bounds is an INVENTED gap (nan); the caller's None at index 1 must survive"
+        );
+
+        // Control: n = 0 puts nothing out of bounds, so the supplied None is
+        // the only missing and no nan is invented.
+        let slashed = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Utf8("a/b/c".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8(String::new()),
+                Scalar::Utf8("no_slash".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            slashed.str().rsplit_get("/", 0).unwrap().values(),
+            &[
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8(String::new()),
+                Scalar::Utf8("no_slash".into()),
+            ]
+        );
+    }
+
     /// An UNMAPPED key makes `Series.map` invent a gap, so an int-valued
     /// mapping widens the whole result to float64 — Rule 1.
     ///

@@ -5,38 +5,86 @@
   "operation": "series_str_split_get",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "25b3c7e0656c91f953dd5f932fcfaed730a69e87abd4ef5a90da9c75313bafdc",
+    "generated_at": "2026-08-08T21:58:40Z"
   },
   "str_split_pat": "_",
   "str_split_n": 5,
   "left": {
     "name": "text",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "a_b_c" },
-      { "kind": "null", "value": "null" },
-      { "kind": "utf8", "value": "single" },
-      { "kind": "utf8", "value": "a_b_c_d_e_f" }
+      {
+        "kind": "utf8",
+        "value": "a_b_c"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "utf8",
+        "value": "single"
+      },
+      {
+        "kind": "utf8",
+        "value": "a_b_c_d_e_f"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "null", "value": "null" },
-      { "kind": "null", "value": "null" },
-      { "kind": "null", "value": "null" },
-      { "kind": "utf8", "value": "f" }
+      {
+        "kind": "null",
+        "value": "na_n"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "null",
+        "value": "na_n"
+      },
+      {
+        "kind": "utf8",
+        "value": "f"
+      }
     ]
   }
 }
