@@ -1635,7 +1635,45 @@ def op_dataframe_from_series(pd, payload: dict[str, Any]) -> dict[str, Any]:
         fixture_series_from_payload(pd, series_payload, "dataframe_from_series")
         for series_payload in payloads
     ]
-    frame = pd.concat(series_list, axis=1, sort=False)
+    # The operation is the DataFrame CONSTRUCTOR, not concat, and the two
+    # disagree on index order. MEASURED, live pandas 2.2.3, with
+    # a = Series([10,30], index=[1,3]) and b = Series([20,300], index=[2,3]):
+    #
+    #   pd.DataFrame({'a': a, 'b': b}).index   -> [1, 2, 3]   SORTED union
+    #   pd.concat([a, b], axis=1).index        -> [1, 3, 2]   discovery order
+    #
+    # This handler used `pd.concat(..., sort=False)`, so every multi-index
+    # from_series fixture was evaluated against the wrong operation and the
+    # oracle disagreed with its fixture on ROW ORDER — attributed to
+    # FrankenPandas as a "KIND float64->null + VALUE" move when the real cause
+    # was the oracle answering a different question. Exactly the class
+    # br-frankenpandas-fixture-divergence-triage-9s0c4 exists for.
+    #
+    # The dict form also gives the duplicate-name semantics the corpus already
+    # pins: pd.DataFrame({s.name: s}) keeps the LAST series under a repeated
+    # name (fp_p2d_017_dataframe_from_series_duplicate_name_last_wins_strict),
+    # whereas concat emits two same-named columns and only survives that
+    # fixture because dataframe_to_json collapses them.
+    #
+    # Routing through _frame_with_optional_dtype ALSO fixes a second, separate
+    # defect in this handler: it never read `constructor_dtype`. That is the
+    # very family `resolve_constructor_dtype`'s docstring describes as fixed —
+    # from_series was missed. fp_p2d_023_..._dtype_float64_copy_true_strict and
+    # fp_p2d_024_..._dtype_f64_alias_hardened pin float64 while the oracle
+    # returned int64, and they were moved for that reason BEFORE this change
+    # (verified against the pre-change corpus report, class KIND float64->int64).
+    # The alias normalization matters: 024 sends the literal "f64".
+    data = {series.name: series for series in series_list}
+    try:
+        frame = _frame_with_optional_dtype(
+            pd,
+            data,
+            None,
+            None,
+            resolve_constructor_dtype(payload, "dataframe_from_series"),
+        )
+    except Exception as exc:
+        raise OracleError(f"dataframe_from_series failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(frame)}
 
 

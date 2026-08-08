@@ -92745,6 +92745,69 @@ mod tests {
         }
     }
 
+    /// `DataFrame::from_series` invents a gap wherever a series is absent from
+    /// the union index, and that gap is a NaN — Rule 1.
+    ///
+    /// MEASURED, live pandas 2.2.3, with
+    /// `a = Series([10,30], index=[1,3])` and `b = Series([20,300], index=[2,3])`:
+    ///
+    /// ```text
+    /// pd.DataFrame({'a': a, 'b': b})
+    ///   index  -> [1, 2, 3]                   the SORTED union
+    ///   a      -> float64 [10.0, nan, 30.0]   int64 widened by the gap
+    ///   b      -> float64 [nan, 20.0, 300.0]
+    /// ```
+    ///
+    /// The index is worth pinning alongside the marker: the conformance oracle
+    /// modelled this operation as `pd.concat(axis=1, sort=False)`, which gives
+    /// discovery order `[1, 3, 2]` instead, and that mismatch was being read as
+    /// a FrankenPandas value divergence. Fixed in `op_dataframe_from_series`.
+    /// (br-frankenpandas-nywa8, br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn dataframe_from_series_union_gap_is_nan_over_the_sorted_union() {
+        let mk = |name: &str, labels: [i64; 2], values: [i64; 2]| {
+            Series::from_values(
+                name,
+                labels.iter().map(|l| IndexLabel::Int64(*l)).collect(),
+                values.iter().map(|v| Scalar::Int64(*v)).collect(),
+            )
+            .unwrap()
+        };
+        let df =
+            DataFrame::from_series(vec![mk("a", [1, 3], [10, 30]), mk("b", [2, 3], [20, 300])])
+                .unwrap();
+
+        assert_eq!(
+            df.index().labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3)
+            ],
+            "the constructor aligns on the SORTED union, not concat's discovery order"
+        );
+        for (name, expected) in [
+            ("a", [Some(10.0), None, Some(30.0)]),
+            ("b", [None, Some(20.0), Some(300.0)]),
+        ] {
+            let values = df.column(name).unwrap().values().to_vec();
+            for (i, want) in expected.iter().enumerate() {
+                match want {
+                    Some(number) => assert_eq!(
+                        values[i],
+                        Scalar::Float64(*number),
+                        "{name}[{i}]: the gap widens the whole column to float64"
+                    ),
+                    None => assert_eq!(
+                        values[i],
+                        Scalar::Null(NullKind::NaN),
+                        "{name}[{i}]: an INVENTED gap is a NaN, never a generic Null"
+                    ),
+                }
+            }
+        }
+    }
+
     /// The CUMULATIVE forms accumulate an object column too — they do not pass
     /// it through untouched, and they have no `numeric_only` option at all.
     ///
