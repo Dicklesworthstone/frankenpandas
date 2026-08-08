@@ -5,8 +5,8 @@
   "operation": "dataframe_assign",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "e6864c97b458f493855b58568bd911dddff570d5cc35cf4df1419132b79a376a",
-    "generated_at": "2026-08-08T16:11:38Z",
+    "oracle_script_sha256": "512aa5a6dc18d97eea4245a5baaa3aaf15893279b1ea861b10b7cc7ee4f04297",
+    "generated_at": "2026-08-08T16:50:16Z",
     "oracle_attestation": "error_agreement"
 },
   "assignments": [

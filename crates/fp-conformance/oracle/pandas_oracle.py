@@ -4589,7 +4589,23 @@ def _str_any_op(pd, payload: dict[str, Any], op_name: str, method: str) -> dict[
         # Null inputs propagate to a missing result (pandas str predicates
         # return NA for NaN inputs; the OR-reduce/empty-pattern path above
         # forces concrete bools, so restore missingness here).
-        out = out.where(series.notna())
+        #
+        # ⚠️ RESTORE THE INPUT'S OWN MISSING VALUE, not `.where()`'s NaN.
+        # `Series.where` fills masked positions with NaN, which cannot express a
+        # None — so a None input came back as nan and the corpus recorded a
+        # marker pandas never produces. Measured on 2.2.3, single-pattern:
+        #     pd.Series(['foobar', None,  'baz']).str.contains('oo')
+        #       -> [True, None, False]          None PRESERVED
+        #     pd.Series(['foobar', nan,   'baz']).str.contains('oo')
+        #       -> [True, nan,  False]          nan preserved
+        # i.e. the predicate hands back the INPUT's own missing kind. Writing the
+        # original values into the masked slots reproduces that for the
+        # OR-reduce, which `.where()` structurally cannot.
+        # (br-frankenpandas-6e6ag)
+        missing = series.isna()
+        if bool(missing.any()):
+            out = out.astype(object)
+            out[missing] = series[missing]
     except Exception as exc:
         raise OracleError(f"{op_name} failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}

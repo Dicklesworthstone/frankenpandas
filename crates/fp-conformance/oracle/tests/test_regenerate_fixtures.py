@@ -141,10 +141,18 @@ def load_packet(name: str) -> dict:
 
 
 def test_corpus_anchor_head_with_nulls_is_a_round_trip_loss():
-    """`head(3)` does not touch values[1]; input and expectation both pin `null`."""
+    """`head(3)` does not touch values[1], so its marker comes from the INPUT.
+
+    That input-derived-ness is what this anchor exists to pin, and it is
+    unchanged. The EXPECTATION is no longer `null`: the fixture was corrected
+    under br-frankenpandas-nywa8 once FrankenPandas started normalizing a float
+    column's missing to NaN, which is what pandas has there. The input still
+    carries a `null` marker, so `roundtrip_implicated` must still classify a
+    NULL_TO_NAN move as round-trip — that is the assertion that matters here.
+    """
     fixture = load_packet("fp_p2c_010_series_head_with_nulls_hardened.json")
     assert "null" in regenerate_fixtures.input_null_markers(fixture)
-    assert fixture["expected_series"]["values"][1] == NULL
+    assert fixture["expected_series"]["values"][1] == NAN
     assert regenerate_fixtures.roundtrip_implicated(fixture, [NULL_TO_NAN]) == [
         NULL_TO_NAN
     ]
