@@ -71774,8 +71774,73 @@ impl DataFrame {
     /// Sum of non-null values per column.
     ///
     /// Matches `pd.DataFrame.sum()`.
+    ///
+    /// ⚠️ This still defaults to `numeric_only=true`, which is pandas 1.x.
+    /// pandas 2.x defaults to FALSE and includes object columns. Reach the
+    /// pandas-2.x behaviour explicitly via [`Self::sum_with_numeric_only`] until
+    /// the default is flipped
+    /// (br-frankenpandas-reductions-numeric-only-default-zx21n).
     pub fn sum(&self) -> Result<Series, FrameError> {
         self.reduce_numeric("sum")
+    }
+
+    /// `df.sum(numeric_only=...)`. With `false`, an object column is CONCATENATED
+    /// and the numeric columns keep their own dtype, matching pandas 2.x.
+    pub fn sum_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("sum", numeric_only)
+    }
+
+    /// `df.min(numeric_only=...)`. With `false`, an object column is compared
+    /// LEXICOGRAPHICALLY, matching pandas 2.x.
+    pub fn min_agg_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("min", numeric_only)
+    }
+
+    /// `df.max(numeric_only=...)`. See [`Self::min_agg_with_numeric_only`].
+    pub fn max_agg_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("max", numeric_only)
+    }
+
+    /// `df.mean(numeric_only=...)`. With `false` and a non-numeric column present
+    /// this RAISES, as pandas 2.x does ("Could not convert ... to numeric").
+    pub fn mean_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("mean", numeric_only)
+    }
+
+    /// `df.prod(numeric_only=...)`. Raises on a non-numeric column when `false`.
+    pub fn prod_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("prod", numeric_only)
+    }
+
+    /// `df.median(numeric_only=...)`. Raises on a non-numeric column when `false`.
+    pub fn median_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("median", numeric_only)
+    }
+
+    /// `df.std(numeric_only=...)`. Raises on a non-numeric column when `false`.
+    pub fn std_agg_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("std", numeric_only)
+    }
+
+    /// `df.var(numeric_only=...)`. Raises on a non-numeric column when `false`.
+    pub fn var_agg_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("var", numeric_only)
+    }
+
+    /// `df.sem(numeric_only=...)`. Raises on a non-numeric column when `false`.
+    pub fn sem_agg_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("sem", numeric_only)
+    }
+
+    /// `df.skew(numeric_only=...)`. Raises on a non-numeric column when `false`.
+    pub fn skew_agg_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("skew", numeric_only)
+    }
+
+    /// `df.kurtosis(numeric_only=...)`. Raises on a non-numeric column when
+    /// `false`.
+    pub fn kurtosis_agg_with_numeric_only(&self, numeric_only: bool) -> Result<Series, FrameError> {
+        self.reduce_with_numeric_only("kurtosis", numeric_only)
     }
 
     /// Mean of non-null values per column.
@@ -72210,6 +72275,55 @@ impl DataFrame {
     }
 
     fn reduce_numeric(&self, func: &str) -> Result<Series, FrameError> {
+        // NOTE (br-frankenpandas-reductions-numeric-only-default-zx21n): this is
+        // the `numeric_only=TRUE` path, and it is currently also the DEFAULT.
+        // pandas 2.x defaults to numeric_only=FALSE. The default is deliberately
+        // NOT flipped here — see `reduce_with_numeric_only` for why.
+        self.reduce_with_numeric_only(func, true)
+    }
+
+    /// Reduce each column, optionally restricting to numeric columns.
+    ///
+    /// `numeric_only=true` reproduces the historical behaviour: non-numeric
+    /// columns are skipped entirely, and the numeric ones are promoted to
+    /// float64. `numeric_only=false` is pandas 2.x's DEFAULT and splits the
+    /// family in two, measured on live pandas 2.2.3 over a frame with a float
+    /// 'b', an object 'label' and an int 'a':
+    ///
+    /// ```text
+    /// INCLUDE the object column (5 ops):
+    ///   sum     {'b': -1.0, 'label': 'azm', 'a': 7}   <- CONCATENATED, 'a' int64
+    ///   min     {'b': -7.5, 'label': 'a',   'a': -1}  <- LEXICOGRAPHIC
+    ///   max     {'b':  4.0, 'label': 'z',   'a': 5}
+    ///   count   {'b': 3, 'label': 3, 'a': 3}
+    ///   nunique {'b': 3, 'label': 3, 'a': 3}
+    ///
+    /// RAISE TypeError (8 ops):
+    ///   mean prod median std var sem skew kurt
+    ///     e.g. "could not convert string to float: 'a'"
+    /// ```
+    ///
+    /// ⚠️ The two paths differ in OUTPUT DTYPE for the numeric columns too, not
+    /// just in column selection: under `numeric_only=true` pandas returns column
+    /// 'a' as float64, under the 2.x default it stays int64. Both must be
+    /// individually correct, which is why this is a parameter rather than a
+    /// filter tweak.
+    ///
+    /// ⚠️ THE DEFAULT IS NOT FLIPPED YET, on purpose. Flipping it turns 13
+    /// fixtures red at once: 3 conceal the numeric_only=true result for the
+    /// include-ops, and 10 (`..._skips_nonnumeric_...`) pin values for ops that
+    /// would then RAISE. Those 10 exist to pin the skipping behaviour, so their
+    /// correct repair is to say `numeric_only: true` in the fixture and thread
+    /// it through the oracle — not to convert them to error fixtures. That needs
+    /// the oracle work (zx21n scope 4) and a reconciliation with the strict
+    /// raise-arm story in br-frankenpandas-fyr1z-strict-raise-arms-t7ht2 before
+    /// the raise arms are written. Landing the capability without the flip keeps
+    /// the default UNIFORM across the family rather than half-applied.
+    fn reduce_with_numeric_only(
+        &self,
+        func: &str,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
         // Per br-frankenpandas-vpeoh: Series sum/mean/min/max/std/var/median/prod
         // preserve Timedelta64 dtype (br-28lgk/edmsd/erobu/7iz85/j0ilf/yy0ks/
         // rbt10). Allow Timedelta64 columns through for those funcs;
@@ -72218,18 +72332,96 @@ impl DataFrame {
             func,
             "sum" | "mean" | "min" | "max" | "std" | "var" | "median" | "prod"
         );
+        let includes_non_numeric = matches!(func, "sum" | "min" | "max");
         let allowed: Vec<String> = self
             .column_order
             .iter()
             .filter(|name| {
                 let dt = self.columns[name.as_str()].dtype();
-                matches!(dt, DType::Int64 | DType::Float64)
+                if matches!(dt, DType::Int64 | DType::Float64)
                     || (timedelta_safe && matches!(dt, DType::Timedelta64))
+                {
+                    return true;
+                }
+                // pandas 2.x keeps non-numeric columns for the ops that can
+                // answer for them, and RAISES for the rest (handled below).
+                !numeric_only
             })
             .cloned()
             .collect();
 
+        if !numeric_only && !includes_non_numeric {
+            // The 8 raise-ops. pandas surfaces the engine's own conversion
+            // failure; FrankenPandas names the column so the message is
+            // actionable, and the harness compares FP's wording anyway.
+            if let Some(offender) = allowed.iter().find(|name| {
+                !matches!(
+                    self.columns[name.as_str()].dtype(),
+                    DType::Int64 | DType::Float64 | DType::Timedelta64
+                )
+            }) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "could not convert column '{offender}' to numeric for {func}"
+                )));
+            }
+        }
+
         let values = self.par_map_columns(&allowed, |name| {
+            let column = &self.columns[name];
+            let is_numeric = matches!(
+                column.dtype(),
+                DType::Int64 | DType::Float64 | DType::Timedelta64
+            );
+            // Object-column semantics for the include-ops, measured on pandas
+            // 2.2.3: `sum` CONCATENATES the strings in row order and min/max
+            // compare LEXICOGRAPHICALLY. Nulls are skipped, as they are for the
+            // numeric path.
+            if !is_numeric && !numeric_only {
+                let present: Vec<&Scalar> =
+                    column.values().iter().filter(|v| !v.is_missing()).collect();
+                return Ok(match func {
+                    "sum" => {
+                        let mut joined = String::new();
+                        for value in &present {
+                            match value {
+                                Scalar::Utf8(text) => joined.push_str(text),
+                                other => joined.push_str(&other.to_string()),
+                            }
+                        }
+                        Scalar::Utf8(joined)
+                    }
+                    "min" | "max" => {
+                        let mut best: Option<&Scalar> = None;
+                        for value in &present {
+                            let take = match best {
+                                None => true,
+                                Some(current) => {
+                                    // Nulls are already filtered out, so the
+                                    // na_position argument cannot bite here;
+                                    // for Utf8 this is String's own Ord, i.e.
+                                    // pandas' lexicographic comparison.
+                                    let ord = compare_scalars_with_na_last(value, current, true);
+                                    if func == "min" {
+                                        ord == std::cmp::Ordering::Less
+                                    } else {
+                                        ord == std::cmp::Ordering::Greater
+                                    }
+                                }
+                            };
+                            if take {
+                                best = Some(value);
+                            }
+                        }
+                        best.cloned().unwrap_or(Scalar::Null(NullKind::NaN))
+                    }
+                    _ => {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "{func} cannot reduce non-numeric column '{name}'"
+                        )));
+                    }
+                });
+            }
+
             let s = self.column_as_series(name)?;
             Ok(match func {
                 "sum" => s.sum()?,
@@ -91713,6 +91905,121 @@ mod tests {
             err.to_string(),
             "compatibility gate rejected operation: dataframe_from_records row width 3 exceeds columns length 2"
         );
+    }
+
+    /// The frame shape the zx21n baseline was measured on: float 'b', object
+    /// 'label', int 'a'.
+    fn numeric_only_probe_frame() -> DataFrame {
+        DataFrame::from_dict(
+            &["b", "label", "a"],
+            vec![
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-7.5),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(2.5),
+                    ],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("z".into()),
+                        Scalar::Utf8("m".into()),
+                    ],
+                ),
+                (
+                    "a",
+                    vec![Scalar::Int64(-1), Scalar::Int64(5), Scalar::Int64(3)],
+                ),
+            ],
+        )
+        .expect("probe frame")
+    }
+
+    /// pandas 2.x `numeric_only=False` INCLUDES the object column for sum/min/max.
+    /// Measured on live pandas 2.2.3 with this exact frame:
+    ///   df.sum() -> {'b': -1.0, 'label': 'azm', 'a': 7}
+    ///   df.min() -> {'b': -7.5, 'label': 'a',   'a': -1}
+    ///   df.max() -> {'b':  4.0, 'label': 'z',   'a': 5}
+    /// sum CONCATENATES in row order; min/max compare LEXICOGRAPHICALLY.
+    /// (br-frankenpandas-reductions-numeric-only-default-zx21n)
+    #[test]
+    fn dataframe_reductions_numeric_only_false_includes_object_column() {
+        let df = numeric_only_probe_frame();
+
+        let sum = df.sum_with_numeric_only(false).expect("sum");
+        let at = |s: &Series, label: &str| -> Scalar {
+            let pos = s
+                .index()
+                .labels()
+                .iter()
+                .position(|l| matches!(l, IndexLabel::Utf8(t) if t == label))
+                .unwrap_or_else(|| panic!("label {label} missing"));
+            s.column().values()[pos].clone()
+        };
+        assert_eq!(at(&sum, "label"), Scalar::Utf8("azm".into()));
+
+        let min = df.min_agg_with_numeric_only(false).expect("min");
+        assert_eq!(at(&min, "label"), Scalar::Utf8("a".into()));
+
+        let max = df.max_agg_with_numeric_only(false).expect("max");
+        assert_eq!(at(&max, "label"), Scalar::Utf8("z".into()));
+    }
+
+    /// The other half of the split: pandas 2.x RAISES for these eight when a
+    /// non-numeric column is present, e.g.
+    ///   df.mean() -> TypeError: Could not convert ['azm'] to numeric
+    /// A wrong choice here throws rather than producing a plausible number,
+    /// which is why FuchsiaBass called this family the negative control.
+    #[test]
+    fn dataframe_reductions_numeric_only_false_raises_for_the_eight() {
+        let df = numeric_only_probe_frame();
+        df.mean_with_numeric_only(false).expect_err("mean raises");
+        df.prod_with_numeric_only(false).expect_err("prod raises");
+        df.median_with_numeric_only(false)
+            .expect_err("median raises");
+        df.std_agg_with_numeric_only(false).expect_err("std raises");
+        df.var_agg_with_numeric_only(false).expect_err("var raises");
+        df.sem_agg_with_numeric_only(false).expect_err("sem raises");
+        df.skew_agg_with_numeric_only(false)
+            .expect_err("skew raises");
+        df.kurtosis_agg_with_numeric_only(false)
+            .expect_err("kurt raises");
+    }
+
+    /// `numeric_only=true` must remain EXACTLY what it is today — it is the path
+    /// the existing corpus pins, float64 promotion included. This is the
+    /// regression guard for the capability being added without moving the
+    /// default: `df.sum()` and `df.sum_with_numeric_only(true)` must agree, and
+    /// neither may mention the object column.
+    #[test]
+    fn dataframe_reductions_numeric_only_true_is_unchanged_and_is_still_the_default() {
+        let df = numeric_only_probe_frame();
+        let has_label = |s: &Series| {
+            s.index()
+                .labels()
+                .iter()
+                .any(|l| matches!(l, IndexLabel::Utf8(t) if t == "label"))
+        };
+
+        for (default, explicit) in [
+            (df.sum().unwrap(), df.sum_with_numeric_only(true).unwrap()),
+            (df.mean().unwrap(), df.mean_with_numeric_only(true).unwrap()),
+            (
+                df.min_agg().unwrap(),
+                df.min_agg_with_numeric_only(true).unwrap(),
+            ),
+            (
+                df.std_agg().unwrap(),
+                df.std_agg_with_numeric_only(true).unwrap(),
+            ),
+        ] {
+            assert!(!has_label(&default), "default must skip the object column");
+            assert!(!has_label(&explicit));
+            assert_eq!(default.column().values(), explicit.column().values());
+        }
     }
 
     /// `pd.DataFrame(scalar, index=..., columns=...)` broadcasts. Measured on
