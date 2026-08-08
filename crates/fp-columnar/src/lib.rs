@@ -43564,7 +43564,21 @@ mod tests {
                 assert_eq!(nan.values().len(), values.len());
 
                 for (pos, value) in values.iter().enumerate() {
-                    let (expected_finite, expected_inf, expected_nan) = oracle(value);
+                    // The oracle is applied to the value AS THE COLUMN STORES IT,
+                    // not as it was handed in. A Float64 column cannot hold a
+                    // generic `Null(Null)`: pandas has no such value in a float
+                    // column, so `Column::from_values` normalizes it to NaN and
+                    // `isnan` is then true for that slot. Comparing against the
+                    // raw input asserted a scalar-identity round trip that
+                    // FrankenPandas deliberately does not provide for float
+                    // columns. Other dtypes are unaffected — the normalizer is a
+                    // no-op for them here. (br-frankenpandas-nywa8)
+                    let as_stored = if input.dtype() == DType::Float64 {
+                        Column::normalize_missing_for_dtype(value.clone(), DType::Float64)
+                    } else {
+                        value.clone()
+                    };
+                    let (expected_finite, expected_inf, expected_nan) = oracle(&as_stored);
                     assert_eq!(
                         finite.values()[pos],
                         Scalar::Bool(expected_finite),
