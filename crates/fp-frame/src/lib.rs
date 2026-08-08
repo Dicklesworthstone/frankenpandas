@@ -42285,7 +42285,82 @@ impl StringAccessor<'_> {
     /// missing, and NaN is the only missing value `float64` can represent — so
     /// the int-returning accessors structurally CANNOT preserve `None`, and
     /// making them do so would be a different divergence, not a fix.
-    fn apply_str_missing_nan<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    /// Shared body for every int-returning `.str` accessor: build the per-row
+    /// result, then apply pandas' three-way result-dtype rule.
+    ///
+    /// `func` returns the per-row `Scalar` so the two accessors that can fail to
+    /// locate their needle (`index_of` / `rindex_of`) can hand back a missing
+    /// value of their own; every other caller returns `Int64`.
+    ///
+    /// MEASURED, live pandas 2.2.3, on `pd.Series([...], dtype=object)`:
+    ///
+    /// ```text
+    /// ["a-b-c", "x-y"]           .str.count("-") -> int64    [2, 1]
+    /// ["a-b-c", None,  "x-y"]                    -> float64  [2.0, nan, 1.0]
+    /// ["a-b-c", 5,     "x-y"]                    -> float64  [2.0, nan, 1.0]
+    /// ["a-b-c", NaT, 5, "x-y"]                   -> object   [2, NaT, nan, 1]
+    /// ```
+    ///
+    /// So the promotion is driven by the RESULT dtype, not by the accessor
+    /// family: an int result plus a gap is float64 (a numpy int64 array cannot
+    /// hold a gap), and a NaT blocks the promotion outright because float64
+    /// cannot hold a NaT either — pandas then leaves the column object with the
+    /// ints unpromoted and the NaT itself intact. A non-string element behaves
+    /// exactly like a `None`: it becomes `nan` and forces the promotion.
+    /// (br-frankenpandas-lwvet)
+    fn apply_str_int_scalar<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> Scalar,
+    {
+        let vals = self.series.column().values();
+        let mut saw_missing = false;
+        let mut saw_nat = false;
+        let mut out: Vec<Scalar> = vals
+            .iter()
+            .map(|v| {
+                let mapped = match v {
+                    Scalar::Utf8(s) => func(s),
+                    // A NaT is the one missing kind float64 cannot absorb, so it
+                    // survives verbatim and suppresses the promotion below.
+                    Scalar::Null(NullKind::NaT) => Scalar::Null(NullKind::NaT),
+                    // Everything else that is not a string — a None/nan null OR
+                    // a present non-string element — is a float `nan` here.
+                    _ => Scalar::Null(NullKind::NaN),
+                };
+                match &mapped {
+                    Scalar::Null(NullKind::NaT) => {
+                        saw_nat = true;
+                        saw_missing = true;
+                    }
+                    other if other.is_missing() => saw_missing = true,
+                    _ => {}
+                }
+                mapped
+            })
+            .collect();
+        if saw_missing && !saw_nat {
+            for scalar in &mut out {
+                if let Scalar::Int64(i) = scalar {
+                    *scalar = Scalar::Float64(*i as f64);
+                }
+            }
+        }
+        let index = self.series.index().clone();
+        let column = Column::from_values(out)?;
+        Series::new(name, index, column)
+    }
+
+    /// Body for `index_of` / `rindex_of`, which are NOT the pandas rule above.
+    ///
+    /// `pd.Series.str.index` RAISES when the needle is absent; FrankenPandas
+    /// instead reports a missing position, an FP-defined nullable-int contract
+    /// that pandas has no equivalent of. The conformance oracle models it
+    /// explicitly (`_index_of_result` builds an OBJECT series of ints-and-NaN),
+    /// so the present positions stay `Int64` and only the gaps are `NaN` — no
+    /// float64 promotion. Routing these two through `apply_str_int_scalar`
+    /// would silently redefine that contract under cover of a pandas-parity
+    /// change, so they keep their own body. (br-frankenpandas-lwvet)
+    fn apply_str_nullable_int<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Scalar,
     {
@@ -42382,28 +42457,10 @@ impl StringAccessor<'_> {
             }
         }
 
-        let vals = self.series.column().values();
-        let mut has_null = false;
-        let mut out: Vec<Scalar> = vals
-            .iter()
-            .map(|v| match v {
-                Scalar::Utf8(s) => Scalar::Int64(func(s)),
-                _ => {
-                    has_null = true;
-                    Scalar::Null(NullKind::NaN)
-                }
-            })
-            .collect();
-        if has_null {
-            for scalar in &mut out {
-                if let Scalar::Int64(i) = scalar {
-                    *scalar = Scalar::Float64(*i as f64);
-                }
-            }
-        }
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(name, index, column)
+        // Nulls are possible past the fast paths, so the shared three-way rule
+        // decides the result dtype — this arm used to promote on ANY missing,
+        // which is wrong for a NaT (see `apply_str_int_scalar`).
+        self.apply_str_int_scalar(|s| Scalar::Int64(func(s)), name)
     }
 
     /// Allocation-once ASCII case conversion for contiguous Utf8 storage.
@@ -43237,8 +43294,9 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.split(pat).str.len()`. Returns Int64 count.
     pub fn split_count(&self, pat: &str) -> Result<Series, FrameError> {
-        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
-        self.apply_str_missing_nan(
+        // Int-valued result: promotes to Float64 unless a NaT blocks it
+        // (see `apply_str_int_scalar`).
+        self.apply_str_int_scalar(
             |s| Scalar::Int64(s.split(pat).count() as i64),
             self.series.name(),
         )
@@ -43532,8 +43590,9 @@ impl StringAccessor<'_> {
         let re = Regex::new(pat).map_err(|e| {
             FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
         })?;
-        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
-        self.apply_str_missing_nan(
+        // Int-valued result: promotes to Float64 unless a NaT blocks it
+        // (see `apply_str_int_scalar`).
+        self.apply_str_int_scalar(
             |s| Scalar::Int64(re.find_iter(s).count() as i64),
             self.series.name(),
         )
@@ -43723,8 +43782,9 @@ impl StringAccessor<'_> {
         let re = Regex::new(pat).map_err(|e| {
             FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
         })?;
-        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
-        self.apply_str_missing_nan(
+        // Int-valued result: promotes to Float64 unless a NaT blocks it
+        // (see `apply_str_int_scalar`).
+        self.apply_str_int_scalar(
             |s| Scalar::Int64(re.find_iter(s).count() as i64),
             self.series.name(),
         )
@@ -43734,8 +43794,9 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.count(pat)` for literal patterns.
     pub fn count_literal(&self, pat: &str) -> Result<Series, FrameError> {
-        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
-        self.apply_str_missing_nan(
+        // Int-valued result: promotes to Float64 unless a NaT blocks it
+        // (see `apply_str_int_scalar`).
+        self.apply_str_int_scalar(
             |s| Scalar::Int64(s.matches(pat).count() as i64),
             self.series.name(),
         )
@@ -44362,8 +44423,9 @@ impl StringAccessor<'_> {
     /// an error for missing values (here, returns NaN for not-found).
     /// Per br-frankenpandas-02ae2b: char-based, not byte-based.
     pub fn index_of(&self, sub: &str) -> Result<Series, FrameError> {
-        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
-        self.apply_str_missing_nan(
+        // FP-defined nullable-int contract, NOT the pandas promotion rule
+        // (see `apply_str_nullable_int`).
+        self.apply_str_nullable_int(
             |s| match s.find(sub) {
                 Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
                 None => Scalar::Null(NullKind::NaN),
@@ -44378,8 +44440,9 @@ impl StringAccessor<'_> {
     /// an error for missing values (here, returns NaN for not-found).
     /// Per br-frankenpandas-02ae2b: char-based, not byte-based.
     pub fn rindex_of(&self, sub: &str) -> Result<Series, FrameError> {
-        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
-        self.apply_str_missing_nan(
+        // FP-defined nullable-int contract, NOT the pandas promotion rule
+        // (see `apply_str_nullable_int`).
+        self.apply_str_nullable_int(
             |s| match s.rfind(sub) {
                 Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
                 None => Scalar::Null(NullKind::NaN),
@@ -107190,6 +107253,139 @@ mod tests {
             Scalar::Null(NullKind::Null),
             "str.join() is string-valued: the None must survive"
         );
+    }
+
+    /// Every int-returning `.str` accessor over an OBJECT string column, on the
+    /// three-way rule measured against live pandas 2.2.3
+    /// (br-frankenpandas-lwvet):
+    ///
+    /// ```text
+    /// pd.Series(["a-b-c", <null>, "x-y"], dtype=object)
+    ///   no nulls        -> int64    [2, 1]
+    ///   null=None / nan -> float64  [2.0, nan, 1.0]
+    ///   null=pd.NaT     -> object   [2, NaT, 1]      <- no promotion, NaT kept
+    /// ```
+    ///
+    /// The promotion is a property of the RESULT dtype, not of the accessor
+    /// family: NaT is not float64-representable, so pandas cannot promote and
+    /// leaves the column object with the NaT intact. `str.join` (string-valued)
+    /// is the control — it never promotes and preserves whatever null arrived.
+    #[test]
+    fn str_int_returning_ops_promote_to_float64_unless_the_null_is_nat() {
+        fn probe(null: Option<NullKind>) -> Vec<(&'static str, Vec<Scalar>)> {
+            let mut values = vec![Scalar::Utf8("a-b-c".into())];
+            if let Some(kind) = null {
+                values.push(Scalar::Null(kind));
+            }
+            values.push(Scalar::Utf8("x-y".into()));
+            let labels: Vec<IndexLabel> = (0..values.len() as i64).map(Into::into).collect();
+            let s = Series::from_values("x", labels, values).unwrap();
+            vec![
+                ("len", s.str().len().unwrap().values().to_vec()),
+                ("find", s.str().find("-").unwrap().values().to_vec()),
+                ("rfind", s.str().rfind("-").unwrap().values().to_vec()),
+                (
+                    "find_with_bounds",
+                    s.str()
+                        .find_with_bounds("-", 0, None)
+                        .unwrap()
+                        .values()
+                        .to_vec(),
+                ),
+                (
+                    "rfind_with_bounds",
+                    s.str()
+                        .rfind_with_bounds("-", 0, None)
+                        .unwrap()
+                        .values()
+                        .to_vec(),
+                ),
+                ("encode", s.str().encode("utf-8").unwrap().values().to_vec()),
+                ("count", s.str().count("-").unwrap().values().to_vec()),
+                (
+                    "count_literal",
+                    s.str().count_literal("-").unwrap().values().to_vec(),
+                ),
+                (
+                    "count_matches",
+                    s.str().count_matches("-").unwrap().values().to_vec(),
+                ),
+                (
+                    "split_count",
+                    s.str().split_count("-").unwrap().values().to_vec(),
+                ),
+            ]
+        }
+
+        // No nulls: Int64, no promotion.
+        for (op, out) in probe(None) {
+            assert!(
+                out.iter().all(|v| matches!(v, Scalar::Int64(_))),
+                "str.{op}() over an all-present column is int64 in pandas, got {out:?}"
+            );
+        }
+
+        // A None/nan null: the WHOLE column promotes to Float64 and the missing
+        // row renders NaN.
+        for kind in [NullKind::Null, NullKind::NaN] {
+            for (op, out) in probe(Some(kind)) {
+                assert_eq!(
+                    out[1],
+                    Scalar::Null(NullKind::NaN),
+                    "str.{op}() with a {kind:?} null: pandas renders the gap as NaN, got {out:?}"
+                );
+                assert!(
+                    matches!(out[0], Scalar::Float64(_)) && matches!(out[2], Scalar::Float64(_)),
+                    "str.{op}() with a {kind:?} null: pandas promotes the whole column to \
+                     float64, got {out:?}"
+                );
+            }
+        }
+
+        // A NaT null: float64 cannot hold it, so pandas keeps the column object
+        // with the ints unpromoted and the NaT itself preserved.
+        for (op, out) in probe(Some(NullKind::NaT)) {
+            assert_eq!(
+                out[1],
+                Scalar::Null(NullKind::NaT),
+                "str.{op}() with a NaT null: pandas cannot promote, so the NaT survives \
+                 unchanged, got {out:?}"
+            );
+            assert!(
+                matches!(out[0], Scalar::Int64(_)) && matches!(out[2], Scalar::Int64(_)),
+                "str.{op}() with a NaT null: the column stays object, so the present values \
+                 stay int — no float64 promotion, got {out:?}"
+            );
+        }
+
+        // index_of / rindex_of are deliberately NOT on this rule: pandas'
+        // `.str.index` raises when the needle is absent, so FrankenPandas'
+        // missing-on-absent behaviour is an FP-defined nullable-int contract
+        // that the oracle models explicitly. Present positions stay Int64.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a-b-c".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("x-y".into()),
+            ],
+        )
+        .unwrap();
+        for (op, out) in [
+            ("index_of", s.str().index_of("-").unwrap().values().to_vec()),
+            (
+                "rindex_of",
+                s.str().rindex_of("-").unwrap().values().to_vec(),
+            ),
+        ] {
+            assert!(
+                matches!(out[0], Scalar::Int64(_)) && matches!(out[2], Scalar::Int64(_)),
+                "str.{op}() keeps the FP nullable-int contract: present positions stay int64 \
+                 with only the gaps NaN, got {out:?}"
+            );
+            assert_eq!(out[1], Scalar::Null(NullKind::NaN));
+        }
     }
 
     #[test]

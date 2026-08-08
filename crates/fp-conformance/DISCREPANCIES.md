@@ -204,6 +204,14 @@
 - **Tests affected:** none changed. The negative result is recorded in `series_dtype_for_payload_values`'s own docstring so the next reader does not repeat the experiment.
 - **Review date:** 2026-08-08
 
+### DISC-020: `str.index` / `str.rindex` report a missing position where pandas raises — and therefore do NOT take the float64 promotion
+- **Reference:** every OTHER int-returning `.str` accessor follows a three-way result-dtype rule, measured on live pandas 2.2.3 over `pd.Series([...], dtype=object)`: no gaps → `int64`; a `None`/`nan`/non-string element → **`float64`** with the gap as `nan`; a `NaT` → **object**, ints unpromoted and the `NaT` preserved, because float64 cannot hold a NaT. `pd.Series.str.index(sub)` does not participate: it **raises `ValueError: substring not found`** rather than returning anything for an absent needle.
+- **Our impl:** `StringAccessor::index_of` / `rindex_of` return a missing value at an absent needle instead of raising — an FP-defined nullable-int contract for an operation pandas has no total equivalent of. Because they are the only int-returning accessors that can invent a gap from *present* input, applying the promotion rule to them would make a found-position `float64` purely because some other row's needle was absent. They therefore keep `Int64` at every found position with only the gaps `NaN`. The oracle already models exactly this (`pandas_oracle._index_of_result` builds an OBJECT series of ints-and-NaN and says so in its docstring); this entry records the same contract on the FrankenPandas side so the two cannot drift apart silently.
+- **Impact:** two accessors, `str.index` / `str.rindex`. Their sibling `str.find` / `str.rfind` are unaffected — pandas defines those totally (`-1` when absent), they never invent a gap, and they do take the promotion rule. The other ten int-returning accessors (`len`, `find`, `rfind`, `find_with_bounds`, `rfind_with_bounds`, `encode`, `count`, `count_literal`, `count_matches`, `split_count`) are on the pandas rule via `StringAccessor::apply_str_int_scalar`.
+- **Resolution:** ACCEPTED (WindyHare, 2026-08-08, `br-frankenpandas-lwvet`). The alternative considered and rejected was routing these two through the promoting helper for uniformity: it would have redefined an already-documented FP contract as a side effect of a pandas-parity change, and moved `fp_p2d_299` / `fp_p2d_300` further from the oracle rather than closer.
+- **Tests affected:** `str_int_returning_ops_promote_to_float64_unless_the_null_is_nat` (fp-frame, final block pins the exception); fixtures `fp_p2d_299_series_str_index_of_null_hardened`, `fp_p2d_300_series_str_rindex_of_null_hardened`.
+- **Review date:** 2026-08-08
+
 ## Rules
 
 1. Every divergence gets a sequential ID (DISC-NNN)
