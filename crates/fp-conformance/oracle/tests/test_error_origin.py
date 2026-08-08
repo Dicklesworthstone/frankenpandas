@@ -92,3 +92,44 @@ def test_origin_defaults_to_unexpected_rather_than_pandas(oracle, pd):
 def test_a_success_response_has_no_origin(oracle):
     """The key exists on every response so consumers need no special case."""
     assert oracle.base_oracle_response()["error_origin"] is None
+
+
+def test_an_oracle_error_wrapping_an_oracle_error_is_still_the_adapter(oracle):
+    """The trap: a helper's OWN refusal, re-wrapped by an op handler.
+
+    `pandas_dtype_from_constructor_spec` raises a bare OracleError inside
+    op_dataframe_constructor_list_like's try-block, which re-raises it with
+    `from exc`. Judging on __cause__ alone credits PANDAS for a rejection pandas
+    never saw — observed live on
+    fp_p2d_024_..._dtype_boolean_pyarrow_unsupported_error_hardened, which
+    classified as `pandas` before this was fixed.
+    """
+    try:
+        try:
+            raise oracle.OracleError("unsupported constructor dtype 'boolean[pyarrow]'")
+        except oracle.OracleError as inner:
+            raise oracle.OracleError(f"dataframe_constructor_list_like failed: {inner}") from inner
+    except oracle.OracleError as exc:
+        assert oracle.oracle_error_origin(exc) == oracle.ERROR_ORIGIN_ADAPTER
+    else:  # pragma: no cover
+        pytest.fail("expected OracleError")
+
+
+def test_an_oracle_error_wrapping_a_wrapped_engine_error_is_still_pandas(oracle):
+    """The unwrap must stop at the ROOT, not at the first OracleError.
+
+    A genuine pandas exception nested under two adapter layers is still pandas;
+    over-correcting would strip attestation from the 49 rows that earned it.
+    """
+    try:
+        try:
+            try:
+                raise ValueError("Need to pass bool-like values")
+            except ValueError as engine:
+                raise oracle.OracleError(f"cast failed: {engine}") from engine
+        except oracle.OracleError as inner:
+            raise oracle.OracleError(f"constructor failed: {inner}") from inner
+    except oracle.OracleError as exc:
+        assert oracle.oracle_error_origin(exc) == oracle.ERROR_ORIGIN_PANDAS
+    else:  # pragma: no cover
+        pytest.fail("expected OracleError")

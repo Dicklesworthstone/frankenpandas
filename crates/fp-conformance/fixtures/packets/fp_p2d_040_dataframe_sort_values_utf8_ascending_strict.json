@@ -5,8 +5,8 @@
   "operation": "dataframe_sort_values",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "ef135bb3088ad340319998b43cdc945af9754fc4d8e943dcb0137729af14fb41",
-    "generated_at": "2026-08-08T08:56:15Z"
+    "oracle_script_sha256": "255f7e7182be81f2f3240934dec5ef03a42f4e0ac6724d63977a43ff41b4025e",
+    "generated_at": "2026-08-08T09:40:35Z"
   },
   "sort_column": "word",
   "sort_ascending": true,

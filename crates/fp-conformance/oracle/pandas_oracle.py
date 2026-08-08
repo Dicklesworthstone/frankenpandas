@@ -108,15 +108,28 @@ def oracle_error_origin(exc: BaseException) -> str:
       * a bare `raise OracleError("... requires ... payload")` is this adapter's
         own argument validation and PANDAS WAS NEVER INVOKED. "The oracle also
         failed here" would be true but vacuous: it never asked the question.
+      * an OracleError wrapping ANOTHER OracleError is still the adapter. A
+        helper such as `pandas_dtype_from_constructor_spec` raises its own
+        refusal INSIDE an op handler's try-block, which then re-wraps it with
+        `from exc` — so a __cause__ alone would credit pandas for a rejection
+        pandas never saw (`unsupported constructor dtype 'boolean[pyarrow]'` is
+        the live example). Unwrap to the ROOT cause before deciding.
       * the stdin decode wrapper is neither; the request itself was malformed.
 
-    Only ERROR_ORIGIN_PANDAS supports an error-agreement attestation.
+    Only ERROR_ORIGIN_PANDAS supports an error-agreement attestation, so every
+    ambiguity here resolves AWAY from pandas.
     (br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr)
     """
-    cause = exc.__cause__
-    if cause is None:
+    root = exc.__cause__
+    while isinstance(root, OracleError) and root.__cause__ is not None:
+        root = root.__cause__
+
+    if root is None:
         return ERROR_ORIGIN_ADAPTER
-    if isinstance(cause, json.JSONDecodeError):
+    if isinstance(root, OracleError):
+        # Bottomed out on the adapter's own refusal.
+        return ERROR_ORIGIN_ADAPTER
+    if isinstance(root, json.JSONDecodeError):
         return ERROR_ORIGIN_REQUEST
     return ERROR_ORIGIN_PANDAS
 
@@ -3375,9 +3388,37 @@ def optional_float_payload(payload: dict[str, Any], key: str, op_name: str) -> f
 
 
 def pandas_dtype_from_constructor_spec(dtype_spec: str) -> str:
+    """Normalize a fixture's dtype spec to a pandas dtype string.
+
+    ⚠️ `bool` and `boolean` are DIFFERENT DTYPES and must not be collapsed
+    (br-frankenpandas-07d3m). `bool` is numpy and truthiness-casts; `boolean` is
+    the nullable BooleanDtype and refuses a non-0/1 int. Measured on 2.2.3:
+
+        pd.DataFrame([[1,0],[0,1]], dtype='bool')    -> [[True,False],[False,True]]
+        pd.DataFrame([[1,0],[0,1]], dtype='boolean') -> same values, dtype boolean
+        pd.DataFrame([[2]],         dtype='bool')    -> [[True]]
+        pd.DataFrame([[2]],         dtype='boolean') -> TypeError: Need to pass
+                                                        bool-like values
+
+    Collapsing them made the oracle answer a question the fixture did not ask,
+    and return True where the requested dtype raises — which is what made
+    fp_p2d_023_..._dtype_bool_invalid_int_error_strict look like FrankenPandas
+    being over-strict when FP and pandas actually agree.
+
+    ⚠️ KNOWN REMAINING CONFLATION, deliberately not changed here: the leading
+    `.lower()` also merges `Int64` (nullable) with `int64` (numpy), which pandas
+    distinguishes BY CASE. It cannot simply be made case-sensitive, because the
+    corpus contains `"  INT64  "` specifically to pin trimming + case-insensitive
+    normalization, and `INT64` is not a pandas dtype at all. The two intents are
+    in genuine conflict; recorded on br-frankenpandas-9ooer rather than resolved
+    by guess. No current fixture observes the difference (both spell their
+    expected values as `kind: int64`).
+    """
     normalized = dtype_spec.strip().lower()
-    if normalized in {"bool", "boolean"}:
+    if normalized == "bool":
         return "bool"
+    if normalized == "boolean":
+        return "boolean"
     if normalized in {"int64", "int", "i64"}:
         return "int64"
     if normalized in {"float64", "float", "f64"}:
