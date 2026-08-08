@@ -25,10 +25,22 @@ use std::{fs, path::PathBuf};
 
 /// Raw construction — producing a frame/column directly rather than by calling
 /// the operation under test.
-const RAW_BUILDERS: [&str; 3] = [
+///
+/// `Scalar::Null(NullKind::` is here because MINTING A MISSING VALUE is the
+/// library's job, not the harness's, and an arm that does it is deciding a
+/// semantic pandas has a specific answer for. It was added after the original
+/// three needles missed
+/// `execute_dataframe_constructor_list_like_fixture_operation`: that arm builds
+/// its column payloads inline and null-fills them, then hands the result to
+/// `collect_dict_constructor_payloads`, so it never touches `Column::from_values`
+/// or `DataFrame::new_with_column_order` and the scan walked straight past it —
+/// while it was blocking three rows on br-frankenpandas-nywa8.
+/// (br-frankenpandas-oxodo)
+const RAW_BUILDERS: [&str; 4] = [
     "DataFrame::new_with_column_order",
     "DataFrame::new(",
     "Column::from_values",
+    "Scalar::Null(NullKind::",
 ];
 
 /// Arms that legitimately construct, each with the reason.
@@ -37,7 +49,7 @@ const RAW_BUILDERS: [&str; 3] = [
 /// (`index` / `columns` / `column_order`) rather than a `DataFrame`, so the arm
 /// must reassemble one AFTER delegating. What is NOT fine is computing the
 /// answer here.
-const ALLOWED: [(&str, &str); 4] = [
+const ALLOWED: [(&str, &str); 5] = [
     (
         "execute_dataframe_merge_fixture_operation",
         "delegates to merge_dataframes_on_with_options; reassembles its parts into a DataFrame",
@@ -54,6 +66,19 @@ const ALLOWED: [(&str, &str); 4] = [
         "execute_dataframe_fixture_operation",
         "multi-op arm: builds INPUT columns for specific ops (e.g. a mask or a \
          replacement column) before calling the op under test",
+    ),
+    (
+        "execute_dataframe_constructor_list_like_fixture_operation",
+        "KNOWN SHADOW, tracked and blocking work — not an approved exception. It \
+         builds its column payloads inline and null-fills them instead of \
+         reaching DataFrame::from_matrix_rows, which holds three rows on \
+         br-frankenpandas-nywa8 behind it. Delegating is NOT mechanical: \
+         from_matrix_rows backs both this entry point and from_records, and \
+         pandas disagrees between them (DataFrame([[1,2],[3]]) pads and widens \
+         col1 to float64; from_records with columns=['a','b','c'] over 2-wide \
+         rows RAISES), so it needs a per-entry-point gap policy first. Listed \
+         here so the guard stays green and TRUTHFUL rather than being weakened; \
+         remove this entry when the arm delegates.",
     ),
 ];
 
