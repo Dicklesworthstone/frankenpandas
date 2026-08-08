@@ -41633,8 +41633,14 @@ fn str_title(s: &str) -> String {
                 result.push(lc);
             }
         } else {
-            for uc in c.to_uppercase() {
-                result.push(uc);
+            // TITLECASE the word-initial character, as `str_capitalize` does
+            // for position 0. MEASURED, live pandas 2.2.3:
+            //   'ßharp note'.title() == 'Ssharp Note'   word-initial ß -> "Ss"
+            //   'straße hbf'.title() == 'Straße Hbf'    interior ß unchanged
+            // char::to_uppercase yields "SS" and produced 'SSharp Note'.
+            // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+            for tc in c.titlecase() {
+                result.push(tc);
             }
         }
         previous_was_cased = is_cased;
@@ -92813,6 +92819,56 @@ mod tests {
                 "numeric_only=true must skip the object column"
             );
         }
+    }
+
+    /// `str.title()` titlecases each WORD's first character — same
+    /// titlecase-not-uppercase rule as `capitalize`, applied per word.
+    ///
+    /// MEASURED, live pandas 2.2.3 (and CPython):
+    ///
+    /// ```text
+    /// pd.Series(['straße hbf','ßharp note','élan VITAL']).str.title()
+    ///   -> ['Straße Hbf', 'Ssharp Note', 'Élan Vital']
+    /// ```
+    ///
+    /// `'ßharp note'.title() == 'Ssharp Note'` — the WORD-INITIAL ß titlecases
+    /// to `Ss`, while the interior ß in `'straße hbf'` stays lowercase and is
+    /// untouched. So the fix is exactly the one `capitalize` needed, applied at
+    /// each word boundary rather than only at position 0, and it must NOT
+    /// disturb interior characters. (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn str_title_titlecases_each_word_initial_not_uppercases_it() {
+        let subject = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Utf8("straße hbf".into()),
+                Scalar::Utf8("ßharp note".into()),
+                Scalar::Utf8("élan VITAL".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            subject.str().title().unwrap().values(),
+            &[
+                Scalar::Utf8("Straße Hbf".into()),
+                Scalar::Utf8("Ssharp Note".into()),
+                Scalar::Utf8("Élan Vital".into()),
+            ],
+            "a word-initial ß titlecases to 'Ss'; the interior ß in 'straße' must not change"
+        );
+
+        // The ASCII fast path must keep agreeing with the Unicode arm.
+        let ascii = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("hELLO wORLD".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            ascii.str().title().unwrap().values(),
+            &[Scalar::Utf8("Hello World".into())]
+        );
     }
 
     /// `str.capitalize()` TITLECASES the first character; it does not uppercase
