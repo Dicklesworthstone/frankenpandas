@@ -42265,6 +42265,44 @@ impl StringAccessor<'_> {
         Series::new(name, index, column)
     }
 
+    /// [`Self::apply_str`], except a missing input row emits
+    /// `Null(NullKind::NaN)` rather than preserving the input's null kind.
+    ///
+    /// br-frankenpandas-str-null-kind-identity-lufpu: pandas splits here by the
+    /// RESULT dtype, not by accessor family. Measured on live pandas 2.2.3 over
+    /// `pd.Series(["a-b-c", None, "x-y"], dtype=object)`:
+    ///
+    /// ```text
+    /// s.str.split("-").str.get(0)  -> object,  None preserved
+    /// s.str.join("+")              -> object,  None preserved
+    /// s.str.count("-")             -> float64, nan
+    /// s.str.split("-").str.len()   -> float64, nan
+    /// ```
+    ///
+    /// A string- or bool-valued result stays `object` and carries the original
+    /// missing object through, so those accessors use [`Self::apply_str`]. An
+    /// INT-valued result is promoted to `float64` the moment any row is
+    /// missing, and NaN is the only missing value `float64` can represent — so
+    /// the int-returning accessors structurally CANNOT preserve `None`, and
+    /// making them do so would be a different divergence, not a fix.
+    fn apply_str_missing_nan<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> Scalar,
+    {
+        let vals = self.series.column().values();
+        let out: Vec<Scalar> = vals
+            .iter()
+            .map(|v| match v {
+                Scalar::Utf8(s) => func(s),
+                _ if v.is_missing() => Scalar::Null(NullKind::NaN),
+                _ => v.clone(),
+            })
+            .collect();
+        let index = self.series.index().clone();
+        let column = Column::from_values(out)?;
+        Series::new(name, index, column)
+    }
+
     /// Apply an integer-returning string op, promoting the whole result column
     /// from Int64 to Float64 when the input contains ANY null.
     ///
@@ -43189,7 +43227,8 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.split(pat).str.len()`. Returns Int64 count.
     pub fn split_count(&self, pat: &str) -> Result<Series, FrameError> {
-        self.apply_str(
+        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
+        self.apply_str_missing_nan(
             |s| Scalar::Int64(s.split(pat).count() as i64),
             self.series.name(),
         )
@@ -43483,7 +43522,8 @@ impl StringAccessor<'_> {
         let re = Regex::new(pat).map_err(|e| {
             FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
         })?;
-        self.apply_str(
+        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
+        self.apply_str_missing_nan(
             |s| Scalar::Int64(re.find_iter(s).count() as i64),
             self.series.name(),
         )
@@ -43672,7 +43712,8 @@ impl StringAccessor<'_> {
         let re = Regex::new(pat).map_err(|e| {
             FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
         })?;
-        self.apply_str(
+        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
+        self.apply_str_missing_nan(
             |s| Scalar::Int64(re.find_iter(s).count() as i64),
             self.series.name(),
         )
@@ -43682,7 +43723,8 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.count(pat)` for literal patterns.
     pub fn count_literal(&self, pat: &str) -> Result<Series, FrameError> {
-        self.apply_str(
+        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
+        self.apply_str_missing_nan(
             |s| Scalar::Int64(s.matches(pat).count() as i64),
             self.series.name(),
         )
@@ -44309,7 +44351,8 @@ impl StringAccessor<'_> {
     /// an error for missing values (here, returns NaN for not-found).
     /// Per br-frankenpandas-02ae2b: char-based, not byte-based.
     pub fn index_of(&self, sub: &str) -> Result<Series, FrameError> {
-        self.apply_str(
+        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
+        self.apply_str_missing_nan(
             |s| match s.find(sub) {
                 Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
                 None => Scalar::Null(NullKind::NaN),
@@ -44324,7 +44367,8 @@ impl StringAccessor<'_> {
     /// an error for missing values (here, returns NaN for not-found).
     /// Per br-frankenpandas-02ae2b: char-based, not byte-based.
     pub fn rindex_of(&self, sub: &str) -> Result<Series, FrameError> {
-        self.apply_str(
+        // Int-valued result: missing stays NaN (see `apply_str_missing_nan`).
+        self.apply_str_missing_nan(
             |s| match s.rfind(sub) {
                 Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
                 None => Scalar::Null(NullKind::NaN),
@@ -106013,6 +106057,59 @@ mod tests {
                 "str.startswith() must preserve the {kind:?} null"
             );
         }
+    }
+
+    /// The boundary of the lufpu fix, and the case that makes it non-blanket.
+    ///
+    /// pandas splits by RESULT dtype, not accessor family. Measured on live
+    /// pandas 2.2.3 over `pd.Series(["a-b-c", None, "x-y"], dtype=object)`:
+    ///
+    /// ```text
+    /// s.str.split("-").str.get(0) -> object,  None preserved
+    /// s.str.join("+")             -> object,  None preserved
+    /// s.str.count("-")            -> float64, nan     <- NOT None
+    /// s.str.split("-").str.len()  -> float64, nan     <- NOT None
+    /// ```
+    ///
+    /// An int-valued result promotes to float64 as soon as a row is missing,
+    /// and NaN is the only missing value float64 can hold. So preserving the
+    /// kind here would be a NEW divergence, not the fix — these accessors must
+    /// keep emitting NaN even though their string-valued siblings do not.
+    #[test]
+    fn str_int_returning_ops_keep_nan_not_the_source_null_kind() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a-b-c".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("x-y".into()),
+            ],
+        )
+        .unwrap();
+
+        for (op, result) in [
+            ("count_literal", s.str().count_literal("-").unwrap()),
+            ("count", s.str().count("-").unwrap()),
+            ("count_matches", s.str().count_matches("-").unwrap()),
+            ("split_count", s.str().split_count("-").unwrap()),
+            ("index_of", s.str().index_of("b").unwrap()),
+            ("rindex_of", s.str().rindex_of("b").unwrap()),
+        ] {
+            assert_eq!(
+                result.values()[1],
+                Scalar::Null(NullKind::NaN),
+                "str.{op}() is int-valued: pandas promotes to float64, so the \
+                 missing row must stay NaN and must NOT become None"
+            );
+        }
+
+        // The string-valued sibling on the very same input still preserves it.
+        assert_eq!(
+            s.str().join("-", "+").unwrap().values()[1],
+            Scalar::Null(NullKind::Null),
+            "str.join() is string-valued: the None must survive"
+        );
     }
 
     #[test]
