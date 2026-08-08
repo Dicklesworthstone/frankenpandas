@@ -41583,9 +41583,19 @@ fn str_capitalize(s: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(c) => {
-            let upper: String = c.to_uppercase().collect();
-            let rest: String = chars.flat_map(|c| c.to_lowercase()).collect();
-            format!("{upper}{rest}")
+            // TITLECASE, not uppercase. Unicode gives some characters a
+            // Titlecase_Mapping distinct from their Uppercase_Mapping, and
+            // CPython's str.capitalize (which pandas defers to) uses the
+            // titlecase one. MEASURED:
+            //   'ßharp'.capitalize() == 'Ssharp'      titlecase of ß is "Ss"
+            //   'ß'.upper()          == 'SS'          uppercase is BOTH letters
+            // Rust's char::to_uppercase yields "SS", so this arm produced
+            // 'SSharp'. The `ucd` crate (already a dependency, and the source of
+            // the Codepoint trait imported above) carries the full mapping.
+            // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+            let title: String = c.titlecase().collect();
+            let rest: String = chars.flat_map(char::to_lowercase).collect();
+            format!("{title}{rest}")
         }
     }
 }
@@ -92803,6 +92813,66 @@ mod tests {
                 "numeric_only=true must skip the object column"
             );
         }
+    }
+
+    /// `str.capitalize()` TITLECASES the first character; it does not uppercase
+    /// it. The two differ for the expanding cases.
+    ///
+    /// MEASURED, live pandas 2.2.3 (and CPython, which pandas defers to):
+    ///
+    /// ```text
+    /// pd.Series(['straße','élan','ßharp','MAÑANA']).str.capitalize()
+    ///   -> ['Straße', 'Élan', 'Ssharp', 'Mañana']
+    ///
+    /// 'ßharp'.capitalize() == 'Ssharp'      titlecase of 'ß' is 'Ss'
+    /// 'ß'.upper()          == 'SS'          uppercase is BOTH letters
+    /// ```
+    ///
+    /// FrankenPandas used `char::to_uppercase` for the first character, which
+    /// Rust maps to `"SS"`, so it produced `'SSharp'`. Unicode gives `ß` a
+    /// Titlecase_Mapping of `Ss` distinct from its Uppercase_Mapping of `SS`,
+    /// and CPython's `capitalize` uses the titlecase one. The `ucd` crate
+    /// already in this crate's dependencies exposes the full mapping.
+    ///
+    /// `str.title()` is deliberately NOT changed here: it is a different
+    /// transform over word boundaries and no fixture flags it. The pinned
+    /// values above are only about the first character of the whole string.
+    /// (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn str_capitalize_titlecases_the_first_char_not_uppercases_it() {
+        let subject = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Utf8("straße".into()),
+                Scalar::Utf8("élan".into()),
+                Scalar::Utf8("ßharp".into()),
+                Scalar::Utf8("MAÑANA".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            subject.str().capitalize().unwrap().values(),
+            &[
+                Scalar::Utf8("Straße".into()),
+                Scalar::Utf8("Élan".into()),
+                Scalar::Utf8("Ssharp".into()),
+                Scalar::Utf8("Mañana".into()),
+            ],
+            "the leading ß titlecases to 'Ss'; uppercasing it would give 'SS'"
+        );
+
+        // The ASCII fast path must keep agreeing with the Unicode arm.
+        let ascii = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("hELLO wORLD".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            ascii.str().capitalize().unwrap().values(),
+            &[Scalar::Utf8("Hello world".into())]
+        );
     }
 
     /// `ewm(span=3).mean()` over a gap: the gap still DECAYS the prior weight,

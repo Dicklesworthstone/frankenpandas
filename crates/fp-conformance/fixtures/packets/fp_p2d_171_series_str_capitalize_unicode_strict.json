@@ -5,36 +5,84 @@
   "operation": "series_str_capitalize",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "91254e08fa66bca71d3bb11dadaf0864aa67a643e51bba0b6b3b9f1fa5cfa78b",
+    "generated_at": "2026-08-08T22:55:05Z"
   },
   "left": {
     "name": "text",
     "index": [
-      { "kind": "int64", "value": 3 },
-      { "kind": "int64", "value": 4 },
-      { "kind": "int64", "value": 4 },
-      { "kind": "int64", "value": 8 }
+      {
+        "kind": "int64",
+        "value": 3
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "int64",
+        "value": 8
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "straße" },
-      { "kind": "utf8", "value": "élan" },
-      { "kind": "utf8", "value": "ßharp" },
-      { "kind": "utf8", "value": "MAÑANA" }
+      {
+        "kind": "utf8",
+        "value": "stra\u00dfe"
+      },
+      {
+        "kind": "utf8",
+        "value": "\u00e9lan"
+      },
+      {
+        "kind": "utf8",
+        "value": "\u00dfharp"
+      },
+      {
+        "kind": "utf8",
+        "value": "MA\u00d1ANA"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 3 },
-      { "kind": "int64", "value": 4 },
-      { "kind": "int64", "value": 4 },
-      { "kind": "int64", "value": 8 }
+      {
+        "kind": "int64",
+        "value": 3
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "int64",
+        "value": 8
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "Straße" },
-      { "kind": "utf8", "value": "Élan" },
-      { "kind": "utf8", "value": "SSharp" },
-      { "kind": "utf8", "value": "Mañana" }
+      {
+        "kind": "utf8",
+        "value": "Stra\u00dfe"
+      },
+      {
+        "kind": "utf8",
+        "value": "\u00c9lan"
+      },
+      {
+        "kind": "utf8",
+        "value": "Ssharp"
+      },
+      {
+        "kind": "utf8",
+        "value": "Ma\u00f1ana"
+      }
     ]
   }
 }
