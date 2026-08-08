@@ -129048,6 +129048,150 @@ mod tests {
         }
     }
 
+    /// Every gap a WINDOW or DERIVED op leaves in a float64 column is a `NaN`,
+    /// never a generic `Null` — whether the op invented it (Rule 1) or carried
+    /// through a `None` the caller supplied into a float column (Rule 2).
+    ///
+    /// MEASURED, live pandas 2.2.3. A float64 column cannot hold anything but
+    /// `nan`, so a supplied `None` is already `nan` before the op runs:
+    ///
+    /// ```text
+    /// pd.Series([1.0, None, 3.0, 5.0, 7.0])          -> [1.0, nan, 3.0, 5.0, 7.0]
+    ///   .shift(1)                                    -> [nan, 1.0, nan, 3.0, 5.0]
+    ///   .rolling(3, min_periods=2).std()             -> [nan, nan, 1.41.., ...]
+    ///   .expanding(min_periods=1).var()              -> [nan, nan, 2.0, ...]
+    /// df.diff() / df.rank()                          -> gaps are nan
+    /// ```
+    ///
+    /// The inputs below are the exact payloads of the eight corpus fixtures
+    /// that pin these ops (fp_p2d_336/339/345/352/353/360/385/387), which pinned
+    /// the marker as `null`. This test EXECUTES FrankenPandas on them rather
+    /// than reasoning about the fill sites, because the conformance harness
+    /// cannot see the difference: `Scalar::semantic_eq` treats every null kind
+    /// as equal, so those fixtures pass either way (br-frankenpandas-gxe5s).
+    /// (br-frankenpandas-nywa8)
+    #[test]
+    fn window_and_derived_ops_leave_nan_gaps_in_a_float64_column() {
+        fn labels(n: i64) -> Vec<IndexLabel> {
+            (0..n).map(Into::into).collect()
+        }
+        fn series(vals: Vec<Scalar>) -> Series {
+            let n = vals.len() as i64;
+            Series::from_values("v", labels(n), vals).unwrap()
+        }
+        fn f(x: f64) -> Scalar {
+            Scalar::Float64(x)
+        }
+        let null = || Scalar::Null(NullKind::Null);
+
+        // fp_p2d_336 / 339 / 352 / 353 / 360 all use this shape or its sibling.
+        let a = || vec![f(1.0), null(), f(3.0), f(4.0), f(5.0)];
+        let b = || vec![f(1.0), null(), f(3.0), f(5.0), f(7.0)];
+
+        let mut cases: Vec<(&'static str, Vec<Scalar>)> = vec![
+            (
+                "rolling(3, 2).std",
+                series(a())
+                    .rolling(3, Some(2))
+                    .std()
+                    .unwrap()
+                    .values()
+                    .to_vec(),
+            ),
+            (
+                "rolling(3, 1).var",
+                series(a())
+                    .rolling(3, Some(1))
+                    .var()
+                    .unwrap()
+                    .values()
+                    .to_vec(),
+            ),
+            (
+                "expanding.std",
+                series(b()).expanding(None).std().unwrap().values().to_vec(),
+            ),
+            (
+                "expanding.var",
+                series(b()).expanding(None).var().unwrap().values().to_vec(),
+            ),
+            ("shift(1)", series(b()).shift(1).unwrap().values().to_vec()),
+        ];
+
+        // fp_p2d_345 dataframe_rolling_mean, 385 dataframe_diff, 387 dataframe_rank.
+        let roll_df = DataFrame::from_dict_with_index(
+            vec![
+                ("A", a()),
+                ("B", vec![f(10.0), f(20.0), null(), f(40.0), f(50.0)]),
+            ],
+            labels(5),
+        )
+        .unwrap();
+        let diff_df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![f(1.0), null(), f(3.0), f(5.0), f(8.0)]),
+                ("b", vec![null(), f(10.0), f(15.0), null(), f(25.0)]),
+            ],
+            labels(5),
+        )
+        .unwrap();
+        let rank_df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![f(3.0), null(), f(1.0), f(2.0)]),
+                ("b", vec![null(), f(5.0), f(10.0), null()]),
+            ],
+            labels(4),
+        )
+        .unwrap();
+        for (label, frame, out) in [
+            (
+                "df.rolling(3, 2).mean",
+                &roll_df,
+                roll_df.rolling(3, Some(2)).mean().unwrap(),
+            ),
+            ("df.diff(1)", &diff_df, diff_df.diff(1).unwrap()),
+            (
+                "df.rank",
+                &rank_df,
+                rank_df
+                    .rank_with_pct("average", true, "keep", false)
+                    .unwrap(),
+            ),
+        ] {
+            for name in frame.column_names() {
+                cases.push((label, out.column(name).unwrap().values().to_vec()));
+            }
+        }
+
+        for (op, out) in cases {
+            assert!(
+                out.iter().any(Scalar::is_missing),
+                "{op}: this input is supposed to leave a gap — the test proves nothing otherwise, \
+                 got {out:?}"
+            );
+            for (i, v) in out.iter().enumerate() {
+                if !v.is_missing() {
+                    continue;
+                }
+                // Two FrankenPandas encodings are both a float NaN and both
+                // correct: the `Null(NaN)` marker, and a PRESENT `Float64` whose
+                // value is NaN, which the typed float kernels produce directly
+                // (rolling var/std take that path). pandas has one
+                // representation — the NaN bit pattern in the float64 array —
+                // and the fixture format writes either as `na_n`. What must NOT
+                // appear is a generic `Null` or a `NaT`: those are markers a
+                // float64 column cannot hold.
+                let nan_flavoured = matches!(v, Scalar::Null(NullKind::NaN))
+                    || matches!(v, Scalar::Float64(x) if x.is_nan());
+                assert!(
+                    nan_flavoured,
+                    "{op} row {i}: a gap in a float64 column is a NaN in pandas, never a generic \
+                     Null or a NaT. Got {v:?}, full output {out:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn dt_is_quarter_start_end() {
         let s = Series::from_values(
