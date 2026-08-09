@@ -57766,10 +57766,48 @@ impl DataFrame {
             let values = (0..output_row_count)
                 .map(|row_offset| supplied(row_offset).cloned().unwrap_or_else(|| gap.clone()))
                 .collect::<Vec<_>>();
-            columns.insert(
-                column_name.clone(),
-                column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
-            );
+            // nywa8 RULE 2, which `column_with_invented_gaps` does not cover: a
+            // SUPPLIED missing value survives only if the dtype can store it.
+            // Rule 1 (that helper) is about a gap this constructor INVENTED;
+            // here the caller handed us the None as data, and numpy int64 still
+            // cannot hold it, so pandas widens the column and normalizes the
+            // marker. MEASURED, live pandas 2.2.3, on
+            // `pd.DataFrame(rows, columns=['a','b'])` reading column b:
+            //   [[1, None], [2, 3]]        -> float64 [nan, 3.0]   None -> nan
+            //   [[1.0, None], [2.0, 3.0]]  -> float64 [nan, 3.0]
+            //   [["x", None], ["y", "z"]]  -> object  [None, 'z']  None PRESERVED
+            //   [[True, None], [False, True]] -> object [None, True] PRESERVED
+            //   [[1, 4], [2, 3]]           -> int64   [4, 3]       the control:
+            //                                 no gap, no widening
+            // So the widening is NUMERIC-ONLY: object columns keep the caller's
+            // None, which is the same dtype-dependence br-frankenpandas-lufpu
+            // relies on. Gated on `invent_gaps` so the PRESERVE_NULL callers
+            // (from_records, whose padded frame is an FP-defined contract with
+            // no oracle behind it) are untouched.
+            let supplied_missing_in_numeric_column = invent_gaps
+                && values.iter().any(Scalar::is_missing)
+                && values
+                    .iter()
+                    .any(|value| matches!(value, Scalar::Int64(_) | Scalar::Float64(_)))
+                && values.iter().all(|value| {
+                    matches!(value, Scalar::Int64(_) | Scalar::Float64(_)) || value.is_missing()
+                });
+            let column = if supplied_missing_in_numeric_column {
+                let widened = values
+                    .into_iter()
+                    .map(|value| {
+                        if value.is_missing() {
+                            Scalar::Null(NullKind::NaN)
+                        } else {
+                            value
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Column::new(DType::Float64, widened)?
+            } else {
+                column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?
+            };
+            columns.insert(column_name.clone(), column);
         }
 
         Self::new_with_column_order(index, columns, output_order)
@@ -145855,6 +145893,78 @@ mod tests {
     /// object column: it was a NaT in a datetime column first. That is the
     /// distinction lufpu and this bead have to hold at once, and it is why the
     /// rule is "derive from the dtype the value LIVED IN", not "object preserves".
+    /// br-frankenpandas-nywa8 RULE 2, on the list-like constructor: a SUPPLIED
+    /// missing value survives only if the dtype can store it. numpy int64
+    /// cannot, so the column widens to float64 and the marker normalizes to
+    /// NaN — while an OBJECT column keeps the caller's `None`, which is the
+    /// dtype-dependence br-frankenpandas-lufpu relies on.
+    ///
+    /// Measured, live pandas 2.2.3, `pd.DataFrame(rows, columns=['a','b'])`,
+    /// reading column b:
+    /// ```text
+    ///   [[1, None], [2, 3]]           -> float64 [nan, 3.0]     None -> nan
+    ///   [[1.0, None], [2.0, 3.0]]     -> float64 [nan, 3.0]
+    ///   [["x", None], ["y", "z"]]     -> object  [None, 'z']    PRESERVED
+    ///   [[True, None], [False, True]] -> object  [None, True]   PRESERVED
+    ///   [[1, 4], [2, 3]]              -> int64   [4, 3]         no gap, no widening
+    /// ```
+    /// The last line is the control: the widening is caused by the gap, not by
+    /// the constructor. The two object rows are the control that it is
+    /// NUMERIC-only.
+    #[test]
+    fn list_like_constructor_widens_a_numeric_column_around_a_supplied_null() {
+        let build = |rows: Vec<Vec<Scalar>>| {
+            DataFrame::from_list_like(
+                rows,
+                Some(&["a".to_owned(), "b".to_owned()]),
+                Some(vec![0_i64.into(), 1_i64.into()]),
+            )
+            .unwrap()
+        };
+
+        let ints = build(vec![
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+            vec![Scalar::Int64(2), Scalar::Int64(3)],
+        ]);
+        // The gap-free column is untouched...
+        assert_eq!(
+            ints.columns["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        // ...and the column holding the supplied None widens, marker and all.
+        assert_eq!(ints.columns["b"].dtype(), DType::Float64);
+        assert_eq!(
+            ints.columns["b"].values(),
+            &[Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)]
+        );
+
+        // Control: no gap, no widening.
+        let dense = build(vec![
+            vec![Scalar::Int64(1), Scalar::Int64(4)],
+            vec![Scalar::Int64(2), Scalar::Int64(3)],
+        ]);
+        assert_eq!(dense.columns["b"].dtype(), DType::Int64);
+
+        // Control: an OBJECT column keeps the caller's None — pandas does, and
+        // collapsing it would undo lufpu's null-kind identity.
+        let text = build(vec![
+            vec![Scalar::Utf8("x".into()), Scalar::Null(NullKind::Null)],
+            vec![Scalar::Utf8("y".into()), Scalar::Utf8("z".into())],
+        ]);
+        assert_eq!(
+            text.columns["b"].values(),
+            &[Scalar::Null(NullKind::Null), Scalar::Utf8("z".into())]
+        );
+        let flags = build(vec![
+            vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)],
+            vec![Scalar::Bool(false), Scalar::Bool(true)],
+        ]);
+        assert_eq!(
+            flags.columns["b"].values(),
+            &[Scalar::Null(NullKind::Null), Scalar::Bool(true)]
+        );
+    }
+
     #[test]
     fn dt_accessors_derive_the_missing_marker_from_the_result_dtype() {
         let dates = Series::from_values(
