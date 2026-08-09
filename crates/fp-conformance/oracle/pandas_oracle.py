@@ -1793,8 +1793,25 @@ def op_dataframe_from_dict(pd, payload: dict[str, Any]) -> dict[str, Any]:
             selected[name] = data[name]
         data = selected
 
+    # `constructor_dtype` was never read here — the third member of the family
+    # resolve_constructor_dtype's docstring describes as fixed, after
+    # from_series (51fb88ead). MEASURED, live pandas 2.2.3:
+    #   pd.DataFrame({'a':[1,2],'b':[3,4]})                 -> int64
+    #   pd.DataFrame({'a':[1,2],'b':[3,4]}, dtype='float64') -> float64
+    # fp_p2d_023_dataframe_from_dict_dtype_float64_strict pins the float64 and
+    # is RIGHT; the oracle was returning int64.
+    #
+    # Column selection is already done above, so `columns` stays None here —
+    # passing it again would re-project an already-projected dict.
+    # (br-frankenpandas-fixture-divergence-triage-9s0c4)
     try:
-        frame = pd.DataFrame(data, index=index)
+        frame = _frame_with_optional_dtype(
+            pd,
+            data,
+            index,
+            None,
+            resolve_constructor_dtype(payload, "dataframe_from_dict"),
+        )
     except Exception as exc:
         raise OracleError(f"dataframe_from_dict failed: {exc}") from exc
 
