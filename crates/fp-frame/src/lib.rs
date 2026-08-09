@@ -57069,6 +57069,75 @@ impl DataFrame {
         })
     }
 
+    /// `pd.DataFrame(dict_of_series, columns=[...])` — SELECT the named columns
+    /// first, then align only those.
+    ///
+    /// The order matters and is observable in the ROW COUNT. MEASURED, live
+    /// pandas 2.2.3, with `a` indexed `[1,2]` and `b` indexed `[2,3]`:
+    ///
+    /// ```text
+    /// pd.DataFrame({'a': a, 'b': b})                index [1, 2, 3]   the union
+    /// pd.DataFrame({'a': a, 'b': b}, columns=['b']) index [2, 3]      b's index ALONE
+    ///     b -> [30, 40]      int64, no gap invented, so no widening
+    /// pd.DataFrame({'a': a, 'b': b}, columns=['a','z'])
+    ///                                              index [1, 2]      a's index alone
+    ///     a -> [10, 20]      int64
+    ///     z -> [nan, nan]    OBJECT, an all-missing column for the absent name
+    /// ```
+    ///
+    /// Building the full union and projecting afterwards gives three rows where
+    /// pandas gives two, and null-fills columns that pandas leaves intact. A
+    /// name absent from the data contributes NO index labels — it becomes an
+    /// all-missing column over whatever the present names span.
+    ///
+    /// `columns = None` is the plain union, i.e. [`Self::from_series`].
+    /// (br-frankenpandas-oxodo, br-frankenpandas-fixture-divergence-triage-9s0c4)
+    pub fn from_series_with_columns(
+        series_list: Vec<Series>,
+        columns: Option<&[String]>,
+    ) -> Result<Self, FrameError> {
+        let Some(columns) = columns else {
+            return Self::from_series(series_list);
+        };
+        let mut by_name: BTreeMap<String, Series> = BTreeMap::new();
+        for series in series_list {
+            // A repeated name keeps the LAST series, matching the dict the
+            // caller would have written (see op_dataframe_from_series).
+            by_name.insert(series.name().to_owned(), series);
+        }
+
+        let selected: Vec<Series> = columns
+            .iter()
+            .filter_map(|name| by_name.get(name).cloned())
+            .collect();
+        let absent: Vec<&String> = columns
+            .iter()
+            .filter(|name| !by_name.contains_key(*name))
+            .collect();
+
+        // The index spans only the SELECTED columns.
+        let aligned = Self::from_series(selected)?;
+        let row_count = aligned.index.len();
+
+        let mut cols = BTreeMap::new();
+        let mut order = Vec::with_capacity(columns.len());
+        for name in columns {
+            if let Some(column) = aligned.columns.get(name) {
+                cols.insert(name.clone(), column.clone());
+            } else if absent.contains(&name) {
+                // An absent name is an all-missing column. pandas builds it as
+                // OBJECT holding nan (measured above), which is the invented-gap
+                // marker, not a supplied None.
+                cols.insert(
+                    name.clone(),
+                    Column::new(DType::Utf8, vec![Scalar::Null(NullKind::NaN); row_count])?,
+                );
+            }
+            order.push(name.clone());
+        }
+        Self::new_with_column_order(aligned.index.clone(), cols, order)
+    }
+
     /// AG-05: Pre-compute N-way union index across all series first, then
     /// reindex each column exactly once. Eliminates O(N²) iterative
     /// realignment where N = number of series.
@@ -92886,6 +92955,80 @@ mod tests {
                 "numeric_only=true must skip the object column"
             );
         }
+    }
+
+    /// `pd.DataFrame(dict, columns=[...])` aligns only the SELECTED columns, so
+    /// the row count depends on which columns were asked for.
+    ///
+    /// MEASURED, live pandas 2.2.3, `a` indexed `[1,2]` and `b` indexed `[2,3]`:
+    ///
+    /// ```text
+    /// pd.DataFrame({'a': a, 'b': b})                 index [1, 2, 3]
+    /// pd.DataFrame({'a': a, 'b': b}, columns=['b'])  index [2, 3]
+    ///     b -> [30, 40]  int64      no gap invented, so no widening
+    /// pd.DataFrame({'a': a, 'b': b}, columns=['a','z'])
+    ///                                               index [1, 2]
+    ///     a -> [10, 20]  int64
+    ///     z -> [nan, nan] object    absent name contributes NO labels
+    /// ```
+    ///
+    /// FrankenPandas built the full union and projected afterwards, giving
+    /// THREE rows where pandas gives two and null-filling columns pandas leaves
+    /// intact. The row count is the observable, which is why this shows up in
+    /// the corpus as a SHAPE divergence rather than a value one.
+    /// (br-frankenpandas-oxodo, br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn dataframe_from_series_with_columns_aligns_only_the_selected_columns() {
+        let mk = |name: &str, labels: [i64; 2], values: [i64; 2]| {
+            Series::from_values(
+                name,
+                labels.iter().map(|l| IndexLabel::Int64(*l)).collect(),
+                values.iter().map(|v| Scalar::Int64(*v)).collect(),
+            )
+            .unwrap()
+        };
+        let inputs = || vec![mk("a", [1, 2], [10, 20]), mk("b", [2, 3], [30, 40])];
+
+        // Baseline: no selection is the plain union.
+        assert_eq!(
+            DataFrame::from_series_with_columns(inputs(), None)
+                .unwrap()
+                .index()
+                .len(),
+            3
+        );
+
+        // Selecting only 'b' narrows the index to b's own labels.
+        let only_b =
+            DataFrame::from_series_with_columns(inputs(), Some(&["b".to_owned()])).unwrap();
+        assert_eq!(
+            only_b.index().labels(),
+            &[IndexLabel::Int64(2), IndexLabel::Int64(3)],
+            "the index spans the SELECTED columns, not every dict entry"
+        );
+        assert_eq!(
+            only_b.column("b").unwrap().values(),
+            &[Scalar::Int64(30), Scalar::Int64(40)],
+            "no gap is invented, so b stays int64"
+        );
+
+        // An absent name contributes no labels and becomes all-missing.
+        let with_absent =
+            DataFrame::from_series_with_columns(inputs(), Some(&["a".to_owned(), "z".to_owned()]))
+                .unwrap();
+        assert_eq!(
+            with_absent.index().labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(2)]
+        );
+        assert_eq!(
+            with_absent.column("a").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+        assert_eq!(
+            with_absent.column("z").unwrap().values(),
+            &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+            "an absent name is an INVENTED all-missing column, so its gap is NaN"
+        );
     }
 
     /// `idxmin`/`idxmax` return the index LABEL with its own dtype, and they

@@ -15025,12 +15025,18 @@ fn execute_dataframe_constructor_dict_of_series_fixture_operation(
         series_list
             .push(build_series(&payload).map_err(|err| format!("series build failed: {err}"))?);
     }
-    let frame = DataFrame::from_series(series_list).map_err(|err| err.to_string())?;
-    let projected = materialize_dataframe_constructor_projection(
-        &frame,
-        fixture.index.clone(),
-        fixture.column_order.clone(),
-    )?;
+    // Delegate the COLUMN selection to FrankenPandas rather than building the
+    // full union here and projecting afterwards. pandas selects first and
+    // aligns only the selected columns, so the two orders differ in ROW COUNT:
+    // with a indexed [1,2] and b indexed [2,3], columns=['b'] gives index [2,3],
+    // not the union [1,2,3]. Building-then-projecting produced three rows and
+    // null-filled b. (br-frankenpandas-oxodo)
+    let frame = DataFrame::from_series_with_columns(series_list, fixture.column_order.as_deref())
+        .map_err(|err| err.to_string())?;
+    // The explicit index= is still applied afterwards; that IS a reindex of the
+    // constructed frame, which is what pandas does with it.
+    let projected =
+        materialize_dataframe_constructor_projection(&frame, fixture.index.clone(), None)?;
     apply_constructor_options(fixture, "dataframe_constructor_dict_of_series", projected)
 }
 

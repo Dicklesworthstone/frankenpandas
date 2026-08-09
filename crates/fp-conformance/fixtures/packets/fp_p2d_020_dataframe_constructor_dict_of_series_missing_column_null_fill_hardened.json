@@ -5,8 +5,8 @@
   "operation": "dataframe_constructor_dict_of_series",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "91254e08fa66bca71d3bb11dadaf0864aa67a643e51bba0b6b3b9f1fa5cfa78b",
+    "generated_at": "2026-08-09T00:13:29Z"
   },
   "left": {
     "name": "a",
@@ -67,41 +67,33 @@
       {
         "kind": "int64",
         "value": 2
-      },
-      {
-        "kind": "int64",
-        "value": 3
       }
     ],
     "columns": {
       "a": [
         {
-          "kind": "float64",
-          "value": 10.0
+          "kind": "int64",
+          "value": 10
         },
         {
-          "kind": "float64",
-          "value": 20.0
-        },
-        {
-          "kind": "null",
-          "value": "null"
+          "kind": "int64",
+          "value": 20
         }
       ],
       "z": [
         {
           "kind": "null",
-          "value": "null"
+          "value": "na_n"
         },
         {
           "kind": "null",
-          "value": "null"
-        },
-        {
-          "kind": "null",
-          "value": "null"
+          "value": "na_n"
         }
       ]
-    }
+    },
+    "column_order": [
+      "a",
+      "z"
+    ]
   }
 }
