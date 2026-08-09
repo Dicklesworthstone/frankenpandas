@@ -1861,8 +1861,35 @@ def op_dataframe_from_records(pd, payload: dict[str, Any]) -> dict[str, Any]:
             "dataframe_from_records requires records or matrix_rows payload"
         )
 
+    # `constructor_dtype` was never read here — the FOURTH and last member of
+    # the family resolve_constructor_dtype's docstring describes, after
+    # from_series (51fb88ead) and from_dict (03e6dd575).
+    #
+    # `DataFrame.from_records` HAS NO `dtype=` PARAMETER — its signature is
+    # (data, index, exclude, columns, coerce_float, nrows) — so the dtype cannot
+    # simply be forwarded. The constructor that accepts one is `pd.DataFrame`
+    # itself, and for the record shapes in this corpus it builds the same frame.
+    # MEASURED, live pandas 2.2.3:
+    #   pd.DataFrame([{'a':1.0,'b':True},{'a':2.0,'b':False}])
+    #     -> a float64 [1.0, 2.0], b bool [True, False]
+    #   pd.DataFrame([{'a':1.0,'b':True},{'a':2.0,'b':False}], dtype='int64')
+    #     -> a int64 [1, 2], b int64 [1, 0]        the bools cast to 1/0
+    #   pd.DataFrame([{'a':1}], dtype='string')    -> a ['1'], python str
+    # Both dtype fixtures pinned those answers and were RIGHT; the oracle was
+    # returning the undtyped frame.
+    #
+    # The from_records path is KEPT for the no-dtype case rather than replaced
+    # wholesale: from_records(index=...) can name a COLUMN to index by, which
+    # pd.DataFrame(index=...) reads as labels instead, and 11 of the 13
+    # from_records fixtures exercise that path. Only the two carrying a dtype
+    # (both with index=null and records, not matrix_rows) change route.
+    # (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    dtype = resolve_constructor_dtype(payload, "dataframe_from_records")
     try:
-        frame = pd.DataFrame.from_records(data, columns=column_order, index=index)
+        if dtype is None:
+            frame = pd.DataFrame.from_records(data, columns=column_order, index=index)
+        else:
+            frame = _frame_with_optional_dtype(pd, data, index, column_order, dtype)
     except Exception as exc:
         raise OracleError(f"dataframe_from_records failed: {exc}") from exc
 

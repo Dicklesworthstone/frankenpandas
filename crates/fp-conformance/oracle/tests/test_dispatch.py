@@ -6,6 +6,7 @@ contract stays green as handlers evolve.
 """
 from __future__ import annotations
 
+import inspect
 import sys
 from types import SimpleNamespace
 
@@ -670,3 +671,86 @@ def test_series_dt_date_encodes_nat_as_null_not_the_string_nat(oracle, pd):
     assert not any(
         v.get("value") == "NaT" for v in values
     ), f"a missing value was encoded as the string 'NaT': {values}"
+
+
+def test_from_records_honours_constructor_dtype(oracle, pd):
+    """dataframe_from_records never read constructor_dtype.
+
+    Fourth and last member of the family resolve_constructor_dtype's docstring
+    describes, after from_series (51fb88ead) and from_dict (03e6dd575).
+
+    DataFrame.from_records has NO dtype= parameter -- its signature is
+    (data, index, exclude, columns, coerce_float, nrows) -- so the oracle now
+    routes through pd.DataFrame(...) when, and only when, a dtype is asked for.
+
+    MEASURED, live pandas 2.2.3:
+        pd.DataFrame([{'a':1.0,'b':True},{'a':2.0,'b':False}])
+          -> a float64 [1.0, 2.0], b bool [True, False]
+        pd.DataFrame([{'a':1.0,'b':True},{'a':2.0,'b':False}], dtype='int64')
+          -> a int64 [1, 2], b int64 [1, 0]
+        pd.DataFrame([{'a':1}], dtype='string') -> a ['1'] as python str
+
+    fp_p2d_023_dataframe_from_records_dtype_int64_strict and
+    ..._dtype_utf8_coerced_hardened pin those and were RIGHT.
+    """
+    assert "dtype" not in inspect.signature(pd.DataFrame.from_records).parameters, (
+        "from_records grew a dtype= parameter; the pd.DataFrame() detour may no "
+        "longer be needed"
+    )
+
+    payload = {
+        "operation": "dataframe_from_records",
+        "records": [
+            {"a": {"kind": "float64", "value": 1.0}, "b": {"kind": "bool", "value": True}},
+            {"a": {"kind": "float64", "value": 2.0}, "b": {"kind": "bool", "value": False}},
+        ],
+    }
+
+    def cols(p):
+        return oracle.dispatch(pd, p)["expected_frame"]["columns"]
+
+    plain = cols(payload)
+    assert [v["kind"] for v in plain["a"]] == ["float64", "float64"], "no key -> pandas' inference"
+    assert [v["kind"] for v in plain["b"]] == ["bool", "bool"]
+
+    typed = cols({**payload, "constructor_dtype": "int64"})
+    assert [(v["kind"], v["value"]) for v in typed["a"]] == [("int64", 1), ("int64", 2)]
+    # The bool column casts to 1/0 under an int64 constructor dtype.
+    assert [(v["kind"], v["value"]) for v in typed["b"]] == [("int64", 1), ("int64", 0)]
+
+    # utf8 normalizes to pandas' "string" and renders the int as text.
+    coerced = cols({
+        "operation": "dataframe_from_records",
+        "records": [{"a": {"kind": "int64", "value": 1}}],
+        "constructor_dtype": "utf8",
+    })
+    assert coerced["a"] == [{"kind": "utf8", "value": "1"}]
+
+    with pytest.raises(oracle.OracleError, match="unsupported constructor dtype"):
+        oracle.dispatch(pd, {**payload, "constructor_dtype": "no-such-dtype"})
+
+
+def test_from_records_without_dtype_still_uses_from_records(oracle, pd):
+    """The no-dtype path must NOT be rerouted through pd.DataFrame().
+
+    from_records(index=...) can name a COLUMN to index by; pd.DataFrame(index=...)
+    reads the same argument as LABELS. 11 of the 13 from_records fixtures use the
+    no-dtype path, so the detour is gated on a dtype actually being requested.
+
+    MEASURED, live pandas 2.2.3:
+        pd.DataFrame.from_records([{'k':'x','v':1},{'k':'y','v':2}], index='k')
+          -> index Index(['x','y'], name='k'), one column v
+        pd.DataFrame([{'k':'x','v':1},{'k':'y','v':2}], index='k')
+          -> raises; 'k' is not a valid list of labels
+    """
+    payload = {
+        "operation": "dataframe_from_records",
+        "records": [
+            {"k": {"kind": "utf8", "value": "x"}, "v": {"kind": "int64", "value": 1}},
+            {"k": {"kind": "utf8", "value": "y"}, "v": {"kind": "int64", "value": 2}},
+        ],
+    }
+    frame = oracle.dispatch(pd, payload)["expected_frame"]
+    assert [v["value"] for v in frame["columns"]["k"]] == ["x", "y"]
+    assert [v["value"] for v in frame["columns"]["v"]] == [1, 2]
+    assert [v["value"] for v in frame["index"]] == [0, 1]

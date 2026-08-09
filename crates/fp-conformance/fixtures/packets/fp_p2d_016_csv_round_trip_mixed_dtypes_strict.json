@@ -5,8 +5,8 @@
   "operation": "csv_round_trip",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "de67a6bde53ca02029cea6568cb17673cbbc9eb74dbed0b3d403e6d7d95d3c06",
-    "generated_at": "2026-08-09T09:07:47Z"
+    "oracle_script_sha256": "9705c0dd4c1059611abf3477c184311df5bbf72c14a6348dc46c847169dbf7b2",
+    "generated_at": "2026-08-09T09:36:43Z"
   },
   "csv_input": "id,score,active,tag\n1,95.5,true,gold\n2,87.0,false,silver\n3,100,true,platinum\n",
   "expected_bool": true
