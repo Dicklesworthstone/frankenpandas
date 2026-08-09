@@ -5,36 +5,84 @@
   "operation": "series_dt_total_seconds",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "70c8c26b55a1b419beed28d198d022f1ca8eb25070814ab1156eb18562be38cc",
+    "generated_at": "2026-08-09T13:11:17Z"
   },
   "left": {
     "name": "timedeltas",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "1 days 00:00:00" },
-      { "kind": "null", "value": "null" },
-      { "kind": "utf8", "value": "0 days 01:30:00" },
-      { "kind": "utf8", "value": "0 days 00:00:30" }
+      {
+        "kind": "utf8",
+        "value": "1 days 00:00:00"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "utf8",
+        "value": "0 days 01:30:00"
+      },
+      {
+        "kind": "utf8",
+        "value": "0 days 00:00:30"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "float64", "value": 86400.0 },
-      { "kind": "null", "value": "null" },
-      { "kind": "float64", "value": 5400.0 },
-      { "kind": "float64", "value": 30.0 }
+      {
+        "kind": "float64",
+        "value": 86400.0
+      },
+      {
+        "kind": "null",
+        "value": "na_n"
+      },
+      {
+        "kind": "float64",
+        "value": 5400.0
+      },
+      {
+        "kind": "float64",
+        "value": 30.0
+      }
     ]
   }
 }

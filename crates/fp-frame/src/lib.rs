@@ -145834,6 +145834,81 @@ mod tests {
         assert_eq!(result.values()[1], Scalar::Float64(7200.0)); // 2 hours = 7200 seconds
     }
 
+    /// br-frankenpandas-nywa8, the `.dt` slice: the missing marker a `.dt`
+    /// accessor emits is derived from its RESULT dtype, not carried over from
+    /// the input. A `.dt` value lives in a datetime64/timedelta64 column where
+    /// the gap is NaT, and NaT renders into the result as that dtype's own gap.
+    ///
+    /// Measured, live pandas 2.2.3, every input GIVEN a python `None`:
+    /// ```text
+    ///   pd.to_datetime(pd.Series(['2024-03-15T14:30:00', None]), errors='coerce')
+    ///     .dt.strftime('%Y/%m/%d %H:%M')
+    ///       dtype object -> [('str', '2024/03/15 14:30'), ('float', nan)]
+    ///       the missing cell `is None` -> False, `isnan` -> True
+    ///   pd.to_timedelta(pd.Series(['1 days 00:00:00', None, '0 days 01:30:00']))
+    ///     .dt.total_seconds()
+    ///       dtype float64 -> [86400.0, nan, 5400.0]
+    /// ```
+    /// So even though `strftime`'s output column is OBJECT — the one dtype where
+    /// pandas otherwise preserves a supplied `None` (br-frankenpandas-lufpu) —
+    /// the gap here is a float `nan`, because it never existed as a `None` in an
+    /// object column: it was a NaT in a datetime column first. That is the
+    /// distinction lufpu and this bead have to hold at once, and it is why the
+    /// rule is "derive from the dtype the value LIVED IN", not "object preserves".
+    #[test]
+    fn dt_accessors_derive_the_missing_marker_from_the_result_dtype() {
+        let dates = Series::from_values(
+            "dates",
+            (0..3_i64).map(IndexLabel::from).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("2024-03-15T14:30:00".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("2024-07-04T00:00:00".into()),
+            ],
+        )
+        .unwrap();
+        let formatted = dates.dt().strftime("%Y/%m/%d %H:%M").unwrap();
+        assert_eq!(
+            formatted.values(),
+            &[
+                Scalar::Utf8("2024/03/15 14:30".into()),
+                // NOT Null(Null): the input's None never lived in an object
+                // column, it became NaT on the way into the datetime domain.
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("2024/07/04 00:00".into()),
+            ]
+        );
+
+        let durations = Series::from_values(
+            "durations",
+            (0..3_i64).map(IndexLabel::from).collect::<Vec<_>>(),
+            vec![
+                Scalar::Timedelta64(fp_types::Timedelta::NANOS_PER_DAY),
+                Scalar::Null(NullKind::Null),
+                Scalar::Timedelta64(fp_types::Timedelta::NANOS_PER_HOUR + 1_800_000_000_000),
+            ],
+        )
+        .unwrap();
+        // total_seconds returns float64, and FrankenPandas spells a missing
+        // float as a PRESENT-typed `Float64(NaN)` rather than `Null(NaN)` —
+        // `Scalar::is_missing` treats `Float64(v) if v.is_nan()` as missing
+        // (fp-types), so the two are the same value in FP's model. Assert the
+        // semantics, not the spelling: missing, and float-kinded either way.
+        let seconds = durations.dt().total_seconds().unwrap();
+        assert_eq!(seconds.values()[0], Scalar::Float64(86400.0));
+        assert_eq!(seconds.values()[2], Scalar::Float64(5400.0));
+        assert!(seconds.values()[1].is_missing(), "the gap must be missing");
+        assert!(
+            seconds.values()[1].is_nan(),
+            "and it must be the FLOAT gap, not a carried-over None: {:?}",
+            seconds.values()[1]
+        );
+        assert!(
+            !matches!(seconds.values()[1], Scalar::Null(NullKind::Null)),
+            "a supplied None must not survive into a float64 result"
+        );
+    }
+
     #[test]
     fn dt_total_seconds_rejects_datetime() {
         // Per br-frankenpandas-i9bah: pandas datetime has no total_seconds().
