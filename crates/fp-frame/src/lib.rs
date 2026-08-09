@@ -22149,27 +22149,24 @@ impl Series {
     /// parse all values as integers or floats. If all values can be parsed,
     /// returns a numeric Series; otherwise returns the original.
     pub fn convert_dtypes(&self) -> Result<Self, FrameError> {
-        if self.column.dtype() != DType::Utf8 {
-            return Ok(self.clone());
-        }
-        let mut converted = Vec::with_capacity(self.len());
-        for val in self.column.values() {
-            match val {
-                Scalar::Utf8(s) => {
-                    let trimmed = s.trim();
-                    if let Ok(i) = trimmed.parse::<i64>() {
-                        converted.push(Scalar::Int64(i));
-                    } else if let Ok(f) = trimmed.parse::<f64>() {
-                        converted.push(Scalar::Float64(f));
-                    } else {
-                        // Not all numeric — return original Series unchanged
-                        return Ok(self.clone());
-                    }
-                }
-                _ => converted.push(val.clone()),
-            }
-        }
-        self.with_values_preserving_index(converted)
+        // convert_dtypes RETYPES what is already numeric; it never RE-READS
+        // text. This used to walk a Utf8 column and parse::<i64>/parse::<f64>
+        // every cell, turning ['1.5','2.7','3.14'] into float64 — a conversion
+        // pandas offers under a different function name.
+        //
+        // MEASURED, live pandas 2.2.3:
+        //   pd.Series(['1','2','3'], dtype=object).convert_dtypes()
+        //     -> dtype string, values ['1','2','3']   STILL STRINGS
+        //   pd.Series([1,2,3], dtype=object).convert_dtypes()
+        //     -> dtype Int64,  values [1,2,3]         already numbers
+        //   pd.to_numeric(pd.Series(['1','2','3']))
+        //     -> int64 [1,2,3]                        THIS is the parser
+        //
+        // FrankenPandas has no separate `string` extension dtype distinct from
+        // Utf8, so the faithful result for a string column is the column
+        // itself; every other dtype was already returned unchanged.
+        // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+        Ok(self.clone())
     }
 
     /// Infer object dtypes to best-possible scalar dtypes.
