@@ -2604,21 +2604,27 @@ def op_series_fillna(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if fill_value_payload is None:
         raise OracleError("series_fillna requires fill_value payload")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
+    # Build through fixture_series_from_payload, NOT a bare pd.Series(values):
+    # an int column carrying a null infers numpy float64 from a plain list, so
+    # every surviving int came back as a float. Its ALIAS `fill_na` has done
+    # this since it was added; `series_fillna` is the same operation under the
+    # name the corpus actually uses and kept a private, unfixed copy.
+    # MEASURED, live pandas 2.2.3, on this fixture's own input
+    # [1, None, nan, 4, NaT] with fill 0:
+    #   pd.Series([1, None, nan, 4, None])              -> float64
+    #     .fillna(0)                                    -> [1.0, 0.0, 0.0, 4.0, 0.0]
+    #   pd.Series([1, None, nan, 4, None], dtype='Int64')-> Int64 [1, <NA>, <NA>, 4, <NA>]
+    #     .fillna(0)                                    -> Int64 [1, 0, 0, 4, 0]
+    # fp_p2d_046_series_fillna_numeric_basic_strict pins the int64 answer and
+    # was RIGHT. (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    series = fixture_series_from_payload(pd, left, "series_fillna")
     fill_value = scalar_from_json(fill_value_payload)
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
     try:
         out = series.fillna(fill_value)
     except Exception as exc:
         raise OracleError(f"series_fillna failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_dropna(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2626,17 +2632,23 @@ def op_series_dropna(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if left is None:
         raise OracleError("series_dropna requires left payload")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
-    out = series.dropna()
+    # Same private-copy defect as series_fillna above, and its alias `drop_na`
+    # already carries the fix WITH the reason in a comment. A bare
+    # pd.Series(values) infers float64 for an int column with a null, so dropna
+    # returned floats for the rows that survived.
+    # MEASURED, live pandas 2.2.3, on this fixture's own input
+    # [1, None, nan, 2, NaT, 3]:
+    #   pd.Series([1, None, nan, 2, None, 3]).dropna()               -> [1.0, 2.0, 3.0]
+    #   pd.Series([...], dtype='Int64').dropna()                     -> Int64 [1, 2, 3]
+    # fp_p2d_046_series_dropna_mixed_missing_strict pins the int64 answer and
+    # was RIGHT. (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    series = fixture_series_from_payload(pd, left, "series_dropna")
+    try:
+        out = series.dropna()
+    except Exception as exc:
+        raise OracleError(f"series_dropna failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_drop_na(pd, payload: dict[str, Any]) -> dict[str, Any]:

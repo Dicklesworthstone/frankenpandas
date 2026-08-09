@@ -5,8 +5,8 @@
   "operation": "series_str_isalnum",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "9705c0dd4c1059611abf3477c184311df5bbf72c14a6348dc46c847169dbf7b2",
-    "generated_at": "2026-08-09T09:38:42Z"
+    "oracle_script_sha256": "db4f5f28cac82f275ddccf48807e814843f8442dd725f45c88bb3cd076901eb8",
+    "generated_at": "2026-08-09T11:34:13Z"
   },
   "left": {
     "name": "text",
