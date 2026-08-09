@@ -1498,12 +1498,21 @@ def op_series_dt_date(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = dt_series.dt.date
     except Exception as exc:
         raise OracleError(f"series_dt_date failed: {exc}") from exc
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in series.index.tolist()],
-            "values": [{"kind": "utf8", "value": str(v)} if v is not None else {"kind": "null", "value": "null"} for v in out.tolist()],
-        }
-    }
+    # This used to hand-roll the encoder as
+    #     {"kind": "utf8", "value": str(v)} if v is not None else <null>
+    # and `.dt.date` puts NaT — not None — in a missing slot, so `NaT is not
+    # None` held and the oracle emitted the STRING "NaT" as a real value.
+    # MEASURED, live pandas 2.2.3, on the fixture's own input:
+    #     pd.to_datetime(pd.Series([...,None,...])).dt.date
+    #       -> dtype object, [date(2024,3,15), NaT, date(2024,7,4), ...]
+    #     type(NaT).__name__ == 'NaTType', pd.isna(NaT) is True
+    # The shared scalar_to_json already gets BOTH cases right — it renders a
+    # datetime.date through its str() fallback to the identical '2024-03-15'
+    # and routes NaT through scalar_is_pandas_extension_missing to
+    # {"kind":"null","value":"null"} — so the fix is to delete the private copy
+    # rather than repair it. Every sibling dt accessor here already calls
+    # series_to_expected; this handler was the only one that did not.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_dt_day_name(pd, payload: dict[str, Any]) -> dict[str, Any]:

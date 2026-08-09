@@ -5,8 +5,8 @@
   "operation": "series_str_rjust",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f8a63fbbee510e746e1ea4de4a65cc907568406e1c7554bde8c9fa057f0ee813",
-    "generated_at": "2026-08-09T06:54:44Z"
+    "oracle_script_sha256": "de67a6bde53ca02029cea6568cb17673cbbc9eb74dbed0b3d403e6d7d95d3c06",
+    "generated_at": "2026-08-09T09:09:40Z"
   },
   "str_width": 8,
   "left": {

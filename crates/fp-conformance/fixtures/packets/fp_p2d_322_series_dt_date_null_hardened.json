@@ -5,8 +5,8 @@
   "operation": "series_dt_date",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "de67a6bde53ca02029cea6568cb17673cbbc9eb74dbed0b3d403e6d7d95d3c06",
+    "generated_at": "2026-08-09T09:10:02Z"
   },
   "left": {
     "name": "datetimes",

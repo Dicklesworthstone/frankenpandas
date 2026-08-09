@@ -623,3 +623,50 @@ def test_series_split_df_honours_str_split_n(oracle, pd):
 
     with pytest.raises(oracle.OracleError, match="must be an integer"):
         oracle.dispatch(pd, {**payload, "str_split_n": "1"})
+
+
+def test_series_dt_date_encodes_nat_as_null_not_the_string_nat(oracle, pd):
+    """series_dt_date hand-rolled its encoder and leaked the string "NaT".
+
+    The private copy was
+        {"kind": "utf8", "value": str(v)} if v is not None else <null>
+    and `.dt.date` puts NaT — not None — in a missing slot, so the guard held
+    and a MISSING value was banked as a real utf8 value "NaT".
+
+    MEASURED, live pandas 2.2.3:
+        pd.to_datetime(pd.Series(['2024-03-15T23:59:59', None])).dt.date
+          -> dtype object, [datetime.date(2024, 3, 15), NaT]
+        type(pd.NaT).__name__ == 'NaTType'   pd.NaT is None -> False
+        pd.isna(pd.NaT) -> True
+
+    fp_p2d_322_series_dt_date_null_hardened pins null at that row and was RIGHT;
+    the oracle returned {"kind": "utf8", "value": "NaT"}.
+
+    Same shape as br-frankenpandas-oxodo: a private re-implementation of
+    something the shared helper already did correctly. Every sibling dt accessor
+    calls series_to_expected; this one did not.
+    """
+    payload = {
+        "operation": "series_dt_date",
+        "left": {
+            "name": "datetimes",
+            "index": [{"kind": "int64", "value": i} for i in range(4)],
+            "values": [
+                {"kind": "utf8", "value": "2024-03-15T23:59:59"},
+                {"kind": "null", "value": "null"},
+                {"kind": "utf8", "value": "2024-07-04T00:00:01"},
+                {"kind": "utf8", "value": "not a date at all"},
+            ],
+        },
+    }
+
+    values = oracle.dispatch(pd, payload)["expected_series"]["values"]
+    assert values[0] == {"kind": "utf8", "value": "2024-03-15"}
+    assert values[2] == {"kind": "utf8", "value": "2024-07-04"}
+    # The supplied null, and the unparseable string that errors="coerce" turns
+    # into NaT, must BOTH be missing — neither may be the text "NaT".
+    assert values[1] == {"kind": "null", "value": "null"}, "supplied null leaked"
+    assert values[3] == {"kind": "null", "value": "null"}, "coerced NaT leaked"
+    assert not any(
+        v.get("value") == "NaT" for v in values
+    ), f"a missing value was encoded as the string 'NaT': {values}"
