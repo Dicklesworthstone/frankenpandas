@@ -17310,26 +17310,80 @@ fn execute_dataframe_merge_fixture_operation(
         .map_err(|err| err.to_string())
 }
 
+/// Promote the row index into a merge-key column, DELEGATING the label-to-value
+/// conversion to `DataFrame::reset_index` rather than keeping a private copy.
+///
+/// br-frankenpandas-oxodo, scope item 1: this helper (and
+/// `collect_dict_constructor_payloads`) were the two the `execute_*` sweep could
+/// not see. It carried its OWN `index_label_to_scalar`, and that copy had drifted
+/// from fp-frame's: it rendered a `Datetime64` label as
+/// `Scalar::Utf8(format_datetime_ns(..))`, so merging on a DatetimeIndex joined
+/// on STRINGS where FrankenPandas itself joins on `Datetime64`.
+///
+/// MEASURED, live pandas 2.2.3:
+/// ```text
+///   idx = pd.to_datetime(['2024-01-15','2024-01-16'])
+///   pd.DataFrame({'v':[1,2]}, index=idx).reset_index().dtypes
+///     -> index datetime64[ns], v int64      NOT a string column
+///   df.merge(other, left_index=True, right_index=True, how='outer').index.dtype
+///     -> datetime64[ns]
+/// ```
+/// fp-frame's own `index_label_to_scalar` already says exactly this at its
+/// `Datetime64` arm; the harness copy contradicted it. This is the shape oxodo
+/// warns about — a harness that models an operation differently from FP — and it
+/// was latent only because no current fixture merges on a datetime index.
+///
+/// The conversion now comes from `reset_index(false)`, which is the FP API that
+/// owns it (including the mixed int/utf8 label rule the private copy lacked
+/// entirely). The promoted column is then attached under each requested key
+/// name, leaving the original index in place — the one thing `reset_index` does
+/// that this caller must NOT inherit.
 fn dataframe_with_index_as_columns(
     frame: &DataFrame,
     key_names: &[String],
 ) -> Result<DataFrame, String> {
+    let promoted = frame.reset_index(false).map_err(|err| err.to_string())?;
+    let existing: Vec<&String> = frame.column_names();
+    let added: Vec<&String> = promoted
+        .column_names()
+        .into_iter()
+        .filter(|name| !existing.contains(name))
+        .collect();
+    let [index_column_name] = added.as_slice() else {
+        return Err(format!(
+            "merge on index expects a single-level index; reset_index promoted {} columns",
+            added.len()
+        ));
+    };
+    let key_column = promoted
+        .column(index_column_name.as_str())
+        .ok_or_else(|| format!("reset_index did not produce column '{index_column_name}'"))?
+        .clone();
+
     let mut out = frame.clone();
     for key_name in key_names {
-        let index_values = frame
-            .index()
-            .labels()
-            .iter()
-            .map(index_label_to_scalar)
-            .collect::<Vec<_>>();
-        let key_column = Column::from_values(index_values).map_err(|err| err.to_string())?;
         out = out
-            .with_column(key_name.as_str(), key_column)
+            .with_column(key_name.as_str(), key_column.clone())
             .map_err(|err| err.to_string())?;
     }
     Ok(out)
 }
 
+/// Render a single index LABEL as the scalar the corpus compares against.
+///
+/// This is NOT the conversion `dataframe_with_index_as_columns` above needs, and
+/// the difference is the reason that helper stopped calling it. Here the answer
+/// is an `expected_scalar` for `idxmin`/`idxmax`, and the corpus's convention for
+/// a datetime scalar is the STRING form — `scalar_to_json` in the oracle
+/// deliberately does not intercept `Timestamp` and falls through to `str(value)`,
+/// with a comment saying so. There the answer is a merge KEY COLUMN, where
+/// pandas keeps `datetime64[ns]` (measured on `reset_index` and on an
+/// index-merge) and FrankenPandas must join on the typed value, not on text.
+///
+/// So this stays a serialization convention for a scalar comparison, while the
+/// column path delegates to `DataFrame::reset_index`. Keeping them separate is
+/// deliberate; collapsing either into the other reintroduces
+/// br-frankenpandas-oxodo's failure in one direction or the other.
 fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(value) => Scalar::Int64(*value),
