@@ -63448,11 +63448,19 @@ impl DataFrame {
                 .enumerate()
                 .map(|(i, (val, c))| match c {
                     Scalar::Bool(true) => val.clone(),
-                    Scalar::Bool(false) => aligned_other
+                    // A NON-TRUE condition — False OR MISSING — takes `other`.
+                    // The condition is a SELECTOR, and an undecidable selector
+                    // falls to the else-branch; pandas never propagates the
+                    // condition's own missingness into the result. MEASURED,
+                    // live pandas 2.2.3, df=[10.0,20.0], other=[100.0,200.0],
+                    // cond=[<NA>, False]:
+                    //   df.where(cond, other) -> [100.0, 200.0]
+                    // The old `_ => Null(NaN)` arm produced [nan, 200.0].
+                    // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+                    _ => aligned_other
                         .as_ref()
                         .and_then(|oc| oc.values().get(i).cloned())
                         .unwrap_or(Scalar::Null(NullKind::NaN)),
-                    _ => Scalar::Null(NullKind::NaN),
                 })
                 .collect();
 
@@ -63600,7 +63608,19 @@ impl DataFrame {
                         .and_then(|oc| oc.values().get(i).cloned())
                         .unwrap_or(Scalar::Null(NullKind::NaN)),
                     Scalar::Bool(false) => val.clone(),
-                    _ => Scalar::Null(NullKind::NaN),
+                    // A MISSING condition takes `other`, same as in
+                    // `where_cond_df`. mask is where(~cond), and inverting an
+                    // undecidable selector leaves it undecidable, so it still
+                    // falls to the else-branch rather than yielding NaN.
+                    // MEASURED, live pandas 2.2.3 with cond=[<NA>, False]:
+                    //   df.mask(cond, other) -> [100.0, 20.0]
+                    // Row 1 differs from `where`'s 200.0 precisely because mask
+                    // inverts — the null row does not.
+                    // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+                    _ => aligned_other
+                        .as_ref()
+                        .and_then(|oc| oc.values().get(i).cloned())
+                        .unwrap_or(Scalar::Null(NullKind::NaN)),
                 })
                 .collect();
 
@@ -92955,6 +92975,64 @@ mod tests {
                 "numeric_only=true must skip the object column"
             );
         }
+    }
+
+    /// A NULL in the condition of `where`/`mask` behaves as FALSE — it selects
+    /// the other operand rather than propagating a NaN.
+    ///
+    /// MEASURED, live pandas 2.2.3, with `df = [10.0, 20.0]`,
+    /// `other = [100.0, 200.0]` and a condition of `[<NA>, False]`:
+    ///
+    /// ```text
+    /// df.where(cond, other) -> [100.0, 200.0]   NA acts False -> take other
+    /// df.mask(cond, other)  -> [100.0,  20.0]   mask is where(~cond), so the
+    ///                                           NA row still takes other
+    /// ```
+    ///
+    /// FrankenPandas produced `[nan, 200.0]` and `[nan, 20.0]`: it propagated
+    /// the condition's missingness into the RESULT, which pandas never does —
+    /// the condition is a selector, and an undecidable selector falls to the
+    /// else-branch. Note the two disagree on row 1 (200.0 vs 20.0) exactly
+    /// because `mask` inverts, which is the control that this is about the
+    /// selector and not about the data.
+    /// (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn where_and_mask_treat_a_null_condition_as_false() {
+        let frame = |name: &str, values: [f64; 2]| {
+            DataFrame::from_dict_with_index(
+                vec![(name, values.iter().map(|v| Scalar::Float64(*v)).collect())],
+                (0..2_i64).map(IndexLabel::Int64).collect(),
+            )
+            .unwrap()
+        };
+        let subject = frame("a", [10.0, 20.0]);
+        let other = frame("a", [100.0, 200.0]);
+        let cond = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Null(NullKind::Null), Scalar::Bool(false)])],
+            (0..2_i64).map(IndexLabel::Int64).collect(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            subject
+                .where_cond_df(&cond, &other)
+                .unwrap()
+                .column("a")
+                .unwrap()
+                .values(),
+            &[Scalar::Float64(100.0), Scalar::Float64(200.0)],
+            "a null condition is FALSE, so where takes `other` at that row"
+        );
+        assert_eq!(
+            subject
+                .mask_df_other(&cond, &other)
+                .unwrap()
+                .column("a")
+                .unwrap()
+                .values(),
+            &[Scalar::Float64(100.0), Scalar::Float64(20.0)],
+            "mask inverts, so the null row still takes `other` but row 1 keeps 20.0"
+        );
     }
 
     /// `pct_change()` FORWARD-FILLS before differencing — that is pandas 2.2.3's
