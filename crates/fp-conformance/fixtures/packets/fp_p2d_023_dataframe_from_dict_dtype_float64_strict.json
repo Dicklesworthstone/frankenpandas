@@ -5,8 +5,8 @@
   "operation": "dataframe_from_dict",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "c3a7e374ae8ec4e6086d48d2290c958e45d37d357782aa3374c5bbbaeae8544b",
+    "generated_at": "2026-08-09T05:04:31Z"
   },
   "constructor_dtype": "float64",
   "dict_columns": {

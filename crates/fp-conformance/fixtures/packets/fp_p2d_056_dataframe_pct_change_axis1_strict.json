@@ -5,8 +5,8 @@
   "operation": "dataframe_pct_change",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "91254e08fa66bca71d3bb11dadaf0864aa67a643e51bba0b6b3b9f1fa5cfa78b",
-    "generated_at": "2026-08-08T22:28:34Z"
+    "oracle_script_sha256": "c3a7e374ae8ec4e6086d48d2290c958e45d37d357782aa3374c5bbbaeae8544b",
+    "generated_at": "2026-08-09T05:04:50Z"
   },
   "diff_periods": 1,
   "diff_axis": 1,
