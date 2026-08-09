@@ -5,8 +5,8 @@
   "operation": "series_bool",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "c3a7e374ae8ec4e6086d48d2290c958e45d37d357782aa3374c5bbbaeae8544b",
-    "generated_at": "2026-08-09T05:04:56Z"
+    "oracle_script_sha256": "f8a63fbbee510e746e1ea4de4a65cc907568406e1c7554bde8c9fa057f0ee813",
+    "generated_at": "2026-08-09T06:53:44Z"
   },
   "left": {
     "name": "val",

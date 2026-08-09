@@ -5,42 +5,90 @@
   "operation": "series_split_df",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "f8a63fbbee510e746e1ea4de4a65cc907568406e1c7554bde8c9fa057f0ee813",
+    "generated_at": "2026-08-09T06:55:23Z"
   },
   "str_split_pat": "_",
   "str_split_n": 1,
   "left": {
     "name": "parts",
     "index": [
-      { "kind": "utf8", "value": "row0" },
-      { "kind": "utf8", "value": "row1" },
-      { "kind": "utf8", "value": "row2" }
+      {
+        "kind": "utf8",
+        "value": "row0"
+      },
+      {
+        "kind": "utf8",
+        "value": "row1"
+      },
+      {
+        "kind": "utf8",
+        "value": "row2"
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "a_b_c" },
-      { "kind": "utf8", "value": "d_e" },
-      { "kind": "utf8", "value": "f" }
+      {
+        "kind": "utf8",
+        "value": "a_b_c"
+      },
+      {
+        "kind": "utf8",
+        "value": "d_e"
+      },
+      {
+        "kind": "utf8",
+        "value": "f"
+      }
     ]
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "row0" },
-      { "kind": "utf8", "value": "row1" },
-      { "kind": "utf8", "value": "row2" }
+      {
+        "kind": "utf8",
+        "value": "row0"
+      },
+      {
+        "kind": "utf8",
+        "value": "row1"
+      },
+      {
+        "kind": "utf8",
+        "value": "row2"
+      }
     ],
-    "column_order": ["0", "1"],
     "columns": {
       "0": [
-        { "kind": "utf8", "value": "a" },
-        { "kind": "utf8", "value": "d" },
-        { "kind": "utf8", "value": "f" }
+        {
+          "kind": "utf8",
+          "value": "a"
+        },
+        {
+          "kind": "utf8",
+          "value": "d"
+        },
+        {
+          "kind": "utf8",
+          "value": "f"
+        }
       ],
       "1": [
-        { "kind": "utf8", "value": "b_c" },
-        { "kind": "utf8", "value": "e" },
-        { "kind": "null", "value": "na_n" }
+        {
+          "kind": "utf8",
+          "value": "b_c"
+        },
+        {
+          "kind": "utf8",
+          "value": "e"
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        }
       ]
-    }
+    },
+    "column_order": [
+      "0",
+      "1"
+    ]
   }
 }

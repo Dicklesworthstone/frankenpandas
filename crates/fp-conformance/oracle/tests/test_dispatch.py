@@ -576,3 +576,50 @@ def test_from_dict_honours_constructor_dtype(oracle, pd):
         "a": "float64",
         "b": "float64",
     }
+
+
+def test_series_split_df_honours_str_split_n(oracle, pd):
+    """series_split_df never read str_split_n.
+
+    Same dropped-argument family as groupby ngroup's sort_ascending
+    (905ba264e) and from_dict's constructor_dtype (03e6dd575): the fixture
+    stores the option, the Rust harness passes it
+    (Series::str().split_expand_n), and the oracle silently answered a
+    DIFFERENT question -- an unlimited split.
+
+    MEASURED, live pandas 2.2.3, pd.Series(['a_b_c','d_e','f']):
+        .str.split('_', n=1,  expand=True) -> 2 columns  [['a','b_c'],['d','e'],['f',None]]
+        .str.split('_', n=0,  expand=True) -> 3 columns  (n <= 0 is UNLIMITED)
+        .str.split('_', n=-1, expand=True) -> 3 columns  (pandas' own default)
+        .str.split('_',       expand=True) -> 3 columns
+
+    fp_p2d_431_series_str_split_expand_n_padding_strict pins n=1 and the two
+    columns, and was RIGHT; the oracle returned three.
+    """
+    payload = {
+        "operation": "series_split_df",
+        "str_split_pat": "_",
+        "left": {
+            "name": "parts",
+            "index": [{"kind": "int64", "value": i} for i in range(3)],
+            "values": [
+                {"kind": "utf8", "value": "a_b_c"},
+                {"kind": "utf8", "value": "d_e"},
+                {"kind": "utf8", "value": "f"},
+            ],
+        },
+    }
+
+    def order(p):
+        return oracle.dispatch(pd, p)["expected_frame"]["column_order"]
+
+    assert order(payload) == ["0", "1", "2"], "no key -> pandas' default (unlimited)"
+    assert order({**payload, "str_split_n": 1}) == ["0", "1"], (
+        "str_split_n=1 must reach pandas as str.split(n=1)"
+    )
+    # Non-positive n is unlimited, so it must agree with the absent key.
+    assert order({**payload, "str_split_n": 0}) == ["0", "1", "2"]
+    assert order({**payload, "str_split_n": -1}) == ["0", "1", "2"]
+
+    with pytest.raises(oracle.OracleError, match="must be an integer"):
+        oracle.dispatch(pd, {**payload, "str_split_n": "1"})

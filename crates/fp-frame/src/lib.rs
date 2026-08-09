@@ -43250,15 +43250,30 @@ impl StringAccessor<'_> {
         self.split_df_n(pat, None)
     }
 
+    /// Translate pandas' `n` (max number of SPLITS) into a Rust `splitn` part
+    /// limit (`n + 1` parts), or `None` for an unlimited split.
+    ///
+    /// `n = 0` is UNLIMITED, not "zero splits". pandas' own default is `n=-1`
+    /// and every non-positive `n` takes the same branch. Measured, pandas
+    /// 2.2.3, `pd.Series(['a_b_c','d_e','f'])`:
+    /// ```text
+    ///   .str.split('_', n=1,  expand=True).shape -> (3, 2)
+    ///   .str.split('_', n=0,  expand=True).shape -> (3, 3)   same as default
+    ///   .str.split('_', n=-1, expand=True).shape -> (3, 3)   same as default
+    ///   pd.Series(['abc']).str.split('', n=0, expand=True).shape -> (1, 5)
+    /// ```
+    /// FrankenPandas used to read `n=0` as "keep the whole string in column 0",
+    /// which is the one value of `n` where capping and not capping disagree.
     fn checked_split_part_limit(n: Option<usize>, op: &str) -> Result<Option<usize>, FrameError> {
-        n.map(|limit| {
-            limit.checked_add(1).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "{op}: n is too large to compute split part count"
-                ))
+        n.filter(|limit| *limit > 0)
+            .map(|limit| {
+                limit.checked_add(1).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "{op}: n is too large to compute split part count"
+                    ))
+                })
             })
-        })
-        .transpose()
+            .transpose()
     }
 
     /// Split each string with a maximum number of splits, returning a DataFrame.
@@ -43297,7 +43312,10 @@ impl StringAccessor<'_> {
                 if i < parts.len() {
                     out_cols_data[i].push(parts[i].clone());
                 } else {
-                    out_cols_data[i].push(Scalar::Null(NullKind::NaN));
+                    // pandas pads a short row with Python `None`, NOT `nan` —
+                    // it builds a list per row and widens with None before
+                    // constructing the object frame. See `split_pad_kind`.
+                    out_cols_data[i].push(Scalar::Null(NullKind::Null));
                 }
             }
         }
@@ -43360,7 +43378,9 @@ impl StringAccessor<'_> {
                 if i < parts.len() {
                     out_cols_data[i].push(parts[i].clone());
                 } else {
-                    out_cols_data[i].push(Scalar::Null(NullKind::NaN));
+                    // Same `None` pad as `split_df_n`, and pandas pads rsplit
+                    // on the RIGHT too. See `split_pad_kind`.
+                    out_cols_data[i].push(Scalar::Null(NullKind::Null));
                 }
             }
         }
@@ -109711,13 +109731,15 @@ mod tests {
             result.column("0").unwrap().values(),
             &[Scalar::Utf8("a".into()), Scalar::Utf8("solo".into())]
         );
+        // The pad is `None`, not `nan` — see `split_pad_kind` for the
+        // measurement against live pandas 2.2.3.
         assert_eq!(
             result.column("1").unwrap().values(),
-            &[Scalar::Utf8("b".into()), Scalar::Null(NullKind::NaN)]
+            &[Scalar::Utf8("b".into()), Scalar::Null(NullKind::Null)]
         );
         assert_eq!(
             result.column("2").unwrap().values(),
-            &[Scalar::Utf8("c".into()), Scalar::Null(NullKind::NaN)]
+            &[Scalar::Utf8("c".into()), Scalar::Null(NullKind::Null)]
         );
     }
 
@@ -109756,16 +109778,146 @@ mod tests {
         );
     }
 
+    /// CORRECTED against live pandas 2.2.3. This test previously asserted that
+    /// `n=0` meant "zero splits → the whole string in column 0", which is
+    /// FrankenPandas' own former output and not pandas'. Measured:
+    /// ```text
+    ///   pd.Series(['a-b-c']).str.split('-', n=0,  expand=True).shape -> (1, 3)
+    ///   pd.Series(['a-b-c']).str.split('-', n=-1, expand=True).shape -> (1, 3)
+    ///   pd.Series(['a-b-c']).str.split('-',       expand=True).shape -> (1, 3)
+    /// ```
+    /// `n=0` is UNLIMITED. pandas' default is `n=-1` and every non-positive `n`
+    /// takes the same branch, so `Some(0)` must agree with `None`.
     #[test]
-    fn str_split_df_n_zero_yields_single_column() {
+    fn str_split_df_n_zero_is_unlimited_like_pandas() {
         let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a-b-c".into())])
             .unwrap();
-        // n=0 means zero splits → entire string in column 0.
-        let result = s.str().split_df_n("-", Some(0)).unwrap();
-        assert_eq!(result.column_names(), vec!["0"]);
+        let zero = s.str().split_df_n("-", Some(0)).unwrap();
+        let unlimited = s.str().split_df_n("-", None).unwrap();
+
+        assert_eq!(zero.column_names(), vec!["0", "1", "2"]);
+        assert_eq!(zero.column_names(), unlimited.column_names());
+        for name in unlimited.column_names() {
+            assert_eq!(
+                zero.column(name).unwrap().values(),
+                unlimited.column(name).unwrap().values(),
+                "column {name} disagrees between n=0 and n=None"
+            );
+        }
+
+        // The same rule on rsplit, and on the empty separator, where the
+        // cap/no-cap answers differ most visibly:
+        //   pd.Series(['abc']).str.split('', n=0, expand=True).shape -> (1, 5)
         assert_eq!(
-            result.column("0").unwrap().values(),
-            &[Scalar::Utf8("a-b-c".into())]
+            s.str().rsplit_df("-", Some(0)).unwrap().column_names(),
+            vec!["0", "1", "2"]
+        );
+        let empty_sep =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("abc".into())]).unwrap();
+        assert_eq!(
+            empty_sep
+                .str()
+                .split_df_n("", Some(0))
+                .unwrap()
+                .column_names()
+                .len(),
+            5,
+            "empty separator with n=0 must split at every boundary"
+        );
+
+        // Control that the cap still applies for a POSITIVE n — the fix must
+        // not turn every limit into unlimited.
+        assert_eq!(
+            s.str().split_df_n("-", Some(1)).unwrap().column_names(),
+            vec!["0", "1"]
+        );
+    }
+
+    /// The pad a short row receives from `str.split`/`str.rsplit(expand=True)`
+    /// is Python `None`, NOT `nan`. Measured, live pandas 2.2.3,
+    /// `pd.Series(['a_b_c','d_e','f'])`:
+    /// ```text
+    ///   .str.split('_', n=1, expand=True)[1] -> ['b_c', 'e', None]
+    ///     [type(v).__name__ ...]             -> ['str', 'str', 'NoneType']
+    ///   .str.split('_', expand=True)[2]      -> ['c', None, None]
+    ///   pd.Series(['a_b', None, 'c']).str.split('_', expand=True)
+    ///     row 1 (the null INPUT)             -> [None, None]
+    /// ```
+    /// This is NOT the general "an introduced miss is nan" rule that governs
+    /// reindex/merge/concat — `str.split` builds one Python list per row and
+    /// pads those lists with `None` before the object frame is constructed, so
+    /// the marker is `None` for both the ragged pad and the null input row.
+    /// The negative controls that bound the change: `str.partition`/
+    /// `str.rpartition` pad with the EMPTY STRING and produce no null at all,
+    /// and `str.extract` uses `nan` for a group that did not participate:
+    /// ```text
+    ///   pd.Series(['a_b','c']).str.partition('_')  -> [['a','_','b'], ['c','','']]
+    ///   pd.Series(['a1','bb']).str.extract(r'([a-z])(\d)?')[1] -> ['1', nan]
+    /// ```
+    #[test]
+    fn split_pad_kind() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a_b_c".into()),
+                Scalar::Utf8("d_e".into()),
+                Scalar::Utf8("f".into()),
+            ],
+        )
+        .unwrap();
+
+        let capped = s.str().split_df_n("_", Some(1)).unwrap();
+        assert_eq!(capped.column_names(), vec!["0", "1"]);
+        assert_eq!(
+            capped.column("1").unwrap().values(),
+            &[
+                Scalar::Utf8("b_c".into()),
+                Scalar::Utf8("e".into()),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
+
+        // rsplit pads on the right as well:
+        //   .str.rsplit('_', n=1, expand=True) -> [['a_b','c'], ['d','e'], ['f', None]]
+        let right = s.str().rsplit_df("_", Some(1)).unwrap();
+        assert_eq!(
+            right.column("1").unwrap().values(),
+            &[
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("e".into()),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
+
+        // A null INPUT row takes the same marker in every output column.
+        let with_null = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a_b".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        let expanded = with_null.str().split_df_n("_", None).unwrap();
+        assert_eq!(expanded.column_names(), vec!["0", "1"]);
+        assert_eq!(
+            expanded.column("0").unwrap().values(),
+            &[
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("c".into()),
+            ]
+        );
+        assert_eq!(
+            expanded.column("1").unwrap().values(),
+            &[
+                Scalar::Utf8("b".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+            ]
         );
     }
 
@@ -109786,7 +109938,7 @@ mod tests {
         );
         assert_eq!(
             result.column("1").unwrap().values(),
-            &[Scalar::Utf8("c".into()), Scalar::Null(NullKind::NaN)]
+            &[Scalar::Utf8("c".into()), Scalar::Null(NullKind::Null)]
         );
     }
 
@@ -144546,7 +144698,8 @@ mod tests {
             &[
                 Scalar::Utf8("b_c".to_string()),
                 Scalar::Utf8("e".to_string()),
-                Scalar::Null(NullKind::NaN)
+                // `None`, not `nan` — see `split_pad_kind`.
+                Scalar::Null(NullKind::Null)
             ]
         );
     }

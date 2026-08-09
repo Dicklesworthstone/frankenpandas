@@ -1,6 +1,6 @@
-         0  1    2    3
-0        a  b    c  NaN
-1        x  y  NaN  NaN
-2        p  q    r    s
+         0  1     2     3
+0        a  b     c  None
+1        x  y  None  None
+2        p  q     r     s
 
 [3 rows x 4 columns]

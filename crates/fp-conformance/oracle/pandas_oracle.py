@@ -3269,10 +3269,22 @@ def op_series_split_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
     str_split_pat = payload.get("str_split_pat")
     if not isinstance(str_split_pat, str):
         raise OracleError("series_split_df requires str_split_pat")
+    # `str_split_n` is the maxsplit cap. It was previously never read, so an
+    # n-limited fixture was answered with an UNLIMITED split and reported a
+    # column-count divergence that the fixture had pinned correctly. pandas'
+    # own default is n=-1, and every n <= 0 means unlimited, so an absent key
+    # maps to -1. Measured, pandas 2.2.3, pd.Series(['a_b_c','d_e','f']):
+    #   .str.split('_', n=1,  expand=True) -> 2 columns
+    #   .str.split('_', n=-1, expand=True) -> 3 columns, same as the default
+    str_split_n = payload.get("str_split_n")
+    if str_split_n is None:
+        str_split_n = -1
+    elif not isinstance(str_split_n, int) or isinstance(str_split_n, bool):
+        raise OracleError("series_split_df str_split_n must be an integer")
 
     series = fixture_series_from_payload(pd, left, "series_split_df")
     try:
-        out = series.str.split(str_split_pat, expand=True)
+        out = series.str.split(str_split_pat, n=str_split_n, expand=True)
     except Exception as exc:
         raise OracleError(f"series_split_df failed: {exc}") from exc
 
