@@ -5,67 +5,162 @@
   "operation": "dataframe_merge_asof",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "9705c0dd4c1059611abf3477c184311df5bbf72c14a6348dc46c847169dbf7b2",
+    "generated_at": "2026-08-09T11:23:01Z"
   },
   "merge_on": "time",
   "direction": "forward",
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "columns": {
       "time": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 5 },
-        { "kind": "int64", "value": 10 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 5
+        },
+        {
+          "kind": "int64",
+          "value": 10
+        }
       ],
       "left_val": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 50 },
-        { "kind": "int64", "value": 100 }
+        {
+          "kind": "int64",
+          "value": 10
+        },
+        {
+          "kind": "int64",
+          "value": 50
+        },
+        {
+          "kind": "int64",
+          "value": 100
+        }
       ]
     },
-    "column_order": ["time", "left_val"]
+    "column_order": [
+      "time",
+      "left_val"
+    ]
   },
   "frame_right": {
-    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
     "columns": {
       "time": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 6 }
+        {
+          "kind": "int64",
+          "value": 2
+        },
+        {
+          "kind": "int64",
+          "value": 6
+        }
       ],
       "right_val": [
-        { "kind": "int64", "value": 20 },
-        { "kind": "int64", "value": 60 }
+        {
+          "kind": "int64",
+          "value": 20
+        },
+        {
+          "kind": "int64",
+          "value": 60
+        }
       ]
     },
-    "column_order": ["time", "right_val"]
+    "column_order": [
+      "time",
+      "right_val"
+    ]
   },
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "columns": {
       "time": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 5 },
-        { "kind": "int64", "value": 10 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 5
+        },
+        {
+          "kind": "int64",
+          "value": 10
+        }
       ],
       "left_val": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 50 },
-        { "kind": "int64", "value": 100 }
+        {
+          "kind": "int64",
+          "value": 10
+        },
+        {
+          "kind": "int64",
+          "value": 50
+        },
+        {
+          "kind": "int64",
+          "value": 100
+        }
       ],
       "right_val": [
-        { "kind": "int64", "value": 20 },
-        { "kind": "int64", "value": 60 },
-        { "kind": "null", "value": "na_n" }
+        {
+          "kind": "float64",
+          "value": 20.0
+        },
+        {
+          "kind": "float64",
+          "value": 60.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ]
-    }
+    },
+    "column_order": [
+      "time",
+      "left_val",
+      "right_val"
+    ]
   }
 }

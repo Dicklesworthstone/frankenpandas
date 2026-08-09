@@ -11086,7 +11086,7 @@ fn build_asof_output(
         specs.push((output_name, AsofOutputTask::RightGather(right_col)));
     }
 
-    let build_one = |task: &AsofOutputTask<'_>| -> Result<Column, ColumnError> {
+    let build_one = |task: &AsofOutputTask<'_>| -> Result<Column, JoinError> {
         match task {
             AsofOutputTask::LeftClone(col) => Ok((*col).clone()),
             AsofOutputTask::RightGather(right_col) => {
@@ -11120,23 +11120,42 @@ fn build_asof_output(
                     }
                     return Ok(Column::from_f64_values_with_validity(data, validity));
                 }
-                let src = right_col.values();
-                let mut vals = Vec::with_capacity(n_out);
-                for m in right_matches {
-                    match m {
-                        Some(j) if *j < right_n => vals.push(src[*j].clone()),
-                        _ => vals.push(fp_types::Scalar::Null(fp_types::NullKind::NaN)),
-                    }
-                }
-                Column::new(right_col.dtype(), vals)
+                // A right column that gains an UNMATCHED row gains a gap, and an
+                // all-valid numpy int64 cannot hold one — pandas widens it to
+                // float64, exactly as it does for the join family. This used to
+                // be a hand-rolled gather ending in
+                // `Column::new(right_col.dtype(), vals)`, which kept Int64 and
+                // left the present values pinned as ints beside a NaN.
+                //
+                // MEASURED, live pandas 2.2.3:
+                //   L = DataFrame({'time':[1,5,10], 'left_val':[10,50,100]})
+                //   R = DataFrame({'time':[2,6],    'right_val':[20,60]})
+                //   pd.merge_asof(L, R, on='time', direction='forward')
+                //     right_val -> [20.0, 60.0, NaN]   dtype float64
+                //     time and left_val stay int64 — they gain no gap
+                //   with every left row matched, right_val stays int64
+                //
+                // Note the rule here is PER COLUMN, unlike Series.unstack where
+                // a gap widens the whole frame: merge builds each output column
+                // independently, so only the column that gains the gap moves.
+                //
+                // reindex_join_column_with_invented_gap is the helper the nywa8
+                // join sweep already built for this, including the guard that a
+                // source ALREADY carrying a missing value is nullable and keeps
+                // its dtype. merge_asof was the sibling that sweep did not
+                // reach; calling it rather than re-deriving the rule here.
+                Ok(reindex_join_column_with_invented_gap(
+                    right_col,
+                    right_matches,
+                )?)
             }
         }
     };
 
-    let built: Vec<Result<Column, ColumnError>> = {
+    let built: Vec<Result<Column, JoinError>> = {
         let thread_count = join_parallel_thread_count();
         if specs.len() > 1 && n_out >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1 {
-            let mut slots: Vec<Option<Result<Column, ColumnError>>> =
+            let mut slots: Vec<Option<Result<Column, JoinError>>> =
                 (0..specs.len()).map(|_| None).collect();
             let chunk = specs.len().div_ceil(thread_count).max(1);
             let build_one = &build_one;
@@ -18958,6 +18977,100 @@ mod tests {
         assert_eq!(bid_col.values()[1], Scalar::Float64(99.5));
         assert_eq!(bid_col.values()[2], Scalar::Float64(100.5));
         assert_eq!(bid_col.values()[3], Scalar::Float64(101.5));
+    }
+
+    /// A right column that gains an UNMATCHED row gains a gap, and an all-valid
+    /// numpy int64 cannot hold one — pandas widens that column to float64,
+    /// exactly as it does across the join family.
+    ///
+    /// Measured, live pandas 2.2.3:
+    /// ```text
+    ///   L = DataFrame({'time':[1,5,10], 'left_val':[10,50,100]})
+    ///   R = DataFrame({'time':[2,6],    'right_val':[20,60]})
+    ///   pd.merge_asof(L, R, on='time', direction='forward')
+    ///     right_val -> [20.0, 60.0, NaN]  dtype float64
+    ///     dtypes: time int64, left_val int64, right_val float64
+    ///
+    ///   L2 = DataFrame({'time':[1,5]}, ...); R2 = DataFrame({'time':[2,4]}, ...)
+    ///   pd.merge_asof(L2, R2, on='time', direction='backward')
+    ///     right_val -> [NaN, 40.0]        dtype float64
+    ///
+    ///   with every left row matched (times 3,7 against 2,4)
+    ///     right_val -> [20, 40]           dtype int64
+    /// ```
+    /// The rule is PER COLUMN here — `time` and `left_val` gain no gap and stay
+    /// int64 — unlike `Series.unstack`, where a gap widens the whole frame
+    /// because it reshapes one block. Both fixtures on FP-P2D-056 pinned the
+    /// present values as int64 beside the NaN, which is FrankenPandas' own
+    /// pre-fix answer.
+    #[test]
+    fn merge_asof_unmatched_row_widens_that_column_to_float64() {
+        use super::DataFrameMergeExt;
+
+        let int_frame = |name: &str, times: Vec<i64>, vals: Vec<i64>| {
+            fp_frame::DataFrame::from_dict(
+                &["time", name],
+                vec![
+                    (
+                        "time",
+                        times.into_iter().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
+                    (
+                        name,
+                        vals.into_iter().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
+                ],
+            )
+            .unwrap()
+        };
+
+        let left = int_frame("left_val", vec![1, 5, 10], vec![10, 50, 100]);
+        let right = int_frame("right_val", vec![2, 6], vec![20, 60]);
+        let forward = left.merge_asof(&right, "time", "forward").unwrap();
+        assert_eq!(
+            forward.columns.get("right_val").unwrap().values(),
+            &[
+                Scalar::Float64(20.0),
+                Scalar::Float64(60.0),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+        // The columns that gain NO gap keep int64 — this is per column, not
+        // frame-wide.
+        assert_eq!(
+            forward.columns.get("left_val").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(50), Scalar::Int64(100)]
+        );
+        assert_eq!(
+            forward.columns.get("time").unwrap().dtype(),
+            fp_types::DType::Int64
+        );
+
+        let backward = int_frame("left_val", vec![1, 5], vec![10, 50])
+            .merge_asof(
+                &int_frame("right_val", vec![2, 4], vec![20, 40]),
+                "time",
+                "backward",
+            )
+            .unwrap();
+        assert_eq!(
+            backward.columns.get("right_val").unwrap().values(),
+            &[Scalar::Null(NullKind::NaN), Scalar::Float64(40.0)]
+        );
+
+        // The control that this is about the GAP and not about merge_asof always
+        // widening: with every left row matched, right_val stays int64.
+        let matched = int_frame("left_val", vec![3, 7], vec![10, 50])
+            .merge_asof(
+                &int_frame("right_val", vec![2, 4], vec![20, 40]),
+                "time",
+                "backward",
+            )
+            .unwrap();
+        assert_eq!(
+            matched.columns.get("right_val").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(40)]
+        );
     }
 
     #[test]
