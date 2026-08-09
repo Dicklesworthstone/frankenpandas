@@ -1613,17 +1613,70 @@ def op_series_dt_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
-def op_series_dt_total_seconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
+def timedelta_total_seconds_from_payload(pd, payload: dict[str, Any], op_name: str) -> dict[str, Any]:
+    """Shared body for series_dt_total_seconds and series_timedelta_total_seconds.
+
+    br-frankenpandas-7btvv. Both handlers were byte-identical copies ending in
+    `pd.to_timedelta(series, errors="coerce").dt.total_seconds()`, and that
+    coercion MANUFACTURED AN ANSWER for inputs pandas refuses outright: a
+    datetime column became all-NaT and total_seconds() then returned a column of
+    NaN, so a fixture pinning FrankenPandas' (correct) rejection looked like
+    "FP rejects what pandas accepts".
+
+    MEASURED, live pandas 2.2.3:
+
+        pd.to_datetime(pd.Series(['2024-01-15T00:00:00', ...])).dt.total_seconds()
+          -> AttributeError: 'DatetimeProperties' object has no attribute 'total_seconds'
+        pd.Series([60, 3661.5, 86400]).dt.total_seconds()
+          -> AttributeError: Can only use .dt accessor with datetimelike values
+        pd.to_timedelta(pd.Series(['1 days 00:00:00', None, '0 days 01:30:00']))
+          .dt.total_seconds()  -> [86400.0, nan, 5400.0]        the legitimate shape
+
+    Two gates, each mirroring one of those refusals:
+
+    1. A NUMERIC series is refused up front. `.dt` is not reachable on one, and
+       to_timedelta would silently read the numbers as NANOSECONDS
+       (pd.to_timedelta(pd.Series([60])).dt.total_seconds() -> [6e-08]), which
+       is an answer pandas never gives for this expression.
+    2. errors="raise", not "coerce", so a string column that is not timedeltas
+       propagates instead of degrading to NaT. Measured:
+       pd.to_timedelta(pd.Series(['2024-01-15T00:00:00'])) raises ValueError.
+
+    The bead guessed errors="coerce" was load-bearing for timedelta fixtures
+    with unparseable entries. It is not: of the eight fixtures on these two ops,
+    six are clean timedelta strings, one is empty, and one is the numeric case
+    above — none carries an unparseable entry inside a timedelta column. A null
+    still round-trips under errors="raise" (measured in B above).
+
+    The EMPTY series is exempt from gate 1: an empty payload has no kinds, so it
+    builds as float64 and would trip the numeric check, while
+    pd.to_timedelta(pd.Series([])).dt.total_seconds() is a legitimate empty
+    result that fp_p2d_093_series_timedelta_total_seconds_empty_strict pins.
+    """
     left = payload.get("left")
     if left is None:
-        raise OracleError("series_dt_total_seconds requires left payload")
-    series = fixture_series_from_payload(pd, left, "series_dt_total_seconds")
+        raise OracleError(f"{op_name} requires left payload")
+    series = fixture_series_from_payload(pd, left, op_name)
+
+    if (
+        len(series) > 0
+        and pd.api.types.is_numeric_dtype(series)
+        and not pd.api.types.is_timedelta64_dtype(series)
+    ):
+        raise OracleError(
+            f"{op_name}: Can only use .dt accessor with datetimelike values"
+        )
+
     try:
-        td_series = pd.to_timedelta(series, errors="coerce")
+        td_series = pd.to_timedelta(series, errors="raise")
         out = td_series.dt.total_seconds()
     except Exception as exc:
-        raise OracleError(f"series_dt_total_seconds failed: {exc}") from exc
+        raise OracleError(f"{op_name} failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_total_seconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return timedelta_total_seconds_from_payload(pd, payload, "series_dt_total_seconds")
 
 
 def op_series_dt_to_timestamp(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2542,16 +2595,11 @@ def op_series_to_timedelta(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def op_series_timedelta_total_seconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    left = payload.get("left")
-    if left is None:
-        raise OracleError("series_timedelta_total_seconds requires left payload")
-    series = fixture_series_from_payload(pd, left, "series_timedelta_total_seconds")
-    try:
-        td_series = pd.to_timedelta(series, errors="coerce")
-        out = td_series.dt.total_seconds()
-    except Exception as exc:
-        raise OracleError(f"series_timedelta_total_seconds failed: {exc}") from exc
-    return {"expected_series": series_to_expected(out)}
+    # Same body as series_dt_total_seconds; see the shared helper for the
+    # measurements. These two were byte-identical copies (br-frankenpandas-7btvv).
+    return timedelta_total_seconds_from_payload(
+        pd, payload, "series_timedelta_total_seconds"
+    )
 
 
 def op_series_to_frame(pd, payload: dict[str, Any]) -> dict[str, Any]:

@@ -5,9 +5,10 @@
   "operation": "series_dt_total_seconds",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
-  },
+    "oracle_script_sha256": "70c8c26b55a1b419beed28d198d022f1ca8eb25070814ab1156eb18562be38cc",
+    "generated_at": "2026-08-09T12:19:30Z",
+    "oracle_attestation": "error_agreement"
+},
   "left": {
     "name": "times",
     "index": [
