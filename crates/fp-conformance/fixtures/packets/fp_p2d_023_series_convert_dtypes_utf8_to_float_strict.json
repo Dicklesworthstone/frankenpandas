@@ -5,32 +5,68 @@
   "operation": "series_convert_dtypes",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "c3a7e374ae8ec4e6086d48d2290c958e45d37d357782aa3374c5bbbaeae8544b",
+    "generated_at": "2026-08-09T06:12:13Z"
   },
   "left": {
     "name": "nums",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "1.5" },
-      { "kind": "utf8", "value": "2.7" },
-      { "kind": "utf8", "value": "3.14" }
+      {
+        "kind": "utf8",
+        "value": "1.5"
+      },
+      {
+        "kind": "utf8",
+        "value": "2.7"
+      },
+      {
+        "kind": "utf8",
+        "value": "3.14"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "float64", "value": 1.5 },
-      { "kind": "float64", "value": 2.7 },
-      { "kind": "float64", "value": 3.14 }
+      {
+        "kind": "utf8",
+        "value": "1.5"
+      },
+      {
+        "kind": "utf8",
+        "value": "2.7"
+      },
+      {
+        "kind": "utf8",
+        "value": "3.14"
+      }
     ]
   }
 }

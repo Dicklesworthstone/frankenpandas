@@ -1,4 +1,4 @@
 0    10
 1    20
 2    30
-Name: val, Length: 3, dtype: Int64
+Name: val, Length: 3, dtype: Utf8

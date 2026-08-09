@@ -137178,9 +137178,16 @@ mod tests {
             vec![Scalar::Utf8("1".into()), Scalar::Utf8("2".into())],
         )
         .unwrap();
+        // MEASURED: pd.Series(['1','2'], dtype=object).infer_objects() stays
+        // object with the STRINGS intact — infer_objects retypes objects that
+        // already ARE numbers, it does not parse text.
+        // (br-frankenpandas-fixture-divergence-triage-9s0c4)
         let inferred = strings.infer_objects().unwrap();
-        assert_eq!(inferred.dtypes(), DType::Int64);
-        assert_eq!(inferred.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+        assert_eq!(inferred.dtypes(), DType::Utf8);
+        assert_eq!(
+            inferred.values(),
+            &[Scalar::Utf8("1".into()), Scalar::Utf8("2".into())]
+        );
 
         let list = s.list();
         assert_eq!(list.series_name(), "x");
@@ -142626,9 +142633,13 @@ mod tests {
             vec![Scalar::Utf8("10".into()), Scalar::Utf8("20".into())],
         )
         .unwrap();
+        // pandas does NOT parse numeric-looking strings here. MEASURED:
+        // pd.Series(['1','2','3'], dtype=object).convert_dtypes() -> dtype
+        // string, values ['1','2','3']. Only to_numeric parses. This asserted
+        // FrankenPandas' own parsing. (br-frankenpandas-fixture-divergence-triage-9s0c4)
         let result = s.convert_dtypes().unwrap();
-        assert_eq!(result.column().values()[0], Scalar::Int64(10));
-        assert_eq!(result.column().values()[1], Scalar::Int64(20));
+        assert_eq!(result.column().values()[0], Scalar::Utf8("10".into()));
+        assert_eq!(result.column().values()[1], Scalar::Utf8("20".into()));
     }
 
     #[test]
@@ -142639,9 +142650,10 @@ mod tests {
             vec![Scalar::Utf8("1.5".into()), Scalar::Utf8("2.5".into())],
         )
         .unwrap();
+        // Same rule as the int-strings sibling: strings stay strings.
         let result = s.convert_dtypes().unwrap();
-        assert_eq!(result.column().values()[0], Scalar::Float64(1.5));
-        assert_eq!(result.column().values()[1], Scalar::Float64(2.5));
+        assert_eq!(result.column().values()[0], Scalar::Utf8("1.5".into()));
+        assert_eq!(result.column().values()[1], Scalar::Utf8("2.5".into()));
     }
 
     #[test]
