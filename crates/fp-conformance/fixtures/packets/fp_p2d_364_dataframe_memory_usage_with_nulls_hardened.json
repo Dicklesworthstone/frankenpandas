@@ -5,42 +5,99 @@
   "operation": "dataframe_memory_usage",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "f8a63fbbee510e746e1ea4de4a65cc907568406e1c7554bde8c9fa057f0ee813",
+    "generated_at": "2026-08-09T08:30:58Z"
   },
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
-    "column_order": ["nums", "strs"],
+    "column_order": [
+      "nums",
+      "strs"
+    ],
     "columns": {
       "nums": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "null", "value": "null" },
-        { "kind": "float64", "value": 3.0 },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "float64",
+          "value": 1.0
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "float64",
+          "value": 3.0
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        }
       ],
       "strs": [
-        { "kind": "null", "value": "null" },
-        { "kind": "utf8", "value": "hello" },
-        { "kind": "utf8", "value": "world" },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "utf8",
+          "value": "hello"
+        },
+        {
+          "kind": "utf8",
+          "value": "world"
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        }
       ]
     }
   },
   "expected_series": {
     "index": [
-      { "kind": "utf8", "value": "Index" },
-      { "kind": "utf8", "value": "nums" },
-      { "kind": "utf8", "value": "strs" }
+      {
+        "kind": "utf8",
+        "value": "Index"
+      },
+      {
+        "kind": "utf8",
+        "value": "nums"
+      },
+      {
+        "kind": "utf8",
+        "value": "strs"
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 32 },
-      { "kind": "int64", "value": 32 },
-      { "kind": "int64", "value": 234 }
+      {
+        "kind": "int64",
+        "value": 32
+      },
+      {
+        "kind": "int64",
+        "value": 32
+      },
+      {
+        "kind": "int64",
+        "value": 32
+      }
     ]
   }
 }

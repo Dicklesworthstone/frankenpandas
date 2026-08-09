@@ -408,7 +408,21 @@ fn dtype_memory_width(dtype: DType) -> usize {
         | DType::Period => 8,
         DType::Interval => 24,
         DType::Utf8 => std::mem::size_of::<usize>(),
-        DType::Null | DType::Sparse => 0,
+        // An ALL-MISSING column still costs 8 bytes per element. pandas has no
+        // "everything is null" dtype to fall through to — it lands the column
+        // on object, float64 or datetime64 depending on which missing value was
+        // supplied, and all three are 8 bytes wide. Measured, live pandas
+        // 2.2.3, on Index([0,1,2,3], dtype='int64'):
+        //   DataFrame({'z': [None]*4}).memory_usage()   -> z 32   (dtype object)
+        //   DataFrame({'z': [nan]*4}).memory_usage()    -> z 32   (dtype float64)
+        //   DataFrame({'z': [pd.NaT]*4}).memory_usage() -> z 32   (dtype <M8[ns])
+        // FrankenPandas reported 0, which is the one answer pandas never gives
+        // for a non-empty column.
+        DType::Null => 8,
+        // Sparse is deliberately left at 0: pandas accounts for a SparseArray
+        // by its stored (non-fill) values plus the index, which is a different
+        // formula, and no fixture exercises it. Not measured, so not asserted.
+        DType::Sparse => 0,
     }
 }
 
@@ -181389,6 +181403,126 @@ mod tests {
         let result = df.memory_usage().unwrap();
         let output = format!("{result}");
         assert_text_golden("memory_usage_basic.txt", &output);
+    }
+
+    /// `memory_usage()` is SHALLOW by default and charges one POINTER per
+    /// element for any object column — including a column that is entirely
+    /// missing, which pandas still stores as `object`.
+    ///
+    /// Measured, live pandas 2.2.3, both frames on the fixtures' explicit
+    /// `Index([0,1,2,3], dtype='int64')`:
+    /// ```text
+    ///   DataFrame({'flag':[T,F,T,F], 'nums':[10,20,30,40],
+    ///              'text':['aa','bbb','c','dddd'], 'empty':[None]*4})
+    ///     .memory_usage()          -> Index 32, flag 4, nums 32, text 32, empty 32
+    ///     .memory_usage(deep=True) -> Index 32, flag 4, nums 32, text 206, empty 96
+    ///
+    ///   DataFrame({'nums':[1.0,None,3.0,None], 'strs':[None,'hello','world',None]})
+    ///     .memory_usage()          -> Index 32, nums 32, strs 32
+    ///     .memory_usage(deep=True) -> Index 32, nums 32, strs 156
+    /// ```
+    /// `df['empty'].dtype` is `object`, not some empty dtype — pandas has no
+    /// all-null dtype to fall through to, so the width is the pointer width and
+    /// the byte count is `len * 8`, exactly like any other object column.
+    #[test]
+    fn memory_usage_is_shallow_and_charges_a_pointer_per_object_element() {
+        let idx: Vec<IndexLabel> = (0..4_i64).map(IndexLabel::from).collect();
+        let mixed = DataFrame::new_with_column_order(
+            Index::new(idx.clone()),
+            [
+                (
+                    "flag".to_owned(),
+                    Column::from_values(vec![
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                    ])
+                    .unwrap(),
+                ),
+                (
+                    "nums".to_owned(),
+                    Column::from_values(vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ])
+                    .unwrap(),
+                ),
+                (
+                    "text".to_owned(),
+                    Column::from_values(vec![
+                        Scalar::Utf8("aa".into()),
+                        Scalar::Utf8("bbb".into()),
+                        Scalar::Utf8("c".into()),
+                        Scalar::Utf8("dddd".into()),
+                    ])
+                    .unwrap(),
+                ),
+                (
+                    "empty".to_owned(),
+                    Column::from_values(vec![Scalar::Null(NullKind::Null); 4]).unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<String, Column>>(),
+            vec![
+                "flag".to_owned(),
+                "nums".to_owned(),
+                "text".to_owned(),
+                "empty".to_owned(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            mixed.memory_usage().unwrap().values(),
+            &[
+                Scalar::Int64(32), // Index
+                Scalar::Int64(4),  // flag  — bool, 1 byte per element
+                Scalar::Int64(32), // nums  — int64
+                Scalar::Int64(32), // text  — object, one pointer per element
+                Scalar::Int64(32), // empty — object TOO, not a zero-width dtype
+            ]
+        );
+
+        let with_nulls = DataFrame::new_with_column_order(
+            Index::new(idx),
+            [
+                (
+                    "nums".to_owned(),
+                    Column::from_values(vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(3.0),
+                        Scalar::Null(NullKind::Null),
+                    ])
+                    .unwrap(),
+                ),
+                (
+                    "strs".to_owned(),
+                    Column::from_values(vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Utf8("hello".into()),
+                        Scalar::Utf8("world".into()),
+                        Scalar::Null(NullKind::Null),
+                    ])
+                    .unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<String, Column>>(),
+            vec!["nums".to_owned(), "strs".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            with_nulls.memory_usage().unwrap().values(),
+            &[
+                Scalar::Int64(32), // Index
+                Scalar::Int64(32), // nums — float64
+                Scalar::Int64(32), // strs — object; the nulls are pointers too
+            ]
+        );
     }
 }
 
