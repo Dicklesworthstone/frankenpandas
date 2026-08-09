@@ -20927,6 +20927,30 @@ impl Series {
             }
         } else {
             let values = self.column.values();
+            // `unstack` reshapes ONE numpy block, so a gap anywhere widens
+            // EVERY column — not only the column that gained it. Measured, live
+            // pandas 2.2.3, on a MultiIndex missing ('west','B'):
+            //   pd.Series([1,2,3], index=[('east','A'),('east','B'),('west','A')])
+            //     .unstack().dtypes -> A float64, B float64
+            //     column A has NO gap and is float64 anyway
+            //   the same Series with all four cells present
+            //     .unstack().dtypes -> A int64, B int64
+            // So it is the presence of a gap, not which column holds it, that
+            // decides. FrankenPandas widened per column and left the gap-free
+            // column Int64.
+            //
+            // Only Int64 widens. Measured on the same shape:
+            //   float64 in -> A float64, B float64          (already float)
+            //   object  in -> A object,  B object; 'x' stays str, gap is nan
+            //   bool    in -> A object,  B object; True stays bool, gap is nan
+            // pandas sends the non-numeric cases to OBJECT rather than to
+            // float, and their present values keep their own type — which is
+            // what the generic path below already produces, so they are left
+            // alone. FrankenPandas has no object dtype to reach for anyway
+            // (br-frankenpandas-hlcgl).
+            let widen_int_to_float = self.column.dtype() == DType::Int64;
+            let mut built: Vec<(String, Vec<Scalar>)> = Vec::with_capacity(col_keys.len());
+            let mut any_missing = false;
             for (ci, ck) in col_keys.iter().enumerate() {
                 let vals: Vec<Scalar> = (0..nrows)
                     .map(|ri| {
@@ -20935,8 +20959,24 @@ impl Series {
                             .unwrap_or(Scalar::Null(NullKind::NaN))
                     })
                     .collect();
+                // Computed over ALL columns before any is built, so the
+                // decision is frame-wide.
+                any_missing |= vals.iter().any(Scalar::is_missing);
+                built.push((ck.clone(), vals));
+            }
+            for (ck, mut vals) in built {
+                if widen_int_to_float && any_missing {
+                    for value in &mut vals {
+                        if let Scalar::Int64(datum) = *value {
+                            #[allow(clippy::cast_precision_loss)]
+                            {
+                                *value = Scalar::Float64(datum as f64);
+                            }
+                        }
+                    }
+                }
                 columns.insert(ck.clone(), Column::from_values(vals)?);
-                col_order.push(ck.clone());
+                col_order.push(ck);
             }
         }
 
@@ -144404,6 +144444,92 @@ mod tests {
         // a, y and b, x should be NaN
         assert!(df.columns["y"].values()[0].is_missing()); // a, y
         assert!(df.columns["x"].values()[1].is_missing()); // b, x
+    }
+
+    /// `unstack` reshapes ONE numpy block, so a gap ANYWHERE widens EVERY
+    /// column — not only the column that gained it.
+    ///
+    /// Measured, live pandas 2.2.3, on a MultiIndex missing ('west','B'):
+    /// ```text
+    ///   pd.Series([1,2,3], index=MultiIndex.from_tuples(
+    ///       [('east','A'),('east','B'),('west','A')])).unstack()
+    ///     ->        A    B          dtypes: A float64, B float64
+    ///        east  1.0  2.0
+    ///        west  3.0  NaN
+    ///     column A has NO gap and is float64 anyway
+    ///
+    ///   the same Series with all four cells present
+    ///     .unstack().dtypes -> A int64, B int64
+    /// ```
+    /// So it is the PRESENCE of a gap, not which column holds it, that decides.
+    /// FrankenPandas widened per column and left the gap-free column Int64,
+    /// which is the shape fp_p2d_127_series_unstack_strict pinned.
+    #[test]
+    fn series_unstack_gap_widens_every_column_not_just_its_own() {
+        let sparse = Series::from_values(
+            "value",
+            vec!["east, A".into(), "east, B".into(), "west, A".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let df = sparse.unstack().unwrap();
+        assert_eq!(df.column_names(), vec!["A", "B"]);
+        // A is gap-free and STILL widens.
+        assert_eq!(
+            df.columns["A"].values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(3.0)]
+        );
+        assert_eq!(df.columns["A"].dtype(), DType::Float64);
+        assert_eq!(
+            df.columns["B"].values(),
+            &[Scalar::Float64(2.0), Scalar::Null(NullKind::NaN)]
+        );
+
+        // The control that this is about the GAP and not about unstack always
+        // widening: with every cell present, both columns stay Int64.
+        let full = Series::from_values(
+            "value",
+            vec![
+                "east, A".into(),
+                "east, B".into(),
+                "west, A".into(),
+                "west, B".into(),
+            ],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let dense = full.unstack().unwrap();
+        assert_eq!(dense.columns["A"].dtype(), DType::Int64);
+        assert_eq!(dense.columns["B"].dtype(), DType::Int64);
+
+        // Only Int64 widens. pandas sends a gapped OBJECT column to object, not
+        // to float, and the present values keep their own type:
+        //   pd.Series(['x','y','z'], index=<the sparse MultiIndex>).unstack()
+        //     -> A object ['x','z'] (str), B object ['y', nan]
+        let utf8 = Series::from_values(
+            "value",
+            vec!["east, A".into(), "east, B".into(), "west, A".into()],
+            vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("z".into()),
+            ],
+        )
+        .unwrap();
+        let text = utf8.unstack().unwrap();
+        assert_eq!(
+            text.columns["A"].values(),
+            &[Scalar::Utf8("x".into()), Scalar::Utf8("z".into())]
+        );
+        assert_eq!(
+            text.columns["B"].values(),
+            &[Scalar::Utf8("y".into()), Scalar::Null(NullKind::NaN)]
+        );
     }
 
     #[test]
