@@ -5,36 +5,84 @@
   "operation": "series_dt_is_leap_year",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "9705c0dd4c1059611abf3477c184311df5bbf72c14a6348dc46c847169dbf7b2",
+    "generated_at": "2026-08-09T10:12:38Z"
   },
   "left": {
     "name": "dates",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2020-06-15T00:00:00" },
-      { "kind": "null", "value": "null" },
-      { "kind": "utf8", "value": "2100-01-01T00:00:00" },
-      { "kind": "utf8", "value": "2400-01-01T00:00:00" }
+      {
+        "kind": "utf8",
+        "value": "2020-06-15T00:00:00"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "utf8",
+        "value": "2100-01-01T00:00:00"
+      },
+      {
+        "kind": "utf8",
+        "value": "2400-01-01T00:00:00"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "bool", "value": true },
-      { "kind": "bool", "value": false },
-      { "kind": "bool", "value": false },
-      { "kind": "bool", "value": true }
+      {
+        "kind": "bool",
+        "value": true
+      },
+      {
+        "kind": "bool",
+        "value": false
+      },
+      {
+        "kind": "bool",
+        "value": false
+      },
+      {
+        "kind": "bool",
+        "value": false
+      }
     ]
   }
 }

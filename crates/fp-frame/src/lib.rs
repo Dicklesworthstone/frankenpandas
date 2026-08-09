@@ -46657,6 +46657,25 @@ impl DatetimeAccessor<'_> {
             return Scalar::Null(NullKind::NaN);
         };
 
+        // Same pandas-range gate as `parse_ymd_from_datetime`. This is a SECOND
+        // string entry point into the `.dt` family — the numeric components
+        // (year/month/day/hour/minute/second) come through here while the
+        // boolean ones go through `parse_ymd_from_datetime` — so the range rule
+        // has to be applied in both or `.dt.year` answers 2400 for an instant
+        // `.dt.is_leap_year` already calls missing. Measured, live pandas 2.2.3:
+        //   pd.to_datetime(pd.Series(['2400-01-01T00:00:00']), errors='coerce')
+        //     .dt.year -> [nan]
+        if !Self::datetime_in_pandas_range(
+            year,
+            month,
+            day,
+            time_part
+                .and_then(Self::parse_time)
+                .map_or(0, |(h, m, s)| h * 3600 + m * 60 + s),
+        ) {
+            return Scalar::Null(NullKind::NaN);
+        }
+
         match component {
             0 => Scalar::Int64(year),
             1 => Scalar::Int64(month),
@@ -47302,11 +47321,95 @@ impl DatetimeAccessor<'_> {
         Some((year, month, day))
     }
 
+    /// Days since 1970-01-01 for a proleptic-Gregorian date (Hinnant's
+    /// `days_from_civil`), the same algorithm `fast_iso_datetime_nanos` uses.
+    fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = (if y >= 0 { y } else { y - 399 }) / 400;
+        let yoe = y - era * 400;
+        let mp = if month > 2 { month - 3 } else { month + 9 };
+        let doy = (153 * mp + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+
+    /// Whether an instant is inside pandas' `datetime64[ns]` range.
+    ///
+    /// pandas stores a Timestamp as a nanosecond count in an i64, so the
+    /// representable range is EXACTLY the i64 range minus the `i64::MIN` NaT
+    /// sentinel — `Timestamp.min.value == -(2**63 - 1)` and
+    /// `Timestamp.max.value == 2**63 - 1`, i.e.
+    /// 1677-09-21 00:12:43.145224193 to 2262-04-11 23:47:16.854775807.
+    /// Anything outside is not a late date, it is NOT A DATE: with
+    /// `errors="coerce"` pandas returns NaT. Measured, live pandas 2.2.3,
+    /// `pd.to_datetime(pd.Series([...]), errors="coerce")`:
+    /// ```text
+    ///   1677-09-20T00:00:00 -> NaT        2262-04-11T00:00:00 -> ok
+    ///   1677-09-21T00:00:00 -> NaT        2262-04-11T23:47:16 -> ok
+    ///   1677-09-21T12:00:00 -> ok         2262-04-11T23:59:59 -> NaT
+    ///   1677-09-22T00:00:00 -> ok         2262-04-12T00:00:00 -> NaT
+    ///   2400-01-01T00:00:00 -> NaT        1500-01-01T00:00:00 -> NaT
+    /// ```
+    /// The two boundary DAYS are only partly representable, which is why this
+    /// takes the time of day and not just the date.
+    ///
+    /// Sub-second precision is deliberately NOT modelled: the caller parses to
+    /// whole seconds, so a timestamp that crosses the bound inside the boundary
+    /// SECOND (1677-09-21 00:12:43.000000000, 2262-04-11 23:47:16.900000000) is
+    /// judged by its second. That is two seconds out of 584 years, no fixture
+    /// reaches them, and the alternative is a fractional-second parser this path
+    /// does not otherwise need.
+    fn datetime_in_pandas_range(year: i64, month: i64, day: i64, secs_of_day: i64) -> bool {
+        // i128 throughout: the whole point is that the i64 product overflows.
+        let total_secs =
+            i128::from(Self::days_from_civil(year, month, day)) * 86_400 + i128::from(secs_of_day);
+        let Some(nanos) = total_secs.checked_mul(1_000_000_000) else {
+            return false;
+        };
+        (i128::from(i64::MIN) + 1..=i128::from(i64::MAX)).contains(&nanos)
+    }
+
     /// Internal: extract date part from a datetime string, then parse YMD.
+    ///
+    /// Returns `None` for an instant pandas cannot represent, so every `.dt`
+    /// accessor reading a Utf8 column treats it as MISSING — which is what
+    /// pandas does. Measured on the fixture's own input:
+    /// ```text
+    ///   s = pd.to_datetime(pd.Series(['2020-06-15T00:00:00', None,
+    ///           '2100-01-01T00:00:00', '2400-01-01T00:00:00']), errors='coerce')
+    ///   list(s)             -> [Timestamp('2020-06-15'), NaT,
+    ///                           Timestamp('2100-01-01'), NaT]
+    ///   s.dt.is_leap_year   -> [True, False, False, False]
+    ///   s.dt.year           -> [2020.0, nan, nan_for_the_2400_row]
+    ///   s.dt.is_month_start -> [False, False, True, False]
+    /// ```
+    /// 2400 IS a leap year; FrankenPandas used to answer True because it read
+    /// the year straight out of the text and never asked whether pandas could
+    /// hold the instant. The whole `.dt` string family funnels through here, so
+    /// one gate covers all 16 accessors that call it.
     fn parse_ymd_from_datetime(s: &str) -> Option<(i64, i64, i64)> {
         let date_part = s.split('T').next().unwrap_or(s);
         let date_part = date_part.split(' ').next().unwrap_or(date_part);
-        Self::parse_ymd(date_part)
+        let (year, month, day) = Self::parse_ymd(date_part)?;
+        let secs_of_day = Self::parse_time_of_day_seconds(s);
+        if !Self::datetime_in_pandas_range(year, month, day, secs_of_day) {
+            return None;
+        }
+        Some((year, month, day))
+    }
+
+    /// Seconds past midnight for the time half of a datetime string, or 0 when
+    /// there is no time half. Only used to decide representability on the two
+    /// partly-representable boundary days.
+    fn parse_time_of_day_seconds(s: &str) -> i64 {
+        let Some(rest) = s
+            .split_once('T')
+            .map(|(_, t)| t)
+            .or_else(|| s.split_once(' ').map(|(_, t)| t))
+        else {
+            return 0;
+        };
+        Self::parse_time(rest).map_or(0, |(h, m, sec)| h * 3600 + m * 60 + sec)
     }
 
     /// Internal: parse hour, minute, second from a time string ("HH:MM:SS").
@@ -155751,6 +155854,89 @@ mod tests {
     /// second from each other under pandas' rule, so no threshold reproduces
     /// it. A caller who means seconds passes `unit='s'` — which is the
     /// `to_datetime_with_unit_*` family below, and those are unchanged.
+    /// A datetime pandas cannot hold is NOT A LATE DATE, it is NOT A DATE: the
+    /// `.dt` accessors must treat it as missing, exactly as they treat a
+    /// supplied null. pandas stores a Timestamp as an i64 nanosecond count, so
+    /// the representable range is the i64 range minus the NaT sentinel —
+    /// 1677-09-21 00:12:43.145224193 to 2262-04-11 23:47:16.854775807.
+    ///
+    /// Measured, live pandas 2.2.3, on the fixture's own input:
+    /// ```text
+    ///   s = pd.to_datetime(pd.Series(['2020-06-15T00:00:00', None,
+    ///           '2100-01-01T00:00:00', '2400-01-01T00:00:00']), errors='coerce')
+    ///   list(s)             -> [Timestamp('2020-06-15'), NaT,
+    ///                           Timestamp('2100-01-01'), NaT]
+    ///   s.dt.is_leap_year   -> [True, False, False, False]
+    ///   s.dt.is_month_start -> [False, False, True, False]
+    /// ```
+    /// 2400 IS a leap year by the civil rule, which is exactly why this is a
+    /// trap: FrankenPandas read the year out of the text and answered True.
+    /// pandas never gets as far as the calendar.
+    #[test]
+    fn dt_accessors_treat_an_unrepresentable_datetime_as_missing() {
+        let s = Series::from_values(
+            "dates",
+            (0..4_i64).map(IndexLabel::from).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("2020-06-15T00:00:00".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("2100-01-01T00:00:00".into()),
+                Scalar::Utf8("2400-01-01T00:00:00".into()),
+            ],
+        )
+        .unwrap();
+
+        // The supplied null (row 1) and the unrepresentable instant (row 3)
+        // must answer identically — that is the whole claim.
+        assert_eq!(
+            s.dt().is_leap_year().unwrap().values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ]
+        );
+        assert_eq!(
+            s.dt().is_month_start().unwrap().values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ]
+        );
+
+        // The boundary DAYS are only partly representable, so the gate has to
+        // read the time of day and not just the date. Measured above:
+        //   1677-09-21T00:00:00 -> NaT     1677-09-21T12:00:00 -> ok
+        //   2262-04-11T23:47:16 -> ok      2262-04-11T23:59:59 -> NaT
+        let boundary = Series::from_values(
+            "edges",
+            (0..6_i64).map(IndexLabel::from).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("1677-09-21T00:00:00".into()),
+                Scalar::Utf8("1677-09-21T12:00:00".into()),
+                Scalar::Utf8("1677-09-22T00:00:00".into()),
+                Scalar::Utf8("2262-04-11T23:47:16".into()),
+                Scalar::Utf8("2262-04-11T23:59:59".into()),
+                Scalar::Utf8("2262-04-12T00:00:00".into()),
+            ],
+        )
+        .unwrap();
+        // is_year_start is false for every one of these dates, so it cannot
+        // distinguish in-range from out-of-range; use the year instead, which
+        // is missing exactly when the instant is unrepresentable.
+        let years = boundary.dt().year().unwrap();
+        let present: Vec<bool> = years.values().iter().map(|v| !v.is_missing()).collect();
+        assert_eq!(
+            present,
+            vec![false, true, true, true, false, false],
+            "representability must follow the INSTANT, not the date: {:?}",
+            years.values()
+        );
+    }
+
     #[test]
     fn to_datetime_bare_integer_is_nanoseconds_like_pandas() {
         let s = Series::from_values(
