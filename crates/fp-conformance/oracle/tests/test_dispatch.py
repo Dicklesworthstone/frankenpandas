@@ -539,3 +539,40 @@ def test_groupby_ngroup_honours_sort_ascending(oracle, pd):
 
     with pytest.raises(oracle.OracleError, match="must be a bool"):
         oracle.dispatch(pd, {**base, "sort_ascending": "no"})
+
+
+def test_from_dict_honours_constructor_dtype(oracle, pd):
+    """dataframe_from_dict never read constructor_dtype.
+
+    Third member of the family resolve_constructor_dtype's docstring describes
+    as fixed, after from_series (51fb88ead).
+
+    MEASURED, live pandas 2.2.3:
+        pd.DataFrame({'a':[1,2],'b':[3,4]})                  -> int64
+        pd.DataFrame({'a':[1,2],'b':[3,4]}, dtype='float64') -> float64
+
+    fp_p2d_023_dataframe_from_dict_dtype_float64_strict pins the float64 and was
+    RIGHT; the oracle returned int64.
+    """
+    payload = {
+        "operation": "dataframe_from_dict",
+        "dict_columns": {
+            "a": [{"kind": "int64", "value": 1}, {"kind": "int64", "value": 2}],
+            "b": [{"kind": "int64", "value": 3}, {"kind": "int64", "value": 4}],
+        },
+    }
+
+    def kinds(p):
+        cols = oracle.dispatch(pd, p)["expected_frame"]["columns"]
+        return {name: values[0]["kind"] for name, values in cols.items()}
+
+    assert kinds(payload) == {"a": "int64", "b": "int64"}, "no key -> pandas' inference"
+    assert kinds({**payload, "constructor_dtype": "float64"}) == {
+        "a": "float64",
+        "b": "float64",
+    }
+    # The alias/trim normalization resolve_constructor_dtype exists for.
+    assert kinds({**payload, "constructor_dtype": "  F64 "}) == {
+        "a": "float64",
+        "b": "float64",
+    }
