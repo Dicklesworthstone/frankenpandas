@@ -92957,6 +92957,78 @@ mod tests {
         }
     }
 
+    /// `pct_change()` FORWARD-FILLS before differencing — that is pandas 2.2.3's
+    /// default, and it is what makes the interior rows finite.
+    ///
+    /// MEASURED, live pandas 2.2.3, on `pd.Series([10.0, None, 30.0, 40.0, 50.0])`:
+    ///
+    /// ```text
+    /// .pct_change()                   -> [nan, 0.0, 2.0, 0.333333, 0.25]
+    /// .pct_change(fill_method=None)   -> [nan, nan, nan, 0.333333, 0.25]
+    /// ```
+    ///
+    /// The default pads the gap to 10.0 first, so row 1 is `(10-10)/10 = 0.0`
+    /// and row 2 is `(30-10)/10 = 2.0`. With no fill both propagate NaN. The two
+    /// differ only at the rows adjacent to the gap, which is exactly where a
+    /// fixture pinning the no-fill answer looks plausible.
+    ///
+    /// ⚠️ pandas 2.2 DEPRECATES this default and warns that `fill_method` will
+    /// become `None` in a future version. FrankenPandas targets the pinned
+    /// 2.2.3 behaviour, so `pad` stays the default here; `pct_change_with_fill`
+    /// reaches the other path. Revisit if the pandas pin moves to 3.x.
+    /// (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn pct_change_forward_fills_by_default_like_pandas_2x() {
+        let subject = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+                Scalar::Float64(50.0),
+            ],
+        )
+        .unwrap();
+
+        let got: Vec<Option<f64>> = subject
+            .pct_change(1)
+            .unwrap()
+            .values()
+            .iter()
+            .map(|v| {
+                if v.is_missing() {
+                    None
+                } else {
+                    v.to_f64().ok()
+                }
+            })
+            .collect();
+        let want = [None, Some(0.0), Some(2.0), Some(1.0 / 3.0), Some(0.25)];
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            match (g, w) {
+                (None, None) => {}
+                (Some(g), Some(w)) => assert!(
+                    (g - w).abs() < 1e-12,
+                    "pct_change row {i}: got {g}, pandas gives {w} (full {got:?})"
+                ),
+                _ => panic!("pct_change row {i}: got {g:?}, pandas gives {w:?}"),
+            }
+        }
+
+        // The no-fill path is still reachable and is what a fixture pinning
+        // [nan, nan, nan, ...] would have been describing.
+        let no_fill: Vec<bool> = subject
+            .pct_change_with_fill(1, None, None)
+            .unwrap()
+            .values()
+            .iter()
+            .map(fp_types::Scalar::is_missing)
+            .collect();
+        assert_eq!(no_fill, vec![true, true, true, false, false]);
+    }
+
     /// `pd.DataFrame(dict, columns=[...])` aligns only the SELECTED columns, so
     /// the row count depends on which columns were asked for.
     ///
