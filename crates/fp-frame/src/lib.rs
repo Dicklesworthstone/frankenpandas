@@ -50738,31 +50738,34 @@ fn values_have_mixed_timezone(values: &[Scalar]) -> bool {
     false
 }
 
-/// Normalize a mixed tz-naive/tz-aware string column to its pandas object-dtype
-/// representation: each value becomes `str(pd.Timestamp(value))` — naive
-/// `YYYY-MM-DD HH:MM:SS`, aware `... ±HH:MM`. Unparseable values and nulls are
-/// passed through (mirrors pandas keeping the original object).
+/// A mixed tz-naive/tz-aware `parse_dates` column is left EXACTLY AS READ.
+///
+/// CORRECTED. This used to rewrite each value to `str(pd.Timestamp(value))`, on
+/// the premise that pandas produced an object column of Timestamp objects. It
+/// does not: when the values cannot be unified, pandas gives up parsing the
+/// column ENTIRELY and the original text survives, `T` and `Z` and all.
+/// Measured, live pandas 2.2.3:
+/// ```text
+///   csv = "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n"
+///   pd.read_csv(StringIO(csv), parse_dates=['ts'])['ts']
+///     dtype object
+///     [(type(v).__name__, str(v)) ...]
+///       -> [('str', '2024-01-15 10:30:00'), ('str', '2024-01-15T10:30:00Z')]
+///     BOTH are str, and the second keeps its T and its Z
+/// ```
+/// The premise was true of a DIFFERENT column shape — all-aware values with
+/// DIFFERING offsets, which pandas really does parse into Timestamp objects:
+/// ```text
+///   "2024-01-15T10:30:00+01:00" / "2024-01-15T10:30:00+02:00"
+///     -> [('Timestamp', '2024-01-15 10:30:00+01:00'),
+///         ('Timestamp', '2024-01-15 10:30:00+02:00')]
+/// ```
+/// That shape never reaches here: `values_have_mixed_timezone` requires BOTH a
+/// naive and an aware value, so an all-aware column falls through to normal
+/// coercion and keeps parsing. The two cases are genuinely different and the
+/// distinction is the whole reason this function can be a pass-through.
 fn normalize_mixed_timezone_values(values: &[Scalar]) -> Vec<Scalar> {
-    values
-        .iter()
-        .map(|value| match value {
-            Scalar::Utf8(s) => {
-                let trimmed = s.trim();
-                if has_tz_suffix(trimmed) {
-                    match parse_tz_aware_datetime(trimmed) {
-                        Ok(parsed) => Scalar::Utf8(format_aware_datetime(parsed.fixed, None)),
-                        Err(_) => value.clone(),
-                    }
-                } else {
-                    match parse_naive_datetime_value(trimmed) {
-                        Ok(naive) => Scalar::Utf8(format_naive_datetime(naive)),
-                        Err(_) => value.clone(),
-                    }
-                }
-            }
-            _ => value.clone(),
-        })
-        .collect()
+    values.to_vec()
 }
 
 fn infer_datetime_timezone_pattern(value: &str) -> Option<DatetimeTimezonePattern> {

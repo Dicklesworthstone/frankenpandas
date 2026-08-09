@@ -25029,16 +25029,22 @@ mod tests {
         );
     }
 
+    /// CORRECTED against live pandas 2.2.3. This test used to assert that both
+    /// entries are "normalized to their pandas object-string form", on
+    /// br-frankenpandas-unz0t's premise that pandas returns a Series of
+    /// Timestamp objects here. It does not. When `parse_dates` cannot unify a
+    /// column, pandas gives up on it ENTIRELY and the original text survives:
+    /// ```text
+    ///   csv = "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n"
+    ///   pd.read_csv(StringIO(csv), parse_dates=['ts'])['ts']
+    ///     dtype object
+    ///     [(type(v).__name__, str(v)) ...]
+    ///       -> [('str', '2024-01-15 10:30:00'), ('str', '2024-01-15T10:30:00Z')]
+    /// ```
+    /// Both are `str`, and the second keeps its `T` and its `Z`. FrankenPandas
+    /// was rewriting it to `2024-01-15 10:30:00+00:00`.
     #[test]
-    fn csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value() {
-        // pandas pd.read_csv(parse_dates=["ts"]) CANNOT unify a column mixing
-        // tz-naive and tz-aware timestamps into datetime64[ns], so it keeps the
-        // whole column as object — a Series of mixed Timestamp objects whose
-        // str() forms are the naive `YYYY-MM-DD HH:MM:SS` and the aware
-        // `... +HH:MM`. FrankenPandas reproduces that (br-frankenpandas-unz0t):
-        // both entries are normalized to their pandas object-string form rather
-        // than coercing the naive one to Datetime64 (which contradicted both
-        // pandas and conformance fixture FP-P2D-mixed-timezone).
+    fn csv_parse_dates_mixed_naive_and_aware_leaves_the_column_untouched() {
         let input = "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n";
         let opts = CsvReadOptions {
             parse_dates: Some(vec!["ts".to_owned()]),
@@ -25049,12 +25055,43 @@ mod tests {
             frame.column("ts").unwrap().values(),
             &[
                 Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
-                Scalar::Utf8("2024-01-15 10:30:00+00:00".to_owned()),
+                // Verbatim as it appeared in the CSV.
+                Scalar::Utf8("2024-01-15T10:30:00Z".to_owned()),
             ]
         );
         assert_eq!(
             frame.column("value").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    /// The control that bounds the pass-through above: a column that CAN be
+    /// unified must still parse. unz0t's original premise was true of this
+    /// shape — all values tz-aware with DIFFERING offsets — which pandas really
+    /// does turn into Timestamp objects, rendered with a space:
+    /// ```text
+    ///   "2024-01-15T10:30:00+01:00" / "2024-01-15T10:30:00+02:00"
+    ///     -> [('Timestamp', '2024-01-15 10:30:00+01:00'),
+    ///         ('Timestamp', '2024-01-15 10:30:00+02:00')]
+    ///   all-naive       -> dtype datetime64[ns]
+    ///   all-same-offset -> dtype datetime64[ns, UTC]
+    /// ```
+    /// An all-aware column never reaches the mixed-timezone branch, because
+    /// that branch requires BOTH a naive and an aware value.
+    #[test]
+    fn csv_parse_dates_all_aware_mixed_offsets_still_parses() {
+        let input = "ts,value\n2024-01-15T10:30:00+01:00,1\n2024-01-15T10:30:00+02:00,2\n";
+        let opts = CsvReadOptions {
+            parse_dates: Some(vec!["ts".to_owned()]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        let values = frame.column("ts").unwrap().values().to_vec();
+        assert!(
+            values
+                .iter()
+                .all(|v| !matches!(v, Scalar::Utf8(s) if s.contains('T'))),
+            "an all-aware column must still be parsed, not passed through: {values:?}"
         );
     }
 
