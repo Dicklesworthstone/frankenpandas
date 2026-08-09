@@ -49877,28 +49877,34 @@ pub fn to_datetime_values_with_options(
                         parse_datetime_string(s, options.format)
                     }
                 }
-                Scalar::Int64(epoch) => {
-                    // Auto-detect: values > 1e11 are likely milliseconds, else seconds.
-                    let secs = if epoch.unsigned_abs() > 100_000_000_000 {
-                        *epoch / 1000
-                    } else {
-                        *epoch
-                    };
-                    if options.utc {
-                        format_unix_timestamp(secs, 0, false)
-                    } else {
-                        datetime64_scalar_from_unix_timestamp(secs, 0)
-                    }
-                }
-                Scalar::Float64(v) => {
-                    if v.is_nan() || v.is_infinite() {
-                        Scalar::Null(NullKind::NaT)
-                    } else if options.utc {
-                        format_unix_timestamp(*v as i64, 0, false)
-                    } else {
-                        datetime64_scalar_from_unix_timestamp(*v as i64, 0)
-                    }
-                }
+                // A bare number carries NO unit information, and pandas does not
+                // guess one: `to_datetime` with no `unit=` reads an integer as
+                // NANOSECONDS, whatever its magnitude. Measured, live pandas
+                // 2.2.3, `[pd.Timestamp(v) for v in pd.to_datetime(pd.Series(x))]`:
+                //   [0, 1704067200, 1704153600] -> 1970-01-01 00:00:00,
+                //                                  1970-01-01 00:00:01.704067200,
+                //                                  1970-01-01 00:00:01.704153600
+                //   [1704067200000]             -> 1970-01-01 00:28:24.067200
+                //   [1704067200000000000]       -> 2024-01-01 00:00:00
+                // The magnitude that "looks like" seconds and the one that
+                // "looks like" milliseconds land a fraction of a second apart,
+                // so there is no threshold to find. FrankenPandas used to read
+                // <= 1e11 as seconds and anything larger as milliseconds, an
+                // inference pandas has no equivalent of — a caller who means
+                // seconds says `unit='s'`. Same rule pandas applies to bare
+                // numeric `to_timedelta` (br-frankenpandas-0caxj).
+                Scalar::Int64(epoch) => parse_epoch_i64_with_unit(
+                    *epoch,
+                    DatetimeUnit::Nanoseconds,
+                    DatetimeOrigin::unix(),
+                    options.utc,
+                ),
+                Scalar::Float64(v) => parse_epoch_f64_with_unit(
+                    *v,
+                    DatetimeUnit::Nanoseconds,
+                    DatetimeOrigin::unix(),
+                    options.utc,
+                ),
                 _ => Scalar::Null(NullKind::NaT),
             };
             if options.utc {
@@ -50074,12 +50080,64 @@ impl DatetimeOrigin {
             .checked_mul(1_000_000_000_i128)
             .and_then(|value| value.checked_add(i128::from(self.nanos)))
     }
+
+    /// Truncate the origin DOWN to a whole multiple of `unit`, matching what
+    /// pandas does before it adds the argument.
+    ///
+    /// `_adjust_to_origin` reduces the origin to an integer count of the
+    /// argument's own unit — `ioffset = (Timestamp(origin) - Timestamp(0)) //
+    /// Timedelta(1, unit=unit)` — so any part of the origin finer than `unit`
+    /// is DISCARDED, and Python's `//` floors toward negative infinity.
+    /// Measured, live pandas 2.2.3, `pd.to_datetime(pd.Series([0]), unit=u,
+    /// origin=o)` read back as `.value`:
+    /// ```text
+    ///   u='s',  o='1960-01-01 12:34:56.123456789' -> -315573904000000000
+    ///           (the origin itself is -315573903876543211 — floored DOWN)
+    ///   u='s',  o='2000-01-01 00:00:00.987654321' ->  946684800000000000
+    ///           (origin  946684800987654321 — floored DOWN, not truncated
+    ///            toward zero; both directions agree only because floor and
+    ///            trunc coincide for positives, hence the negative control)
+    ///   u='ms', o='2000-01-01 00:00:00.987654321' ->  946684800987000000
+    ///   u='us', o='2000-01-01 00:00:00.987654321' ->  946684800987654000
+    ///   u='D',  o='2000-01-01 12:00:00'           ->  946684800000000000
+    ///   u='D',  o='1960-01-01 12:00:00'           -> -315619200000000000
+    /// ```
+    /// FrankenPandas used to carry the origin at full nanosecond precision into
+    /// every row, which is a resolution pandas never offers on this path.
+    fn floored_to_unit(self, unit: Option<DatetimeUnit>) -> Result<Self, FrameError> {
+        let Some(unit) = unit else {
+            // No unit means no numeric-offset path at all; the origin is unix.
+            return Ok(self);
+        };
+        let step = unit.nanos_per_unit_i128();
+        if step <= 1 {
+            return Ok(self);
+        }
+        let total = self.total_nanos().ok_or_else(|| {
+            FrameError::CompatibilityRejected("invalid to_datetime origin".to_owned())
+        })?;
+        // div_euclid floors toward negative infinity for a positive divisor,
+        // which is the `//` semantics pandas inherits from Python.
+        Self::from_total_nanos(total.div_euclid(step) * step)
+    }
 }
 
 fn resolve_datetime_origin(
     origin: Option<ToDatetimeOrigin<'_>>,
     unit: Option<DatetimeUnit>,
 ) -> Result<DatetimeOrigin, FrameError> {
+    // `origin='julian'` is the ONE form pandas does not reduce to a whole
+    // number of `unit`s: `_adjust_to_origin` gives it its own branch that
+    // subtracts `Timestamp(0).to_julian_date()` (2440587.5) from the ARGUMENT,
+    // never building an `ioffset`, so the half-day survives. Measured, live
+    // pandas 2.2.3, `pd.to_datetime(pd.Series([2451544.5, 2451545.0]),
+    // unit='D', origin='julian')` -> 2000-01-01 00:00:00 and
+    // 2000-01-01 12:00:00. Flooring it would shift every julian date by 12h.
+    if let Some(ToDatetimeOrigin::Str(raw)) = origin
+        && raw.trim().eq_ignore_ascii_case("julian")
+    {
+        return DatetimeOrigin::parse_str(raw, unit);
+    }
     match origin {
         Some(ToDatetimeOrigin::Str(origin)) => DatetimeOrigin::parse_str(origin, unit),
         Some(ToDatetimeOrigin::Int(origin)) => {
@@ -50100,6 +50158,7 @@ fn resolve_datetime_origin(
         }
         None => Ok(DatetimeOrigin::unix()),
     }
+    .and_then(|resolved| resolved.floored_to_unit(unit))
 }
 
 fn parse_datetime_scalar_with_unit(
@@ -155664,28 +155723,104 @@ mod tests {
         }
     }
 
+    /// CORRECTED against live pandas 2.2.3. These two tests used to assert that
+    /// a BARE integer is auto-detected as seconds (1705312200) or milliseconds
+    /// (1705312200000), both landing on 2024-01-15 09:50:00. That is
+    /// FrankenPandas' own invention; pandas reads a unitless integer as
+    /// NANOSECONDS at every magnitude:
+    /// ```text
+    ///   pd.to_datetime(pd.Series([1705312200]))    -> 1970-01-01 00:00:01.705312200
+    ///   pd.to_datetime(pd.Series([1705312200000])) -> 1970-01-01 00:28:25.312200
+    ///   pd.to_datetime(pd.Series([1704067200000000000])) -> 2024-01-01 00:00:00
+    /// ```
+    /// The two magnitudes the old heuristic split apart land a fraction of a
+    /// second from each other under pandas' rule, so no threshold reproduces
+    /// it. A caller who means seconds passes `unit='s'` — which is the
+    /// `to_datetime_with_unit_*` family below, and those are unchanged.
     #[test]
-    fn to_datetime_epoch_seconds() {
+    fn to_datetime_bare_integer_is_nanoseconds_like_pandas() {
         let s = Series::from_values(
             "epoch",
-            vec![0_i64.into()],
-            vec![Scalar::Int64(1705312200)], // 2024-01-15 09:50:00 UTC
+            vec![0_i64.into(), 1_i64.into()],
+            // The old heuristic read the first as seconds and the second as
+            // milliseconds, mapping both to 2024-01-15 09:50:00.
+            vec![
+                Scalar::Int64(1_705_312_200),
+                Scalar::Int64(1_705_312_200_000),
+            ],
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        assert_eq!(result.values()[0], datetime64_scalar("2024-01-15 09:50:00"));
+        assert_eq!(
+            result.values(),
+            &[
+                datetime64_scalar("1970-01-01 00:00:01.705312200"),
+                datetime64_scalar("1970-01-01 00:28:25.312200"),
+            ]
+        );
+
+        // The unit-bearing call is the one that means seconds, and it still
+        // reaches 2024-01-15 09:50:00 — the control that the fix removed the
+        // GUESS and not the capability.
+        let explicit = super::to_datetime_with_unit(
+            &Series::from_values(
+                "epoch",
+                vec![0_i64.into()],
+                vec![Scalar::Int64(1_705_312_200)],
+            )
+            .unwrap(),
+            "s",
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.values()[0],
+            datetime64_scalar("2024-01-15 09:50:00")
+        );
     }
 
+    /// `utc=True` on the same unitless-integer path. No test covered this
+    /// combination before, so the nanosecond fix above could have changed it
+    /// silently — the whole crate stayed green either way.
+    /// Measured, live pandas 2.2.3:
+    /// ```text
+    ///   pd.to_datetime(pd.Series([1705312200, 1704067200000000000]), utc=True)
+    ///     -> 1970-01-01 00:00:01.705312200+00:00
+    ///        2024-01-01 00:00:00+00:00        (dtype datetime64[ns, UTC])
+    /// ```
+    /// ⚠️ The first expectation below is FrankenPandas' CURRENT rendering,
+    /// `.7053122`, and it does NOT match the pandas string above. That gap is a
+    /// separate, pre-existing defect in the shared `format_naive_datetime`,
+    /// which trims trailing zero DIGITS where pandas trims whole 3-digit
+    /// GROUPS — filed as br-frankenpandas-3z9ca with its own measurements.
+    /// The instant is right in both; only the text differs. Update this
+    /// assertion to the pandas form when 3z9ca lands.
     #[test]
-    fn to_datetime_epoch_milliseconds() {
+    fn to_datetime_bare_integer_with_utc_is_nanoseconds_too() {
         let s = Series::from_values(
-            "epoch_ms",
-            vec![0_i64.into()],
-            vec![Scalar::Int64(1705312200000)], // same as above but ms
+            "epoch",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Int64(1_705_312_200),
+                Scalar::Int64(1_704_067_200_000_000_000),
+            ],
         )
         .unwrap();
-        let result = super::to_datetime(&s).unwrap();
-        assert_eq!(result.values()[0], datetime64_scalar("2024-01-15 09:50:00"));
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                utc: true,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                // br-frankenpandas-3z9ca: pandas prints '.705312200' here.
+                Scalar::Utf8("1970-01-01 00:00:01.7053122+00:00".into()),
+                Scalar::Utf8("2024-01-01 00:00:00+00:00".into()),
+            ]
+        );
     }
 
     #[test]
@@ -155841,8 +155976,22 @@ mod tests {
         );
     }
 
+    /// CORRECTED against live pandas 2.2.3. This test used to assert, in its own
+    /// name, that a timestamp-like origin PRESERVES sub-unit precision. pandas
+    /// discards it: `_adjust_to_origin` reduces the origin to an integer count
+    /// of the argument's unit, `ioffset = (Timestamp(origin) - Timestamp(0)) //
+    /// Timedelta(1, unit=unit)`, so `.123456789` never reaches the result.
+    /// Measured on exactly this input:
+    /// ```text
+    ///   pd.to_datetime(pd.Series([0, 1.5, -60]), unit='s',
+    ///                  origin='1960-01-01 12:34:56.123456789')
+    ///     -> [-315573904000000000, -315573902500000000, -315573964000000000]
+    ///        i.e. 1960-01-01 12:34:56, 12:34:57.5, 12:33:56
+    /// ```
+    /// The origin itself is -315573903876543211 ns, so the shift is DOWN to the
+    /// next whole second, not toward zero.
     #[test]
-    fn to_datetime_with_options_timestamp_like_origin_preserves_fractional_seconds() {
+    fn to_datetime_with_options_timestamp_like_origin_floors_to_the_unit() {
         let s = Series::from_values(
             "epoch_s",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
@@ -155863,11 +156012,78 @@ mod tests {
         assert_eq!(
             result.values(),
             &[
-                datetime64_scalar("1960-01-01 12:34:56.123456789"),
-                datetime64_scalar("1960-01-01 12:34:57.623456789"),
-                datetime64_scalar("1960-01-01 12:33:56.123456789"),
+                datetime64_scalar("1960-01-01 12:34:56"),
+                datetime64_scalar("1960-01-01 12:34:57.5"),
+                datetime64_scalar("1960-01-01 12:33:56"),
             ]
         );
+
+        // A POSITIVE origin is the control that separates floor from truncate —
+        // they coincide above the epoch, so only the negative case above can
+        // tell them apart, and both must hold at once.
+        //   pd.to_datetime(pd.Series([0]), unit='s',
+        //                  origin='2000-01-01 00:00:00.987654321').value
+        //     -> 946684800000000000
+        let positive = super::to_datetime_with_options(
+            &Series::from_values("epoch_s", vec![0_i64.into()], vec![Scalar::Int64(0)]).unwrap(),
+            super::ToDatetimeOptions {
+                unit: Some("s"),
+                origin: Some(super::ToDatetimeOrigin::Str(
+                    "2000-01-01 00:00:00.987654321",
+                )),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            positive.values()[0],
+            datetime64_scalar("2000-01-01 00:00:00")
+        );
+
+        // Sub-unit precision COARSER than the origin's is kept, so the rule is
+        // "floor to the unit", not "floor to the second":
+        //   unit='us', origin='2000-01-01 00:00:00.987654321'
+        //     -> 946684800987654000
+        let micros = super::to_datetime_with_options(
+            &Series::from_values("epoch_us", vec![0_i64.into()], vec![Scalar::Int64(0)]).unwrap(),
+            super::ToDatetimeOptions {
+                unit: Some("us"),
+                origin: Some(super::ToDatetimeOrigin::Str(
+                    "2000-01-01 00:00:00.987654321",
+                )),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            micros.values()[0],
+            datetime64_scalar("2000-01-01 00:00:00.987654")
+        );
+    }
+
+    /// The negative control for the flooring above: `origin='julian'` is the one
+    /// form pandas does NOT reduce to whole units — it has its own branch in
+    /// `_adjust_to_origin` that subtracts `Timestamp(0).to_julian_date()`
+    /// (2440587.5) from the argument, so the half-day survives. Flooring it
+    /// would shift every julian date by 12 hours. Measured:
+    /// ```text
+    ///   pd.to_datetime(pd.Series([2440588]), unit='D', origin='julian')
+    ///     -> 1970-01-01 12:00:00
+    /// ```
+    #[test]
+    fn to_datetime_julian_origin_keeps_its_half_day_across_the_unit_floor() {
+        let s = Series::from_values("julian", vec![0_i64.into()], vec![Scalar::Int64(2_440_588)])
+            .unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("D"),
+                origin: Some(super::ToDatetimeOrigin::Str("julian")),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.values()[0], datetime64_scalar("1970-01-01 12:00:00"));
     }
 
     #[test]
