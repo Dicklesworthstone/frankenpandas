@@ -92977,6 +92977,68 @@ mod tests {
         }
     }
 
+    /// `convert_dtypes()` and `infer_objects()` do NOT parse numeric-looking
+    /// STRINGS. They retype what is already numeric; they never re-read text.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// pd.Series(['1','2','3'], dtype=object)
+    ///   .infer_objects()  -> object  ['1','2','3']
+    ///   .convert_dtypes() -> string  ['1','2','3']     STILL STRINGS
+    ///
+    /// pd.Series([1,2,3], dtype=object)      the objects ARE numbers
+    ///   .infer_objects()  -> int64  [1,2,3]
+    ///   .convert_dtypes() -> Int64  [1,2,3]
+    ///
+    /// pd.to_numeric(pd.Series(['1','2','3']))  -> int64 [1,2,3]
+    /// ```
+    ///
+    /// Only `to_numeric` parses. FrankenPandas' `convert_dtypes` walked a Utf8
+    /// column and `parse::<i64>()` / `parse::<f64>()`'d every cell, so
+    /// `['1.5','2.7','3.14']` came back as float64 — a conversion pandas offers
+    /// under a DIFFERENT function name. `infer_objects` delegates to the same
+    /// code and inherited it.
+    /// (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn convert_dtypes_does_not_parse_numeric_looking_strings() {
+        let strings = |vals: &[&str]| {
+            Series::from_values(
+                "x",
+                (0..vals.len() as i64).map(IndexLabel::Int64).collect(),
+                vals.iter().map(|v| Scalar::Utf8((*v).to_owned())).collect(),
+            )
+            .unwrap()
+        };
+
+        for vals in [["1", "2", "3"], ["1.5", "2.7", "3.14"]] {
+            let subject = strings(&vals);
+            let want: Vec<Scalar> = vals.iter().map(|v| Scalar::Utf8((*v).to_owned())).collect();
+            assert_eq!(
+                subject.convert_dtypes().unwrap().values(),
+                want.as_slice(),
+                "convert_dtypes retypes, it does not re-read text — only to_numeric parses"
+            );
+            assert_eq!(
+                subject.infer_objects().unwrap().values(),
+                want.as_slice(),
+                "infer_objects likewise leaves strings as strings"
+            );
+        }
+
+        // A non-Utf8 column is unaffected either way.
+        let ints = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        assert_eq!(
+            ints.convert_dtypes().unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
     /// A NULL in the condition of `where`/`mask` behaves as FALSE — it selects
     /// the other operand rather than propagating a NaN.
     ///
