@@ -67353,6 +67353,25 @@ impl DataFrame {
         let mut idx_map: HashMap<Vec<ScalarKey<'_>>, usize> = HashMap::new();
 
         for i in 0..self.len() {
+            // pandas DataFrame.value_counts defaults to dropna=TRUE, and it
+            // drops a row if ANY subset column is missing — not just the ones
+            // that are entirely null. MEASURED, live pandas 2.2.3, on
+            // DataFrame({'a':[1,1,2,None], 'b':[1,None,2,1]}):
+            //   df.value_counts()             -> {(1.0,1.0): 1, (2.0,2.0): 1}
+            //   df.value_counts(dropna=False) -> adds (1.0,nan) and (nan,1.0)
+            // FrankenPandas counted every row, so it returned four rows where
+            // pandas returns two. (br-frankenpandas-2a8yn)
+            //
+            // The dense fast path above cannot reach this: it is gated on
+            // as_i64_slice / contiguous-Utf8 backings, which are all-valid by
+            // construction, so a null-bearing frame always lands here.
+            if self
+                .column_order
+                .iter()
+                .any(|col_name| self.columns[col_name].values()[i].is_missing())
+            {
+                continue;
+            }
             let mut parts = Vec::with_capacity(self.column_order.len());
             let mut key_parts = Vec::with_capacity(self.column_order.len());
             for col_name in &self.column_order {
@@ -145911,6 +145930,95 @@ mod tests {
     /// The last line is the control: the widening is caused by the gap, not by
     /// the constructor. The two object rows are the control that it is
     /// NUMERIC-only.
+    /// br-frankenpandas-2a8yn: `DataFrame.value_counts()` defaults to
+    /// `dropna=True`, and it drops a row if ANY subset column is missing.
+    ///
+    /// Measured, live pandas 2.2.3, on
+    /// `DataFrame({'a':[1,1,2,None], 'b':[1,None,2,1]})`:
+    /// ```text
+    ///   df.value_counts()             -> {(1.0,1.0): 1, (2.0,2.0): 1}
+    ///   df.value_counts(dropna=False) -> {(1.0,1.0): 1, (1.0,nan): 1,
+    ///                                     (2.0,2.0): 1, (nan,1.0): 1}
+    /// ```
+    /// FrankenPandas counted every row — the `dropna=False` answer — so it
+    /// returned four rows where pandas returns two. Note the dropped rows are
+    /// PARTIALLY null: (1.0, nan) has a perfectly good `a`. It is the row that
+    /// goes, not the cell.
+    #[test]
+    fn dataframe_value_counts_drops_any_row_with_a_missing_cell() {
+        let frame = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let counts = frame.value_counts().unwrap();
+        let labels: Vec<String> = counts
+            .index()
+            .labels()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["1, 1".to_string(), "2, 2".to_string()],
+            "rows carrying a missing cell must be dropped: {labels:?}"
+        );
+        assert_eq!(
+            counts.values(),
+            &[Scalar::Int64(1), Scalar::Int64(1)],
+            "and the surviving counts are unchanged"
+        );
+
+        // Control: with no missing cell anywhere, every row is still counted —
+        // the dropping is caused by the gap, not by value_counts.
+        let dense = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            dense.value_counts().unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(1)]
+        );
+    }
+
     #[test]
     fn list_like_constructor_widens_a_numeric_column_around_a_supplied_null() {
         let build = |rows: Vec<Vec<Scalar>>| {
