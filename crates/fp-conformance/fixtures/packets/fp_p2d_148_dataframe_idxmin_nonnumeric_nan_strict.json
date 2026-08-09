@@ -5,37 +5,79 @@
   "operation": "dataframe_idxmin",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "91254e08fa66bca71d3bb11dadaf0864aa67a643e51bba0b6b3b9f1fa5cfa78b",
+    "generated_at": "2026-08-08T23:51:53Z"
   },
   "frame": {
     "index": [
-      { "kind": "utf8", "value": "r0" },
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
+      {
+        "kind": "utf8",
+        "value": "r0"
+      },
+      {
+        "kind": "utf8",
+        "value": "r1"
+      },
+      {
+        "kind": "utf8",
+        "value": "r2"
+      }
     ],
-    "column_order": ["num", "txt"],
+    "column_order": [
+      "num",
+      "txt"
+    ],
     "columns": {
       "num": [
-        { "kind": "float64", "value": 5.0 },
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 2.0 }
+        {
+          "kind": "float64",
+          "value": 5.0
+        },
+        {
+          "kind": "float64",
+          "value": 1.0
+        },
+        {
+          "kind": "float64",
+          "value": 2.0
+        }
       ],
       "txt": [
-        { "kind": "utf8", "value": "x" },
-        { "kind": "utf8", "value": "z" },
-        { "kind": "utf8", "value": "y" }
+        {
+          "kind": "utf8",
+          "value": "x"
+        },
+        {
+          "kind": "utf8",
+          "value": "z"
+        },
+        {
+          "kind": "utf8",
+          "value": "y"
+        }
       ]
     }
   },
   "expected_series": {
     "index": [
-      { "kind": "utf8", "value": "num" },
-      { "kind": "utf8", "value": "txt" }
+      {
+        "kind": "utf8",
+        "value": "num"
+      },
+      {
+        "kind": "utf8",
+        "value": "txt"
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "null", "value": "na_n" }
+      {
+        "kind": "utf8",
+        "value": "r1"
+      },
+      {
+        "kind": "utf8",
+        "value": "r0"
+      }
     ]
   }
 }

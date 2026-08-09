@@ -71972,6 +71972,51 @@ impl DataFrame {
     /// Index label of the minimum value per numeric column.
     ///
     /// Matches `pd.DataFrame.idxmin()`.
+    /// Can `idxmin`/`idxmax` order this column at all?
+    ///
+    /// pandas answers for any HOMOGENEOUS comparable column — numeric, bool,
+    /// datetime, timedelta, and object-of-strings (lexicographically) — and
+    /// raises `TypeError` when the values are not mutually orderable, which for
+    /// an object column includes a `nan` sitting among strings. See the
+    /// measurements on [`Self::idxmin`].
+    /// An all-missing column yields `nan` rather than refusing.
+    ///
+    /// MEASURED, live pandas 2.2.3, index `['r0','r1']`:
+    ///
+    /// ```text
+    /// {'a': [nan, nan]}   float64   idxmax -> {'a': nan}
+    /// {'a': [None, None]} object    idxmax -> {'a': nan}
+    /// {'a': [1.0, nan]}   float64   idxmax -> {'a': 'r0'}   nan is SKIPPED
+    /// ```
+    ///
+    /// (pandas emits a FutureWarning that the all-NA case will raise in a later
+    /// version; it does not raise in 2.2.3, so neither do we.) Checked BEFORE
+    /// comparability, because an all-missing column has nothing to compare and
+    /// would otherwise be refused. The metamorphic properties caught this — the
+    /// generator emits all-null columns, exactly as they did for the
+    /// numeric_only flip. (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    fn idx_extreme_is_all_missing(column: &Column) -> bool {
+        column.values().iter().all(Scalar::is_missing)
+    }
+
+    fn idx_extreme_is_comparable(column: &Column) -> bool {
+        match column.dtype() {
+            DType::Bool
+            | DType::Int64
+            | DType::Float64
+            | DType::Timedelta64
+            | DType::Datetime64 => true,
+            // A string column orders lexicographically, but only if EVERY value
+            // is a string: pandas compares the raw objects, so a nan among them
+            // raises rather than being skipped.
+            DType::Utf8 => column
+                .values()
+                .iter()
+                .all(|value| matches!(value, Scalar::Utf8(_))),
+            _ => false,
+        }
+    }
+
     pub fn idxmin(&self) -> Result<Series, FrameError> {
         let labels: Vec<IndexLabel> = self
             .column_order
@@ -71980,17 +72025,30 @@ impl DataFrame {
             .collect();
         let mut values = Vec::with_capacity(labels.len());
         for name in &self.column_order {
-            // pandas 2.2.3 DataFrame.idxmin treats non-numeric (object/Utf8)
-            // columns as having no computable idxmin and returns NaN for
-            // them. Series::idxmin alone supports Utf8 lex via br-7db78,
-            // but at the DataFrame level pandas does NOT call into the
-            // lex path. Match the oracle behavior (FP-P2D-148).
-            if !matches!(
-                self.columns[name].dtype(),
-                DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
-            ) {
+            // The claim previously here — "pandas treats non-numeric
+            // (object/Utf8) columns as having no computable idxmin and returns
+            // NaN for them ... Match the oracle behavior (FP-P2D-148)" — is
+            // FALSE, and it was written against the oracle rather than pandas.
+            // MEASURED, live pandas 2.2.3, index ['r0','r1','r2']:
+            //   {'c': ['x','z','y']}          idxmin -> 'r0'   idxmax -> 'r1'
+            //   {'c': [False,True,False]}     idxmin -> 'r0'   idxmax -> 'r1'
+            //   {'c': datetimes}              idxmin -> 'r0'   idxmax -> 'r1'
+            //   {'c': ['x', 2, 'y']}          RAISES TypeError (mixed types)
+            //   {'c': ['x', nan, 'y']}        RAISES TypeError (nan vs str)
+            // A homogeneous comparable column IS answered, lexicographically
+            // for strings. Only an incomparable one refuses, and it refuses
+            // rather than yielding NaN. Datetime64 was excluded by the old gate
+            // too, which was a second miss.
+            // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+            if Self::idx_extreme_is_all_missing(&self.columns[name]) {
                 values.push(Scalar::Null(NullKind::NaN));
                 continue;
+            }
+            if !Self::idx_extreme_is_comparable(&self.columns[name]) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "idxmin cannot compare column '{name}': its values are not \
+                     mutually orderable"
+                )));
             }
             let s = self.column_as_series(name)?;
             match s.idxmin() {
@@ -72012,14 +72070,16 @@ impl DataFrame {
             .collect();
         let mut values = Vec::with_capacity(labels.len());
         for name in &self.column_order {
-            // Sister to idxmin above: pandas DataFrame.idxmax skips
-            // non-numeric columns (returns NaN). FP-P2D-148.
-            if !matches!(
-                self.columns[name].dtype(),
-                DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
-            ) {
+            // Sister to idxmin above, same measured rule.
+            if Self::idx_extreme_is_all_missing(&self.columns[name]) {
                 values.push(Scalar::Null(NullKind::NaN));
                 continue;
+            }
+            if !Self::idx_extreme_is_comparable(&self.columns[name]) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "idxmax cannot compare column '{name}': its values are not \
+                     mutually orderable"
+                )));
             }
             let s = self.column_as_series(name)?;
             match s.idxmax() {
@@ -84040,7 +84100,12 @@ impl DataFrameGroupBy<'_> {
                     if r == usize::MAX {
                         Scalar::Null(NullKind::NaN)
                     } else {
-                        Scalar::Utf8(orig_labels[r].to_string())
+                        // idxmin/idxmax return the index LABEL with ITS OWN dtype, not a
+                        // string. MEASURED, live pandas 2.2.3, on an Int64 index:
+                        //   d.groupby('grp').idxmin() -> {'val': [1]} dtype int64
+                        // Stringifying gave Utf8("1").
+                        // (br-frankenpandas-fixture-divergence-triage-9s0c4)
+                        index_label_to_scalar(&orig_labels[r])
                     }
                 })
                 .collect();
@@ -84125,7 +84190,8 @@ impl DataFrameGroupBy<'_> {
                 };
 
                 if let Some(idx) = best_idx {
-                    agg_vals.push(Scalar::Utf8(orig_labels[idx].to_string()));
+                    // The LABEL keeps its dtype — see the dense arm above.
+                    agg_vals.push(index_label_to_scalar(&orig_labels[idx]));
                 } else {
                     agg_vals.push(Scalar::Null(NullKind::NaN));
                 }
@@ -84205,7 +84271,8 @@ impl DataFrameGroupBy<'_> {
                 };
 
                 if let Some(idx) = best_idx {
-                    agg_vals.push(Scalar::Utf8(orig_labels[idx].to_string()));
+                    // The LABEL keeps its dtype — see the dense arm above.
+                    agg_vals.push(index_label_to_scalar(&orig_labels[idx]));
                 } else {
                     agg_vals.push(Scalar::Null(NullKind::NaN));
                 }
@@ -92819,6 +92886,96 @@ mod tests {
                 "numeric_only=true must skip the object column"
             );
         }
+    }
+
+    /// `idxmin`/`idxmax` return the index LABEL with its own dtype, and they
+    /// answer for an OBJECT column too.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// d = DataFrame({'grp': ['x','x','x'], 'val': [30,10,20]}, index=[0,1,2])
+    /// d.groupby('grp').idxmin()
+    ///   -> {'val': [1]}   dtype int64   the LABEL, still an integer
+    ///
+    /// d2 = DataFrame({'num': [1.0,5.0,2.0], 'txt': ['x','z','y']},
+    ///                index=['r0','r1','r2'])
+    /// d2.idxmax()
+    ///   -> {'num': 'r1', 'txt': 'r1'}   the object column IS answered for
+    /// d2.idxmax(numeric_only=True)
+    ///   -> {'num': 'r1'}
+    /// ```
+    ///
+    /// Two separate defects: FrankenPandas STRINGIFIED the label (returning
+    /// `'1'` for an Int64 index), and it emitted a null for the object column
+    /// instead of the label of its lexicographic max. The second is the same
+    /// numeric_only=False default settled for the reductions in
+    /// br-frankenpandas-reductions-numeric-only-default-zx21n, which did not
+    /// cover idxmin/idxmax — they were not among its 13 fixtures.
+    /// (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn idxmin_idxmax_keep_the_label_dtype_and_answer_for_object_columns() {
+        let grouped = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("x".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)],
+                ),
+            ],
+            (0..3_i64).map(IndexLabel::Int64).collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            grouped
+                .groupby(&["grp"])
+                .unwrap()
+                .idxmin()
+                .unwrap()
+                .column("val")
+                .unwrap()
+                .values(),
+            &[Scalar::Int64(1)],
+            "the label of an Int64 index stays Int64; stringifying it gives '1'"
+        );
+
+        let frame = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "num",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+                (
+                    "txt",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("z".into()),
+                        Scalar::Utf8("y".into()),
+                    ],
+                ),
+            ],
+            ["r0", "r1", "r2"]
+                .iter()
+                .map(|l| IndexLabel::Utf8((*l).to_owned()))
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            frame.idxmax().unwrap().values(),
+            &[Scalar::Utf8("r1".into()), Scalar::Utf8("r1".into())],
+            "idxmax answers for the object column too — 'z' is its max, at label r1"
+        );
     }
 
     /// The rest of the Unicode case family, measured together so the
@@ -123651,8 +123808,18 @@ mod tests {
         assert_eq!(idxmax.values()[0], Scalar::Int64(0));
     }
 
+    /// pandas ANSWERS for a homogeneous object column; it does not skip it.
+    ///
+    /// This test asserted the opposite and its comment said "non-numeric,
+    /// skipped at DataFrame level". MEASURED, live pandas 2.2.3, on the very
+    /// frame below:
+    ///   DataFrame({'num': [1.0,5.0,2.0], 'txt': ['x','z','y']},
+    ///             index=['r0','r1','r2']).idxmax()
+    ///     -> {'num': 'r1', 'txt': 'r1'}
+    /// The txt column is ordered lexicographically, so its max 'z' sits at r1.
+    /// (br-frankenpandas-fixture-divergence-triage-9s0c4)
     #[test]
-    fn dataframe_idxmin_idxmax_skip_non_numeric() {
+    fn dataframe_idxmin_idxmax_answer_for_a_homogeneous_object_column() {
         // pandas DataFrame.idxmin/idxmax returns NaN for non-numeric
         // columns even though Series::idxmin handles Utf8 via lex
         // comparison (br-7db78). Matches FP-P2D-148.
@@ -123689,14 +123856,14 @@ mod tests {
         .unwrap();
         let idxmax = df.idxmax().unwrap();
         assert_eq!(idxmax.len(), 2);
-        // num column → "r1" (max=5.0 at index r1)
+        // num → r1 (max 5.0); txt → r1 (lexicographic max 'z')
         assert_eq!(idxmax.values()[0], Scalar::Utf8("r1".to_string()));
-        // txt column → NaN (non-numeric, skipped at DataFrame level)
-        assert!(idxmax.values()[1].is_missing());
+        assert_eq!(idxmax.values()[1], Scalar::Utf8("r1".to_string()));
 
         let idxmin = df.idxmin().unwrap();
+        // num → r0 (min 1.0); txt → r0 (lexicographic min 'x')
         assert_eq!(idxmin.values()[0], Scalar::Utf8("r0".to_string()));
-        assert!(idxmin.values()[1].is_missing());
+        assert_eq!(idxmin.values()[1], Scalar::Utf8("r0".to_string()));
     }
 
     // ── DataFrame element-wise ops preserve non-numeric columns ──
