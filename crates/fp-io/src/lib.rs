@@ -5456,9 +5456,39 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     apply_pandas_csv_numeric_promotions(&mut columns);
 
     // Apply dtype coercion if specified.
+    //
+    // `dtype=str` is special: pandas hands back the source text, so `007` stays `"007"`
+    // and `1e3` stays `"1e3"`. Casting the already-inferred scalar cannot do that — by
+    // then `007` is `Int64(7)` and re-rendering yields `"7"`, silently destroying leading
+    // zeros, bit-string labels like `00`, and the original numeric spelling. Take the
+    // verbatim cell from `raw_columns` instead, which is exactly what it is kept for.
+    //
+    // Guarded on the same condition as the object-fallback text below: a parse-date
+    // transform can rewrite or add columns and desync `raw_columns` from `columns`, and
+    // the per-column length check keeps the indexing honest even so.
+    let raw_text_is_aligned = options.parse_dates.is_none()
+        && options.parse_date_combinations.is_none()
+        && options.parse_date_combinations_named.is_none()
+        && raw_columns.len() == columns.len();
     if let Some(ref dtype_map) = options.dtype {
         for (i, name) in headers.iter().enumerate() {
             if let Some(&target_dt) = dtype_map.get(name) {
+                if target_dt == DType::Utf8
+                    && raw_text_is_aligned
+                    && raw_columns[i].len() == columns[i].len()
+                {
+                    // Missing cells stay missing: pandas `dtype=str` yields NaN for an
+                    // NA cell rather than the literal marker text.
+                    columns[i] = columns[i]
+                        .iter()
+                        .zip(&raw_columns[i])
+                        .map(|(value, raw)| match value {
+                            Scalar::Null(kind) => Scalar::Null(*kind),
+                            _ => Scalar::Utf8(raw.clone()),
+                        })
+                        .collect();
+                    continue;
+                }
                 let coerced = columns[i]
                     .iter()
                     .map(|v| fp_types::cast_scalar(v, target_dt))
@@ -24906,6 +24936,61 @@ mod tests {
         );
         // id column should remain Int64 (not in dtype map)
         assert_eq!(frame.column("id").unwrap().values()[0], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn csv_dtype_str_preserves_source_text() {
+        // pandas: read_csv(..., dtype=str) hands back the source text unchanged, so
+        // leading zeros, bit-string labels, and the original numeric spelling survive.
+        // Coercing the already-inferred scalar cannot do this: by then `007` is
+        // `Int64(7)` and re-rendering yields "7", which silently merges `007` with `7`.
+        let input = "cluster,regime,x\n007,00,0.50\n7,10,1e3\n";
+        let mut dtype_map = std::collections::HashMap::new();
+        for column in ["cluster", "regime", "x"] {
+            dtype_map.insert(column.to_owned(), fp_types::DType::Utf8);
+        }
+        let opts = CsvReadOptions {
+            dtype: Some(dtype_map),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+
+        let cluster = frame.column("cluster").unwrap();
+        assert_eq!(cluster.values()[0], Scalar::Utf8("007".to_owned()));
+        assert_eq!(cluster.values()[1], Scalar::Utf8("7".to_owned()));
+        assert_ne!(
+            cluster.values()[0],
+            cluster.values()[1],
+            "007 and 7 are distinct labels and must not collapse"
+        );
+
+        let regime = frame.column("regime").unwrap();
+        assert_eq!(regime.values()[0], Scalar::Utf8("00".to_owned()));
+        assert_eq!(regime.values()[1], Scalar::Utf8("10".to_owned()));
+
+        let x = frame.column("x").unwrap();
+        assert_eq!(x.values()[0], Scalar::Utf8("0.50".to_owned()));
+        assert_eq!(x.values()[1], Scalar::Utf8("1e3".to_owned()));
+    }
+
+    #[test]
+    fn csv_dtype_str_keeps_missing_cells_missing() {
+        // pandas keeps NaN under dtype=str rather than materializing the NA marker text.
+        let input = "id,label\n1,\n2,keep\n";
+        let mut dtype_map = std::collections::HashMap::new();
+        dtype_map.insert("label".to_owned(), fp_types::DType::Utf8);
+        let opts = CsvReadOptions {
+            dtype: Some(dtype_map),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        let label = frame.column("label").unwrap();
+        assert!(
+            matches!(label.values()[0], Scalar::Null(_)),
+            "an NA cell must stay null under dtype=str, got {:?}",
+            label.values()[0]
+        );
+        assert_eq!(label.values()[1], Scalar::Utf8("keep".to_owned()));
     }
 
     #[test]
