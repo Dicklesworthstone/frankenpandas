@@ -5473,15 +5473,20 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     if let Some(ref dtype_map) = options.dtype {
         for (i, name) in headers.iter().enumerate() {
             if let Some(&target_dt) = dtype_map.get(name) {
+                let raw_column = if raw_text_is_aligned {
+                    raw_columns.get(i)
+                } else {
+                    None
+                };
                 if target_dt == DType::Utf8
-                    && raw_text_is_aligned
-                    && raw_columns[i].len() == columns[i].len()
+                    && raw_column.is_some_and(|raw| raw.len() == columns[i].len())
                 {
+                    let raw_column = raw_column.expect("checked immediately above");
                     // Missing cells stay missing: pandas `dtype=str` yields NaN for an
                     // NA cell rather than the literal marker text.
                     columns[i] = columns[i]
                         .iter()
-                        .zip(&raw_columns[i])
+                        .zip(raw_column)
                         .map(|(value, raw)| match value {
                             Scalar::Null(kind) => Scalar::Null(*kind),
                             _ => Scalar::Utf8(raw.clone()),
@@ -24936,6 +24941,23 @@ mod tests {
         );
         // id column should remain Int64 (not in dtype map)
         assert_eq!(frame.column("id").unwrap().values()[0], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn csv_dtype_str_uses_unquoted_field_content() {
+        // The verbatim text taken for dtype=str is the *parsed* field, not the raw line
+        // slice, so quoting is still removed and an embedded delimiter survives.
+        let input = "a,b\n\"x,y\",2\n\"lead 007\",3\n";
+        let mut dtype_map = std::collections::HashMap::new();
+        dtype_map.insert("a".to_owned(), fp_types::DType::Utf8);
+        let opts = CsvReadOptions {
+            dtype: Some(dtype_map),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        let a = frame.column("a").unwrap();
+        assert_eq!(a.values()[0], Scalar::Utf8("x,y".to_owned()));
+        assert_eq!(a.values()[1], Scalar::Utf8("lead 007".to_owned()));
     }
 
     #[test]
