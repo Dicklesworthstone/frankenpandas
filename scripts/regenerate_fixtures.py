@@ -728,6 +728,13 @@ def main() -> int:
                              "attribution pass driven by counts rather than by a visible slice.")
     args = parser.parse_args()
 
+    if args.apply and args.glob == "*.json" and not args.limit:
+        print(
+            "--apply requires an explicit --glob or --limit: corpus-wide regeneration is forbidden",
+            file=sys.stderr,
+        )
+        return 2
+
     # --restamp-agreeing rewrites no expected value, so it does not need an
     # attribution allowlist. With no --attributions the allowlist loads empty,
     # which means zero MOVED fixtures can be written — the bulk-regeneration ban
