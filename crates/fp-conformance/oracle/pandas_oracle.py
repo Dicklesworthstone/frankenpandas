@@ -835,10 +835,8 @@ def op_csv_read_frame(pd, payload: dict[str, Any]) -> dict[str, Any]:
         kwargs["decimal"] = decimal
     on_bad_lines = payload.get("csv_on_bad_lines")
     if on_bad_lines is not None:
-        if on_bad_lines not in {"error", "warn", "skip"}:
-            raise OracleError("csv_read_frame csv_on_bad_lines must be error|warn|skip")
         kwargs["on_bad_lines"] = on_bad_lines
-        if on_bad_lines != "error":
+        if on_bad_lines in ("warn", "skip"):
             kwargs["engine"] = "python"
     true_values = payload.get("csv_true_values")
     if true_values is not None:

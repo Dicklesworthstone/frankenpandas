@@ -196,6 +196,22 @@ def test_series_join_cross_is_a_pandas_error(oracle, pd):
     assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
 
 
+def test_csv_read_frame_invalid_on_bad_lines_is_a_pandas_error(oracle, pd):
+    payload = {
+        "operation": "csv_read_frame",
+        "csv_input": "a,b\n1,2\n",
+        "csv_on_bad_lines": "bogus",
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "csv_read_frame failed: Argument bogus is invalid for on_bad_lines"
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
 def test_groupby_min_preserves_integer_dtype(oracle, pd):
     payload = {
         "operation": "groupby_min",
