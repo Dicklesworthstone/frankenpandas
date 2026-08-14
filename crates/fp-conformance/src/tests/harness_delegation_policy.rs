@@ -43,6 +43,13 @@ const RAW_BUILDERS: [&str; 4] = [
     "Scalar::Null(NullKind::",
 ];
 
+/// Helpers that previously owned pandas-visible constructor policy in the
+/// harness.  Unlike a raw builder, this shape can make a packet green by
+/// rejecting or projecting data before FrankenPandas gets a chance to run.
+/// Keep these names forbidden rather than allowing a replacement shadow to
+/// return under an innocuous helper name.
+const FORBIDDEN_POLICY_HELPERS: [&str; 1] = ["collect_dict_constructor_payloads"];
+
 /// Arms that legitimately construct, each with the reason.
 ///
 /// Repackaging is fine: the fp-join entry points return a result struct
@@ -129,6 +136,17 @@ fn self_building_arms(source: &str) -> Vec<String> {
     found
 }
 
+fn forbidden_policy_helpers(source: &str) -> Vec<String> {
+    let source = strip_line_comments(source).join("\n");
+    let mut found: Vec<String> = FORBIDDEN_POLICY_HELPERS
+        .iter()
+        .filter(|name| source.contains(&format!("fn {name}(")))
+        .map(|name| (*name).to_owned())
+        .collect();
+    found.sort();
+    found
+}
+
 #[test]
 fn fixture_operation_arms_delegate_to_frankenpandas() {
     let source = harness_source();
@@ -157,6 +175,19 @@ fn fixture_operation_arms_delegate_to_frankenpandas() {
     );
 }
 
+#[test]
+fn fixture_policy_helpers_do_not_preempt_frankenpandas() {
+    let forbidden = forbidden_policy_helpers(&harness_source());
+    assert!(
+        forbidden.is_empty(),
+        "these helpers own pandas-visible policy before FrankenPandas runs: \
+         {forbidden:#?}\n\n\
+         Delegate the policy to the public fp-* API instead. A helper that \
+         rejects, projects, or fabricates constructor payloads can certify the \
+         harness rather than the implementation. See br-frankenpandas-oxodo."
+    );
+}
+
 /// The comment-stripping is load-bearing, so it gets its own assertion rather
 /// than being trusted implicitly: a doc comment naming a raw builder must not
 /// make an arm look like a violator.
@@ -182,5 +213,18 @@ fn execute_offender_fixture_operation() {
     assert_eq!(
         self_building_arms(real),
         vec!["execute_offender_fixture_operation".to_string()]
+    );
+}
+
+#[test]
+fn policy_helper_is_detected_even_without_a_raw_builder() {
+    let source = "\
+fn collect_dict_constructor_payloads() {
+    return Err(\"column is absent\".to_owned());
+}
+";
+    assert_eq!(
+        forbidden_policy_helpers(source),
+        vec!["collect_dict_constructor_payloads".to_string()]
     );
 }
