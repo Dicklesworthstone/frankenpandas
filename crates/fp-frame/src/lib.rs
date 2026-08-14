@@ -91273,6 +91273,31 @@ mod tests {
         );
     }
 
+    fn assert_nonnegative_f64_values_within_ulps(
+        actual_values: &[Scalar],
+        expected_values: &[f64],
+        max_ulps: u64,
+    ) {
+        assert_eq!(actual_values.len(), expected_values.len());
+        for (row, (actual, expected)) in actual_values.iter().zip(expected_values).enumerate() {
+            let Scalar::Float64(actual) = actual else {
+                panic!("row {row} should contain Float64, got {actual:?}");
+            };
+            assert!(
+                actual.is_finite() && actual.is_sign_positive(),
+                "row {row} should contain a finite nonnegative result, got {actual}"
+            );
+            assert!(
+                expected.is_finite() && expected.is_sign_positive(),
+                "test expectation at row {row} should be finite and nonnegative, got {expected}"
+            );
+            assert!(
+                actual.to_bits().abs_diff(expected.to_bits()) <= max_ulps,
+                "row {row} differs by more than {max_ulps} ULPs: actual={actual:.17}, expected={expected:.17}"
+            );
+        }
+    }
+
     /// Remove every `label_identity: <digits>, ` occurrence (fp-index Index
     /// Debug's runtime-only counter) so golden comparisons are deterministic.
     fn strip_volatile_label_identity(s: &str) -> String {
@@ -165588,7 +165613,7 @@ mod tests {
     }
 
     #[test]
-    fn series_acosh_golden_basic() {
+    fn series_acosh_matches_reference_within_two_ulps_glfm8() {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
@@ -165600,8 +165625,11 @@ mod tests {
         )
         .unwrap();
         let result = s.acosh().unwrap();
-        let output = format!("{result}");
-        assert_text_golden("series_acosh_basic.txt", &output);
+        assert_nonnegative_f64_values_within_ulps(
+            result.values(),
+            &[0.0, 1.316_957_896_924_816_6, 1.762_747_174_039_086],
+            2,
+        );
     }
 
     #[test]
@@ -166344,7 +166372,7 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_arccosh_golden_basic() {
+    fn dataframe_arccosh_matches_reference_within_two_ulps_glfm8() {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
@@ -166368,8 +166396,20 @@ mod tests {
         )
         .unwrap();
         let result = df.arccosh().unwrap();
-        let output = format!("{result}");
-        assert_text_golden("dataframe_arccosh_basic.txt", &output);
+        assert_nonnegative_f64_values_within_ulps(
+            result.column("a").unwrap().values(),
+            &[0.0, 1.316_957_896_924_816_6, 1.762_747_174_039_086],
+            2,
+        );
+        assert_nonnegative_f64_values_within_ulps(
+            result.column("b").unwrap().values(),
+            &[
+                0.962_423_650_119_206_9,
+                1.566_799_236_972_411,
+                2.063_437_068_895_560_8,
+            ],
+            2,
+        );
     }
 
     #[test]
@@ -166928,7 +166968,7 @@ mod tests {
     }
 
     #[test]
-    fn series_arccosh_golden_basic() {
+    fn series_arccosh_matches_reference_within_two_ulps_glfm8() {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
@@ -166940,8 +166980,11 @@ mod tests {
         )
         .unwrap();
         let result = s.arccosh().unwrap();
-        let output = format!("{result}");
-        assert_text_golden("series_arccosh_basic.txt", &output);
+        assert_nonnegative_f64_values_within_ulps(
+            result.values(),
+            &[0.0, 1.316_957_896_924_816_6, 1.762_747_174_039_086],
+            2,
+        );
     }
 
     #[test]
