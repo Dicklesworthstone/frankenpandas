@@ -199,9 +199,10 @@ def test_column_order_is_applied_as_a_selector_for_loc_and_iloc(oracle, pd):
 
 
 def test_column_selector_rejects_names_not_in_the_frame(oracle, pd):
-    """The negative control: a bad selector must raise, not silently pass through."""
+    """A bad selector is rejected by pandas, not an adapter membership check."""
     import pytest as _pytest
 
     frame = pd.DataFrame({"a": [1]})
-    with _pytest.raises(oracle.OracleError):
+    with _pytest.raises(oracle.OracleError) as raised:
         oracle.apply_column_selector(frame, {"column_order": ["nope"]}, "t")
+    assert oracle.oracle_error_origin(raised.value) == oracle.ERROR_ORIGIN_PANDAS

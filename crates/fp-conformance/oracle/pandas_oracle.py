@@ -5333,10 +5333,12 @@ def apply_column_selector(frame, payload: dict[str, Any], op_name: str):
         return frame
     if not isinstance(selector, list):
         raise OracleError(f"{op_name} column_order must be a list when provided")
-    missing = [name for name in selector if name not in frame.columns]
-    if missing:
-        raise OracleError(f"{op_name} column_order names absent from frame: {missing}")
-    return frame.loc[:, selector]
+    try:
+        # Let pandas decide selector validity. The former hand-rolled
+        # membership check made this adapter error look like a pandas refusal.
+        return frame.loc[:, selector]
+    except KeyError as exc:
+        raise OracleError(f"{op_name} column lookup failed: {exc}") from exc
 
 
 def op_dataframe_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
