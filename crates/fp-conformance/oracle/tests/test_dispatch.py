@@ -88,6 +88,44 @@ def test_dataframe_cumsum_preserves_integer_dtype(oracle, pd):
     assert [item["value"] for item in values] == [1, 3, 6]
 
 
+@pytest.mark.parametrize(
+    ("operation", "other", "expected"),
+    [
+        ("dataframe_where", -1, {"a": [1, -1], "b": [-1, -1]}),
+        ("dataframe_mask", -1, {"a": [-1, 2], "b": [-1, -1]}),
+        ("dataframe_where_df", None, {"a": [1, 20], "b": [30, 40]}),
+        ("dataframe_mask_df", None, {"a": [10, 2], "b": [30, 40]}),
+    ],
+)
+def test_dataframe_where_and_mask_align_partial_condition_columns(
+    oracle, pd, operation, other, expected
+):
+    payload = {
+        "operation": operation,
+        "frame": _frame_payload({"a": [1, 2], "b": [3, 4]}),
+        "frame_right": {
+            "index": [
+                {"kind": "int64", "value": 0},
+                {"kind": "int64", "value": 1},
+            ],
+            "columns": {
+                "a": [
+                    {"kind": "bool", "value": True},
+                    {"kind": "bool", "value": False},
+                ]
+            },
+        },
+    }
+    if other is None:
+        payload["frame_other"] = _frame_payload({"a": [10, 20], "b": [30, 40]})
+    else:
+        payload["fill_value"] = {"kind": "int64", "value": other}
+
+    response = oracle.dispatch(pd, payload)
+    columns = response["expected_frame"]["columns"]
+    assert {name: [item["value"] for item in values] for name, values in columns.items()} == expected
+
+
 def test_groupby_min_preserves_integer_dtype(oracle, pd):
     payload = {
         "operation": "groupby_min",

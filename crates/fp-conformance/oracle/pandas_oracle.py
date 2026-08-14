@@ -6640,9 +6640,6 @@ def op_dataframe_where(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     frame = dataframe_from_json(pd, frame_payload)
     cond = dataframe_from_json(pd, cond_payload)
-    for column in frame.columns.tolist():
-        if column not in cond.columns.tolist():
-            raise OracleError(f"where: condition missing column {column!r}")
 
     fill_value = payload.get("fill_value")
     try:
@@ -6669,9 +6666,6 @@ def op_dataframe_where_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame = dataframe_from_json(pd, frame_payload)
     cond = dataframe_from_json(pd, cond_payload)
     other = dataframe_from_json(pd, other_payload)
-    for column in frame.columns.tolist():
-        if column not in cond.columns.tolist():
-            raise OracleError(f"where_cond_df: condition missing column {column!r}")
 
     try:
         out = frame.where(cond, other=other)
@@ -6690,9 +6684,6 @@ def op_dataframe_mask(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     frame = dataframe_from_json(pd, frame_payload)
     cond = dataframe_from_json(pd, cond_payload)
-    for column in frame.columns.tolist():
-        if column not in cond.columns.tolist():
-            raise OracleError(f"mask: condition missing column {column!r}")
 
     fill_value = payload.get("fill_value")
     try:
@@ -6719,9 +6710,6 @@ def op_dataframe_mask_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame = dataframe_from_json(pd, frame_payload)
     cond = dataframe_from_json(pd, cond_payload)
     other = dataframe_from_json(pd, other_payload)
-    for column in frame.columns.tolist():
-        if column not in cond.columns.tolist():
-            raise OracleError(f"mask_df_other: condition missing column {column!r}")
 
     try:
         out = frame.mask(cond, other=other)
