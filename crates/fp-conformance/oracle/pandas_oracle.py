@@ -7573,14 +7573,7 @@ def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
     right = dataframe_from_json(pd, frame_right_payload)
     axis = payload.get("concat_axis", 0)
 
-    join_raw = payload.get("concat_join", "outer")
-    if not isinstance(join_raw, str):
-        raise OracleError("dataframe_concat concat_join must be a string")
-    join = join_raw.lower()
-    if join not in {"outer", "inner"}:
-        raise OracleError(
-            f"dataframe_concat concat_join must be 'outer' or 'inner', got {join_raw}"
-        )
+    join = payload.get("concat_join", "outer")
 
     if axis in (1, "columns"):
         overlapping = sorted(set(left.columns.tolist()) & set(right.columns.tolist()))

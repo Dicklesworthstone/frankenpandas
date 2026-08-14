@@ -160,6 +160,24 @@ def test_dataframe_concat_invalid_axis_is_a_pandas_error(oracle, pd):
     assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
 
 
+def test_dataframe_concat_invalid_join_is_a_pandas_error(oracle, pd):
+    payload = {
+        "operation": "dataframe_concat",
+        "frame": _frame_payload({"left": [1]}),
+        "frame_right": _frame_payload({"right": [2]}),
+        "concat_join": "sideways",
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "dataframe_concat failed: Only can inner (intersect) or outer (union) "
+        "join the other axis"
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
 def test_groupby_min_preserves_integer_dtype(oracle, pd):
     payload = {
         "operation": "groupby_min",
