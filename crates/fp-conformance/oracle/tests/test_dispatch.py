@@ -143,6 +143,23 @@ def test_dataframe_set_index_missing_column_is_a_pandas_error(oracle, pd):
     assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
 
 
+def test_dataframe_concat_invalid_axis_is_a_pandas_error(oracle, pd):
+    payload = {
+        "operation": "dataframe_concat",
+        "frame": _frame_payload({"left": [1]}),
+        "frame_right": _frame_payload({"right": [2]}),
+        "concat_axis": 2,
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "dataframe_concat failed: No axis named 2 for object type DataFrame"
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
 def test_groupby_min_preserves_integer_dtype(oracle, pd):
     payload = {
         "operation": "groupby_min",

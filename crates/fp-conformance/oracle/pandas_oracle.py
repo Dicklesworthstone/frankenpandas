@@ -7571,15 +7571,7 @@ def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     left = dataframe_from_json(pd, frame_payload)
     right = dataframe_from_json(pd, frame_right_payload)
-    axis_raw = payload.get("concat_axis", 0)
-    try:
-        axis = int(axis_raw)
-    except (TypeError, ValueError) as exc:
-        raise OracleError(
-            f"dataframe_concat concat_axis must be an integer: {exc}"
-        ) from exc
-    if axis not in (0, 1):
-        raise OracleError(f"dataframe_concat concat_axis must be 0 or 1, got {axis}")
+    axis = payload.get("concat_axis", 0)
 
     join_raw = payload.get("concat_join", "outer")
     if not isinstance(join_raw, str):
@@ -7590,16 +7582,17 @@ def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
             f"dataframe_concat concat_join must be 'outer' or 'inner', got {join_raw}"
         )
 
-    if axis == 0:
-        out = pd.concat([left, right], axis=0, join=join, sort=False)
-    else:
+    if axis in (1, "columns"):
         overlapping = sorted(set(left.columns.tolist()) & set(right.columns.tolist()))
         if overlapping:
             joined = ", ".join(map(str, overlapping))
             raise OracleError(
                 f"dataframe_concat axis=1 duplicate columns unsupported: {joined}"
             )
-        out = pd.concat([left, right], axis=1, join=join, sort=False)
+    try:
+        out = pd.concat([left, right], axis=axis, join=join, sort=False)
+    except Exception as exc:
+        raise OracleError(f"dataframe_concat failed: {exc}") from exc
     expected_frame = dataframe_to_json(out)
     expected_frame["column_order"] = [str(name) for name in out.columns.tolist()]
     return {"expected_frame": expected_frame}
