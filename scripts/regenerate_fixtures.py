@@ -735,6 +735,13 @@ def main() -> int:
         )
         return 2
 
+    if args.apply and not args.restamp_agreeing and args.report_json is None:
+        print(
+            "--apply regeneration requires --report-json for complete attribution review",
+            file=sys.stderr,
+        )
+        return 2
+
     # --restamp-agreeing rewrites no expected value, so it does not need an
     # attribution allowlist. With no --attributions the allowlist loads empty,
     # which means zero MOVED fixtures can be written — the bulk-regeneration ban
