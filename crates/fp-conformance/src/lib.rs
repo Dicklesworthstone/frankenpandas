@@ -24965,30 +24965,72 @@ mod tests {
         }
     }
 
-    fn assert_packet_report_green_or_actionable_surface(label: &str, report: &PacketParityReport) {
-        if report.is_green() {
+    fn assert_green_after_failure_surface(
+        label: &str,
+        is_green: bool,
+        entries: &[FailureSurfaceEntry],
+        artifact_writer: impl FnOnce(&[FailureSurfaceEntry]) -> String,
+    ) {
+        if is_green {
             return;
         }
 
-        let entries = build_failure_surface_entries_for_report(report);
-        let artifact = write_failure_surface_artifact(label, &entries);
-        assert_failure_surface_is_actionable(label, &artifact, &entries);
+        let artifact = artifact_writer(entries);
+        assert_failure_surface_is_actionable(label, &artifact, entries);
+        panic!(
+            "{label} conformance mismatch\n{artifact}\n{surface}",
+            surface = render_failure_surface_entries(entries),
+        );
     }
 
-    fn assert_grouped_reports_green_or_actionable_surface(
+    fn assert_packet_report_green_after_writing_failure_surface(
+        label: &str,
+        report: &PacketParityReport,
+    ) {
+        if report.is_green() {
+            return;
+        }
+        let entries = build_failure_surface_entries_for_report(report);
+        assert_green_after_failure_surface(label, false, &entries, |entries| {
+            write_failure_surface_artifact(label, entries)
+        });
+    }
+
+    fn assert_grouped_reports_green_after_writing_failure_surface(
         label: &str,
         reports: &[PacketParityReport],
     ) {
         if reports.iter().all(PacketParityReport::is_green) {
             return;
         }
-
         let entries = build_failure_surface_entries(reports);
-        let artifact = write_failure_surface_artifact(label, &entries);
-        assert_failure_surface_is_actionable(label, &artifact, &entries);
+        assert_green_after_failure_surface(label, false, &entries, |entries| {
+            write_failure_surface_artifact(label, entries)
+        });
     }
 
-    fn assert_ci_gate_green_or_actionable_surface(label: &str, result: &CiGateResult) {
+    #[test]
+    #[should_panic(expected = "synthetic packet mismatch conformance mismatch")]
+    fn non_green_packet_surface_fails_the_gate_gxe5s() {
+        let entries = [FailureSurfaceEntry {
+            suite: "synthetic".to_owned(),
+            packet_id: "FP-TEST-001".to_owned(),
+            case_id: "fixture_mismatch".to_owned(),
+            operation: FixtureOperation::SeriesAdd,
+            mode: RuntimeMode::Strict,
+            mismatch_class: "value_critical".to_owned(),
+            mismatch: "actual=Int64(1), expected=Int64(2)".to_owned(),
+            replay_key: "FP-TEST-001/fixture_mismatch/strict".to_owned(),
+            trace_id: "FP-TEST-001:fixture_mismatch:strict".to_owned(),
+            evidence_records: 1,
+        }];
+
+        assert_green_after_failure_surface("synthetic packet mismatch", false, &entries, |_| {
+            "artifact: <test-only>".to_owned()
+        });
+    }
+
+    fn assert_ci_gate_green_after_validating_failure_surface(label: &str, result: &CiGateResult) {
         if result.passed {
             return;
         }
@@ -25017,6 +25059,7 @@ mod tests {
             saw_structured_failure,
             "{label} expected at least one structured failure row\n{result:#?}"
         );
+        panic!("{label} conformance gate failed\n{result:#?}");
     }
 
     fn sample_failure_digest() -> FailureDigest {
@@ -25116,7 +25159,7 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let report = run_packet_suite(&cfg).expect("suite should run");
         assert!(report.fixture_count >= 1, "expected packet fixtures");
-        assert_packet_report_green_or_actionable_surface(
+        assert_packet_report_green_after_writing_failure_surface(
             "packet_suite_is_green_for_bootstrap_cases",
             &report,
         );
@@ -25146,7 +25189,7 @@ mod tests {
             "expected exactly one grouped report per packet: unique={unique_packet_count} reports={}",
             reports.len()
         );
-        assert_grouped_reports_green_or_actionable_surface(
+        assert_grouped_reports_green_after_writing_failure_surface(
             "grouped_reports_are_partitioned_per_packet",
             &reports,
         );
@@ -25288,7 +25331,7 @@ mod tests {
         let diff_report =
             run_differential_suite(&cfg, &SuiteOptions::default()).expect("differential suite");
         assert!(diff_report.report.fixture_count >= 1);
-        assert_packet_report_green_or_actionable_surface(
+        assert_packet_report_green_after_writing_failure_surface(
             "differential_suite_produces_structured_drift",
             &diff_report.report,
         );
@@ -25568,7 +25611,7 @@ mod tests {
         for packet_id in packet_ids {
             let diff_report = run_differential_by_id(&cfg, &packet_id, OracleMode::FixtureExpected)
                 .expect("differential report for discovered packet should run");
-            assert_packet_report_green_or_actionable_surface(
+            assert_packet_report_green_after_writing_failure_surface(
                 &format!("differential_all_packets_green_{packet_id}"),
                 &diff_report.report,
             );
@@ -26164,7 +26207,7 @@ mod tests {
             report.packet_reports.len()
         );
         assert!(report.total_fixtures > 0, "should have fixtures");
-        assert_grouped_reports_green_or_actionable_surface(
+        assert_grouped_reports_green_after_writing_failure_surface(
             "e2e_suite_runs_full_pipeline",
             &report.packet_reports,
         );
@@ -27248,7 +27291,10 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
     fn ci_gate_g6_conformance_evaluates() {
         let config = CiPipelineConfig::default();
         let result = evaluate_ci_gate(CiGate::G6Conformance, &config);
-        assert_ci_gate_green_or_actionable_surface("ci_gate_g6_conformance_evaluates", &result);
+        assert_ci_gate_green_after_validating_failure_surface(
+            "ci_gate_g6_conformance_evaluates",
+            &result,
+        );
         assert!(result.elapsed_ms > 0 || result.passed);
     }
 
@@ -27275,7 +27321,7 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
                 "green pipeline should have green gate"
             );
         } else {
-            assert_ci_gate_green_or_actionable_surface(
+            assert_ci_gate_green_after_validating_failure_surface(
                 "ci_pipeline_conformance_only_runs_and_reports",
                 &result.gates[0],
             );
