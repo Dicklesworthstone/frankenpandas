@@ -65604,10 +65604,11 @@ impl DataFrame {
         base: Self,
         ri_codes: &[u32],
         ci_codes: &[u32],
-        val_f64: &[f64],
+        value_slices: (&[f64], Option<&[i64]>),
         aggfunc: &str,
         margins_name: &str,
     ) -> Result<Self, FrameError> {
+        let (val_f64, int_values) = value_slices;
         let n_idx = base.index.len();
         let n_col = base.column_order.len();
         let (row_margins, col_margins, overall) =
@@ -65627,10 +65628,29 @@ impl DataFrame {
             all_col_vals.push(Scalar::Float64(rm));
         }
         all_col_vals.push(Scalar::Float64(overall));
-        new_cols.insert(
-            margins_name.to_owned(),
-            Column::new(DType::Float64, all_col_vals)?,
-        );
+        // A sparse pivot body must widen its affected cells to Float64 for the
+        // invented gaps, but the sum margin column has no gaps of its own. For
+        // an all-valid Int64 source pandas therefore retains Int64 in that
+        // column rather than promoting it along with the sparse body.
+        let all_col = if aggfunc == "sum" {
+            if let Some(values) = int_values {
+                debug_assert_eq!(values.len(), ri_codes.len());
+                let mut sums = vec![0_i64; n_idx];
+                let mut overall = 0_i64;
+                for (row, &value) in values.iter().enumerate() {
+                    let idx = ri_codes[row] as usize;
+                    sums[idx] = sums[idx].wrapping_add(value);
+                    overall = overall.wrapping_add(value);
+                }
+                sums.push(overall);
+                Column::from_i64_values(sums)
+            } else {
+                Column::new(DType::Float64, all_col_vals)?
+            }
+        } else {
+            Column::new(DType::Float64, all_col_vals)?
+        };
+        new_cols.insert(margins_name.to_owned(), all_col);
         new_col_order.push(margins_name.to_owned());
 
         let mut new_labels = base.index.labels().to_vec();
@@ -65680,7 +65700,7 @@ impl DataFrame {
                 base,
                 &ri_codes,
                 &ci_codes,
-                val_f64.as_ref(),
+                (val_f64.as_ref(), self.columns[values].as_i64_slice()),
                 aggfunc,
                 margins_name,
             );
@@ -108309,6 +108329,54 @@ mod tests {
 
         // Index should end with "All"
         assert_eq!(pt.index().labels()[2], IndexLabel::Utf8("All".to_owned()));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_sparse_int_sum_margin_stays_int64_ro5dy() {
+        // pandas 2.2.3 widens the sparse A/B body columns for their invented
+        // gaps, but the complete sum margin column remains int64.
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(13), Scalar::Int64(5), Scalar::Int64(7)],
+                ),
+            ],
+        )
+        .expect("frame");
+
+        let pivot = df
+            .pivot_table_with_margins("sales", "region", "product", "sum", true)
+            .expect("pivot with margins");
+
+        assert_eq!(pivot.column("A").expect("A").dtype(), DType::Float64);
+        assert_eq!(pivot.column("B").expect("B").dtype(), DType::Float64);
+        assert_eq!(
+            pivot.column("All").expect("All").dtype(),
+            DType::Int64,
+            "the all-present sum margin must not inherit the body gap's promotion"
+        );
+        assert_eq!(
+            pivot.column("All").expect("All").values(),
+            &[Scalar::Int64(18), Scalar::Int64(7), Scalar::Int64(25)]
+        );
     }
 
     #[test]

@@ -60,9 +60,9 @@
         { "kind": "float64", "value": 5.0 }
       ],
       "All": [
-        { "kind": "float64", "value": 18.0 },
-        { "kind": "float64", "value": 7.0 },
-        { "kind": "float64", "value": 25.0 }
+        { "kind": "int64", "value": 18 },
+        { "kind": "int64", "value": 7 },
+        { "kind": "int64", "value": 25 }
       ]
     },
     "column_order": ["A", "B", "All"]
