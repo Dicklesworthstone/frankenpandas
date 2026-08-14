@@ -6901,10 +6901,6 @@ def op_series_between(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("series_between requires between_left payload")
     if between_right is None:
         raise OracleError("series_between requires between_right payload")
-    if inclusive not in {"both", "neither", "left", "right"}:
-        raise OracleError(
-            f"series_between inclusive must be both|neither|left|right, got {inclusive!r}"
-        )
 
     index = [label_from_json(item) for item in left["index"]]
     values = [scalar_from_json(item) for item in left["values"]]

@@ -212,6 +212,25 @@ def test_csv_read_frame_invalid_on_bad_lines_is_a_pandas_error(oracle, pd):
     assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
 
 
+def test_series_between_invalid_inclusive_is_a_pandas_error(oracle, pd):
+    payload = {
+        "operation": "series_between",
+        "left": _series_payload([1, 2, 3], [0, 1, 2]),
+        "between_left": {"kind": "int64", "value": 1},
+        "between_right": {"kind": "int64", "value": 3},
+        "between_inclusive": "bogus",
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "series_between failed: Inclusive has to be either string of "
+        "'both','left', 'right', or 'neither'."
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
 def test_groupby_min_preserves_integer_dtype(oracle, pd):
     payload = {
         "operation": "groupby_min",
