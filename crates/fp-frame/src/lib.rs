@@ -46536,7 +46536,7 @@ impl DatetimeAccessor<'_> {
                         .and_then(|t| t.split('Z').next())
                         .unwrap_or(time_part);
                     if Self::parse_time(time_clean).is_some() {
-                        return Scalar::Utf8(time_clean.to_string());
+                        return Scalar::Utf8(Self::trim_zero_time_fraction(time_clean).to_string());
                     }
                 }
                 // Try space-delimited: "YYYY-MM-DD HH:MM:SS"
@@ -46548,7 +46548,7 @@ impl DatetimeAccessor<'_> {
                         .and_then(|t| t.split('Z').next())
                         .unwrap_or(time_part);
                     if Self::parse_time(time_clean).is_some() {
-                        return Scalar::Utf8(time_clean.to_string());
+                        return Scalar::Utf8(Self::trim_zero_time_fraction(time_clean).to_string());
                     }
                 }
                 Scalar::Null(NullKind::NaN)
@@ -46625,7 +46625,12 @@ impl DatetimeAccessor<'_> {
                     .and_then(|t| t.split('Z').next())
                     .unwrap_or(time_with_tz);
                 if Self::parse_time(time_part).is_some() {
-                    return Scalar::Utf8(time_with_tz.to_string());
+                    let timezone = &time_with_tz[time_part.len()..];
+                    return Scalar::Utf8(format!(
+                        "{}{}",
+                        Self::trim_zero_time_fraction(time_part),
+                        timezone
+                    ));
                 }
                 Scalar::Null(NullKind::NaN)
             },
@@ -47483,6 +47488,20 @@ impl DatetimeAccessor<'_> {
             return None;
         }
         Some((hour, minute, second))
+    }
+
+    /// `datetime.time` renders no fractional component when its microsecond
+    /// field is zero. Preserve a nonzero source fraction verbatim, but remove
+    /// an explicit all-zero fraction before exposing `.dt.time` / `.dt.timetz`.
+    fn trim_zero_time_fraction(time: &str) -> &str {
+        let Some((whole_seconds, fraction)) = time.split_once('.') else {
+            return time;
+        };
+        if !fraction.is_empty() && fraction.bytes().all(|byte| byte == b'0') {
+            whole_seconds
+        } else {
+            time
+        }
     }
 
     /// Internal: is the given year a leap year?
@@ -151291,16 +151310,13 @@ mod tests {
         assert!(result.column().values()[1].is_missing());
         assert!(result.column().values()[2].is_missing());
 
-        // A zero fraction is deliberately NOT used here: pandas renders
-        // `time(23,59,59)` as '23:59:59' while FrankenPandas keeps the
-        // '.000000' it was given. That divergence is real, was found while
-        // correcting this test, and is filed separately rather than smuggled
-        // into this bead's assertions.
+        // br-frankenpandas-fuqgh: pandas' datetime.time drops a zero fraction
+        // but preserves nonzero microseconds.
         let s = Series::from_values(
             "ts",
             vec![0_i64.into(), 1_i64.into()],
             vec![
-                Scalar::Utf8("2023-06-30 23:59:59.500000".to_string()),
+                Scalar::Utf8("2023-06-30 23:59:59.000000".to_string()),
                 Scalar::Utf8("2023-12-01 08:00:00.123456".to_string()),
             ],
         )
@@ -151308,7 +151324,7 @@ mod tests {
         let result = s.dt().time().unwrap();
         assert_eq!(
             result.column().values()[0],
-            Scalar::Utf8("23:59:59.500000".to_string())
+            Scalar::Utf8("23:59:59".to_string())
         );
         assert_eq!(
             result.column().values()[1],
@@ -151507,6 +151523,27 @@ mod tests {
         assert_eq!(
             result.column().values()[1],
             Scalar::Utf8("23:59:59+05:30".to_string())
+        );
+
+        // pandas applies the same zero-fraction rendering before retaining
+        // timetz's suffix: `23:59:59.000000+05:30` -> `23:59:59+05:30`.
+        let zero_fraction = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2023-06-30 23:59:59.000000+05:30".to_string()),
+                Scalar::Utf8("2023-12-01 08:00:00.123456+05:30".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = zero_fraction.dt().timetz().unwrap();
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("23:59:59+05:30".to_string())
+        );
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("08:00:00.123456+05:30".to_string())
         );
     }
 
