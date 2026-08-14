@@ -1486,18 +1486,25 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     }
     let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
     reject_duplicate_headers(&headers)?;
+    let header_count = headers.len();
+    // pandas treats a uniformly one-field-wider body as an implicit first
+    // index column, not as malformed CSV. This must be decided across the
+    // whole body: a mixture of header-width and wider rows remains a parser
+    // error, as does a body that is wider by two or more fields.
+    let promotes_implicit_index = csv_body_has_uniform_one_extra_field(input, header_count)?;
 
-    if let Some(frame) = try_read_csv_str_simple_typed_numeric(input, &headers)? {
-        return Ok(frame);
-    }
+    if !promotes_implicit_index {
+        if let Some(frame) = try_read_csv_str_simple_typed_numeric(input, &headers)? {
+            return Ok(frame);
+        }
 
-    if let Some(frame) = try_read_csv_str_typed_numeric(input, &headers)? {
-        return Ok(frame);
+        if let Some(frame) = try_read_csv_str_typed_numeric(input, &headers)? {
+            return Ok(frame);
+        }
     }
 
     // AG-07: Vec-based column accumulation (O(1) per cell vs O(log c) BTreeMap).
     // Capacity hint from byte length avoids reallocation for typical CSVs.
-    let header_count = headers.len();
     let row_hint = input.len() / (header_count * 8).max(1);
     // Keep each cell's original text so an object-fallback column can preserve
     // the verbatim literal like pandas (see build_csv_object_aware_column). Stored
@@ -1547,11 +1554,25 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         .collect();
 
     let mut row_count: i64 = 0;
+    let mut implicit_index = promotes_implicit_index.then(Vec::new);
     for row in reader.records() {
         let record = row?;
-        reject_overlong_csv_record(record.len(), header_count, (row_count as usize) + 2)?;
+        let field_offset = usize::from(promotes_implicit_index);
+        if promotes_implicit_index {
+            debug_assert_eq!(record.len(), header_count + field_offset);
+            implicit_index
+                .as_mut()
+                .expect("implicit-index mode initializes index labels")
+                .push(csv_index_label_from_scalar(parse_scalar(
+                    record
+                        .get(0)
+                        .expect("uniform one-extra row has index field"),
+                )));
+        } else {
+            reject_overlong_csv_record(record.len(), header_count, (row_count as usize) + 2)?;
+        }
         for idx in 0..header_count {
-            let field = record.get(idx).unwrap_or_default();
+            let field = record.get(idx + field_offset).unwrap_or_default();
             raw_bytes[idx].extend_from_slice(field.as_bytes());
             raw_offsets[idx].push(raw_bytes[idx].len());
             let acc = &mut accs[idx];
@@ -1678,7 +1699,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         column_order.push(name);
     }
 
-    let index = csv_default_unit_range_index(row_count);
+    let index = implicit_index.map_or_else(|| csv_default_unit_range_index(row_count), Index::new);
     Ok(DataFrame::new_with_column_order(
         index,
         out_columns,
@@ -5123,6 +5144,60 @@ fn reject_overlong_csv_record(found: usize, expected: usize, line: usize) -> Res
         });
     }
     Ok(())
+}
+
+/// Return whether every data record has exactly one more field than the header.
+///
+/// pandas interprets this precise shape as an implicit first index column. The
+/// decision cannot be made record-by-record: accepting one long row would hide
+/// a later width mismatch that pandas rejects.
+fn csv_body_has_uniform_one_extra_field(input: &str, header_count: usize) -> Result<bool, IoError> {
+    let mut reader = ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(input.as_bytes());
+    let _ = reader.headers().map_err(IoError::from)?;
+
+    let mut saw_data_row = false;
+    for row in reader.records() {
+        if row?.len() != header_count + 1 {
+            return Ok(false);
+        }
+        saw_data_row = true;
+    }
+    Ok(saw_data_row)
+}
+
+fn csv_index_label_from_scalar(value: Scalar) -> IndexLabel {
+    match value {
+        Scalar::Int64(v) => IndexLabel::Int64(v),
+        Scalar::Utf8(v) => IndexLabel::Utf8(v),
+        Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+        Scalar::Bool(v) => IndexLabel::Utf8(if v { "True" } else { "False" }.to_owned()),
+        Scalar::Null(kind) => IndexLabel::Null(kind),
+        Scalar::Timedelta64(v) => {
+            if v == Timedelta::NAT {
+                IndexLabel::Utf8("<NaT>".to_owned())
+            } else {
+                IndexLabel::Utf8(Timedelta::format(v))
+            }
+        }
+        Scalar::Datetime64(v) => {
+            if v == Timestamp::NAT {
+                IndexLabel::Utf8("<NaT>".to_owned())
+            } else {
+                IndexLabel::Utf8(format_datetime_ns(v))
+            }
+        }
+        Scalar::Period(v) => {
+            if v.ordinal == i64::MIN {
+                IndexLabel::Utf8("<NaT>".to_owned())
+            } else {
+                IndexLabel::Utf8(v.calendar_string())
+            }
+        }
+        Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+    }
 }
 
 fn should_skip_bad_csv_record(
@@ -15101,6 +15176,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn csv_uniform_one_extra_field_becomes_the_index_azv2h() {
+        // br-frankenpandas-azv2h. pandas' implicit-index rule is deliberately
+        // all-or-nothing: every data row must be exactly one field wider than
+        // the header. The leading field becomes the index, not a discarded
+        // value and not a third data column.
+        let frame = read_csv_str("a,b\n1,2,3\n4,5,6\n")
+            .expect("uniform one-extra rows become an implicit index");
+
+        assert_eq!(frame.column_names(), vec!["a", "b"]);
+        assert_eq!(
+            frame.index().labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(4)]
+        );
+        assert_eq!(
+            frame.column("a").expect("a column").values(),
+            &[Scalar::Int64(2), Scalar::Int64(5)]
+        );
+        assert_eq!(
+            frame.column("b").expect("b column").values(),
+            &[Scalar::Int64(3), Scalar::Int64(6)]
+        );
+
+        // A single header-width row makes the input genuinely ragged again;
+        // accepting the first row alone would falsely turn a parser error into
+        // a green frame.
+        let err = read_csv_str("a,b\n1,2,3\n4,5\n")
+            .expect_err("mixed widths must not use implicit-index promotion");
+        assert!(matches!(
+            err,
+            IoError::CsvFieldCount {
+                line: 2,
+                expected: 2,
+                found: 3,
+            }
+        ));
+    }
+
     fn make_table_format_dataframe() -> DataFrame {
         let mut columns = BTreeMap::new();
         columns.insert(
@@ -17101,8 +17214,9 @@ mod tests {
     #[test]
     fn read_csv_typed_numeric_fast_path_preserves_ragged_row_errors() {
         // The numeric fast path runs `flexible(true)` like every other reader,
-        // so it must enforce the overlong direction itself (gtkz1).
-        let long_row = "a,b\n1,2,3\n";
+        // so it must enforce an overlong row once the body is not uniformly
+        // eligible for pandas' implicit-index rule (azv2h).
+        let long_row = "a,b\n1,2,3\n4,5\n";
         let err = read_csv_str(long_row).expect_err("long row must reject");
         assert!(
             matches!(
