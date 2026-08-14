@@ -22062,74 +22062,70 @@ orchestrator decision, not an agent's), or a host without resident background
 services. `37.187.75.150` is disqualified as a bench host until `bun` and
 `midas-edge-api` are moved off it.
 
-### 2026-08-14 IcyFern — `str.startswith` Arrow @1M measured live on a CONTENDED host at 4.89x; the 2026-07-28 0.420x row does not describe today's code — incumbent-win
+### 2026-08-14 IcyFern — `str.startswith` Arrow @1M is 5.105x on a CONTENDED host via the SANCTIONED harness; the 2026-07-28 0.420x row does not describe today's code — incumbent-win
 
-Supersedes the MEASUREMENT-BLOCKED row directly above. That row was right that
-no host clears `HostWideExclusivityGate`, and wrong to stop there.
-franken_networkx root-caused the same bottleneck fleet-wide and committed the
-answer (`scripts/balanced_square_ab.py`, 72761094c): stop requiring an idle host
-and make the COMPARISON immune to a busy one. Ported to
-`benches/balanced_square_ab.py` — their design, our arm plumbing.
+Supersedes the MEASUREMENT-BLOCKED row directly above it. That row was right
+that no host clears the legacy all-CPU quiescence gate, and wrong to stop there:
+`0d55655e8` had already given `benches/vs_pandas_harness.py` a
+`--measurement-mode` whose DEFAULT is `balanced-square`, which pairs the two
+arms inside an ABBAABBA round instead of demanding an idle machine
+(`host_wide_quiescence_required: false`). No new harness was needed. Measured by
+running the sanctioned harness exactly as shipped.
 
 **Campaign result class:** `incumbent-win`.
 
-**Executing ELF SHA-256 (self-reported by process):** `bench_elf_sha256=7f756620cd592ab18971768065a32457742a361699e7d85a0dfd50f6ff5d7683 (77993024 bytes) /data/tmp/cargo-target/release-perf/fp-bench` — printed by fp-bench from inside the measured process and independently confirmed with `sha256sum`.
+**Executing ELF SHA-256 (self-reported by process):** `bench_elf_sha256=7f756620cd592ab18971768065a32457742a361699e7d85a0dfd50f6ff5d7683 (77993024 bytes) /data/tmp/cargo-target/release-perf/fp-bench` — the subject ELF fp-bench reports from inside its own process, carried into the row's `frankenpandas.executable` block.
 
-**A/A null control (same invocation):** median null ratio 0.9972 for the pandas arm and 0.9931 for the FrankenPandas arm over 41 rounds, each the median ratio of that arm's own first-half slots to its second-half slots inside the balanced square; both within the required +/-2% band of unity.
+**A/A null control (same invocation):** median null ratio 1.00216491 for the pandas arm and 1.00974469 for the FrankenPandas arm over 9 balanced-square rounds, each the median ratio of that arm's first two slot placements to its final two; both inside the required +/-2% band, and the harness recorded `null_medians_within_2pct_unity: true`.
 
-**Median-CI decision:** median effect 4.8867x with a bootstrap 95% interval of [4.7892, 4.9743]; the interval excludes 1.0, so the effect cleared the required decision interval.
+**Median-CI decision:** median effect 5.105x with a paired-bootstrap median-of-round-ratios 95% interval of [4.99657782, 5.26780511]; claim log-effect 1.63015484 cleared the required log-effect threshold 0.11645026, the interval excludes unity, and the effect exceeded the 2x null margin — all three decidability clauses true.
 
-**CV role:** provenance only; CV had no vote.
+**CV role:** provenance only; CV had no vote (the harness records `cv_is_provenance_only: true`; the observed 4.23%/2.11% figures decided nothing).
 
-**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f invocation_id=bsq-20260814T223121Z-8c8386ab measured_ratio=4.8867x
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f invocation_id=vs-pandas-20260814T224046.662898Z-pid1623299 measured_ratio=5.105x
 
-Banked row, and the three earlier runs of the same substrate:
+Per-arm medians behind the ratio: pandas p50 3948.30us against FrankenPandas
+p50 768.41us over 36 iterations each, 9 rounds x 4 slots per arm.
 
-| workload | rounds | ratio (t_pandas / t_fp) | 95% CI | null pandas | null FP | verdict |
-|---|---:|---:|---|---:|---:|---|
-| `str_startswith_arrow` @1M (banked) | 41 | 4.8867x | [4.7892, 4.9743] | 0.9972 | 0.9931 | ADMISSIBLE |
-| `str_startswith_arrow` @1M | 41 | 5.7239x | [5.6885, 5.8107] | 1.0000 | 0.9994 | ADMISSIBLE |
-| `str_startswith_arrow` @1M | 21 | 4.9342x | [4.8671, 5.0115] | 0.9982 | 0.9920 | ADMISSIBLE |
-| `str_startswith_arrow` @1M | 5 | 5.0338x | [4.9426, 5.1598] | 1.0029 | 0.9833 | ADMISSIBLE |
-| `str_contains_arrow` @1M (CONTROL) | 21 | 11.7588x | [11.5491, 11.8340] | 1.0002 | 1.0043 | ADMISSIBLE |
+**Provenance.** Host `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX, 32
+physical / 64 logical, SMT on, governor `performance`, kernel 6.17.0-41-generic,
+git 13ccc3287. Runtime ISA observed for the subject `scalar,sse2,avx2,fma,bmi2,
+vaes` (host has no avx512f). **Observed** thread counts — not requested —
+FrankenPandas 64 against pandas 1. pyarrow artifact
+`cc070ad58b3c3e9e5e2a79b07883ddc705a74d11e30883688ee78425a33f3114`. The host
+carried a dozen co-tenant agents throughout; the balanced square pairs that load
+across both arms rather than excluding it.
 
-**Report the RANGE, not the best row.** Four `str_startswith_arrow` runs span
-4.89x to 5.72x and the spread tracks host load, which is expected when the
-subject runs 64 threads and the incumbent runs 1. All four cleared the null on
-BOTH arms, so none is more real than the others; the banked headline is the
-lowest, not the highest.
+**Corroboration, and a correction I have to record.** Before finding that the
+sanctioned harness already supported this, I ported franken_networkx's
+substrate into `benches/balanced_square_ab.py` and measured the same workload
+four times: 4.8867x, 5.7239x, 4.9342x, 5.0338x, plus a `str_contains_arrow`
+control at 11.7588x, all with both nulls inside +/-2%. Those numbers agree with
+the sanctioned 5.105x and are why I trust the row — but **that file was a
+shadow of the sanctioned harness** (same square, same subprocess subject arm,
+weaker gate) and has been reduced to a stub. The agreement is corroboration; the
+duplication was a defect, and it is the same class as br-frankenpandas-oxodo,
+which I had fixed hours earlier.
 
-**The control is what makes these a measurement rather than an artifact.**
-`str_contains_arrow` sends the identical column through identical plumbing and
-lands at 11.76x, nowhere near startswith's ~5x. A driver manufacturing a ratio
-out of subprocess-versus-in-process asymmetry would report the same number for
-both.
-
-**Remaining provenance:** host `thinkstation1`, governor `performance`, runtime
-ISA observed as `scalar,sse2,avx2,fma,bmi2,vaes`, observed threads FP 64 (peak
-process 66, available_parallelism 64) against pandas 1, pyarrow artifact
-`cc070ad58b3c3e9e5e2a79b07883ddc705a74d11e30883688ee78425a33f3114`, python
-3.13.7, 50 iterations per slot taken from fp-bench's own sample count so both
-arms average over the same N, and loadavg 15.00 at start / 14.62 at end — a
-contended host throughout, which is the entire point.
+**Report the range, not a single figure.** Across five independent runs by two
+implementations the ratio spans 4.89x to 5.72x, tracking host load, which is
+expected when the subject runs 64 threads and the incumbent runs 1. The banked
+headline is the sanctioned harness's 5.105x.
 
 **What this does NOT establish.** It refutes 0.420x as a description of today's
 code on this host; it does not explain the gap. Hardware, thread count, an
-intervening FrankenPandas improvement, and a different pandas storage backend
-are all live explanations, and this run picks none of them. No lever is credited
-here. Cross-arm VALUE parity is the conformance corpus's job (1600/0 as of
-`1fbff4f76`), not this substrate's.
+intervening FrankenPandas improvement, and pandas storage backend are all live
+explanations, and this run picks none of them. No lever is credited here.
 
 **Reproduce:**
 
 ```
 cargo build --profile release-perf -p fp-bench
-python3 benches/balanced_square_ab.py --workload str_startswith_arrow \
-    --size 1M --rounds 41 --warmup 6 --expect-elf 7f756620cd592ab1
+python3 benches/vs_pandas_harness.py --category strings \
+    --workloads str_startswith_arrow --sizes 1M --json-stdout
 ```
 
-Warmup is mandatory and not cosmetic: the subject arm is a fresh process per
-slot, so its first invocations pay cold page-cache costs the in-process
-incumbent does not. Measured with no warmup at 3 rounds, the subject's own A/A
-null read 1.0398 and the row was correctly REFUSED — the substrate catching an
-asymmetry in its own plumbing before any number was quoted.
+⚠️ rch builds fp-bench REMOTELY and syncs back only metadata, not the 74MB ELF.
+Read the `.rch-target-<worker>-pool-<hash>` path out of the build log and `scp`
+the binary off that worker; `.cargo/config.toml` is intentionally empty and
+RUSTFLAGS is unset, so there is no `target-cpu=native` and the ELF is portable.
