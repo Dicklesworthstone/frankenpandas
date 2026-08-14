@@ -93,6 +93,7 @@ def main() -> int:
             "--category", "strings",
             "--workloads", "str_startswith_arrow",
             "--sizes", "1M",
+            "--measurement-mode", "host-wide-exclusive",
             "--frankenpandas-binary", str(FP_BENCH),
             "--output", str(out),
         ]

@@ -99,6 +99,12 @@ SIZE_CONFIGS = {
 }
 
 PAIRED_ROUNDS = 25
+# A complete balanced square gives each arm every early/late position twice.
+# Unlike the legacy host-wide gate, this is sound on a shared host: co-tenant
+# load and thermal/frequency drift are paired within every round instead of
+# being treated as an unsatisfiable admission predicate.
+BALANCED_SQUARE = "ABBAABBA"
+BALANCED_SQUARE_ROUNDS = 9
 BOOTSTRAP_RESAMPLES = 10_000
 NULL_CI_CONFIDENCE = 0.95
 DECIDABILITY_MARGIN = 2.0
@@ -2754,7 +2760,7 @@ def run_pandas_workload(
     dtype: str,
     tmp_path: Path,
     fingerprint: dict[str, Any],
-    exclusivity_gate: HostWideExclusivityGate,
+    exclusivity_gate: HostWideExclusivityGate | None,
 ) -> tuple[TimingResult, dict[str, Any]]:
     """Run a single pandas workload and return timing result."""
     config = SIZE_CONFIGS[size]
@@ -2776,22 +2782,33 @@ def run_pandas_workload(
         df = pd.DataFrame(index=pd.RangeIndex(config["rows"]))
     else:
         df = generate_test_data(config["rows"], config["cols"], dtype)
-    # Population is outside the timed arm but can leave short-lived allocator
-    # or kernel page work on CPUs outside this process's affinity. Let that
-    # setup-only activity drain before the mandatory immediate pre-arm sample;
-    # the sample still fails closed if any work remains.
-    time.sleep(SETUP_QUIESCENCE_SETTLE_SECONDS)
-
     bench_func = PANDAS_WORKLOADS[category][workload]
     if category in ("io", "pipeline"):
         operation = partial(bench_func, df, tmp_path)
     else:
         operation = partial(bench_func, df)
-    samples, quiescence = _run_host_exclusive_arm(
-        exclusivity_gate,
-        f"pandas:{category}/{workload}/{size}/{dtype}",
-        operation,
-    )
+    if exclusivity_gate is None:
+        # Balanced-square mode uses temporal pairing rather than a global
+        # machine-idle predicate.  Do not insert a one-second idle wait here:
+        # it would merely make co-tenant drift asymmetric between slots.
+        samples = operation()
+        quiescence = {
+            "mode": "balanced_square",
+            "valid": True,
+            "host_wide_quiescence_required": False,
+        }
+    else:
+        # Population is outside the timed arm but can leave short-lived
+        # allocator or kernel page work on CPUs outside this process's
+        # affinity. Let that setup-only activity drain before the mandatory
+        # immediate pre-arm sample; the sample still fails closed if any work
+        # remains.
+        time.sleep(SETUP_QUIESCENCE_SETTLE_SECONDS)
+        samples, quiescence = _run_host_exclusive_arm(
+            exclusivity_gate,
+            f"pandas:{category}/{workload}/{size}/{dtype}",
+            operation,
+        )
 
     if not isinstance(samples, PairedSamples):
         raise TypeError(f"{category}/{workload} did not use the paired timing contract")
@@ -3003,6 +3020,246 @@ def run_fp_workload_subprocess(
     )
 
 
+def _balanced_square_aggregate(
+    slots: list[TimingResult],
+    *,
+    engine: str,
+) -> TimingResult:
+    """Turn one arm's balanced-square slots into a contract-valid sample.
+
+    Each slot already includes its engine-local alternating A/A control.  This
+    aggregate adds the outer A/A control required for a busy-host comparison:
+    the first two and last two placements of the same arm in each square must
+    agree.  Failing either control leaves the row NULL_UNDECIDABLE.
+    """
+    if len(slots) < 4 or len(slots) % 4:
+        raise ValueError("balanced square needs four slots per arm per round")
+    first = slots[0]
+    if any(not slot.is_valid for slot in slots):
+        raise RuntimeError(f"{engine} emitted an invalid balanced-square slot")
+    identity_fields = (
+        "workload",
+        "category",
+        "size",
+        "dtype",
+        "engine",
+        "executable_sha256",
+        "executable_bytes",
+        "executable_path",
+    )
+    for slot in slots[1:]:
+        if any(getattr(slot, field) != getattr(first, field) for field in identity_fields):
+            raise RuntimeError(f"{engine} identity changed inside balanced square")
+
+    slot_p50s = [slot.p50_us for slot in slots]
+    null_arm_a_us = [
+        float(np.median(slot_p50s[offset : offset + 2]))
+        for offset in range(0, len(slot_p50s), 4)
+    ]
+    null_arm_b_us = [
+        float(np.median(slot_p50s[offset + 2 : offset + 4]))
+        for offset in range(0, len(slot_p50s), 4)
+    ]
+    checksums = "|".join(str(slot.checksum) for slot in slots).encode("utf-8")
+    return TimingResult(
+        workload=first.workload,
+        category=first.category,
+        size=first.size,
+        dtype=first.dtype,
+        engine=first.engine,
+        times_us=slot_p50s,
+        null_arm_a_us=null_arm_a_us,
+        null_arm_b_us=null_arm_b_us,
+        null_ratios=[left / right for left, right in zip(null_arm_a_us, null_arm_b_us)],
+        checksum=hashlib.sha256(checksums).hexdigest(),
+        executable_sha256=first.executable_sha256,
+        executable_bytes=first.executable_bytes,
+        executable_path=first.executable_path,
+        runtime_available_parallelism=first.runtime_available_parallelism,
+        process_threads_before_probe=first.process_threads_before_probe,
+        peak_process_threads=max(
+            slot.peak_process_threads or 0 for slot in slots
+        ),
+        operation_threads_used=max(slot.operation_threads_used or 0 for slot in slots),
+        runtime_detected_isa_features=first.runtime_detected_isa_features,
+    )
+
+
+def run_balanced_square_cell(
+    category: str,
+    workload: str,
+    size: str,
+    dtype: str,
+    tmp_path: Path,
+    fingerprint: dict[str, Any],
+    fp_binary: Path | None,
+    rounds: int,
+) -> tuple[TimingResult, TimingResult, dict[str, Any]]:
+    """Interleave incumbent and subject according to the sanctioned ABBA square."""
+    pandas_slots: list[TimingResult] = []
+    fp_slots: list[TimingResult] = []
+    round_ratios: list[float] = []
+    rounds_artifact = []
+    for round_index in range(rounds):
+        pandas_round: list[TimingResult] = []
+        fp_round: list[TimingResult] = []
+        for slot_index, arm in enumerate(BALANCED_SQUARE):
+            if arm == "A":
+                result, _ = run_pandas_workload(
+                    category,
+                    workload,
+                    size,
+                    dtype,
+                    tmp_path,
+                    fingerprint,
+                    None,
+                )
+                pandas_slots.append(result)
+                pandas_round.append(result)
+            else:
+                result = run_fp_workload_subprocess(
+                    category,
+                    workload,
+                    size,
+                    dtype,
+                    tmp_path if category == "pipeline" else None,
+                    fp_binary,
+                )
+                fp_slots.append(result)
+                fp_round.append(result)
+        if any(not result.is_valid for result in (*pandas_round, *fp_round)):
+            # Match the legacy harness's behavior for a missing/invalid FP
+            # executable: emit an INCOMPLETE row rather than treating an
+            # infrastructure failure as a measurement or throwing away the
+            # artifact.  One completed incumbent slot is enough provenance to
+            # make that diagnosis explicit; it is never used for a ratio.
+            return (
+                fp_round[0],
+                pandas_round[0],
+                {
+                    "design": "balanced-square-abbaabba-v1",
+                    "incomplete": True,
+                    "reason": "slot timing contract invalid",
+                    "host_wide_quiescence_required": False,
+                },
+            )
+        pandas_median = float(np.median([result.p50_us for result in pandas_round]))
+        fp_median = float(np.median([result.p50_us for result in fp_round]))
+        if fp_median <= 0.0:
+            raise RuntimeError("balanced-square subject median must be positive")
+        round_ratios.append(pandas_median / fp_median)
+        rounds_artifact.append(
+            {
+                "round": round_index,
+                "order": BALANCED_SQUARE,
+                "pandas_slot_p50_us": [result.p50_us for result in pandas_round],
+                "frankenpandas_slot_p50_us": [result.p50_us for result in fp_round],
+                "ratio_pandas_over_frankenpandas": round_ratios[-1],
+            }
+        )
+    return (
+        _balanced_square_aggregate(fp_slots, engine="frankenpandas"),
+        _balanced_square_aggregate(pandas_slots, engine="pandas"),
+        {
+            "design": "balanced-square-abbaabba-v1",
+            "incumbent_arm": "A=pandas",
+            "subject_arm": "B=frankenpandas",
+            "rounds": rounds,
+            "slots_per_arm_per_round": BALANCED_SQUARE.count("A"),
+            "round_ratio_pandas_over_frankenpandas": round_ratios,
+            "rounds_detail": rounds_artifact,
+            "host_wide_quiescence_required": False,
+        },
+    )
+
+
+def apply_balanced_square_gate(
+    comparison: dict[str, Any],
+    fp_result: TimingResult,
+    pd_result: TimingResult,
+    experiment: dict[str, Any],
+) -> None:
+    """Replace independent-sample inference with paired round-ratio inference."""
+    round_ratios = experiment["round_ratio_pandas_over_frankenpandas"]
+    ratio = float(np.median(round_ratios))
+    effect_ci = bootstrap_median_ci(round_ratios)
+    required_log_effect = DECIDABILITY_MARGIN * max(
+        fp_result.null_log_half_width,
+        pd_result.null_log_half_width,
+    )
+    gate = corrected_null_gate(
+        ratio,
+        effect_ci,
+        required_log_effect,
+        fp_result.null_median_ratio,
+        pd_result.null_median_ratio,
+    )
+    comparison["ratio"] = round(ratio, 3)
+    comparison["median_ci_gate"] = gate | {
+        "margin_multiplier": DECIDABILITY_MARGIN,
+        "combined_two_x_null_interval": [
+            round(math.exp(-required_log_effect), 6),
+            round(math.exp(required_log_effect), 6),
+        ],
+        "effect_ci_method": "paired-bootstrap-median-of-round-ratios",
+        "cv_is_provenance_only": True,
+    }
+    comparison["verdict"] = (
+        "FASTER" if gate["decidable"] and ratio > 1.0 else
+        "SLOWER" if gate["decidable"] else
+        "NULL_UNDECIDABLE"
+    )
+    comparison["balanced_square"] = experiment
+
+
+def _balanced_square_self_test() -> None:
+    """Pin the busy-host pairing and its outer A/A null control."""
+    if BALANCED_SQUARE != "ABBAABBA" or BALANCED_SQUARE.count("A") != 4:
+        raise RuntimeError("balanced square must contain four placements per arm")
+    if [index for index, arm in enumerate(BALANCED_SQUARE) if arm == "A"] != [0, 3, 4, 7]:
+        raise RuntimeError("pandas positions drifted from the sanctioned square")
+
+    def slot(engine: str, p50_us: float) -> TimingResult:
+        return TimingResult(
+            workload="synthetic",
+            category="strings",
+            size="1M",
+            dtype="float64",
+            engine=engine,
+            times_us=[p50_us] * 4,
+            null_arm_a_us=[p50_us, p50_us],
+            null_arm_b_us=[p50_us, p50_us],
+            null_ratios=[1.0, 1.0],
+            checksum=f"{engine}-{p50_us}",
+            executable_sha256=f"{engine}-sha",
+            executable_bytes=1,
+            executable_path=f"/{engine}",
+            runtime_available_parallelism=1,
+            process_threads_before_probe=1,
+            peak_process_threads=1,
+            operation_threads_used=1,
+            runtime_detected_isa_features=["avx2"],
+        )
+
+    fp_result = _balanced_square_aggregate(
+        [slot("frankenpandas", 50.0)] * 4,
+        engine="frankenpandas",
+    )
+    pd_result = _balanced_square_aggregate(
+        [slot("pandas", 100.0)] * 4,
+        engine="pandas",
+    )
+    comparison = compute_comparison(fp_result, pd_result, 1)
+    experiment = {
+        "round_ratio_pandas_over_frankenpandas": [2.0] * 5,
+    }
+    apply_balanced_square_gate(comparison, fp_result, pd_result, experiment)
+    if comparison["ratio"] != 2.0 or comparison["verdict"] != "FASTER":
+        raise RuntimeError("paired balanced-square ratio must remain decidable")
+    if fp_result.null_median_ratio != 1.0 or pd_result.null_median_ratio != 1.0:
+        raise RuntimeError("balanced-square A/A null must land at 1.0")
+
+
 def compute_comparison(fp_result: TimingResult, pd_result: TimingResult,
                        rows: int) -> dict[str, Any]:
     """Compute head-to-head comparison metrics."""
@@ -3185,7 +3442,9 @@ def build_thread_provenance(
 def run_category(category: str, sizes: list[str], dtypes: list[str],
                  tmp_path: Path, fingerprint: dict[str, Any],
                  requested_thread_count: int | None,
-                 exclusivity_gate: HostWideExclusivityGate,
+                 exclusivity_gate: HostWideExclusivityGate | None,
+                 measurement_mode: str,
+                 balanced_square_rounds: int,
                  fp_binary: Path | None = None,
                  fp_reference_binary: Path | None = None,
                  workload_filter: set[str] | None = None,
@@ -3213,6 +3472,70 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
             for dtype in dtypes:
                 config = SIZE_CONFIGS[size]
                 print(f"  [{category}] {workload} @ {size}/{dtype}...", end=" ", flush=True)
+
+                if measurement_mode == "balanced-square":
+                    fp_result, pd_result, experiment = run_balanced_square_cell(
+                        category,
+                        workload,
+                        size,
+                        dtype,
+                        tmp_path,
+                        fingerprint,
+                        fp_binary,
+                        balanced_square_rounds,
+                    )
+                    comparison = compute_comparison(
+                        fp_result,
+                        pd_result,
+                        config["rows"],
+                    )
+                    if fp_result.is_valid and pd_result.is_valid:
+                        apply_balanced_square_gate(
+                            comparison,
+                            fp_result,
+                            pd_result,
+                            experiment,
+                        )
+                    else:
+                        comparison["balanced_square"] = experiment
+                    comparison["host_wide_quiescence"] = {
+                        "required": False,
+                        "replacement": "balanced-square-abbaabba-v1",
+                        "valid": True,
+                    }
+                    if category == "pipeline":
+                        equivalence = compare_pipeline_outputs(tmp_path, workload)
+                        comparison["output_equivalence"] = equivalence
+                        if not equivalence["equivalent"]:
+                            comparison["verdict"] = "OUTPUT_MISMATCH"
+                    if workload == "astype_str_f64_telemetry_batches":
+                        comparison["allocator_provenance"] = {
+                            "frankenpandas": {
+                                "allocator": "mimalloc",
+                                "purge_delay_ms": int(
+                                    TELEMETRY_MIMALLOC_PURGE_DELAY_MS
+                                ),
+                                "reason": "purge rendered-batch pages at the timed drop boundary",
+                            }
+                        }
+                    comparison["thread_provenance"] = build_thread_provenance(
+                        fingerprint,
+                        requested_thread_count,
+                        fp_result,
+                        pd_result,
+                    )
+                    if not comparison["thread_provenance"]["valid"]:
+                        comparison["verdict"] = "CONTRACT_INVALID"
+                        comparison["ratio"] = None
+                    results.append(comparison)
+                    if result_sink is not None:
+                        result_sink.append(comparison)
+                    verdict = comparison.get("verdict", "N/A")
+                    ratio = comparison.get("ratio")
+                    ratio_str = f"{ratio:.2f}x" if ratio else "N/A"
+                    print(f"{verdict} ({ratio_str})")
+                    cell_index += 1
+                    continue
 
                 pd_result, pandas_quiescence = run_pandas_workload(
                     category,
@@ -3462,6 +3785,27 @@ def main():
         ),
     )
     parser.add_argument(
+        "--measurement-mode",
+        choices=("balanced-square", "host-wide-exclusive"),
+        default="balanced-square",
+        help=(
+            "Comparison design: balanced-square interleaves pandas and FP on "
+            "a shared host; host-wide-exclusive retains the legacy all-CPU "
+            "quiescence gate for a booked machine"
+        ),
+    )
+    parser.add_argument(
+        "--balanced-square-rounds",
+        type=int,
+        default=BALANCED_SQUARE_ROUNDS,
+        help="Number of ABBAABBA paired rounds in balanced-square mode",
+    )
+    parser.add_argument(
+        "--balanced-square-self-test",
+        action="store_true",
+        help="Exercise the balanced-square paired ratio and A/A null contract",
+    )
+    parser.add_argument(
         "--host-exclusivity-self-test",
         action="store_true",
         help="Exercise the fail-closed host-wide quiescence adjudicator and exit",
@@ -3502,6 +3846,11 @@ def main():
     if args.corrected_null_gate_self_test:
         _corrected_null_gate_self_test()
         print("corrected_null_gate_self_test=pass")
+        return
+
+    if args.balanced_square_self_test:
+        _balanced_square_self_test()
+        print("balanced_square_self_test=pass")
         return
 
     if args.dependency_probe:
@@ -3547,6 +3896,9 @@ def main():
 
     if not args.category and not args.all:
         parser.error("Specify --category or --all")
+
+    if args.balanced_square_rounds < 3:
+        parser.error("--balanced-square-rounds must be at least 3")
 
     if pd is None:
         print("ERROR: pandas not installed", file=sys.stderr)
@@ -3594,18 +3946,20 @@ def main():
             print(f"ERROR: thread provenance contract: {error}", file=sys.stderr)
         sys.exit(2)
 
-    online_cpu_ids = _online_cpu_ids()
-    if not online_cpu_ids:
-        print(
-            "ERROR: host-wide benchmark exclusivity found no online CPUs",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    exclusivity_gate = HostWideExclusivityGate(online_cpu_ids)
-    # Admission must precede our own 228 MiB provenance hash. Otherwise the
-    # first host sample can reject an idle machine for work this harness just
-    # created, misclassifying self-load as a co-tenant.
-    exclusivity_gate.wait_until_quiet("invocation_preflight")
+    exclusivity_gate: HostWideExclusivityGate | None = None
+    if args.measurement_mode == "host-wide-exclusive":
+        online_cpu_ids = _online_cpu_ids()
+        if not online_cpu_ids:
+            print(
+                "ERROR: host-wide benchmark exclusivity found no online CPUs",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        exclusivity_gate = HostWideExclusivityGate(online_cpu_ids)
+        # Admission must precede our own 228 MiB provenance hash. Otherwise
+        # the first host sample can reject an idle machine for work this
+        # harness just created, misclassifying self-load as a co-tenant.
+        exclusivity_gate.wait_until_quiet("invocation_preflight")
 
     timestamp = datetime.now(timezone.utc).isoformat()
     invocation_id = (
@@ -3634,12 +3988,13 @@ def main():
         "benchmark_host_fingerprint_json="
         + json.dumps(fingerprint, separators=(",", ":"), sort_keys=True)
     )
-    # Hashing the pandas + pyarrow installation can wake filesystem kernel
-    # workers outside this process's affinity mask. Wait boundedly for that
-    # self-induced residue, then demand a fresh immediate checkpoint before
-    # fixture setup. Readiness retries are retained in the JSON artifact.
-    time.sleep(PROVENANCE_QUIESCENCE_SETTLE_SECONDS)
-    exclusivity_gate.wait_until_quiet("post_provenance")
+    if exclusivity_gate is not None:
+        # Hashing the pandas + pyarrow installation can wake filesystem kernel
+        # workers outside this process's affinity mask. Wait boundedly for
+        # that self-induced residue, then demand a fresh immediate checkpoint
+        # before fixture setup. Readiness retries are retained in the JSON.
+        time.sleep(PROVENANCE_QUIESCENCE_SETTLE_SECONDS)
+        exclusivity_gate.wait_until_quiet("post_provenance")
 
     sizes = [s.strip() for s in args.sizes.split(",")]
     dtypes = [d.strip() for d in args.dtypes.split(",")]
@@ -3649,6 +4004,19 @@ def main():
         else None
     )
     categories = list(CATEGORIES.keys()) if args.all else [args.category]
+
+    if args.measurement_mode == "balanced-square":
+        if args.all or len(categories) != 1:
+            parser.error("balanced-square mode requires exactly one category")
+        if workload_filter is None or len(workload_filter) != 1:
+            parser.error("balanced-square mode requires exactly one --workloads entry")
+        if len(sizes) != 1 or len(dtypes) != 1:
+            parser.error("balanced-square mode requires exactly one size and dtype")
+        if args.frankenpandas_reference_binary is not None:
+            parser.error(
+                "balanced-square mode compares pandas and one FP ELF; "
+                "whole-binary reference requires --measurement-mode host-wide-exclusive"
+            )
 
     import tempfile
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3704,13 +4072,18 @@ def main():
                     fingerprint,
                     args.thread_count,
                     exclusivity_gate,
+                    args.measurement_mode,
+                    args.balanced_square_rounds,
                     args.frankenpandas_binary,
                     args.frankenpandas_reference_binary,
                     workload_filter,
                     result_sink=all_results,
                 )
-            exclusivity_gate.require_quiet("invocation_postflight")
+            if exclusivity_gate is not None:
+                exclusivity_gate.require_quiet("invocation_postflight")
         except SystemExit:
+            if exclusivity_gate is None:
+                raise
             invocation_rejection = exclusivity_gate.last_rejection or {
                 "phase": "unknown",
                 "kind": "unrecorded",
@@ -3770,12 +4143,36 @@ def main():
             },
             "harness_source": harness_source_identity,
             "host_fingerprint": fingerprint,
-            "host_wide_exclusivity": exclusivity_gate.artifact(),
+            "host_wide_exclusivity": (
+                exclusivity_gate.artifact()
+                if exclusivity_gate is not None
+                else {
+                    "required": False,
+                    "replacement": "balanced-square-abbaabba-v1",
+                    "valid": True,
+                }
+            ),
             "parameters": {
                 "sizes": sizes,
                 "dtypes": dtypes,
                 "categories": categories,
                 "paired_rounds": PAIRED_ROUNDS,
+                "measurement_mode": args.measurement_mode,
+                "balanced_square": (
+                    {
+                        "order": BALANCED_SQUARE,
+                        "rounds": args.balanced_square_rounds,
+                        "same_invocation_incumbent": True,
+                        "paired_effect_ci": (
+                            "bootstrap median of per-round pandas/FP ratios"
+                        ),
+                        "outer_aa_null": (
+                            "first two versus final two placements per arm"
+                        ),
+                    }
+                    if args.measurement_mode == "balanced-square"
+                    else None
+                ),
                 "warmup_iterations": WARMUP_ITERATIONS,
                 "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
                 "null_ci_confidence": NULL_CI_CONFIDENCE,
@@ -3805,7 +4202,7 @@ def main():
                     else None
                 ),
                 "host_wide_exclusivity_contract": {
-                    "required": True,
+                    "required": args.measurement_mode == "host-wide-exclusive",
                     "scope": "all_online_host_cpus",
                     "maximum_busy_fraction": MAX_HOST_WIDE_BUSY_FRACTION,
                     "sample_interval_ms": round(
@@ -3829,6 +4226,9 @@ def main():
                         "bounded readiness plus immediate checkpoint before "
                         "each pandas and FrankenPandas arm; immediate "
                         "post-arm checkpoints; invocation postflight"
+                    ) if args.measurement_mode == "host-wide-exclusive" else (
+                        "replaced by paired ABBAABBA slots on the shared host; "
+                        "foreign load is paired instead of used as admission"
                     ),
                 },
                 "pandas_string_backend_policy": {
