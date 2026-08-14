@@ -21996,3 +21996,68 @@ all-online-CPU checkpoint and report observed, not requested, threads.
 Full evidence:
 `artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731.md` and
 `artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731_ab.json`.
+
+### 2026-08-14 IcyFern — `str_startswith_arrow` @1M could not be re-derived: ZERO of 13 reachable hosts clear the exclusivity gate — MEASUREMENT-BLOCKED
+
+Attempted the standing `str.startswith` Arrow re-derivation (the 2026-07-28
+ProudChapel row above, 0.420x geomean REJECT, which a later row on different
+hardware contradicted at 4.814x). **No row was produced, and no ratio from this
+session may be cited** — the harness refused at `invocation_preflight` on every
+host I can reach, which is the gate working, not a harness defect.
+
+Blocker, verbatim: `ERROR: host-wide benchmark exclusivity did not reach a clear
+readiness window for phase=invocation_preflight after 20 attempts`. The gate
+requires EVERY online CPU at or below 20% busy across two consecutive probes.
+
+**Census — every rch host plus the local box, sampled with the gate's own
+adjudicator (`/proc/stat`, 1s window, `MAX_HOST_WIDE_BUSY_FRACTION = 0.20`):**
+
+| host | online CPUs | CPUs over limit | max busy | verdict |
+|---|---:|---:|---:|---|
+| `thinkstation1` (local) | 64 | 14 | 0.970 | blocked |
+| `51.222.245.56` (ovh-a) | 16 | 12 | 0.950 | blocked |
+| `37.187.75.150` (ovh-b) | 8 | 1 | 0.240 | blocked |
+| `178.104.77.29` | 16 | 1 | 0.204 | blocked |
+| `178.18.254.243` | 8 | 3 | 0.630 | blocked |
+| `212.90.121.76` | 10 | 10 | 1.000 | blocked |
+| `109.205.181.92` | 10 | 10 | 1.000 | blocked |
+| `38.242.134.66` | 10 | 10 | 1.000 | blocked |
+| `154.12.232.219` | 6 | 6 | 1.000 | blocked |
+| `109.123.245.77` | 10 | 10 | 1.000 | blocked |
+| `38.242.209.154` | 8 | 8 | 1.000 | blocked |
+| `149.102.137.103` | 8 | 8 | 1.000 | blocked |
+| `87.99.133.171` | 8 | 8 | 1.000 | blocked |
+
+**The two near-misses are the informative rows, and they fail for DIFFERENT
+reasons.** `178.104.77.29` sat one CPU over at 0.204 — then the fleet scheduled
+rch builds onto it and it went to 5 CPUs over within four samples, so it is
+blocked by the swarm and would clear if the swarm paused. `37.187.75.150` is one
+CPU over at 0.240 because of RESIDENT services on that box (`bun` at 21.1% and
+`midas-edge-api` at 15.6%), so it can never clear no matter how quiet the
+campaign gets. On the local box the top consumers are not even FrankenPandas:
+`frankensearch_q` at 577%, then three `smartedgar` processes at ~91% each.
+
+**This does not weaken the prior 0.420x REJECT and does not confirm it.** That
+row stands exactly as written, and the contradicting 4.814x row stands as
+contradicting it, until an exclusive window exists.
+
+**Landed so the next attempt is cheap:** `vs_pandas_harness.py
+--host-readiness-probe [--readiness-wait-seconds N]`, which adjudicates the live
+host through the SAME `_host_wide_quiescence_observation` the gate uses and
+exits 0 clear / 2 blocked, naming the over-limit CPU ids and the top offending
+processes. It runs no benchmark and changes no threshold. Before this, learning
+that a host was unmeasurable cost a repo sync, a pinned-pandas install and a
+release-perf build, because the gate only fires at invocation preflight; it now
+costs about two seconds. Both directions of its verdict are pinned in
+`--host-exclusivity-self-test` by substituting the sampler, so it cannot drift
+into reporting clear where the gate would refuse.
+
+**Concrete retry predicate (sharpening the 2026-07-31 CyanLynx predicate above
+rather than replacing it):** run
+`python3 benches/vs_pandas_harness.py --host-readiness-probe` on the candidate
+host FIRST and require exit 0. Reaching that on this fleet needs one of: the
+swarm quiescing, `rch workers drain <worker>` on a box with no resident
+services (which takes build capacity from nine projects and should be an
+orchestrator decision, not an agent's), or a host without resident background
+services. `37.187.75.150` is disqualified as a bench host until `bun` and
+`midas-edge-api` are moved off it.

@@ -400,6 +400,89 @@ def _run_host_exclusive_arm(
     )
 
 
+def _busiest_host_processes(limit: int = 6) -> list[str]:
+    """Top CPU consumers, for attributing a blocked readiness verdict.
+
+    Diagnostic only — nothing adjudicates on it. Returns an empty list when
+    `ps` is unavailable rather than failing the probe.
+    """
+    try:
+        completed = subprocess.run(
+            ["ps", "-eo", "pcpu,pid,comm", "--sort=-pcpu"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if completed.returncode != 0:
+        return []
+    rows = completed.stdout.strip().splitlines()[1 : limit + 1]
+    return [" ".join(row.split()) for row in rows]
+
+
+def _host_readiness_probe(wait_seconds: float) -> int:
+    """Report whether THIS host would pass the exclusivity gate right now.
+
+    br-frankenpandas-hostprobe: the gate is fail-closed and correct, but its
+    rejection said only "did not reach a clear readiness window", naming
+    neither the CPUs that blocked it nor what was running on them. Finding that
+    out meant hand-rolling a /proc/stat sampler — after paying for a repo sync,
+    a pandas install and a release-perf build, because the gate fires at
+    invocation preflight. This mode answers the same question in ~2s, BEFORE
+    any of that cost, and it adjudicates with the very same
+    `_host_wide_quiescence_observation` the gate uses, so it cannot drift into
+    a softer verdict.
+
+    This does NOT weaken anything: it runs no benchmark, banks no row, and
+    changes no threshold. Exit 0 means the host would pass; 2 means it would
+    not — the same code the gate exits with, so a caller can gate a queued
+    measurement on it.
+
+    Delete this when the swarm grows a real bench-booking mechanism that can
+    guarantee host exclusivity, at which point "is the host quiet" stops being
+    a question an agent has to ask.
+    """
+    online_cpu_ids = _online_cpu_ids()
+    if not online_cpu_ids:
+        print(
+            "ERROR: host readiness probe could not enumerate online CPUs",
+            file=sys.stderr,
+        )
+        return 2
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    attempt = 0
+    while True:
+        attempt += 1
+        observation = _host_wide_quiescence_observation(
+            f"host_readiness_probe:attempt_{attempt}",
+            online_cpu_ids,
+            _sample_host_cpu_busy(),
+        )
+        clear = observation["verdict"] == "clear"
+        print(
+            "host_readiness_probe="
+            f"verdict={observation['verdict']} "
+            f"attempt={attempt} "
+            f"online_cpu_count={observation['expected_cpu_count']} "
+            f"maximum_busy_fraction={MAX_HOST_WIDE_BUSY_FRACTION:.3f} "
+            f"max_observed_busy="
+            f"{observation['maximum_observed_busy_fraction']:.3f} "
+            f"busy_cpu_count_above_limit="
+            f"{observation['busy_cpu_count_above_limit']} "
+            f"busy_cpu_ids={observation['busy_cpu_ids_above_limit']} "
+            f"missing_cpu_ids={observation['missing_cpu_ids']} "
+            f"hostname={socket.gethostname()}"
+        )
+        if clear or time.monotonic() >= deadline:
+            if not clear:
+                for row in _busiest_host_processes():
+                    print(f"host_readiness_probe_top_process={row}")
+            return 0 if clear else 2
+        time.sleep(QUIESCENCE_WAIT_RETRY_SECONDS)
+
+
 def _host_wide_exclusivity_self_test() -> None:
     """Exercise clear, busy, and incomplete adjudication without timing."""
     clear = _host_wide_quiescence_observation(
@@ -461,6 +544,31 @@ def _host_wide_exclusivity_self_test() -> None:
         or not artifact["valid"]
     ):
         raise RuntimeError("exclusive arm artifact must retain both clear guards")
+
+    # The readiness probe must report the SAME verdict the gate would, and
+    # must never report clear on a host the gate would refuse — otherwise it
+    # becomes a way to talk yourself past the gate. Both directions are pinned
+    # here by substituting the sampler, so the contract is checked without
+    # needing a controllable host. (br-frankenpandas-hostprobe)
+    real_sampler = _sample_host_cpu_busy
+    real_online = _online_cpu_ids
+    try:
+        globals()["_online_cpu_ids"] = lambda: [0, 1]
+        globals()["_sample_host_cpu_busy"] = lambda: {0: 0.0, 1: 0.0}
+        if _host_readiness_probe(0.0) != 0:
+            raise RuntimeError("a quiet host must probe as ready (exit 0)")
+        globals()["_sample_host_cpu_busy"] = lambda: {
+            0: 0.0,
+            1: MAX_HOST_WIDE_BUSY_FRACTION + 0.001,
+        }
+        if _host_readiness_probe(0.0) != 2:
+            raise RuntimeError("one over-limit CPU must probe as blocked (exit 2)")
+        globals()["_sample_host_cpu_busy"] = lambda: {0: 0.0}
+        if _host_readiness_probe(0.0) != 2:
+            raise RuntimeError("an unsampled CPU must probe as blocked (exit 2)")
+    finally:
+        globals()["_sample_host_cpu_busy"] = real_sampler
+        globals()["_online_cpu_ids"] = real_online
 
     class SequenceGate(HostWideExclusivityGate):
         def __init__(self) -> None:
@@ -3363,7 +3471,28 @@ def main():
         action="store_true",
         help="Exercise the corrected three-clause null gate and exit",
     )
+    parser.add_argument(
+        "--host-readiness-probe",
+        action="store_true",
+        help=(
+            "Report whether this host would pass the exclusivity gate right "
+            "now (exit 0 clear, 2 blocked) and exit, without building or "
+            "measuring anything"
+        ),
+    )
+    parser.add_argument(
+        "--readiness-wait-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "With --host-readiness-probe, keep sampling for up to this many "
+            "seconds and exit 0 on the first clear window"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.host_readiness_probe:
+        sys.exit(_host_readiness_probe(args.readiness_wait_seconds))
 
     if args.host_exclusivity_self_test:
         _host_wide_exclusivity_self_test()
