@@ -126,6 +126,23 @@ def test_dataframe_where_and_mask_align_partial_condition_columns(
     assert {name: [item["value"] for item in values] for name, values in columns.items()} == expected
 
 
+def test_dataframe_set_index_missing_column_is_a_pandas_error(oracle, pd):
+    payload = {
+        "operation": "dataframe_set_index",
+        "frame": _frame_payload({"present": [1, 2]}),
+        "set_index_column": "missing",
+        "set_index_drop": True,
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "dataframe_set_index failed: \"None of ['missing'] are in the columns\""
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
 def test_groupby_min_preserves_integer_dtype(oracle, pd):
     payload = {
         "operation": "groupby_min",

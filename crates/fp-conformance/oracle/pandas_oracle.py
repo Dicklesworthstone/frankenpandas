@@ -6445,8 +6445,6 @@ def op_dataframe_set_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     frame = dataframe_from_json(pd, frame_payload)
     column_name = set_index_column.strip()
-    if column_name not in frame.columns:
-        raise OracleError(f"dataframe_set_index column '{column_name}' not found")
     try:
         out = frame.set_index(
             column_name,
