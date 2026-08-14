@@ -1965,15 +1965,21 @@ def op_dataframe_from_records(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(frame)}
 
 
-def _frame_with_optional_dtype(pd, data, index, columns, dtype):
-    """`pd.DataFrame(...)`, passing `dtype=` only when the fixture asked for one.
+def _frame_with_optional_dtype(pd, data, index, columns, dtype, copy=None):
+    """`pd.DataFrame(...)`, forwarding only fixture-specified constructor options.
 
-    Passing `dtype=None` explicitly is NOT equivalent for every input shape, so
-    the argument is omitted rather than defaulted.
+    Passing ``None`` explicitly is not equivalent for every input shape, so
+    omitted fixture options must remain absent from the pandas call. This is
+    particularly important for ``copy``: a fixture that asks for ``copy=True``
+    must not be silently evaluated using pandas' default. (br-frankenpandas-
+    fixture-divergence-triage-9s0c4)
     """
-    if dtype is None:
-        return pd.DataFrame(data, index=index, columns=columns)
-    return pd.DataFrame(data, index=index, columns=columns, dtype=dtype)
+    kwargs = {"index": index, "columns": columns}
+    if dtype is not None:
+        kwargs["dtype"] = dtype
+    if copy is not None:
+        kwargs["copy"] = copy
+    return pd.DataFrame(data, **kwargs)
 
 
 def resolve_constructor_dtype(payload: dict[str, Any], op_name: str) -> Any:
@@ -2007,6 +2013,21 @@ def resolve_constructor_dtype(payload: dict[str, Any], op_name: str) -> Any:
     if not isinstance(raw, str):
         raise OracleError(f"{op_name} constructor_dtype must be a string")
     return pandas_dtype_from_constructor_spec(raw)
+
+
+def resolve_constructor_copy(payload: dict[str, Any], op_name: str) -> bool | None:
+    """Return an explicitly requested constructor ``copy=`` option.
+
+    ``constructor_copy`` is nullable in the fixture schema: null means omit the
+    option so pandas supplies its own default, while a boolean must reach the
+    real constructor unchanged.
+    """
+    raw = payload.get("constructor_copy")
+    if raw is None:
+        return None
+    if not isinstance(raw, bool):
+        raise OracleError(f"{op_name} constructor_copy must be a boolean")
+    return raw
 
 
 def op_dataframe_constructor_kwargs(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2087,6 +2108,7 @@ def op_dataframe_constructor_list_like(pd, payload: dict[str, Any]) -> dict[str,
         out = _frame_with_optional_dtype(
             pd, matrix_rows, index, column_order,
             resolve_constructor_dtype(payload, "dataframe_constructor_list_like"),
+            resolve_constructor_copy(payload, "dataframe_constructor_list_like"),
         )
     except Exception as exc:
         raise OracleError(f"dataframe_constructor_list_like failed: {exc}") from exc

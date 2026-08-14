@@ -83,12 +83,6 @@ KNOWN_UNREAD = {
     # is being dropped. fp_p2d_418 is replay-only. Retiring it (with the reason
     # recorded) versus implementing the op is a call for 9s0c4.
     "compare_result_names": "oracle has no dataframe_compare handler; fixture is replay-only",
-    # Genuine gap of the SAME class as dt_strftime_format, still unfixed:
-    # fp_p2d_023_dataframe_constructor_list_like_copy_true pins copy=True and
-    # the constructor handler never reads it. Left for its own before/after
-    # evidence rather than a batch edit. Tracked by
-    # br-frankenpandas-fixture-divergence-triage-9s0c4.
-    "constructor_copy": "9s0c4: fp_p2d_023_..._copy_true pins copy=True; oracle ignores it",
 }
 
 
@@ -159,6 +153,39 @@ def test_known_unread_entries_are_still_unread(key: str, reason: str):
         f"{key} is now read by the oracle ({reason}). Remove it from "
         "KNOWN_UNREAD so the guard covers it."
     )
+
+
+def test_list_like_constructor_forwards_explicit_copy(oracle, monkeypatch):
+    """A fixture's constructor_copy option must reach pandas, not a default."""
+    captured = {}
+
+    class RecordingPandas:
+        def DataFrame(self, data, **kwargs):
+            captured["data"] = data
+            captured["kwargs"] = kwargs
+            return "recorded-frame"
+
+    monkeypatch.setattr(oracle, "dataframe_to_json", lambda frame: {"frame": frame})
+    result = oracle.op_dataframe_constructor_list_like(
+        RecordingPandas(),
+        {
+            "matrix_rows": [[{"kind": "int64", "value": 10}]],
+            "constructor_copy": True,
+        },
+    )
+
+    assert result == {"expected_frame": {"frame": "recorded-frame"}}
+    assert captured["kwargs"]["copy"] is True
+    assert "dtype" not in captured["kwargs"]
+
+    with pytest.raises(oracle.OracleError, match="constructor_copy must be a boolean"):
+        oracle.op_dataframe_constructor_list_like(
+            RecordingPandas(),
+            {
+                "matrix_rows": [[{"kind": "int64", "value": 10}]],
+                "constructor_copy": 1,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
