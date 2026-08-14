@@ -178,6 +178,24 @@ def test_dataframe_concat_invalid_join_is_a_pandas_error(oracle, pd):
     assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
 
 
+def test_series_join_cross_is_a_pandas_error(oracle, pd):
+    payload = {
+        "operation": "series_join",
+        "left": _series_payload([1], [0]),
+        "right": _series_payload([2], [0]),
+        "join_type": "cross",
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "series_join failed: Can not pass on, right_on, left_on or set "
+        "right_index=True or left_index=True"
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
 def test_groupby_min_preserves_integer_dtype(oracle, pd):
     payload = {
         "operation": "groupby_min",

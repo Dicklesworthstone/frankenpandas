@@ -558,10 +558,6 @@ def op_series_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
     join_type = payload.get("join_type")
     if left is None or right is None:
         raise OracleError("series_join requires left and right payloads")
-    if join_type not in {"inner", "left", "right", "outer"}:
-        raise OracleError(
-            f"series_join requires join_type=inner|left|right|outer, got {join_type!r}"
-        )
 
     left_index = [label_from_json(item) for item in left["index"]]
     right_index = [label_from_json(item) for item in right["index"]]
@@ -570,14 +566,17 @@ def op_series_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     lhs = pd.Series(left_values, index=left_index, name="left")
     rhs = pd.Series(right_values, index=right_index, name="right")
-    merged = lhs.to_frame().merge(
-        rhs.to_frame(),
-        left_index=True,
-        right_index=True,
-        how=join_type,
-        sort=False,
-        copy=False,
-    )
+    try:
+        merged = lhs.to_frame().merge(
+            rhs.to_frame(),
+            left_index=True,
+            right_index=True,
+            how=join_type,
+            sort=False,
+            copy=False,
+        )
+    except Exception as exc:
+        raise OracleError(f"series_join failed: {exc}") from exc
 
     def join_scalar_to_json(value: Any) -> dict[str, Any]:
         if pd.isna(value):
