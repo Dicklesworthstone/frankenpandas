@@ -34,8 +34,8 @@
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "2024-01-15T14:30:00" },
-      { "kind": "utf8", "value": "2024-01-15T15:30:00" }
+      { "kind": "utf8", "value": "2024-01-15 14:30:00" },
+      { "kind": "utf8", "value": "2024-01-15 15:30:00" }
     ],
     "columns": {
       "a": [

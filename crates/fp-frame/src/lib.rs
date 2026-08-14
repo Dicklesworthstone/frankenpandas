@@ -348,6 +348,25 @@ fn require_datetime_index(labels: &[IndexLabel], op: &str) -> Result<(), FrameEr
     Ok(())
 }
 
+/// Render parsed string datetime labels the same way a pandas `DatetimeIndex`
+/// renders its `Timestamp`s. Temporal selectors construct a datetime index from
+/// string input, so their result must not retain an ISO `T` separator from the
+/// caller's original spelling.
+fn canonicalize_datetime_index_labels(index: &Index) -> Index {
+    let labels = index
+        .labels()
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Utf8(value) => match parse_datetime_string(value, None) {
+                Scalar::Utf8(rendered) => IndexLabel::Utf8(rendered),
+                _ => label.clone(),
+            },
+            _ => label.clone(),
+        })
+        .collect();
+    Index::new(labels).rename_index(index.name())
+}
+
 fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameError> {
     // Fast path (perf): on 64-bit platforms `len <= isize::MAX <= i64::MAX`, so the
     // whole normalization is exact in i64 and avoids the per-call i128 conversions
@@ -69356,7 +69375,9 @@ impl DataFrame {
             }
         }
 
-        self.take_rows_by_positions(&keep)
+        let mut selected = self.take_rows_by_positions(&keep)?;
+        selected.index = canonicalize_datetime_index_labels(&selected.index);
+        Ok(selected)
     }
 
     /// Select rows where the time component exactly matches the given time.
@@ -69379,7 +69400,9 @@ impl DataFrame {
             }
         }
 
-        self.take_rows_by_positions(&keep)
+        let mut selected = self.take_rows_by_positions(&keep)?;
+        selected.index = canonicalize_datetime_index_labels(&selected.index);
+        Ok(selected)
     }
 
     /// Extract the time portion from a datetime string.
@@ -137900,6 +137923,34 @@ mod tests {
 
         let result = df.at_time("10:00:00").unwrap();
         assert_eq!(result.len(), 2); // Two rows at 10:00
+    }
+
+    #[test]
+    fn df_temporal_selection_canonicalizes_iso_index_labels_qddtp() {
+        let df = DataFrame::from_dict_with_index(
+            vec![(
+                "val",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
+            vec![
+                "2024-01-15T10:30:00".into(),
+                "2024-01-15T11:00:00".into(),
+                "2024-01-16T10:30:00".into(),
+            ],
+        )
+        .unwrap();
+
+        let at_time = df.at_time("10:30:00").unwrap();
+        assert_eq!(
+            at_time.index().labels(),
+            &["2024-01-15 10:30:00".into(), "2024-01-16 10:30:00".into(),]
+        );
+
+        let between_time = df.between_time("10:00:00", "10:30:00").unwrap();
+        assert_eq!(
+            between_time.index().labels(),
+            &["2024-01-15 10:30:00".into(), "2024-01-16 10:30:00".into(),]
+        );
     }
 
     #[test]
