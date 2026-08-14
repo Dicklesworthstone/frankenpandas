@@ -755,6 +755,9 @@ def main() -> int:
     fixtures = sorted(FIXTURE_ROOT.glob(args.glob))
     if args.limit:
         fixtures = fixtures[: args.limit]
+    if args.apply and not fixtures:
+        print("--apply matched no fixtures; refusing a no-op regeneration", file=sys.stderr)
+        return 2
 
     def examine(path: Path):
         fixture = json.loads(path.read_text(encoding="utf-8"))
