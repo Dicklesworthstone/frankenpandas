@@ -58015,7 +58015,8 @@ impl DataFrame {
         operation_name: &str,
         invent_nan: bool,
     ) -> Result<Self, FrameError> {
-        let row_count = matrix_rows.len();
+        let mut matrix_rows = matrix_rows;
+        let mut row_count = matrix_rows.len();
         // pandas lets the INDEX win when there are no rows at all: with no
         // `columns=`, `pd.DataFrame([], index=[0])` is shape (1, 0) — the index
         // is honoured and the frame simply has no columns; `index=[0, 1]` gives
@@ -58027,10 +58028,18 @@ impl DataFrame {
             && labels.len() != row_count
             && row_count > 0
         {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "{operation_name} index length {} does not match row count {row_count}",
-                labels.len()
-            )));
+            // A list-like DataFrame constructor repeats one supplied row for a
+            // longer explicit index. It does not repeat a multi-row input or
+            // truncate a one-row input to a shorter index.
+            if invent_nan && row_count == 1 && labels.len() > row_count {
+                matrix_rows = vec![matrix_rows[0].clone(); labels.len()];
+                row_count = labels.len();
+            } else {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "{operation_name} index length {} does not match row count {row_count}",
+                    labels.len()
+                )));
+            }
         }
 
         let max_row_width = matrix_rows
@@ -94956,6 +94965,40 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "compatibility gate rejected operation: dataframe_from_records index length 1 does not match row count 2"
+        );
+    }
+
+    #[test]
+    fn dataframe_list_like_broadcasts_one_row_to_a_longer_index_ic87j() {
+        let index = vec![10_i64.into(), 20_i64.into(), 30_i64.into()];
+        let frame =
+            DataFrame::from_list_like(vec![vec![Scalar::Int64(7)]], None, Some(index.clone()))
+                .expect("pandas repeats one list-like row for a longer index");
+
+        assert_eq!(frame.index().labels(), index.as_slice());
+        assert_eq!(frame.column_names(), vec!["0"]);
+        assert_eq!(
+            frame.column("0").expect("broadcast column").values(),
+            &[Scalar::Int64(7), Scalar::Int64(7), Scalar::Int64(7)]
+        );
+
+        let short_index =
+            DataFrame::from_list_like(vec![vec![Scalar::Int64(7)]], None, Some(Vec::new()))
+                .expect_err("a shorter explicit index does not truncate the row");
+        assert_eq!(
+            short_index.to_string(),
+            "compatibility gate rejected operation: dataframe_constructor_list_like index length 0 does not match row count 1"
+        );
+
+        let multiple_rows = DataFrame::from_list_like(
+            vec![vec![Scalar::Int64(7)], vec![Scalar::Int64(8)]],
+            None,
+            Some(vec![10_i64.into()]),
+        )
+        .expect_err("only one row broadcasts");
+        assert_eq!(
+            multiple_rows.to_string(),
+            "compatibility gate rejected operation: dataframe_constructor_list_like index length 1 does not match row count 2"
         );
     }
 

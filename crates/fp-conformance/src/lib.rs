@@ -15026,52 +15026,13 @@ fn execute_dataframe_constructor_list_like_fixture_operation(
     fixture: &PacketFixture,
 ) -> Result<DataFrame, String> {
     let matrix_rows = require_matrix_rows(fixture)?;
-    let row_count = matrix_rows.len();
-    let max_row_width = matrix_rows
-        .iter()
-        .map(std::vec::Vec::len)
-        .max()
-        .unwrap_or(0);
-
-    let selected_columns: Vec<String> = if let Some(column_order) = fixture.column_order.clone() {
-        if max_row_width > column_order.len() {
-            return Err(format!(
-                "dataframe_constructor_list_like row width {max_row_width} exceeds columns length {}",
-                column_order.len()
-            ));
-        }
-        column_order
-    } else {
-        (0..max_row_width).map(|idx| idx.to_string()).collect()
-    };
-
-    // Mirrors DataFrame::from_matrix_rows: pandas lets the INDEX win when there
-    // are no rows at all (`pd.DataFrame([], index=[0])` is shape (1, 0)), and
-    // errors only when a NON-empty row set disagrees
-    // (br-frankenpandas-fp-stricter-than-pandas-rejections-gtkz1).
-    let index_labels = if let Some(index) = fixture.index.clone() {
-        if index.len() != row_count && row_count > 0 {
-            return Err(format!(
-                "dataframe_constructor_list_like index length {} does not match row count {row_count}",
-                index.len()
-            ));
-        }
-        index
-    } else {
-        (0..row_count as i64).map(IndexLabel::from).collect()
-    };
-
-    // DELEGATES to DataFrame::from_list_like rather than assembling the columns
-    // and null-filling them here. br-frankenpandas-oxodo: this arm was the third
-    // shadow found in this file, and unlike the others it was also MINTING the
-    // missing cells, which held three rows on br-frankenpandas-nywa8 behind it.
-    // The real constructor pads with NaN and widens the padded column to
-    // float64, matching pandas — `pd.DataFrame([[1,2],[3]])` gives col1
-    // [2, NaN] float64.
+    // The fixture arm must delegate every constructor semantic to fp-frame:
+    // columns, index handling, padding, and one-row broadcasting all belong to
+    // `DataFrame::from_list_like`, not to a second implementation here.
     let frame = DataFrame::from_list_like(
         matrix_rows.to_vec(),
-        Some(&selected_columns),
-        Some(index_labels),
+        fixture.column_order.as_deref(),
+        fixture.index.clone(),
     )
     .map_err(|err| err.to_string())?;
     apply_constructor_options(fixture, "dataframe_constructor_list_like", frame)

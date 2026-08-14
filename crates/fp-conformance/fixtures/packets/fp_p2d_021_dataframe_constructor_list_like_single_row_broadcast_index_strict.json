@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-021",
+  "case_id": "dataframe_constructor_list_like_single_row_broadcast_index_strict",
+  "mode": "strict",
+  "operation": "dataframe_constructor_list_like",
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "70c8c26b55a1b419beed28d198d022f1ca8eb25070814ab1156eb18562be38cc",
+    "generated_at": "2026-08-14T22:17:24Z"
+  },
+  "matrix_rows": [
+    [
+      { "kind": "int64", "value": 7 }
+    ]
+  ],
+  "index": [
+    { "kind": "int64", "value": 10 },
+    { "kind": "int64", "value": 20 },
+    { "kind": "int64", "value": 30 }
+  ],
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 },
+      { "kind": "int64", "value": 30 }
+    ],
+    "columns": {
+      "0": [
+        { "kind": "int64", "value": 7 },
+        { "kind": "int64", "value": 7 },
+        { "kind": "int64", "value": 7 }
+      ]
+    },
+    "column_order": ["0"]
+  }
+}
