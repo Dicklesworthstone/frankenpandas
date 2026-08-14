@@ -139,7 +139,7 @@ pub const fn overflow_policy_for_mode(mode: RuntimeMode) -> OverflowPolicy {
 }
 use fp_types::{
     DType, Interval, IntervalClosed, NullKind, OverflowPolicy, Period, PeriodFreq, Scalar,
-    SparseDType, Timedelta, common_dtype,
+    SparseDType, Timedelta, Timestamp, common_dtype,
 };
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -16354,6 +16354,37 @@ impl Series {
         self.with_values_preserving_index(out)
     }
 
+    /// Cumulative temporal extrema keep the datetime domain: a `NaT` is
+    /// emitted at its own position but does not advance the running bound.
+    ///
+    /// pandas supports this for `Datetime64`, unlike `cumsum`/`cumprod`, which
+    /// refuse to accumulate absolute timestamps.
+    fn cum_datetime64_extreme(&self, maximum: bool) -> Result<Self, FrameError> {
+        let mut acc: Option<i64> = None;
+        let mut out = Vec::with_capacity(self.len());
+        for value in self.column.values() {
+            match value {
+                Scalar::Datetime64(ns) if *ns != Timestamp::NAT => {
+                    let next = acc.map_or(*ns, |current| {
+                        if maximum {
+                            current.max(*ns)
+                        } else {
+                            current.min(*ns)
+                        }
+                    });
+                    acc = Some(next);
+                    out.push(next);
+                }
+                _ => out.push(Timestamp::NAT),
+            }
+        }
+        Series::new(
+            self.name.clone(),
+            self.index.clone(),
+            Column::from_datetime64_values(out),
+        )
+    }
+
     /// Cumulative sum with an explicit `skipna`, matching
     /// `pd.Series.cumsum(skipna=...)`. `skipna=false` propagates the first
     /// NaN/NaT through every later position.
@@ -16555,6 +16586,9 @@ impl Series {
     ///
     /// Matches `pd.Series.cummin(skipna=True)`.
     pub fn cummin(&self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Datetime64 {
+            return self.cum_datetime64_extreme(false);
+        }
         // Typed prefix-min fast path: Int64 acc.min(v); Float64 strict `v<acc`
         // seeded +inf (matches the general path; all-valid ⇒ no NaN).
         if let Some(data) = self.column.as_i64_slice()
@@ -16781,6 +16815,9 @@ impl Series {
     ///
     /// Matches `pd.Series.cummax(skipna=True)`.
     pub fn cummax(&self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Datetime64 {
+            return self.cum_datetime64_extreme(true);
+        }
         // Typed prefix-max fast path: Int64 acc.max(v); Float64 strict `v>acc`
         // seeded -inf (matches the general path; all-valid ⇒ no NaN).
         if let Some(data) = self.column.as_i64_slice()
@@ -78717,9 +78754,12 @@ impl DataFrame {
                     out,
                     fp_columnar::ValidityMask::from_words(words, n),
                 ))
-            } else if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
-                // Numeric non-typed-Float64 (Int64/Bool, or an edge Float64) →
-                // Series op (matches apply_per_column's numeric arm).
+            } else if matches!(
+                col.dtype(),
+                DType::Int64 | DType::Float64 | DType::Bool | DType::Datetime64
+            ) {
+                // Numeric columns and Datetime64 use the Series operation. The
+                // latter accumulates extrema but correctly refuses sum/product.
                 Ok(series_op(&self.column_as_series(name)?)?.column().clone())
             } else if col.dtype() == DType::Utf8 {
                 Self::cum_utf8_column(func, name, col)
@@ -124406,6 +124446,68 @@ mod tests {
         let kept = df.cumsum_with_skipna(true).unwrap();
         let a_kept = kept.column_as_series("a").unwrap();
         assert_eq!(a_kept.values()[2], Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn datetime64_cumulative_extrema_accumulate_and_sum_product_refuse_zrcug() {
+        // pandas 2.2.3: Datetime64 cummin/cummax retain their dtype, leave a
+        // NaT at its position, and continue the running bound after it. Unlike
+        // relative timedeltas, absolute timestamps cannot be summed or
+        // multiplied.
+        let early = 1_700_000_000_000_000_000_i64;
+        let middle = early + 60_000_000_000;
+        let late = middle + 60_000_000_000;
+        let series = Series::new(
+            "when",
+            Index::new_known_unique_int64_unit_range(0, 4),
+            Column::from_datetime64_values(vec![middle, fp_types::Timestamp::NAT, early, late]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            series.cummax().unwrap().values(),
+            &[
+                Scalar::Datetime64(middle),
+                Scalar::Datetime64(fp_types::Timestamp::NAT),
+                Scalar::Datetime64(middle),
+                Scalar::Datetime64(late),
+            ]
+        );
+        assert_eq!(
+            series.cummin().unwrap().values(),
+            &[
+                Scalar::Datetime64(middle),
+                Scalar::Datetime64(fp_types::Timestamp::NAT),
+                Scalar::Datetime64(early),
+                Scalar::Datetime64(early),
+            ]
+        );
+        assert!(
+            series.cummax_with_skipna(false).unwrap().values()[2].is_missing(),
+            "skipna=False propagates the first NaT"
+        );
+
+        let frame = DataFrame::from_series(vec![series]).unwrap();
+        assert_eq!(
+            frame.cummax().unwrap().column("when").unwrap().values(),
+            &[
+                Scalar::Datetime64(middle),
+                Scalar::Datetime64(fp_types::Timestamp::NAT),
+                Scalar::Datetime64(middle),
+                Scalar::Datetime64(late),
+            ]
+        );
+        assert_eq!(
+            frame.cummin().unwrap().column("when").unwrap().values(),
+            &[
+                Scalar::Datetime64(middle),
+                Scalar::Datetime64(fp_types::Timestamp::NAT),
+                Scalar::Datetime64(early),
+                Scalar::Datetime64(early),
+            ]
+        );
+        assert!(frame.cumsum().is_err(), "Datetime64 cumsum must refuse");
+        assert!(frame.cumprod().is_err(), "Datetime64 cumprod must refuse");
     }
 
     // ── DataFrame.all / .any tests ──
