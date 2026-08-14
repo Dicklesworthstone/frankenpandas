@@ -51275,6 +51275,21 @@ fn format_timedelta_seconds(total_secs: f64) -> Scalar {
 /// Matches `pd.Series.dt.total_seconds()`. Works with Timedelta64 scalars
 /// or parses timedelta strings and returns the total duration in seconds.
 pub fn timedelta_total_seconds(series: &Series) -> Result<Series, FrameError> {
+    // `.dt.total_seconds()` requires a timedelta-like Series.  A numeric Series
+    // has no unit, so treating its values as seconds silently invents the same
+    // `unit="s"` interpretation that pandas refuses.  Keep an empty Series
+    // valid: with no values, pandas can retain the timedelta-shaped empty
+    // result, while any concrete numeric value makes the accessor invalid.
+    if series
+        .values()
+        .iter()
+        .any(|value| matches!(value, Scalar::Int64(_) | Scalar::Float64(_)))
+    {
+        return Err(FrameError::CompatibilityRejected(
+            "Can only use .dt accessor with datetimelike values".to_string(),
+        ));
+    }
+
     let mut result = Vec::with_capacity(series.len());
 
     for val in series.values() {
@@ -51293,14 +51308,6 @@ pub fn timedelta_total_seconds(series: &Series) -> Result<Series, FrameError> {
                     Scalar::Float64(total)
                 } else {
                     Scalar::Null(NullKind::NaN)
-                }
-            }
-            Scalar::Int64(v) => Scalar::Float64(*v as f64),
-            Scalar::Float64(v) => {
-                if v.is_nan() {
-                    Scalar::Null(NullKind::NaN)
-                } else {
-                    Scalar::Float64(*v)
                 }
             }
             _ => Scalar::Null(NullKind::NaN),
@@ -146631,6 +146638,34 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("total_seconds"));
+    }
+
+    #[test]
+    fn timedelta_total_seconds_rejects_bare_numeric_series() {
+        // br-frankenpandas-icqxw: `.dt` does not infer that bare numbers are
+        // seconds. Callers must use `to_timedelta(..., unit="s")` first.
+        let numeric = Series::from_values(
+            "durations",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(60),
+                Scalar::Float64(3661.5),
+                Scalar::Int64(86_400),
+            ],
+        )
+        .unwrap();
+
+        let error = super::timedelta_total_seconds(&numeric).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Can only use .dt accessor with datetimelike values")
+        );
+
+        // The refusal is about a concrete numeric dtype; an empty Series keeps
+        // the existing empty result behavior.
+        let empty = Series::from_values("durations", Vec::new(), Vec::new()).unwrap();
+        assert_eq!(super::timedelta_total_seconds(&empty).unwrap().len(), 0);
     }
 
     // ── DataFrameExpanding count/quantile ──

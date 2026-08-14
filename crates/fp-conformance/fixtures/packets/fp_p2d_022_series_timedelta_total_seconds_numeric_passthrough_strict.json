@@ -21,16 +21,5 @@
       { "kind": "int64", "value": 86400 }
     ]
   },
-  "expected_series": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
-    ],
-    "values": [
-      { "kind": "float64", "value": 60.0 },
-      { "kind": "float64", "value": 3661.5 },
-      { "kind": "float64", "value": 86400.0 }
-    ]
-  }
+  "expected_error_contains": "Can only use .dt accessor with datetimelike values"
 }
