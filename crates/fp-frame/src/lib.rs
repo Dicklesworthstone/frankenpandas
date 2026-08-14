@@ -61526,7 +61526,7 @@ impl DataFrame {
             let source = self.columns.get(name).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!("column '{name}' not found"))
             })?;
-            let casted = Column::new(dtype, source.values().to_vec())?;
+            let casted = source.astype(dtype)?;
             columns.insert(name.to_owned(), casted);
         }
 
@@ -61546,7 +61546,7 @@ impl DataFrame {
     pub fn astype(&self, dtype: DType) -> Result<Self, FrameError> {
         let mut columns = BTreeMap::new();
         for (name, col) in &self.columns {
-            let casted = Column::new(dtype, col.values().to_vec())?;
+            let casted = col.astype(dtype)?;
             columns.insert(name.clone(), casted);
         }
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
@@ -104144,6 +104144,46 @@ mod tests {
         assert_eq!(
             casted.column("b").unwrap().values(),
             &[Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())]
+        );
+    }
+
+    #[test]
+    fn dataframe_astype_truncates_lossy_float_to_int_m9xbu() {
+        // pandas 2.2.3: DataFrame.astype('int64') truncates finite floats
+        // toward zero. This is intentionally unlike constructor dtype=, which
+        // rejects the same lossy conversion (covered above).
+        let frame = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.5), Scalar::Float64(-2.9)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(-4.1)]),
+            ],
+        )
+        .expect("frame");
+
+        let all = frame.astype(DType::Int64).expect("astype truncates");
+        assert_eq!(
+            all.column("a").expect("a").values(),
+            &[Scalar::Int64(1), Scalar::Int64(-2)]
+        );
+        assert_eq!(
+            all.column("b").expect("b").values(),
+            &[Scalar::Int64(3), Scalar::Int64(-4)]
+        );
+
+        // The mapping form is the same astype operation for its selected
+        // column and must not leave the former constructor coercion behind.
+        let selected = frame
+            .astype_column("a", DType::Int64)
+            .expect("selected astype truncates");
+        assert_eq!(
+            selected.column("a").expect("a").values(),
+            &[Scalar::Int64(1), Scalar::Int64(-2)]
+        );
+        assert_eq!(
+            selected.column("b").expect("b").values(),
+            frame.column("b").expect("b").values(),
+            "unselected columns stay untouched"
         );
     }
 
