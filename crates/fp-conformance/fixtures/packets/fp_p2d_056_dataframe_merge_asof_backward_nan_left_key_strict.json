@@ -6,7 +6,8 @@
   "fixture_provenance": {
     "pandas_version": "2.2.3",
     "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "generated_at": "2026-04-22T21:02:48Z",
+    "oracle_attestation": "error_agreement"
   },
   "merge_on": "time",
   "direction": "backward",
@@ -98,64 +99,5 @@
       "right_val"
     ]
   },
-  "expected_frame": {
-    "index": [
-      {
-        "kind": "int64",
-        "value": 0
-      },
-      {
-        "kind": "int64",
-        "value": 1
-      },
-      {
-        "kind": "int64",
-        "value": 2
-      }
-    ],
-    "columns": {
-      "time": [
-        {
-          "kind": "int64",
-          "value": 1
-        },
-        {
-          "kind": "null",
-          "value": "na_n"
-        },
-        {
-          "kind": "int64",
-          "value": 4
-        }
-      ],
-      "left_val": [
-        {
-          "kind": "int64",
-          "value": 10
-        },
-        {
-          "kind": "int64",
-          "value": 20
-        },
-        {
-          "kind": "int64",
-          "value": 30
-        }
-      ],
-      "right_val": [
-        {
-          "kind": "float64",
-          "value": 100.0
-        },
-        {
-          "kind": "null",
-          "value": "na_n"
-        },
-        {
-          "kind": "float64",
-          "value": 300.0
-        }
-      ]
-    }
-  }
+  "expected_error_contains": "incompatible merge keys"
 }

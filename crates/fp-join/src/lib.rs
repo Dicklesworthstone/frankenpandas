@@ -10474,6 +10474,27 @@ fn asof_numeric_values(column: &Column, side: &str, on: &str) -> Result<Vec<f64>
     Ok(out)
 }
 
+/// `merge_asof` compares ordering keys rather than coercing them to a common
+/// numeric representation.  Converting both sides to `f64` before validating
+/// their dtypes makes an `int64` key appear compatible with a `float64` key,
+/// which pandas rejects even when every finite value is exactly representable.
+fn ensure_matching_asof_key_dtypes(
+    left_key: &Column,
+    right_key: &Column,
+    on: &str,
+) -> Result<(), JoinError> {
+    if left_key.dtype() != right_key.dtype() {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            format!(
+                "merge_asof: incompatible merge keys [0] for '{on}': left dtype('{}'), right dtype('{}'), must be the same type",
+                left_key.dtype().name(),
+                right_key.dtype().name(),
+            ),
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_sorted_non_decreasing(values: &[f64], side: &str, on: &str) -> Result<(), JoinError> {
     let mut prev: Option<f64> = None;
     for &value in values {
@@ -10544,6 +10565,8 @@ fn merge_asof_simple(
         )))
     })?;
 
+    ensure_matching_asof_key_dtypes(left_key, right_key, on)?;
+
     if let Some(datetime_matches) = try_asof_datetime_matches(
         left_key,
         right_key,
@@ -10567,9 +10590,9 @@ fn merge_asof_simple(
         ),
     };
 
-    // pandas pd.merge_asof accepts NaN keys: the NaN row gets a null in
-    // the joined columns (no match). The strict "reject null keys" check
-    // previously enforced here diverged from the FP-P2D-056 oracle.
+    // With matching key dtypes, pandas accepts NaN keys: the NaN row gets a
+    // null in the joined columns (no match). Dtype incompatibility is rejected
+    // above before this value-level rule is reached.
     ensure_sorted_non_decreasing(&left_vals, "left", on)?;
     ensure_sorted_non_decreasing(&right_vals, "right", on)?;
 
@@ -10618,6 +10641,8 @@ fn merge_asof_grouped(
         )))
     })?;
 
+    ensure_matching_asof_key_dtypes(left_key, right_key, on)?;
+
     // Datetime64 keys: shift-to-f64 (exact for <~104-day ns ranges) instead of the
     // rejected/precision-lossy direct cast. Falls back to the f64 numeric path.
     let (left_vals, right_vals) = match try_asof_datetime_shift(left_key, right_key, on) {
@@ -10628,9 +10653,9 @@ fn merge_asof_grouped(
         ),
     };
 
-    // pandas pd.merge_asof accepts NaN keys: the NaN row gets a null in
-    // the joined columns (no match). The strict "reject null keys" check
-    // previously enforced here diverged from the FP-P2D-056 oracle.
+    // With matching key dtypes, pandas accepts NaN keys: the NaN row gets a
+    // null in the joined columns (no match). Dtype incompatibility is rejected
+    // above before this value-level rule is reached.
     ensure_sorted_non_decreasing(&left_vals, "left", on)?;
     ensure_sorted_non_decreasing(&right_vals, "right", on)?;
 
@@ -19361,9 +19386,8 @@ mod tests {
         )
         .unwrap();
 
-        // pandas merge_asof accepts NaN keys: the NaN row gets no match
-        // (null in joined columns) — verified against FP-P2D-056
-        // backward_nan_left_key_strict (pandas 2.2.3 oracle).
+        // With matching key dtypes, pandas merge_asof accepts NaN keys: the
+        // NaN row gets no match (null in joined columns).
         let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
         assert!(result.columns.get("quote").unwrap().values()[1].is_missing());
         // time=5 → backward match to time=4 → quote=400
@@ -19371,6 +19395,110 @@ mod tests {
             result.columns.get("quote").unwrap().values()[2],
             Scalar::Float64(400.0)
         );
+    }
+
+    #[test]
+    fn merge_asof_rejects_incompatible_key_dtypes_sopel() {
+        use super::{AsofDirection, MergeAsofOptions};
+
+        // pandas 2.2.3: a NaN makes the left `time` column float64, and
+        // `merge_asof` refuses it against an int64 right key rather than
+        // coercing both to a common numeric lane.
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "left_val", "group"],
+            vec![
+                (
+                    "time",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "left_val",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+                (
+                    "group",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "right_val", "group"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Int64(3)]),
+                ("right_val", vec![Scalar::Int64(100), Scalar::Int64(300)]),
+                (
+                    "group",
+                    vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+                ),
+            ],
+        )
+        .unwrap();
+
+        for options in [
+            MergeAsofOptions::new(),
+            MergeAsofOptions::new().by(vec!["group".to_owned()]),
+        ] {
+            let error = super::merge_asof_with_options(
+                &left,
+                &right,
+                "time",
+                AsofDirection::Backward,
+                options,
+            )
+            .expect_err("mixed float64/int64 asof keys must be rejected");
+            assert!(matches!(
+                error,
+                super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
+                    if message.contains("incompatible merge keys")
+                        && message.contains("float64")
+                        && message.contains("int64")
+            ));
+        }
+
+        // This is the fixture-shaped representation: the null marker makes
+        // the left lane nullable Int64, while the all-valid right lane stays
+        // numpy int64. pandas rejects that pair as incompatible too.
+        let mut nullable_columns = ColumnStore::new();
+        nullable_columns.insert(
+            "time".to_owned(),
+            Column::new(
+                DType::Int64Nullable,
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Int64(4),
+                ],
+            )
+            .unwrap(),
+        );
+        nullable_columns.insert(
+            "left_val".to_owned(),
+            Column::from_i64_values(vec![10, 20, 30]),
+        );
+        let nullable_left = fp_frame::DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 3),
+            nullable_columns,
+            vec!["time".to_owned(), "left_val".to_owned()],
+        )
+        .unwrap();
+        let error = super::merge_asof(&nullable_left, &right, "time", AsofDirection::Backward)
+            .expect_err("nullable Int64 and int64 asof keys must be rejected");
+        assert!(matches!(
+            error,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
+                if message.contains("incompatible merge keys")
+                    && message.contains("left dtype('Int64')")
+                    && message.contains("right dtype('int64')")
+        ));
     }
 
     #[test]
