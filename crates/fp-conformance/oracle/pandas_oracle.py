@@ -5014,6 +5014,10 @@ def op_series_str_rsplit_get(pd, payload: dict[str, Any]) -> dict[str, Any]:
     n = _int_payload(payload, "str_split_n", op_name)
 
     def pick(s: Any) -> Any:
+        # pandas preserves a supplied object missing value through the string
+        # accessor. Only an out-of-range part is an accessor-created gap.
+        if s is None or scalar_is_pandas_extension_missing(s):
+            return s
         if not isinstance(s, str):
             return float("nan")
         # pandas str.rsplit(pat) without a maxsplit returns parts left-to-right

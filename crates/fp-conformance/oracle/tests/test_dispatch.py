@@ -248,6 +248,32 @@ def test_series_str_pattern_dispatches_to_pandas(oracle, pd, operation, extra, e
     assert _expected_values(response) == expected
 
 
+def test_series_str_rsplit_get_preserves_supplied_object_missing_value(oracle, pd):
+    payload = {
+        "operation": "series_str_rsplit_get",
+        "str_split_pat": "/",
+        "str_split_n": 0,
+        "left": {
+            "index": [{"kind": "int64", "value": i} for i in range(4)],
+            "values": [
+                {"kind": "utf8", "value": "a/b/c"},
+                {"kind": "null", "value": "null"},
+                {"kind": "utf8", "value": ""},
+                {"kind": "utf8", "value": "no_slash"},
+            ],
+        },
+    }
+
+    response = oracle.dispatch(pd, payload)
+
+    assert response["expected_series"]["values"] == [
+        {"kind": "utf8", "value": "a"},
+        {"kind": "null", "value": "null"},
+        {"kind": "utf8", "value": ""},
+        {"kind": "utf8", "value": "no_slash"},
+    ]
+
+
 @pytest.mark.parametrize(
     ("operation", "extra", "expected"),
     [
