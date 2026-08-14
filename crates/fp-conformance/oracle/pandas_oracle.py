@@ -1847,14 +1847,21 @@ def op_dataframe_from_dict(pd, payload: dict[str, Any]) -> dict[str, Any]:
     column_order = parse_constructor_column_order(payload, "dataframe_from_dict")
     index = parse_constructor_index(payload, "dataframe_from_dict")
 
-    if column_order is not None and len(column_order) > 0:
-        selected: dict[str, list[Any]] = {}
-        for name in column_order:
-            if name not in data:
-                raise OracleError(f"dataframe_from_dict column '{name}' not found in data")
-            selected[name] = data[name]
-        data = selected
-
+    # `columns=` is pandas' OWN selector and pandas answers every question about
+    # it, including the absent-name one. This function used to project `data`
+    # down to `column_order` itself and raise
+    #   "dataframe_from_dict column 'z' not found in data"
+    # — an error pandas does not raise. MEASURED, live pandas 2.2.3:
+    #   pd.DataFrame({'a':[1,2],'b':[3,4]}, columns=['a','z'])
+    #     -> a=[1,2], z=[nan,nan] dtype object
+    #   pd.DataFrame({'a':[1,2],'b':[3,4]}, columns=['b'])    -> ONLY b
+    #   pd.DataFrame({'a':[1,2],'b':[3,4]}, columns=['z','y']) -> shape (0, 2)
+    # The harness held the same invented rejection and so did the fixture, so
+    # all three layers agreed on a rejection and nothing could go red. Deleting
+    # the private projection is what lets pandas be the oracle here.
+    # (br-frankenpandas-oxodo, sibling of br-frankenpandas-f9xlz's
+    # adapter-refuses-what-pandas-accepts class)
+    #
     # `constructor_dtype` was never read here — the third member of the family
     # resolve_constructor_dtype's docstring describes as fixed, after
     # from_series (51fb88ead). MEASURED, live pandas 2.2.3:
@@ -1863,15 +1870,16 @@ def op_dataframe_from_dict(pd, payload: dict[str, Any]) -> dict[str, Any]:
     # fp_p2d_023_dataframe_from_dict_dtype_float64_strict pins the float64 and
     # is RIGHT; the oracle was returning int64.
     #
-    # Column selection is already done above, so `columns` stays None here —
-    # passing it again would re-project an already-projected dict.
-    # (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    # `columns` is passed straight through now that the private projection
+    # above is gone; it was pinned to None while this function did the
+    # selecting itself. (br-frankenpandas-fixture-divergence-triage-9s0c4,
+    # br-frankenpandas-oxodo)
     try:
         frame = _frame_with_optional_dtype(
             pd,
             data,
             index,
-            None,
+            column_order,
             resolve_constructor_dtype(payload, "dataframe_from_dict"),
         )
     except Exception as exc:

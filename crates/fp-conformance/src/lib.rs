@@ -14767,37 +14767,6 @@ fn collect_constructor_series_payloads(
     Ok(payloads)
 }
 
-type DictConstructorPayloads<'a> = (Vec<(&'a str, Vec<Scalar>)>, Vec<&'a str>);
-
-fn collect_dict_constructor_payloads<'a>(
-    dict_columns: &'a BTreeMap<String, Vec<Scalar>>,
-    column_order: Option<&[String]>,
-    op_name: &str,
-) -> Result<DictConstructorPayloads<'a>, String> {
-    if let Some(order) = column_order
-        && !order.is_empty()
-    {
-        let mut payloads = Vec::with_capacity(order.len());
-        let mut selected_columns = Vec::with_capacity(order.len());
-        for requested in order {
-            let (name, values) = dict_columns
-                .get_key_value(requested)
-                .ok_or_else(|| format!("{op_name} column '{requested}' not found in data"))?;
-            payloads.push((name.as_str(), values.clone()));
-            selected_columns.push(name.as_str());
-        }
-        return Ok((payloads, selected_columns));
-    }
-
-    Ok((
-        dict_columns
-            .iter()
-            .map(|(name, values)| (name.as_str(), values.clone()))
-            .collect(),
-        Vec::new(),
-    ))
-}
-
 fn parse_constructor_dtype_spec(dtype_spec: &str) -> Result<DType, String> {
     let normalized = dtype_spec.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -14875,16 +14844,29 @@ fn execute_dataframe_from_dict_fixture_operation(
     fixture: &PacketFixture,
 ) -> Result<DataFrame, String> {
     let dict_columns = require_dict_columns(fixture)?;
-    let (columns, selected_columns) = collect_dict_constructor_payloads(
-        dict_columns,
+    // DELEGATES the whole `columns=` contract to DataFrame::from_dict_with_columns.
+    // br-frankenpandas-oxodo: `collect_dict_constructor_payloads` used to project
+    // the payload here and raise "column 'z' not found in data" for a name the
+    // dict does not carry — a rejection pandas does not make. MEASURED, live
+    // pandas 2.2.3, d = {"a": [1, 2], "b": [3, 4]}:
+    //   pd.DataFrame(d, columns=["a","z"])  -> a=[1,2], z=[nan,nan] object
+    //   pd.DataFrame(d, columns=["b"])      -> ONLY b; 'a' is dropped
+    //   pd.DataFrame(d, columns=["z","y"])  -> shape (0, 2)
+    // The oracle carried the same invented rejection, so fixture, harness and
+    // oracle all agreed on an error and nothing could go red. Note this shadow
+    // was invisible to tests/harness_delegation_policy.rs: the helper builds
+    // nothing, so none of the RAW_BUILDERS needles appear in it — it owned a
+    // POLICY, not a constructor.
+    let data: Vec<(&str, Vec<Scalar>)> = dict_columns
+        .iter()
+        .map(|(name, values)| (name.as_str(), values.clone()))
+        .collect();
+    let frame = DataFrame::from_dict_with_columns(
+        data,
         fixture.column_order.as_deref(),
-        "dataframe_from_dict",
-    )?;
-    let frame = if let Some(index) = fixture.index.clone() {
-        DataFrame::from_dict_with_index(columns, index).map_err(|err| err.to_string())?
-    } else {
-        DataFrame::from_dict(&selected_columns, columns).map_err(|err| err.to_string())?
-    };
+        fixture.index.clone(),
+    )
+    .map_err(|err| err.to_string())?;
     apply_constructor_options(fixture, "dataframe_from_dict", frame)
 }
 
@@ -17313,8 +17295,9 @@ fn execute_dataframe_merge_fixture_operation(
 /// Promote the row index into a merge-key column, DELEGATING the label-to-value
 /// conversion to `DataFrame::reset_index` rather than keeping a private copy.
 ///
-/// br-frankenpandas-oxodo, scope item 1: this helper (and
-/// `collect_dict_constructor_payloads`) were the two the `execute_*` sweep could
+/// br-frankenpandas-oxodo, scope item 1: this helper (and the since-removed
+/// `collect_dict_constructor_payloads`, whose `columns=` policy now lives in
+/// `DataFrame::from_dict_with_columns`) were the two the `execute_*` sweep could
 /// not see. It carried its OWN `index_label_to_scalar`, and that copy had drifted
 /// from fp-frame's: it rendered a `Datetime64` label as
 /// `Scalar::Utf8(format_datetime_ns(..))`, so merging on a DatetimeIndex joined

@@ -57533,6 +57533,110 @@ impl DataFrame {
         Self::new_with_column_order(index, columns, output_order)
     }
 
+    /// Construct a DataFrame from dict-of-columns data under pandas' `columns=`
+    /// contract, with an optional explicit index.
+    ///
+    /// Matches `pd.DataFrame(dict, columns=..., index=...)`. This is NOT
+    /// [`from_dict`](Self::from_dict)'s `column_order`, which is an ORDERING
+    /// hint over columns that are all expected to exist: that one appends any
+    /// dict key the caller did not list, and REJECTS a listed name that is
+    /// absent. pandas' `columns=` is a SELECTOR. Measured on live pandas 2.2.3
+    /// with `d = {"a": [1, 2], "b": [3, 4]}`:
+    ///
+    /// ```text
+    /// pd.DataFrame(d, columns=["a", "z"])   -> a=[1,2], z=[nan,nan] (object)
+    /// pd.DataFrame(d, columns=["b"])        -> ONLY b; 'a' is DROPPED
+    /// pd.DataFrame(d, columns=["z", "y"])   -> shape (0, 2): no requested name
+    ///                                          exists, so there is no index to
+    ///                                          take a length from
+    /// pd.DataFrame(d, columns=[])           -> shape (0, 0)
+    /// pd.DataFrame(d, columns=[], index=[10, 20])   -> shape (2, 0)
+    /// pd.DataFrame(d, columns=["a"], index=[1,2,3]) -> ValueError (length)
+    /// pd.DataFrame({"a":[1,2],"b":[3]}, columns=["a"]) -> OK: an unselected
+    ///     ragged column is dropped BEFORE the equal-length check, while the
+    ///     same dict with no `columns=` raises "All arrays must be of the same
+    ///     length"
+    /// ```
+    ///
+    /// br-frankenpandas-oxodo: this contract had no owner in FrankenPandas.
+    /// The conformance harness held a private copy of it
+    /// (`collect_dict_constructor_payloads`) and got the first line wrong — it
+    /// raised "column 'z' not found in data", which pandas does not do — and
+    /// the oracle carried the same invented rejection, so all three layers
+    /// agreed on an error and `fp_p2d_018` pinned it as truth. A user calling
+    /// FrankenPandas could not express the operation the packet certified.
+    ///
+    /// A repeated name in `columns` is rejected: pandas returns the column
+    /// twice, and the column store cannot represent duplicate labels
+    /// (br-frankenpandas-ih4t0).
+    pub fn from_dict_with_columns(
+        data: Vec<(&str, Vec<Scalar>)>,
+        columns: Option<&[String]>,
+        index_labels: Option<Vec<IndexLabel>>,
+    ) -> Result<Self, FrameError> {
+        let Some(requested) = columns else {
+            return match index_labels {
+                Some(labels) => Self::from_dict_with_index(data, labels),
+                None => Self::from_dict(&[], data),
+            };
+        };
+
+        let mut supplied: BTreeMap<&str, Vec<Scalar>> = BTreeMap::new();
+        for (name, values) in data {
+            // A repeated key keeps the LAST value, as the dict literal the
+            // caller would have written does.
+            supplied.insert(name, values);
+        }
+
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for name in requested {
+            if !seen.insert(name.as_str()) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "duplicate column selector: '{name}'"
+                )));
+            }
+        }
+
+        // The row count comes from the SELECTED columns, not from the dict: a
+        // selector naming nothing that exists yields a 0-row frame, not a frame
+        // of missing rows.
+        let row_count = match &index_labels {
+            Some(labels) => labels.len(),
+            None => requested
+                .iter()
+                .find_map(|name| supplied.get(name.as_str()).map(Vec::len))
+                .unwrap_or(0),
+        };
+
+        let mut cols = BTreeMap::new();
+        let mut order = Vec::with_capacity(requested.len());
+        for name in requested {
+            let column = match supplied.remove(name.as_str()) {
+                Some(values) => {
+                    if values.len() != row_count {
+                        return Err(FrameError::LengthMismatch {
+                            index_len: row_count,
+                            column_len: values.len(),
+                        });
+                    }
+                    Column::from_values(values)?
+                }
+                // An absent name is an all-missing column. pandas builds it as
+                // OBJECT holding nan — an invented gap, not a supplied None —
+                // which is how `from_series_with_columns` spells it too.
+                None => Column::new(DType::Utf8, vec![Scalar::Null(NullKind::NaN); row_count])?,
+            };
+            cols.insert(name.clone(), column);
+            order.push(name.clone());
+        }
+
+        let index = match index_labels {
+            Some(labels) => Index::new(labels),
+            None => Index::new_known_unique_int64_unit_range(0, row_count),
+        };
+        Self::new_with_column_order(index, cols, order)
+    }
+
     /// Construct a DataFrame from a dict with `orient='index'`.
     ///
     /// Matches `pd.DataFrame.from_dict(data, orient='index')`.
@@ -93534,6 +93638,141 @@ mod tests {
             &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
             "an absent name is an INVENTED all-missing column, so its gap is NaN"
         );
+    }
+
+    /// The dict-of-VALUES sibling of the test above: `pd.DataFrame(dict,
+    /// columns=[...])` is a SELECTOR, not an ordering hint.
+    ///
+    /// MEASURED, live pandas 2.2.3, `d = {"a": [1, 2], "b": [3, 4]}`:
+    ///
+    /// ```text
+    /// pd.DataFrame(d, columns=["a", "z"])   a=[1,2]  z=[nan,nan] object
+    /// pd.DataFrame(d, columns=["b"])        ONLY b — 'a' is DROPPED
+    /// pd.DataFrame(d, columns=["z", "y"])   shape (0, 2), empty index
+    /// pd.DataFrame(d, columns=[])           shape (0, 0)
+    /// pd.DataFrame(d, columns=[], index=[10, 20])     shape (2, 0)
+    /// pd.DataFrame(d, columns=["a"], index=[1, 2, 3]) ValueError (length)
+    /// pd.DataFrame({"a":[1,2],"b":[3]}, columns=["a"]) OK — an UNSELECTED
+    ///     ragged column is dropped before the equal-length check
+    /// ```
+    ///
+    /// Each assertion below is one a naive implementation gets wrong, and three
+    /// of them are what `DataFrame::from_dict` does today (it is a different
+    /// operation and stays as it is): from_dict REJECTS the absent name, APPENDS
+    /// the unlisted key instead of dropping it, and would give an all-absent
+    /// selector two missing ROWS instead of none.
+    /// (br-frankenpandas-oxodo)
+    #[test]
+    fn dataframe_from_dict_with_columns_is_a_selector_not_an_ordering() {
+        let data = || {
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ]
+        };
+        let cols =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_owned()).collect() };
+
+        // An absent name is accepted and becomes all-missing — pandas does NOT
+        // raise here, and `from_dict` does.
+        let with_absent =
+            DataFrame::from_dict_with_columns(data(), Some(&cols(&["a", "z"])), None).unwrap();
+        assert_eq!(with_absent.column_names(), vec!["a", "z"]);
+        assert_eq!(
+            with_absent.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            with_absent.column("z").unwrap().values(),
+            &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)]
+        );
+        assert!(
+            DataFrame::from_dict(&["a", "z"], data()).is_err(),
+            "from_dict is the ordering-hint operation and still rejects an \
+             absent name; the two must not be collapsed"
+        );
+
+        // An unlisted key is DROPPED, not appended.
+        let only_b = DataFrame::from_dict_with_columns(data(), Some(&cols(&["b"])), None).unwrap();
+        assert_eq!(only_b.column_names(), vec!["b"]);
+        assert_eq!(
+            only_b.column("b").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(4)]
+        );
+
+        // No requested name exists -> no index to take a length from, so the
+        // frame is 0 rows wide rather than 2 rows of nulls.
+        let none_present =
+            DataFrame::from_dict_with_columns(data(), Some(&cols(&["z", "y"])), None).unwrap();
+        assert_eq!(none_present.column_names(), vec!["z", "y"]);
+        assert_eq!(none_present.index().len(), 0);
+        assert!(none_present.column("z").unwrap().values().is_empty());
+
+        // An empty selector keeps the explicit index but no columns.
+        let no_columns = DataFrame::from_dict_with_columns(data(), Some(&[]), None).unwrap();
+        assert_eq!(no_columns.index().len(), 0);
+        assert!(no_columns.column_names().is_empty());
+        let no_columns_indexed = DataFrame::from_dict_with_columns(
+            data(),
+            Some(&[]),
+            Some(vec![IndexLabel::Int64(10), IndexLabel::Int64(20)]),
+        )
+        .unwrap();
+        assert_eq!(no_columns_indexed.index().len(), 2);
+        assert!(no_columns_indexed.column_names().is_empty());
+
+        // An explicit index sets the row count, and a selected column that does
+        // not match it is a length error.
+        let indexed = DataFrame::from_dict_with_columns(
+            data(),
+            Some(&cols(&["a", "z"])),
+            Some(vec![IndexLabel::Int64(10), IndexLabel::Int64(20)]),
+        )
+        .unwrap();
+        assert_eq!(
+            indexed.index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
+        );
+        assert_eq!(
+            indexed.column("z").unwrap().values(),
+            &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)]
+        );
+        assert!(
+            DataFrame::from_dict_with_columns(
+                data(),
+                Some(&cols(&["a"])),
+                Some(vec![
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                    IndexLabel::Int64(3),
+                ]),
+            )
+            .is_err(),
+            "a selected column whose length does not match an explicit index is \
+             a ValueError in pandas"
+        );
+
+        // An UNSELECTED ragged column is dropped before the length check.
+        let ragged = vec![
+            ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ("b", vec![Scalar::Int64(3)]),
+        ];
+        let dropped_ragged =
+            DataFrame::from_dict_with_columns(ragged, Some(&cols(&["a"])), None).unwrap();
+        assert_eq!(dropped_ragged.index().len(), 2);
+        assert_eq!(
+            dropped_ragged.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+
+        // A repeated selector would need duplicate column labels, which the
+        // column store cannot represent (br-frankenpandas-ih4t0).
+        assert!(DataFrame::from_dict_with_columns(data(), Some(&cols(&["a", "a"])), None).is_err());
+
+        // No selector at all is the plain dict constructor.
+        let unselected = DataFrame::from_dict_with_columns(data(), None, None).unwrap();
+        assert_eq!(unselected.column_names(), vec!["a", "b"]);
+        assert_eq!(unselected.index().len(), 2);
     }
 
     /// `idxmin`/`idxmax` return the index LABEL with its own dtype, and they
