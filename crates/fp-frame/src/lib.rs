@@ -45506,14 +45506,25 @@ impl DatetimeAccessor<'_> {
         F: Fn(&str) -> Scalar,
     {
         self.validate_datetime_dtype()?;
-        Ok(self
-            .series
-            .column()
-            .values()
+        let values = self.series.column().values();
+        // A STRING column reaching `.dt` is standing in for
+        // `pd.to_datetime(s).dt.<component>`, so it is parsed under the same ONE
+        // guessed format the column-level conversion uses, not row by row
+        // (br-frankenpandas-hzayc). Without this the `.dt` family answered for
+        // rows `to_datetime` turns into NaT — fixtures FP-P2D-415/416 read 987654
+        // microseconds out of a row pandas does not parse at all. The lock is
+        // computed once per call; a uniform column takes it and nothing changes.
+        let shape_lock = infer_datetime_shape_lock(values);
+        Ok(values
             .iter()
             .map(|v| match v {
-                Scalar::Utf8(s) => func(s),
-                _ if v.is_missing() => Scalar::Null(NullKind::NaN),
+                Scalar::Utf8(s)
+                    if shape_lock
+                        .as_deref()
+                        .is_none_or(|lock| datetime_shape_signature(s) == lock) =>
+                {
+                    func(s)
+                }
                 _ => Scalar::Null(NullKind::NaN),
             })
             .collect())
@@ -49946,13 +49957,32 @@ pub fn to_datetime_with_options(
         let nrows = offsets.len() - 1;
         let mut nanos: Vec<i64> = Vec::with_capacity(nrows);
         let mut all_fast = true;
+        // The fast path parses each span on its own, so a column mixing two ISO
+        // shapes (`... 12:34:56.123456` and `...T12:34:56.987654321`) would take
+        // it and reproduce exactly the per-row parsing br-frankenpandas-hzayc is
+        // about. Every span here is a plain ISO form, so a differing signature
+        // means the column is NOT uniform: bail to the general path, which owns
+        // the lock. A uniform column is unaffected, so this stays bit-identical
+        // wherever the fast path still fires.
+        let mut lock: Option<String> = None;
         for row in 0..nrows {
             let span = &bytes[offsets[row]..offsets[row + 1]];
             // Contiguous-Utf8 spans are valid UTF-8 by construction.
-            match std::str::from_utf8(span)
-                .ok()
-                .and_then(fast_iso_datetime_nanos)
-            {
+            let text = std::str::from_utf8(span).ok();
+            let signature = text.map(datetime_shape_signature);
+            match (&lock, signature) {
+                (_, None) => {
+                    all_fast = false;
+                    break;
+                }
+                (None, Some(first)) => lock = Some(first),
+                (Some(expected), Some(actual)) if *expected != actual => {
+                    all_fast = false;
+                    break;
+                }
+                (Some(_), Some(_)) => {}
+            }
+            match text.and_then(fast_iso_datetime_nanos) {
                 Some(v) => nanos.push(v),
                 None => {
                     all_fast = false;
@@ -50001,10 +50031,21 @@ pub fn to_datetime_values_with_options(
     if options.mixed_tz_as_object
         && parsed_unit.is_none()
         && options.format.is_none()
-        && values_have_mixed_timezone(values)
+        && (values_have_mixed_timezone(values) || values_have_mixed_datetime_shape(values))
     {
         return Ok(normalize_mixed_timezone_values(values));
     }
+    // The ONE format the column is parsed under (br-frankenpandas-hzayc).
+    // pandas guesses it from the first non-null element and applies it to every
+    // row; FrankenPandas used to parse each row on its own, so it accepted rows
+    // pandas turns into NaT. Only the default string-inference shape takes a
+    // lock: an explicit `format=` already pins the format, and `unit=` is not
+    // parsing strings at all.
+    let shape_lock = if parsed_unit.is_none() && options.format.is_none() {
+        infer_datetime_shape_lock(values)
+    } else {
+        None
+    };
     let inferred_timezone_pattern =
         if parsed_unit.is_none() && options.format.is_none() && options.infer_mixed_timezone {
             infer_values_datetime_timezone_pattern(values)
@@ -50020,7 +50061,14 @@ pub fn to_datetime_values_with_options(
             let parsed = match val {
                 Scalar::Null(_) => Scalar::Null(NullKind::NaT),
                 Scalar::Utf8(s) => {
-                    if let Some(pattern) = inferred_timezone_pattern {
+                    if shape_lock
+                        .as_deref()
+                        .is_some_and(|lock| datetime_shape_signature(s) != lock)
+                    {
+                        // A row the column's ONE guessed format cannot parse.
+                        // (br-frankenpandas-hzayc)
+                        Scalar::Null(NullKind::NaT)
+                    } else if let Some(pattern) = inferred_timezone_pattern {
                         parse_datetime_string_with_timezone_pattern(s, pattern)
                     } else if !options.utc
                         && options.format.is_none()
@@ -50715,6 +50763,133 @@ fn infer_values_datetime_timezone_pattern(values: &[Scalar]) -> Option<DatetimeT
     values.iter().find_map(|value| match value {
         Scalar::Utf8(value) => infer_datetime_timezone_pattern(value),
         _ => None,
+    })
+}
+
+/// The SHAPE of a datetime string, as `pd.to_datetime`'s format inference sees
+/// it (br-frankenpandas-hzayc).
+///
+/// pandas does not parse a string column row by row. It calls
+/// `guess_datetime_format` on the FIRST NON-NULL element, gets ONE strftime
+/// format, and applies that format to every element; anything that does not
+/// match becomes NaT. This function reduces a string to the equivalence class
+/// that format defines, so two strings share a signature iff pandas' guessed
+/// format parses both.
+///
+/// The reduction: every run of digits collapses to `N`, except a LEADING run of
+/// exactly four digits, which is `Y` (a 4-digit leading run is the year, so
+/// `2024-06-15` and `15-06-2024` are different shapes). Every run of letters
+/// collapses to `A` — that covers the `T` separator, a `Z` suffix, and a
+/// textual month alike. Every other character is kept verbatim.
+///
+/// MEASURED, live pandas 2.2.3, each pair as a two-element column:
+///
+/// ```text
+///   2024-06-15            2024-6-15                 BOTH parse  (same shape:
+///                                                   %m/%d take 1 OR 2 digits)
+///   2024-06-15 12:34:56.123456   ...123456789       BOTH parse  (%f is 1-9)
+///   2024-06-15 12:34:56   2024-06-15 12:34          second NaT  (no %S)
+///   2024-06-15 12:34:56.1 2024-06-15 12:34:56       second NaT  (no fraction)
+///   2024-06-15            2024/06/15                second NaT  (separator)
+///   2024-06-15 12:34:56   2024-06-15T12:34:56       second NaT  (T vs space)
+///   ...123456             ...123456+02:00           second NaT  (tz suffix)
+/// ```
+///
+/// A timezone suffix is ONE token whatever its spelling, because `%z` is:
+/// `guess_datetime_format` returns `%Y-%m-%dT%H:%M:%S%z` for BOTH
+/// `2024-01-15T10:30:00Z` and `2024-01-15T10:30:00+05:30`, and pandas parses
+/// the two together (measured — the pair comes back as an object column of two
+/// aware Timestamps, no NaT). So the offset is stripped before the reduction
+/// and re-added as a single `z`.
+///
+/// KNOWN NARROWING, stated rather than hidden: an ambiguous all-numeric date
+/// order is one class here. `15/06/2024` and `06/15/2024` share the signature
+/// `N/N/N`, while pandas guesses `%d/%m/%Y` from the first and turns the second
+/// into NaT because month 15 does not exist. Closing that needs the resolved
+/// field ORDER to travel with the lock and be honoured by the row parser, which
+/// this pass does not do.
+fn datetime_shape_signature(value: &str) -> String {
+    let trimmed = value.trim();
+    let (body, tz) = if has_tz_suffix(trimmed) {
+        (strip_tz_suffix(trimmed).trim_end(), "z")
+    } else {
+        (trimmed, "")
+    };
+    let mut signature = String::with_capacity(body.len() + tz.len());
+    let bytes = body.as_bytes();
+    let mut index = 0;
+    let mut at_start = true;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_digit() {
+            let start = index;
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+            signature.push(if at_start && index - start == 4 {
+                'Y'
+            } else {
+                'N'
+            });
+        } else if byte.is_ascii_alphabetic() {
+            while index < bytes.len() && bytes[index].is_ascii_alphabetic() {
+                index += 1;
+            }
+            signature.push('A');
+        } else {
+            signature.push(byte as char);
+            index += 1;
+        }
+        at_start = false;
+    }
+    signature.push_str(tz);
+    signature
+}
+
+/// The one shape a whole string column is parsed under, or `None` for no lock.
+///
+/// `None` is not "every row is free" by accident — it is pandas' own behaviour
+/// when `guess_datetime_format` cannot read the first non-null element. MEASURED:
+/// `['not-a-date', '2024-06-15 12:34:56.123456']` gives `[NaT, Timestamp(...)]`,
+/// so a leading junk value does NOT poison the rest of the column; it simply
+/// takes no lock and every row is parsed on its own.
+fn infer_datetime_shape_lock(values: &[Scalar]) -> Option<String> {
+    let first = values.iter().find_map(|value| match value {
+        Scalar::Utf8(text) if !text.trim().is_empty() => Some(text.as_str()),
+        _ => None,
+    })?;
+    // A first element FrankenPandas cannot read is pandas' guess returning None.
+    if parse_datetime_string(first, None).is_missing() {
+        return None;
+    }
+    Some(datetime_shape_signature(first))
+}
+
+/// True iff the string values do not all share one inferred datetime shape.
+///
+/// This is the `parse_dates` half of br-frankenpandas-hzayc, and it is a
+/// DIFFERENT answer from `to_datetime`'s. MEASURED, live pandas 2.2.3, on the
+/// same three strings:
+///
+/// ```text
+///   pd.to_datetime(s, errors='coerce')
+///     -> [Timestamp('2024-06-15 12:34:56.123456'), NaT, NaT]   datetime64[ns]
+///   pd.read_csv(..., parse_dates=['ts'])['ts']
+///     -> ['2024-06-15 12:34:56.123456',
+///         '2024-06-15T12:34:56.987654321', '2024-06-15']       OBJECT, as read
+/// ```
+///
+/// `to_datetime` mints NaT for the rows that do not match; `read_csv` gives up
+/// on the column ENTIRELY and the original text survives. That is the same
+/// doctrine already recorded for mixed timezones in br-frankenpandas-unz0t,
+/// generalised from "cannot unify the offsets" to "cannot unify the format".
+fn values_have_mixed_datetime_shape(values: &[Scalar]) -> bool {
+    let Some(lock) = infer_datetime_shape_lock(values) else {
+        return false;
+    };
+    values.iter().any(|value| match value {
+        Scalar::Utf8(text) if !text.trim().is_empty() => datetime_shape_signature(text) != lock,
+        _ => false,
     })
 }
 
@@ -125376,7 +125551,16 @@ mod tests {
 
     #[test]
     fn dt_hour_minute_second() {
-        let s = Series::from_values(
+        // CORRECTED (br-frankenpandas-hzayc). This asserted that a column
+        // mixing `T` and space separators parses BOTH rows. It does not: the
+        // column is parsed under ONE format guessed from the first element, so
+        // the space-separated row is NaT. MEASURED, live pandas 2.2.3:
+        //   pd.to_datetime(['2024-03-15T14:30:45', '2023-12-25 08:15:00'],
+        //                  errors='coerce')  ->  [Timestamp(...), NaT]
+        //   .dt.hour                         ->  [14.0, nan]   float64
+        // Both separator forms are still covered — by the two UNIFORM columns
+        // below, which is what this test was really exercising.
+        let mixed = Series::from_values(
             "times",
             vec![0_i64.into(), 1_i64.into()],
             vec![
@@ -125385,18 +125569,41 @@ mod tests {
             ],
         )
         .unwrap();
+        let hour = mixed.dt().hour().unwrap();
+        assert_eq!(hour.values()[0], Scalar::Float64(14.0));
+        assert!(hour.values()[1].is_missing());
 
-        let hour = s.dt().hour().unwrap();
-        assert_eq!(hour.values()[0], Scalar::Int64(14));
-        assert_eq!(hour.values()[1], Scalar::Int64(8));
+        let t_form = Series::from_values(
+            "times",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-03-15T14:30:45".to_string()),
+                Scalar::Utf8("2023-12-25T08:15:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let space_form = Series::from_values(
+            "times",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-03-15 14:30:45".to_string()),
+                Scalar::Utf8("2023-12-25 08:15:00".to_string()),
+            ],
+        )
+        .unwrap();
+        for s in [&t_form, &space_form] {
+            let hour = s.dt().hour().unwrap();
+            assert_eq!(hour.values()[0], Scalar::Int64(14));
+            assert_eq!(hour.values()[1], Scalar::Int64(8));
 
-        let minute = s.dt().minute().unwrap();
-        assert_eq!(minute.values()[0], Scalar::Int64(30));
-        assert_eq!(minute.values()[1], Scalar::Int64(15));
+            let minute = s.dt().minute().unwrap();
+            assert_eq!(minute.values()[0], Scalar::Int64(30));
+            assert_eq!(minute.values()[1], Scalar::Int64(15));
 
-        let second = s.dt().second().unwrap();
-        assert_eq!(second.values()[0], Scalar::Int64(45));
-        assert_eq!(second.values()[1], Scalar::Int64(0));
+            let second = s.dt().second().unwrap();
+            assert_eq!(second.values()[0], Scalar::Int64(45));
+            assert_eq!(second.values()[1], Scalar::Int64(0));
+        }
     }
 
     #[test]
@@ -125418,7 +125625,12 @@ mod tests {
 
     #[test]
     fn dt_date_extraction() {
-        let s = Series::from_values(
+        // CORRECTED with dt_hour_minute_second (br-frankenpandas-hzayc): the
+        // mixed-separator column yields ONE date and a gap, and each uniform
+        // form still yields both. Measured, live pandas 2.2.3:
+        //   pd.to_datetime(['2024-03-15T14:30:45','2023-12-25 08:15:00'],
+        //                  errors='coerce')  ->  [Timestamp(...), NaT]
+        let mixed = Series::from_values(
             "datetimes",
             vec![0_i64.into(), 1_i64.into()],
             vec![
@@ -125427,8 +125639,20 @@ mod tests {
             ],
         )
         .unwrap();
+        let dates = mixed.dt().date().unwrap();
+        assert_eq!(dates.values()[0], Scalar::Utf8("2024-03-15".to_string()));
+        assert!(dates.values()[1].is_missing());
 
-        let dates = s.dt().date().unwrap();
+        let uniform = Series::from_values(
+            "datetimes",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-03-15T14:30:45".to_string()),
+                Scalar::Utf8("2023-12-25T08:15:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let dates = uniform.dt().date().unwrap();
         assert_eq!(dates.values()[0], Scalar::Utf8("2024-03-15".to_string()));
         assert_eq!(dates.values()[1], Scalar::Utf8("2023-12-25".to_string()));
     }
@@ -151007,7 +151231,14 @@ mod tests {
 
     #[test]
     fn test_dt_time() {
-        let s = Series::from_values(
+        // CORRECTED (br-frankenpandas-hzayc): three different shapes in one
+        // column is three different formats, and the column gets ONE. Measured,
+        // live pandas 2.2.3, on exactly these values:
+        //   pd.to_datetime([...], errors='coerce')
+        //     -> [Timestamp('2023-01-15 14:35:22'), NaT, NaT]
+        // The rows that used to be asserted here are now covered by the uniform
+        // column below, which keeps the fractional-seconds case.
+        let mixed = Series::from_values(
             "ts",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
@@ -151017,17 +151248,35 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = s.dt().time().unwrap();
+        let result = mixed.dt().time().unwrap();
         assert_eq!(
             result.column().values()[0],
             Scalar::Utf8("14:35:22".to_string())
         );
+        assert!(result.column().values()[1].is_missing());
+        assert!(result.column().values()[2].is_missing());
+
+        // A zero fraction is deliberately NOT used here: pandas renders
+        // `time(23,59,59)` as '23:59:59' while FrankenPandas keeps the
+        // '.000000' it was given. That divergence is real, was found while
+        // correcting this test, and is filed separately rather than smuggled
+        // into this bead's assertions.
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2023-06-30 23:59:59.500000".to_string()),
+                Scalar::Utf8("2023-12-01 08:00:00.123456".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().time().unwrap();
         assert_eq!(
-            result.column().values()[1],
-            Scalar::Utf8("23:59:59".to_string())
+            result.column().values()[0],
+            Scalar::Utf8("23:59:59.500000".to_string())
         );
         assert_eq!(
-            result.column().values()[2],
+            result.column().values()[1],
             Scalar::Utf8("08:00:00.123456".to_string())
         );
     }
@@ -151134,7 +151383,16 @@ mod tests {
 
     #[test]
     fn test_dt_tz() {
-        let s = Series::from_values(
+        // CORRECTED (br-frankenpandas-hzayc). The first element is `T`-separated
+        // and the rest are space-separated, which is a DIFFERENT format, so
+        // pandas keeps only the first. Measured, live pandas 2.2.3, on exactly
+        // these four values:
+        //   pd.to_datetime([...], errors='coerce')
+        //     -> dtype datetime64[ns, UTC]
+        //        ['2023-01-15 14:35:22+00:00', NaT, NaT, NaT]
+        // The offset SPELLINGS (Z / +05:30 / -08:00) are still covered by the
+        // uniform column below — they are one `%z` token and parse together.
+        let mixed = Series::from_values(
             "ts",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
@@ -151142,6 +151400,22 @@ mod tests {
                 Scalar::Utf8("2023-06-30 23:59:59+05:30".to_string()),
                 Scalar::Utf8("2023-12-01 08:00:00-08:00".to_string()),
                 Scalar::Utf8("2023-03-15 12:00:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = mixed.dt().tz().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Utf8("UTC".to_string()));
+        assert!(result.column().values()[1].is_missing());
+        assert!(result.column().values()[2].is_missing());
+        assert!(result.column().values()[3].is_missing());
+
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-15 14:35:22Z".to_string()),
+                Scalar::Utf8("2023-06-30 23:59:59+05:30".to_string()),
+                Scalar::Utf8("2023-12-01 08:00:00-08:00".to_string()),
             ],
         )
         .unwrap();
@@ -151155,18 +151429,38 @@ mod tests {
             result.column().values()[2],
             Scalar::Utf8("-08:00".to_string())
         );
-        assert_eq!(result.column().values()[3], Scalar::Null(NullKind::Null));
     }
 
     #[test]
     fn test_dt_timetz() {
-        let s = Series::from_values(
+        // CORRECTED with test_dt_tz (br-frankenpandas-hzayc): `T`-separated
+        // first element, space-separated rest, so only the first survives.
+        // Measured: pd.to_datetime([...], errors='coerce') ->
+        //   ['2023-01-15 14:35:22+00:00', NaT, NaT]  dtype datetime64[ns, UTC]
+        let mixed = Series::from_values(
             "ts",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("2023-01-15T14:35:22Z".to_string()),
                 Scalar::Utf8("2023-06-30 23:59:59+05:30".to_string()),
                 Scalar::Utf8("2023-12-01 08:00:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = mixed.dt().timetz().unwrap();
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("14:35:22Z".to_string())
+        );
+        assert!(result.column().values()[1].is_missing());
+        assert!(result.column().values()[2].is_missing());
+
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-15 14:35:22Z".to_string()),
+                Scalar::Utf8("2023-06-30 23:59:59+05:30".to_string()),
             ],
         )
         .unwrap();
@@ -151178,10 +151472,6 @@ mod tests {
         assert_eq!(
             result.column().values()[1],
             Scalar::Utf8("23:59:59+05:30".to_string())
-        );
-        assert_eq!(
-            result.column().values()[2],
-            Scalar::Utf8("08:00:00".to_string())
         );
     }
 
@@ -152223,13 +152513,23 @@ mod tests {
             ],
         )
         .unwrap();
-        // "not-a-date" is a gap, so the column is float64. Measured:
-        // pd.to_datetime([...,"not-a-date"], errors="coerce").dt.microsecond
-        //   -> float64 [123456.0, 987654.0, 0.0, nan]   (br-frankenpandas-02ijn)
+        // CORRECTED — the comment here USED TO CLAIM, as a measurement:
+        //   pd.to_datetime([...,"not-a-date"], errors="coerce").dt.microsecond
+        //     -> float64 [123456.0, 987654.0, 0.0, nan]
+        // That is not what pandas does, and this input is fixture FP-P2D-415
+        // verbatim. RE-MEASURED, live pandas 2.2.3, three ways that agree:
+        //   raw pandas  -> [123456.0, nan, nan, nan]
+        //   the oracle  -> [123456.0, nan, nan, nan]
+        //   the fixture -> [123456.0, nan, nan, nan]
+        // The column is parsed under ONE format guessed from the first element
+        // (`%Y-%m-%d %H:%M:%S.%f`), so the `T`-separated row and the date-only
+        // row are NaT — they are not 987654 and 0 microseconds. The float64
+        // promotion the old comment describes is real and still asserted; only
+        // the values were wrong. (br-frankenpandas-hzayc, br-frankenpandas-02ijn)
         let result = s.dt().microsecond().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Float64(123_456.0));
-        assert_eq!(result.column().values()[1], Scalar::Float64(987_654.0));
-        assert_eq!(result.column().values()[2], Scalar::Float64(0.0));
+        assert_eq!(result.column().values()[1], Scalar::Null(NullKind::NaN));
+        assert_eq!(result.column().values()[2], Scalar::Null(NullKind::NaN));
         assert_eq!(result.column().values()[3], Scalar::Null(NullKind::NaN));
     }
 
@@ -152246,12 +152546,16 @@ mod tests {
             ],
         )
         .unwrap();
-        // Same gap, same promotion as `test_dt_microsecond`.
-        // (br-frankenpandas-02ijn)
+        // Same gap, same promotion, and the same correction as
+        // `test_dt_microsecond`: this input is fixture FP-P2D-416 verbatim, and
+        // pandas keeps only the first row. MEASURED, live pandas 2.2.3:
+        //   pd.to_datetime([...], errors='coerce').dt.nanosecond
+        //     -> [789.0, nan, nan, nan]
+        // (br-frankenpandas-hzayc, br-frankenpandas-02ijn)
         let result = s.dt().nanosecond().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Float64(789.0));
-        assert_eq!(result.column().values()[1], Scalar::Float64(321.0));
-        assert_eq!(result.column().values()[2], Scalar::Float64(0.0));
+        assert_eq!(result.column().values()[1], Scalar::Null(NullKind::NaN));
+        assert_eq!(result.column().values()[2], Scalar::Null(NullKind::NaN));
         assert_eq!(result.column().values()[3], Scalar::Null(NullKind::NaN));
     }
 
@@ -157160,6 +157464,138 @@ mod tests {
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
         assert!(result.values()[0].is_missing());
+    }
+
+    /// `to_datetime` guesses ONE format from the first non-null element and
+    /// applies it to the whole column; a row that does not match becomes NaT.
+    ///
+    /// MEASURED, live pandas 2.2.3, `pd.to_datetime(pd.Series(v), errors='coerce')`:
+    ///
+    /// ```text
+    /// ['2024-06-15 12:34:56.123456', '2024-06-15T12:34:56.987654321',
+    ///  '2024-06-15', 'not-a-date']       -> [Timestamp(...123456), NaT, NaT, NaT]
+    /// ['2024-06-15', '2024-06-15 12:34:56.123456']
+    ///                                    -> [2024-06-15 00:00:00, NaT]
+    /// ['not-a-date', '2024-06-15 12:34:56.123456']
+    ///                                    -> [NaT, Timestamp(...123456)]
+    /// [None, '2024-06-15T12:34:56.987654321', '2024-06-15']
+    ///                                    -> [NaT, Timestamp(...987654321), NaT]
+    /// ['2024-06-15 12:34:56.123456', '2024-06-15 12:34:56.123']
+    ///                                    -> BOTH parse (%f takes 1-9 digits)
+    /// ['2024-06-15 12:34:56.123456', '2024-06-15 12:34:56']
+    ///                                    -> [Timestamp(...), NaT] (no fraction)
+    /// ['2024-06-15', '2024-6-15']        -> BOTH parse (%m/%d take 1 OR 2 digits)
+    /// ```
+    ///
+    /// FrankenPandas parsed every row on its own, so it accepted rows 2 and 3 of
+    /// the first column and reported 987654 microseconds and 0 where pandas
+    /// reports NaT — the defect behind fixtures FP-P2D-415 / FP-P2D-416.
+    /// (br-frankenpandas-hzayc)
+    #[test]
+    fn to_datetime_locks_one_inferred_format_for_the_whole_column() {
+        let ints = |n: usize| (0..n as i64).map(IndexLabel::Int64).collect::<Vec<_>>();
+        let run = |vals: Vec<Scalar>| {
+            let s = Series::from_values("ts", ints(vals.len()), vals).unwrap();
+            super::to_datetime(&s).unwrap().values().to_vec()
+        };
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+
+        // The FP-P2D-415 input, verbatim.
+        let out = run(vec![
+            utf8("2024-06-15 12:34:56.123456"),
+            utf8("2024-06-15T12:34:56.987654321"),
+            utf8("2024-06-15"),
+            utf8("not-a-date"),
+        ]);
+        assert_eq!(out[0], datetime64_scalar("2024-06-15 12:34:56.123456"));
+        assert!(
+            out[1].is_missing(),
+            "a T-separated row does not match a space-separated guessed format"
+        );
+        assert!(
+            out[2].is_missing(),
+            "a date-only row does not match a format carrying a time"
+        );
+        assert!(out[3].is_missing());
+
+        // The lock comes from the FIRST element, so the reverse order keeps the
+        // date and drops the datetime.
+        let out = run(vec![utf8("2024-06-15"), utf8("2024-06-15 12:34:56.123456")]);
+        assert_eq!(out[0], datetime64_scalar("2024-06-15 00:00:00"));
+        assert!(out[1].is_missing());
+
+        // A first element pandas cannot guess takes NO lock: the rest of the
+        // column is parsed per row. This is the case that makes "lock to row 0"
+        // wrong as a one-line rule.
+        let out = run(vec![utf8("not-a-date"), utf8("2024-06-15 12:34:56.123456")]);
+        assert!(out[0].is_missing());
+        assert_eq!(out[1], datetime64_scalar("2024-06-15 12:34:56.123456"));
+
+        // The lock is taken from the first NON-NULL element, not from index 0.
+        let out = run(vec![
+            Scalar::Null(NullKind::Null),
+            utf8("2024-06-15T12:34:56.987654321"),
+            utf8("2024-06-15"),
+        ]);
+        assert!(out[0].is_missing());
+        assert_eq!(out[1], datetime64_scalar("2024-06-15 12:34:56.987654321"));
+        assert!(out[2].is_missing(), "date-only cannot match the T format");
+
+        // Fractional digits are a variable-width field: 1-9 digits all match,
+        // but the fraction must be PRESENT.
+        let out = run(vec![
+            utf8("2024-06-15 12:34:56.123456"),
+            utf8("2024-06-15 12:34:56.123"),
+        ]);
+        assert_eq!(out[0], datetime64_scalar("2024-06-15 12:34:56.123456"));
+        assert_eq!(out[1], datetime64_scalar("2024-06-15 12:34:56.123"));
+        let out = run(vec![
+            utf8("2024-06-15 12:34:56.123456"),
+            utf8("2024-06-15 12:34:56"),
+        ]);
+        assert!(out[1].is_missing());
+
+        // Month/day accept one OR two digits under the same format, so a
+        // non-padded date is the SAME shape.
+        let out = run(vec![utf8("2024-06-15"), utf8("2024-6-15")]);
+        assert_eq!(out[0], datetime64_scalar("2024-06-15 00:00:00"));
+        assert_eq!(out[1], datetime64_scalar("2024-06-15 00:00:00"));
+
+        // A uniform column is untouched — the lock must not cost anything where
+        // every row already agreed.
+        let out = run(vec![
+            utf8("2024-06-15 12:34:56.123456"),
+            utf8("2024-06-16 01:02:03.000001"),
+        ]);
+        assert_eq!(out[0], datetime64_scalar("2024-06-15 12:34:56.123456"));
+        assert_eq!(out[1], datetime64_scalar("2024-06-16 01:02:03.000001"));
+
+        // A timezone offset is ONE token whatever its spelling, because `%z` is.
+        // MEASURED: guess_datetime_format gives '%Y-%m-%dT%H:%M:%S%z' for BOTH
+        // '2024-01-15T10:30:00Z' and '...+05:30', and pandas returns two aware
+        // Timestamps with no NaT. A shape rule that compared the offset text
+        // would break this pair — see to_datetime_normalizes_timezone_aware_strings.
+        let out = run(vec![
+            utf8("2024-01-15T10:30:00Z"),
+            utf8("2024-01-15T10:30:00+05:30"),
+        ]);
+        assert!(!out[0].is_missing());
+        assert!(!out[1].is_missing(), "Z and +05:30 are both %z");
+
+        // A tz-aware row in a tz-NAIVE column is still a different shape.
+        let out = run(vec![
+            utf8("2024-06-15 12:34:56.123456"),
+            utf8("2024-06-15 12:34:56.123456+02:00"),
+        ]);
+        assert_eq!(out[0], datetime64_scalar("2024-06-15 12:34:56.123456"));
+        assert!(out[1].is_missing());
+
+        // An explicit format= is the caller's lock and overrides inference.
+        let s = Series::from_values("ts", ints(2), vec![utf8("15-01-2024"), utf8("16-01-2024")])
+            .unwrap();
+        let out = super::to_datetime_with_format(&s, Some("%d-%m-%Y")).unwrap();
+        assert_eq!(out.values()[0], datetime64_scalar("2024-01-15 00:00:00"));
+        assert_eq!(out.values()[1], datetime64_scalar("2024-01-16 00:00:00"));
     }
 
     #[test]

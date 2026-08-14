@@ -5,8 +5,8 @@
   "operation": "series_to_datetime",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "70c8c26b55a1b419beed28d198d022f1ca8eb25070814ab1156eb18562be38cc",
-    "generated_at": "2026-08-09T12:18:29Z"
+    "oracle_script_sha256": "23e3a8e70a00e3962543becccef13f9b038f23d0acbc5c19c440484b9fbdbeba",
+    "generated_at": "2026-08-14T17:16:21Z"
   },
   "left": {
     "name": "dates",
@@ -60,12 +60,12 @@
         "value": 1705276800000000000
       },
       {
-        "kind": "datetime64",
-        "value": 1719750600000000000
+        "kind": "null",
+        "value": "null"
       },
       {
-        "kind": "datetime64",
-        "value": 1735689599000000000
+        "kind": "null",
+        "value": "null"
       }
     ]
   }

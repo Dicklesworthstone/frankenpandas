@@ -1322,14 +1322,25 @@ def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
             raise OracleError("series_to_datetime datetime_utc must be a boolean")
         kwargs["utc"] = utc
 
-    # For string inputs with no unit/origin, parse each element with its own
-    # format (format="mixed") to match FP's flexible per-element parsing. The
-    # default single-inferred-format path coerces heterogeneous ISO strings
-    # (date-only mixed with date+time) to NaT after the first row. Numeric
-    # (epoch) inputs keep the default path; format="mixed" only applies to text.
-    if "unit" not in kwargs and "origin" not in kwargs and series.dtype == object:
-        kwargs["format"] = "mixed"
-
+    # NO format= is passed. This block used to set format="mixed" for every
+    # string input, and its own comment said why: 'to match FP's flexible
+    # per-element parsing'. That is the oracle being adapted to FrankenPandas
+    # instead of the other way round, and it is what hid br-frankenpandas-hzayc
+    # on this surface. format="mixed" is an OPT-IN that re-infers a format per
+    # row; pandas' default guesses ONE format from the first non-null element
+    # and coerces every row that does not match it. MEASURED, live pandas 2.2.3,
+    # on this packet's own input:
+    #
+    #   v = ['2024-01-15', '2024-06-30 12:30:00', '2024-12-31T23:59:59']
+    #   pd.to_datetime(pd.Series(v), errors='coerce')
+    #     -> [Timestamp('2024-01-15'), NaT, NaT]          <- the default
+    #   pd.to_datetime(pd.Series(v), errors='coerce', format='mixed')
+    #     -> all three parsed                             <- what this used to do
+    #
+    # The same defect was RED the whole time on the .dt surface (FP-P2D-415 /
+    # 416), because op_series_dt_* does not carry this override. One defect, two
+    # handlers, opposite verdicts — which is the argument against adapting an
+    # oracle anywhere. (br-frankenpandas-hzayc, br-frankenpandas-oxodo)
     try:
         out = pd.to_datetime(series, **kwargs)
     except Exception as exc:
