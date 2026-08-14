@@ -49454,12 +49454,14 @@ fn format_naive_datetime(value: NaiveDateTime) -> String {
     let mut rendered = value.format("%Y-%m-%d %H:%M:%S").to_string();
     let nanos = value.and_utc().timestamp_subsec_nanos();
     if nanos != 0 {
-        let mut fractional = format!("{nanos:09}");
-        while fractional.ends_with('0') {
-            fractional.pop();
-        }
         rendered.push('.');
-        rendered.push_str(&fractional);
+        if nanos.is_multiple_of(1_000) {
+            // pandas keeps the microsecond group even when it ends in zero:
+            // 1_000_000 ns renders as `.001000`, not `.001`.
+            rendered.push_str(&format!("{:06}", nanos / 1_000));
+        } else {
+            rendered.push_str(&format!("{nanos:09}"));
+        }
     }
     rendered
 }
@@ -157049,13 +157051,6 @@ mod tests {
     ///     -> 1970-01-01 00:00:01.705312200+00:00
     ///        2024-01-01 00:00:00+00:00        (dtype datetime64[ns, UTC])
     /// ```
-    /// ⚠️ The first expectation below is FrankenPandas' CURRENT rendering,
-    /// `.7053122`, and it does NOT match the pandas string above. That gap is a
-    /// separate, pre-existing defect in the shared `format_naive_datetime`,
-    /// which trims trailing zero DIGITS where pandas trims whole 3-digit
-    /// GROUPS — filed as br-frankenpandas-3z9ca with its own measurements.
-    /// The instant is right in both; only the text differs. Update this
-    /// assertion to the pandas form when 3z9ca lands.
     #[test]
     fn to_datetime_bare_integer_with_utc_is_nanoseconds_too() {
         let s = Series::from_values(
@@ -157078,10 +157073,35 @@ mod tests {
         assert_eq!(
             result.values(),
             &[
-                // br-frankenpandas-3z9ca: pandas prints '.705312200' here.
-                Scalar::Utf8("1970-01-01 00:00:01.7053122+00:00".into()),
+                Scalar::Utf8("1970-01-01 00:00:01.705312200+00:00".into()),
                 Scalar::Utf8("2024-01-01 00:00:00+00:00".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn format_naive_datetime_preserves_fractional_digit_groups_3z9ca() {
+        let render = |value: &str| {
+            super::format_naive_datetime(
+                chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f").unwrap(),
+            )
+        };
+
+        assert_eq!(
+            render("1970-01-01 00:00:01.705312200"),
+            "1970-01-01 00:00:01.705312200"
+        );
+        assert_eq!(
+            render("1970-01-01 00:00:01.500000000"),
+            "1970-01-01 00:00:01.500000"
+        );
+        assert_eq!(
+            render("1970-01-01 00:00:01.705312000"),
+            "1970-01-01 00:00:01.705312"
+        );
+        assert_eq!(
+            render("1970-01-01 00:00:00.001000000"),
+            "1970-01-01 00:00:00.001000"
         );
     }
 
