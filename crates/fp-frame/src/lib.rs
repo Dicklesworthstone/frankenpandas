@@ -79409,6 +79409,12 @@ impl DataFrame {
                 column.dtype() == DType::Int64 && !column.values().iter().any(Scalar::is_missing);
             if is_all_valid_numpy_int {
                 Scalar::Null(NullKind::NaN)
+            } else if matches!(column.dtype(), DType::Datetime64 | DType::Timedelta64) {
+                // Nullable temporal column backing materializes an invalid slot
+                // as `Null(NaT)`.  Keep alignment on that representation rather
+                // than mixing it with the scalar `Datetime64(NAT)`/`Timedelta64(NAT)`
+                // sentinel used by all-valid temporal columns.
+                Scalar::Null(NullKind::NaT)
             } else {
                 Scalar::missing_for_dtype(column.dtype())
             }
@@ -126706,7 +126712,7 @@ mod tests {
             &[
                 Scalar::Datetime64(1_700_000_000_000_000_000),
                 Scalar::Datetime64(1_700_000_000_001_000_000),
-                Scalar::Datetime64(Timestamp::NAT),
+                Scalar::Null(NullKind::NaT),
             ]
         );
     }
