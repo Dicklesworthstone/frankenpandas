@@ -127,6 +127,83 @@ struct GroupByExecutionTrace {
     estimated_bytes: usize,
 }
 
+/// Align a groupby VALUE lane, applying pandas' widening when the alignment
+/// INVENTS a gap in it.
+///
+/// A groupby whose key and value indexes differ reindexes both to their union,
+/// and that reindex can put a missing value into a lane that had none. pandas
+/// cannot store one in a numpy `int64` array, so the lane becomes `float64`,
+/// and every dtype-preserving aggregation over it (`sum`, `prod`, `min`, `max`,
+/// `first`, `last`) answers in `float64` afterwards.
+///
+/// MEASURED, live pandas 2.2.3, isolating the reindex the oracle itself
+/// performs (`op_groupby_agg` does `value_series.reindex(union_index)`):
+///
+/// ```text
+///   Series([5, 7], index=[0,2]).reindex([0,1,2])
+///     -> float64 [5.0, nan, 7.0]                      WIDENS
+///   Series([5, None, 7], index=[0,3,2], dtype='Int64').reindex([0,1,2,3])
+///     -> Int64   [5, <NA>, 7, <NA>]                   KEEPS
+///   Series([10, None, 30, 40], dtype='Int64')          (no gap invented)
+///     -> Int64   [10, <NA>, 30, 40]                   KEEPS
+/// ```
+///
+/// THE ALL-VALID GUARD IS THE WHOLE RULE, and it is br-frankenpandas-nywa8's
+/// Rule 1 / Rule 2 split seen at one site: a lane that ALREADY carried a
+/// missing value is the nullable `Int64` extension (DISCREPANCIES DISC-011 —
+/// that is what an `int64 + null` payload means in this corpus), and a nullable
+/// `Int64` CAN hold the invented gap, so pandas keeps the dtype. Only an
+/// all-valid numpy lane has to widen. Widening both was the naive version and
+/// it turns `groupby_sum_int_keys_hardened` from `Int64(40)` into
+/// `Float64(40.0)`.
+///
+/// `Float64` needs no widening and every other dtype either has its own
+/// canonical missing (temporal `NaT`) or is object-like, so only `Int64` moves.
+/// This is the same contract as fp-join's
+/// `reindex_join_column_with_invented_gap`, restated at the groupby alignment
+/// site because that is the site that knows it is inventing the gap.
+///
+/// (br-frankenpandas-vc6iu)
+fn align_value_column_with_invented_gap(
+    column: &Column,
+    positions: &[Option<usize>],
+) -> Result<Column, ColumnError> {
+    if column.dtype() != DType::Int64 {
+        return column.reindex_by_positions(positions);
+    }
+
+    let invents_a_gap = positions
+        .iter()
+        .any(|slot| slot.is_none_or(|idx| idx >= column.len()));
+    if !invents_a_gap {
+        return column.reindex_by_positions(positions);
+    }
+
+    // Already nullable ⇒ pandas keeps the extension dtype (Rule 2 above).
+    if column.values().iter().any(Scalar::is_missing) {
+        return column.reindex_by_positions(positions);
+    }
+
+    if let Some(widened) = column.reindex_promote_float64_by_optional_positions(positions) {
+        return Ok(widened);
+    }
+
+    let values = positions
+        .iter()
+        .map(|slot| match slot {
+            Some(idx) => column
+                .values()
+                .get(*idx)
+                .cloned()
+                .unwrap_or(Scalar::Null(NullKind::NaN)),
+            None => Scalar::Null(NullKind::NaN),
+        })
+        .map(|value| fp_types::cast_scalar_owned(value, DType::Float64).map_err(ColumnError::from))
+        .collect::<Result<Vec<_>, ColumnError>>()?;
+
+    Column::new(DType::Float64, values)
+}
+
 pub fn groupby_sum(
     keys: &Series,
     values: &Series,
@@ -172,9 +249,11 @@ fn groupby_sum_with_trace(
         let plan = align_union(keys.index(), values.index());
         validate_alignment_plan(&plan)?;
         let aligned_keys = keys.column().reindex_by_positions(&plan.left_positions)?;
-        let aligned_values = values
-            .column()
-            .reindex_by_positions(&plan.right_positions)?;
+        // The VALUE lane widens when this alignment invents a gap in it; the
+        // KEY lane does not, because a key that gains a gap becomes a null
+        // group, not a float. (br-frankenpandas-vc6iu)
+        let aligned_values =
+            align_value_column_with_invented_gap(values.column(), &plan.right_positions)?;
         Some((aligned_keys, aligned_values))
     };
 
@@ -702,13 +781,26 @@ fn groupby_sum_utf8(
 fn is_int64_or_bool_values(values: &[Scalar]) -> bool {
     let mut saw = false;
     for v in values {
+        // A missing value here is one the CALLER SUPPLIED, so the lane is the
+        // nullable `Int64`/`boolean` extension (DISCREPANCIES DISC-011), and
+        // pandas sums a nullable lane dtype-preservingly. Measured, live pandas
+        // 2.2.3:
+        //   Series([10,None,30,40], dtype='Int64').groupby(k).sum()  -> Int64
+        //   a group whose every value is <NA>                        -> Int64 0
+        //   Series([True,None,False], dtype='boolean').groupby(k).sum() -> Int64
+        // An ALIGNMENT-invented gap never reaches here as Int64: it widens the
+        // lane to Float64 at `align_value_column_with_invented_gap`, which is
+        // what keeps `groupby_sum_alignment_dropna_strict` on float64 [5.0,0.0].
+        //
+        // This REPLACES br-frankenpandas-33d1h's bail-on-missing. 33d1h read the
+        // old fixture (float64) as pandas' answer, but that fixture existed only
+        // because the oracle forced `value_dtype="float64"` for every agg but
+        // min/max/first/last — removed on br-frankenpandas-778bb, which re-banked
+        // the two sum fixtures to Int64. The alignment case 33d1h also named is
+        // still Float64, now for the structural reason rather than by refusing
+        // the typed path. (br-frankenpandas-vc6iu)
         if v.is_missing() {
-            // pandas' non-nullable int/bool column promotes to Float64 the moment
-            // any value is missing (NaN cannot live in int64) — whether the gap
-            // came from alignment or was an explicit null — so groupby.sum() is
-            // Float64, NOT Int64. Do not take the Int64-preserving path.
-            // (br-frankenpandas-33d1h)
-            return false;
+            continue;
         }
         match v {
             Scalar::Int64(_) | Scalar::Bool(_) => saw = true,
@@ -2573,9 +2665,10 @@ pub fn groupby_agg(
         let plan = align_union(keys.index(), values.index());
         validate_alignment_plan(&plan)?;
         let aligned_keys = keys.column().reindex_by_positions(&plan.left_positions)?;
-        let aligned_values = values
-            .column()
-            .reindex_by_positions(&plan.right_positions)?;
+        // See the sibling site in `groupby_sum_with_trace`
+        // (br-frankenpandas-vc6iu).
+        let aligned_values =
+            align_value_column_with_invented_gap(values.column(), &plan.right_positions)?;
         Some((aligned_keys, aligned_values))
     };
 
@@ -2607,7 +2700,13 @@ pub fn groupby_agg(
         } else {
             (keys.values(), values.values())
         };
-    let value_dtype = values.column().dtype();
+    // Read the dtype from the lane the aggregation actually consumes. Taking it
+    // from `values.column()` ignored `align_value_column_with_invented_gap`'s
+    // widening, so an alignment-widened Float64 lane was still summed under the
+    // pre-alignment `Int64` and emitted `Int64`. (br-frankenpandas-vc6iu)
+    let value_dtype = aligned_storage
+        .as_ref()
+        .map_or_else(|| values.column().dtype(), |(_, av)| av.dtype());
 
     let agg_name = match func {
         AggFunc::Sum => "sum",
@@ -3453,7 +3552,7 @@ mod tests {
     use fp_frame::Series;
     use fp_index::{Index, IndexLabel};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
-    use fp_types::{NullKind, Scalar};
+    use fp_types::{DType, NullKind, Scalar};
 
     use super::{
         GroupByExecutionOptions, GroupByOptions, groupby_nunique, groupby_prod, groupby_size,
@@ -3590,6 +3689,160 @@ mod tests {
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         assert_eq!(out.values(), &[Scalar::Int64(6), Scalar::Int64(4)]);
+    }
+
+    /// Where a missing value in an int lane CAME FROM decides the output dtype
+    /// of every dtype-preserving groupby aggregation, and the two origins give
+    /// opposite answers.
+    ///
+    /// MEASURED, live pandas 2.2.3 — each line is one arm of this test, and the
+    /// reindex is the one the oracle itself performs in `op_groupby_agg`:
+    ///
+    /// ```text
+    ///   SUPPLIED    Series([10,None,30,40], index=[10..13], dtype='Int64')
+    ///                 .groupby([1,2,1,2]).sum()          -> Int64  [40, 40]
+    ///   ALL-NA GROUP a group whose every value is <NA>   -> Int64  0, not <NA>
+    ///   INVENTED    Series([5,7], index=[0,2]).reindex([0,1,2])
+    ///                 -> float64 [5.0, nan, 7.0]; grouped sum -> float64 {x:5.0, y:0.0}
+    ///   BOTH        Series([5,None,7], index=[0,3,2], dtype='Int64')
+    ///                 .reindex([0,1,2,3])                -> Int64  [5,<NA>,7,<NA>]
+    /// ```
+    ///
+    /// A gap the ALIGNMENT invented cannot live in a numpy `int64`, so the lane
+    /// widens to `float64` and the sum answers in float. A null the CALLER
+    /// SUPPLIED means the lane was the nullable `Int64` extension all along
+    /// (DISCREPANCIES DISC-011), which CAN hold it, so the sum stays `Int64`.
+    ///
+    /// EVERY ARM IS LOAD-BEARING AS A NEGATIVE CASE:
+    /// - drop the supplied arm and the pre-vc6iu bail-on-missing passes;
+    /// - drop the invented arm and "always keep Int64" passes, regressing
+    ///   `fp_p2c_005_groupby_sum_alignment_dropna_strict`;
+    /// - drop the both arm and "widen whenever a gap is invented" passes,
+    ///   which is what pandas' all-valid guard refutes;
+    /// - drop the all-NA arm and an implementation that emits a missing value
+    ///   for an empty accumulator passes, where pandas emits `0`.
+    ///
+    /// The two fixtures this restores are FP-P2C-005
+    /// `groupby_sum_int_keys_hardened` and FP-P2C-011
+    /// `groupby_sum_multikey_null_hardened`. (br-frankenpandas-vc6iu)
+    #[test]
+    fn groupby_sum_dtype_follows_where_the_missing_value_came_from_vc6iu() {
+        let sum = |keys: &Series, values: &Series| {
+            let mut ledger = EvidenceLedger::new();
+            groupby_sum(
+                keys,
+                values,
+                GroupByOptions::default(),
+                &RuntimePolicy::strict(),
+                &mut ledger,
+            )
+            .expect("groupby sum")
+        };
+
+        // SUPPLIED — identity-aligned, the null is data. FP-P2C-005's payload.
+        let idx: Vec<IndexLabel> = vec![10_i64.into(), 11_i64.into(), 12_i64.into(), 13_i64.into()];
+        let keys = Series::from_values(
+            "key",
+            idx.clone(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ],
+        )
+        .expect("keys");
+        let values = Series::from_values(
+            "value",
+            idx,
+            vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .expect("values");
+        let out = sum(&keys, &values);
+        assert_eq!(out.column().dtype(), DType::Int64);
+        assert_eq!(out.values(), &[Scalar::Int64(40), Scalar::Int64(40)]);
+
+        // ALL-NA GROUP — group `b` holds only the supplied null and sums to 0,
+        // still Int64. FP-P2C-011's shape, single-key.
+        let idx: Vec<IndexLabel> = (0..3_i64).map(IndexLabel::Int64).collect();
+        let keys = Series::from_values(
+            "key",
+            idx.clone(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+            ],
+        )
+        .expect("keys");
+        let values = Series::from_values(
+            "value",
+            idx,
+            vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(30),
+            ],
+        )
+        .expect("values");
+        let out = sum(&keys, &values);
+        assert_eq!(out.column().dtype(), DType::Int64);
+        assert_eq!(out.values(), &[Scalar::Int64(40), Scalar::Int64(0)]);
+
+        // INVENTED — the key index is [0,1] and the value index [0,2], so the
+        // union alignment mints a gap in an all-valid int lane. FP-P2C-005
+        // `groupby_sum_alignment_dropna_strict`.
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())],
+        )
+        .expect("keys");
+        let values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(5), Scalar::Int64(7)],
+        )
+        .expect("values");
+        let out = sum(&keys, &values);
+        assert_eq!(out.column().dtype(), DType::Float64);
+        assert_eq!(out.values(), &[Scalar::Float64(5.0), Scalar::Float64(0.0)]);
+
+        // BOTH — the lane already carried a supplied null, so it is nullable
+        // Int64 and keeps its dtype even though the alignment invents another
+        // gap. This is the arm that refutes "widen whenever a gap is invented".
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+            ],
+        )
+        .expect("keys");
+        let values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 3_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(7),
+            ],
+        )
+        .expect("values");
+        let out = sum(&keys, &values);
+        assert_eq!(out.column().dtype(), DType::Int64);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Int64(12), Scalar::Int64(0)],
+            "x sums 5+7 over the two matched rows; y is the invented gap alone"
+        );
     }
 
     #[test]
@@ -5277,10 +5530,33 @@ mod tests {
         .expect("groupby");
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
-        // pandas promotes an int column with a missing value to Float64, so the
-        // group sums are Float64: "a" = 5 + skipna = 5.0; "b" = all-missing = 0.0.
-        // (br-frankenpandas-33d1h)
-        assert_eq!(out.values(), &[Scalar::Float64(5.0), Scalar::Float64(0.0)]);
+        // The SKIPNA behaviour this test was written for is unchanged: "a" is
+        // 5 + skipped = 5, "b" is all-missing = 0 (NOT missing). Only the dtype
+        // moved, and it moved because the two dtype models give two different
+        // real pandas answers for this same data. MEASURED, live pandas 2.2.3:
+        //
+        //   Series([5,None,None,None], dtype='Int64')  -> sum Int64   {a:5,   b:0}
+        //   Series([5,None,None,None])                 -> float64,
+        //                                                 sum float64 {a:5.0, b:0.0}
+        //
+        // FrankenPandas has no separate nullable extension dtype: an `Int64`
+        // Column carrying a null IS its nullable Int64, which is what
+        // DISCREPANCIES DISC-011 records as an open WILL-FIX divergence from
+        // pandas' numpy inference, and what the whole fixture corpus pins. This
+        // assertion now sits on the same side of DISC-011 as the corpus; the
+        // Float64 it used to pin was pandas' OTHER answer, reachable only from
+        // an inference FrankenPandas does not perform.
+        //
+        // The previous expectation came from br-frankenpandas-33d1h, which read
+        // the then-current fixture as pandas' verdict. That fixture was float64
+        // only because the oracle forced `value_dtype="float64"` for every agg
+        // but min/max/first/last — removed on br-frankenpandas-778bb, which
+        // re-banked FP-P2C-005 `groupby_sum_int_keys_hardened` to Int64(40).
+        // 33d1h's OTHER case, an alignment-invented gap, is still Float64 and is
+        // asserted by `groupby_sum_dtype_follows_where_the_missing_value_came_from_vc6iu`.
+        // (br-frankenpandas-vc6iu)
+        assert_eq!(out.column().dtype(), DType::Int64);
+        assert_eq!(out.values(), &[Scalar::Int64(5), Scalar::Int64(0)]);
     }
 
     /// AG-08-T #7: 10000 unique keys -> all groups present, sums correct.
