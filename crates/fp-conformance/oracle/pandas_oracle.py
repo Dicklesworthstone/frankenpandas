@@ -2180,15 +2180,12 @@ def op_series_iloc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(iloc_positions, list):
         raise OracleError("series_iloc requires iloc_positions list payload")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-
     try:
         positions = [int(value) for value in iloc_positions]
     except Exception as exc:  # pragma: no cover - defensive conversion
         raise OracleError(f"series_iloc positions must be integers: {exc}") from exc
 
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    series = fixture_series_from_payload(pd, left, "series_iloc")
     try:
         out = series.iloc[positions]
     except IndexError as exc:
