@@ -5,69 +5,155 @@
   "operation": "dataframe_merge",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "16ecd687f9124ef58e583f2a88717a3dc00392ea2eb91e57d7899de5fb71cfd5",
+    "generated_at": "2026-08-15T14:01:35Z"
   },
   "join_type": "right",
   "merge_on": "id",
   "merge_sort": true,
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
     "columns": {
       "id": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 1 }
+        {
+          "kind": "int64",
+          "value": 3
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        }
       ],
       "left_v": [
-        { "kind": "int64", "value": 30 },
-        { "kind": "int64", "value": 10 }
+        {
+          "kind": "int64",
+          "value": 30
+        },
+        {
+          "kind": "int64",
+          "value": 10
+        }
       ]
     }
   },
   "frame_right": {
     "index": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 11 },
-      { "kind": "int64", "value": 12 }
+      {
+        "kind": "int64",
+        "value": 10
+      },
+      {
+        "kind": "int64",
+        "value": 11
+      },
+      {
+        "kind": "int64",
+        "value": 12
+      }
     ],
     "columns": {
       "id": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 3 }
+        {
+          "kind": "int64",
+          "value": 2
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 3
+        }
       ],
       "right_v": [
-        { "kind": "int64", "value": 200 },
-        { "kind": "int64", "value": 100 },
-        { "kind": "int64", "value": 300 }
+        {
+          "kind": "int64",
+          "value": 200
+        },
+        {
+          "kind": "int64",
+          "value": 100
+        },
+        {
+          "kind": "int64",
+          "value": 300
+        }
       ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "columns": {
       "id": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 3 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        },
+        {
+          "kind": "int64",
+          "value": 3
+        }
       ],
       "left_v": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 30 }
+        {
+          "kind": "float64",
+          "value": 10.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "float64",
+          "value": 30.0
+        }
       ],
       "right_v": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "int64", "value": 200 },
-        { "kind": "int64", "value": 300 }
+        {
+          "kind": "int64",
+          "value": 100
+        },
+        {
+          "kind": "int64",
+          "value": 200
+        },
+        {
+          "kind": "int64",
+          "value": 300
+        }
       ]
-    }
+    },
+    "column_order": [
+      "id",
+      "left_v",
+      "right_v"
+    ]
   }
 }

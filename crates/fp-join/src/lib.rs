@@ -340,7 +340,9 @@ fn reindex_join_column_with_invented_gap(
         column.dtype(),
         fp_types::DType::Int64 | fp_types::DType::Float64
     ) {
-        return Ok(column.reindex_by_positions(positions)?);
+        return Ok(reindex_non_numeric_join_column_with_invented_gap(
+            column, positions,
+        )?);
     }
 
     let has_missing = positions
@@ -381,6 +383,68 @@ fn reindex_join_column_with_invented_gap(
         .collect::<Result<Vec<_>, ColumnError>>()?;
 
     Ok(Column::new(fp_types::DType::Float64, values)?)
+}
+
+/// Gather a NON-numeric join/merge output column, minting the gap marker pandas
+/// uses for that dtype rather than the column's canonical missing.
+///
+/// A merge that invents a gap does NOT get to fill it with the dtype's own
+/// missing value. MEASURED, live pandas 2.2.3, one row invented on each side of
+/// `DataFrame({'id':[1,2,3]}).merge(DataFrame({'id':[2],'w':...}), how='left')`:
+///
+/// ```text
+///   w object/str   -> dtype object          [nan, 'x', nan]        float nan
+///   w bool         -> dtype object          [nan, True, nan]       float nan
+///   w category     -> dtype category        [nan, 'x', nan]        float nan
+///   w datetime64   -> dtype datetime64[ns]  [NaT, Timestamp, NaT]  NaT
+///   w timedelta64  -> dtype timedelta64[ns] [NaT, Timedelta, NaT]  NaT
+/// ```
+///
+/// So the temporal dtypes already agree with `Scalar::missing_for_dtype` (NaT)
+/// and keep the plain gather. The string/bool/categorical lanes do not: their
+/// canonical missing is `Null(Null)`, which is right for a SUPPLIED None
+/// (nywa8 Rule 2 — object is the dtype that can store one) and wrong for a gap
+/// the join INVENTED (Rule 1 — pandas writes a float nan even into an object
+/// column). Only this site knows which it is minting, which is the same reason
+/// the promotion above could not move into `infer_dtype`.
+///
+/// THE TWO RULES MEET INSIDE A SINGLE COLUMN, which is what makes a dtype-level
+/// table unable to express this. Measured on the composite outer merge behind
+/// `fp_p2d_033_dataframe_merge_composite_left_right_alias_outer_hardened`, with
+/// `lk2 = ['a', None, 'c']` against `rk2 = ['a', None, 'd']`:
+///
+/// ```text
+///   lk2 dtype object, kinds ['str', 'NoneType', 'str', 'float']
+///                                     ^ supplied        ^ invented
+/// ```
+///
+/// Row 1's `None` is data and survives; row 3's gap is the join's and is a nan.
+/// Copying the source cell through unchanged and substituting only for an absent
+/// position gives exactly that split, so no all-valid guard belongs here — that
+/// guard governs the numeric WIDENING above, not the marker.
+///
+/// ⚠️ pandas ALSO widens a numpy `bool` lane to object when it takes a gap. That
+/// is a dtype change FrankenPandas does not make (it keeps `DType::Bool` with the
+/// position invalid), and no fixture covers it; only the marker is corrected
+/// here. Left as-is deliberately rather than folded in unmeasured — widening bool
+/// touches br-frankenpandas-lufpu's bool-family contract and needs its own probe.
+///
+/// (br-frankenpandas-nywa8)
+fn reindex_non_numeric_join_column_with_invented_gap(
+    column: &Column,
+    positions: &[Option<usize>],
+) -> Result<Column, ColumnError> {
+    if !matches!(
+        column.dtype(),
+        fp_types::DType::Utf8 | fp_types::DType::Bool | fp_types::DType::Categorical
+    ) {
+        return column.reindex_by_positions(positions);
+    }
+
+    column.reindex_by_positions_with_absent_scalar(
+        positions,
+        fp_types::Scalar::Null(fp_types::NullKind::NaN),
+    )
 }
 
 fn coalesce_utf8_contiguous_key_column(
@@ -15314,6 +15378,297 @@ mod tests {
         assert_eq!(right_gap_column.dtype(), DType::Float64);
         assert_eq!(right_gap_column.values()[0], Scalar::Null(NullKind::NaN));
         assert_eq!(right_gap_column.values()[1], Scalar::Float64(100.0));
+    }
+
+    /// A missing value FrankenPandas spells two ways on a float lane: the
+    /// `Null(NaN)` marker, and a present `Float64` whose bits are NaN (typed
+    /// kernels emit the latter directly). pandas has ONE representation — the
+    /// NaN bit pattern in the float64 array — and the fixture format writes
+    /// either as `na_n`, so a null-kind assertion on a float lane must accept
+    /// both or it fails on a legitimate representation change. What it must
+    /// still reject is a carried-over generic `Null(Null)` or a `NaT`.
+    ///
+    /// br-frankenpandas-nywa8; the trap is WindyHare's window/derived slice.
+    fn assert_nan_flavoured(value: &Scalar, what: &str) {
+        let ok = match value {
+            Scalar::Null(NullKind::NaN) => true,
+            Scalar::Float64(v) => v.is_nan(),
+            _ => false,
+        };
+        assert!(
+            ok,
+            "{what}: expected a NaN-flavoured missing, got {value:?}"
+        );
+    }
+
+    /// The four merge fixtures that were the last structural rows on
+    /// br-frankenpandas-nywa8, run through the SAME entry point the conformance
+    /// harness uses (`merge_dataframes_on_with_options`) on their exact
+    /// payloads.
+    ///
+    /// THE RULE, and every line of it MEASURED against live pandas 2.2.3 rather
+    /// than inferred from the differ: a lane widens iff the merge INVENTS a gap
+    /// in THAT lane. The join type is irrelevant, and a lane that gains no gap
+    /// keeps int64.
+    ///
+    /// ```text
+    ///   l={'id':[1,2,3],'left_v':[10,20,30],'shared':[1,2,3]}
+    ///   r={'id':[2],'right_v':[200],'shared':[9]}
+    ///   l.merge(r, on='id', how='left')
+    ///     id int64  left_v int64  shared_x int64      no gap  -> unchanged
+    ///     right_v float64 [nan,200.0,nan]
+    ///     shared_y float64 [nan,9.0,nan]              gap     -> widened
+    ///
+    ///   l={'id':[1,2],'left_v':[11,22]}  r={'id':[2,3],'right_v':[220,330]}
+    ///   l.merge(r, on='id', how='right')
+    ///     left_v float64 [22.0,nan]   right_v int64 [220,330]   id int64
+    ///
+    ///   l.merge(r, on='id', how='right', sort=True) over id l=[3,1] r=[2,1,3]
+    ///     id int64 [1,2,3]  left_v float64 [10.0,nan,30.0]  right_v int64
+    /// ```
+    ///
+    /// THE COMPOSITE OUTER CASE IS THE ONE WORTH THE TEST, because a single
+    /// object column carries nywa8's two rules side by side. Measured on
+    /// `lk2 = ['a', None, 'c']` outer-merged against `rk2 = ['a', None, 'd']`:
+    ///
+    /// ```text
+    ///   lk2 dtype object, kinds ['str', 'NoneType', 'str', 'float']
+    ///                                     ^ RULE 2          ^ RULE 1
+    /// ```
+    ///
+    /// Row 1's `None` was SUPPLIED and object can store it, so pandas keeps it.
+    /// Row 3's gap was INVENTED by the outer join, and pandas writes a float nan
+    /// there even though the column is object. That is why the rule cannot be
+    /// "derive the marker from the column dtype" — the same column answers
+    /// differently per cell, and only the site that invents the gap knows which.
+    #[test]
+    fn merge_widens_only_the_lane_that_gains_an_invented_gap_nywa8() {
+        // FP-P2D-014 dataframe_merge_column_left_missing_hardened
+        let left = DataFrame::from_dict(
+            &["id", "left_v", "shared"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+                (
+                    "shared",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "right_v", "shared"],
+            vec![
+                ("id", vec![Scalar::Int64(2)]),
+                ("right_v", vec![Scalar::Int64(200)]),
+                ("shared", vec![Scalar::Int64(9)]),
+            ],
+        )
+        .unwrap();
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Left,
+            MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        for gapless in ["id", "left_v", "shared_x"] {
+            assert_eq!(
+                merged.columns.get(gapless).unwrap().dtype(),
+                DType::Int64,
+                "{gapless} gains no gap and must stay int64"
+            );
+        }
+        for gapped in ["right_v", "shared_y"] {
+            let column = merged.columns.get(gapped).unwrap();
+            assert_eq!(column.dtype(), DType::Float64, "{gapped} gains a gap");
+            assert_nan_flavoured(&column.values()[0], gapped);
+            assert_nan_flavoured(&column.values()[2], gapped);
+        }
+        assert_eq!(
+            merged.columns.get("right_v").unwrap().values()[1],
+            Scalar::Float64(200.0)
+        );
+        assert_eq!(
+            merged.columns.get("shared_y").unwrap().values()[1],
+            Scalar::Float64(9.0)
+        );
+
+        // FP-P2D-014 dataframe_merge_column_right_order_strict
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("left_v", vec![Scalar::Int64(11), Scalar::Int64(22)]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(2), Scalar::Int64(3)]),
+                ("right_v", vec![Scalar::Int64(220), Scalar::Int64(330)]),
+            ],
+        )
+        .unwrap();
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Right,
+            MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(merged.columns.get("id").unwrap().dtype(), DType::Int64);
+        assert_eq!(merged.columns.get("right_v").unwrap().dtype(), DType::Int64);
+        let left_v = merged.columns.get("left_v").unwrap();
+        assert_eq!(left_v.dtype(), DType::Float64);
+        assert_eq!(left_v.values()[0], Scalar::Float64(22.0));
+        assert_nan_flavoured(&left_v.values()[1], "left_v");
+
+        // FP-P2D-037 dataframe_merge_sort_true_right_hardened
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(3), Scalar::Int64(1)]),
+                ("left_v", vec![Scalar::Int64(30), Scalar::Int64(10)]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(200), Scalar::Int64(100), Scalar::Int64(300)],
+                ),
+            ],
+        )
+        .unwrap();
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Right,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(merged.columns.get("id").unwrap().dtype(), DType::Int64);
+        assert_eq!(merged.columns.get("right_v").unwrap().dtype(), DType::Int64);
+        let left_v = merged.columns.get("left_v").unwrap();
+        assert_eq!(left_v.dtype(), DType::Float64);
+        assert_eq!(left_v.values()[0], Scalar::Float64(10.0));
+        assert_nan_flavoured(&left_v.values()[1], "left_v");
+        assert_eq!(left_v.values()[2], Scalar::Float64(30.0));
+
+        // FP-P2D-033 dataframe_merge_composite_left_right_alias_outer_hardened
+        let left = DataFrame::from_dict(
+            &["lk1", "lk2", "left_v"],
+            vec![
+                (
+                    "lk1",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "lk2",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Utf8("c".to_owned()),
+                    ],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["rk1", "rk2", "right_v"],
+            vec![
+                (
+                    "rk1",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(4)],
+                ),
+                (
+                    "rk2",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Utf8("d".to_owned()),
+                    ],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(400)],
+                ),
+            ],
+        )
+        .unwrap();
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["lk1", "lk2"],
+            &["rk1", "rk2"],
+            JoinType::Outer,
+            MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        // Every numeric lane gains a gap under this outer merge, so all four widen.
+        for numeric in ["lk1", "rk1", "left_v", "right_v"] {
+            assert_eq!(
+                merged.columns.get(numeric).unwrap().dtype(),
+                DType::Float64,
+                "{numeric} gains a gap under the outer merge"
+            );
+        }
+        assert_nan_flavoured(&merged.columns.get("lk1").unwrap().values()[3], "lk1");
+        assert_nan_flavoured(&merged.columns.get("left_v").unwrap().values()[3], "left_v");
+        assert_nan_flavoured(&merged.columns.get("rk1").unwrap().values()[2], "rk1");
+        assert_nan_flavoured(
+            &merged.columns.get("right_v").unwrap().values()[2],
+            "right_v",
+        );
+
+        // The object lanes are the point: SUPPLIED None survives, INVENTED gap
+        // is a nan, in the same column.
+        let lk2 = merged.columns.get("lk2").unwrap();
+        assert_eq!(lk2.values()[0], Scalar::Utf8("a".to_owned()));
+        assert_eq!(
+            lk2.values()[1],
+            Scalar::Null(NullKind::Null),
+            "lk2[1]'s None was SUPPLIED and object can hold it (nywa8 Rule 2)"
+        );
+        assert_eq!(lk2.values()[2], Scalar::Utf8("c".to_owned()));
+        assert_nan_flavoured(&lk2.values()[3], "lk2[3] is an INVENTED gap (nywa8 Rule 1)");
+
+        let rk2 = merged.columns.get("rk2").unwrap();
+        assert_eq!(rk2.values()[0], Scalar::Utf8("a".to_owned()));
+        assert_eq!(
+            rk2.values()[1],
+            Scalar::Null(NullKind::Null),
+            "rk2[1]'s None was SUPPLIED and object can hold it (nywa8 Rule 2)"
+        );
+        assert_nan_flavoured(&rk2.values()[2], "rk2[2] is an INVENTED gap (nywa8 Rule 1)");
+        assert_eq!(rk2.values()[3], Scalar::Utf8("d".to_owned()));
     }
 
     #[test]
