@@ -5,78 +5,204 @@
   "operation": "groupby_var",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "70c8c26b55a1b419beed28d198d022f1ca8eb25070814ab1156eb18562be38cc",
-    "generated_at": "2026-08-09T12:17:11Z"
+    "oracle_script_sha256": "206ee9161cebf99c916b2c24ee262cfc767e236d55d26cf322c424d01d8838a1",
+    "generated_at": "2026-08-15T19:40:57Z"
   },
   "groupby_keys": [
     {
       "name": "k1",
       "index": [
-        { "kind": "int64", "value": 0 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 },
-        { "kind": "int64", "value": 5 }
+        {
+          "kind": "int64",
+          "value": 0
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        },
+        {
+          "kind": "int64",
+          "value": 3
+        },
+        {
+          "kind": "int64",
+          "value": 4
+        },
+        {
+          "kind": "int64",
+          "value": 5
+        }
       ],
       "values": [
-        { "kind": "utf8", "value": "a" },
-        { "kind": "utf8", "value": "a" },
-        { "kind": "utf8", "value": "b" },
-        { "kind": "null", "value": "null" },
-        { "kind": "utf8", "value": "b" },
-        { "kind": "utf8", "value": "b" }
+        {
+          "kind": "utf8",
+          "value": "a"
+        },
+        {
+          "kind": "utf8",
+          "value": "a"
+        },
+        {
+          "kind": "utf8",
+          "value": "b"
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "utf8",
+          "value": "b"
+        },
+        {
+          "kind": "utf8",
+          "value": "b"
+        }
       ]
     },
     {
       "name": "k2",
       "index": [
-        { "kind": "int64", "value": 0 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 },
-        { "kind": "int64", "value": 5 }
+        {
+          "kind": "int64",
+          "value": 0
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        },
+        {
+          "kind": "int64",
+          "value": 3
+        },
+        {
+          "kind": "int64",
+          "value": 4
+        },
+        {
+          "kind": "int64",
+          "value": 5
+        }
       ],
       "values": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        }
       ]
     }
   ],
   "right": {
     "name": "value",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 },
-      { "kind": "int64", "value": 4 },
-      { "kind": "int64", "value": 5 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "int64",
+        "value": 5
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 30 },
-      { "kind": "null", "value": "na_n" },
-      { "kind": "int64", "value": 70 },
-      { "kind": "int64", "value": 90 },
-      { "kind": "int64", "value": 110 }
+      {
+        "kind": "int64",
+        "value": 10
+      },
+      {
+        "kind": "int64",
+        "value": 30
+      },
+      {
+        "kind": "null",
+        "value": "na_n"
+      },
+      {
+        "kind": "int64",
+        "value": 70
+      },
+      {
+        "kind": "int64",
+        "value": 90
+      },
+      {
+        "kind": "int64",
+        "value": 110
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "utf8", "value": "s:\"a\"|i:1" },
-      { "kind": "utf8", "value": "s:\"b\"|i:1" },
-      { "kind": "utf8", "value": "s:\"b\"|i:2" }
+      {
+        "kind": "utf8",
+        "value": "s:\"a\"|i:1"
+      },
+      {
+        "kind": "utf8",
+        "value": "s:\"b\"|i:1"
+      },
+      {
+        "kind": "utf8",
+        "value": "s:\"b\"|i:2"
+      }
     ],
     "values": [
-      { "kind": "float64", "value": 200.0 },
-      { "kind": "null", "value": "na_n" },
-      { "kind": "null", "value": "na_n" }
+      {
+        "kind": "float64",
+        "value": 200.0
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      }
     ]
   }
 }

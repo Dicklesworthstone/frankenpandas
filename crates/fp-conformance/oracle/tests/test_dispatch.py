@@ -6,6 +6,7 @@ contract stays green as handlers evolve.
 """
 from __future__ import annotations
 
+import copy
 import inspect
 import sys
 from types import SimpleNamespace
@@ -608,22 +609,37 @@ def test_series_str_get_extracts_character(oracle, pd):
     assert values == ["a", "x"]
 
 
-def test_groupby_std_renders_an_undefined_group_as_nan_not_none(oracle, pd):
-    """A one-member group's std is a float NaN, and the oracle must say so.
+def test_groupby_std_undefined_group_missing_kind_follows_the_payload_dtype(oracle, pd):
+    """The PAYLOAD's dtype decides the missing KIND of a derived float aggregate.
 
-    br-frankenpandas-fixture-divergence-triage-9s0c4. `op_groupby_agg` used to
-    rewrite a std/var NaN into {"kind": "null", "value": "null"}, commented
-    "Runtime currently models n<2 std/var as null (not NaN) for parity" — the
-    oracle bent to FrankenPandas and then banked as truth. It was stale too: FP
-    emits Null(NullKind::NaN) for n <= 1.
+    br-frankenpandas-fixture-divergence-triage-9s0c4 wrote the original of this
+    test to stop `op_groupby_agg` rewriting a std/var NaN into a generic null,
+    commented "Runtime currently models n<2 std/var as null (not NaN) for
+    parity" — the oracle bending to FrankenPandas and banking it as truth. That
+    concern is still live and is the FLOAT64 half below.
+
+    What changed is the premise, not the principle. That test measured a lane the
+    oracle then forced to float64 for every agg; br-frankenpandas-778bb removed
+    the forcing, so an int+null payload now builds the NULLABLE Int64 the corpus
+    means by it (DISCREPANCIES DISC-011), and pandas answers such a lane in its
+    Float64 EXTENSION, whose missing is pd.NA rather than a float NaN.
 
     MEASURED, live pandas 2.2.3, key=['a',None,'a','b','b'] and
-    value=[10,20,nan,40,50] so that group 'a' has ONE present value:
+    value=[10,20,<missing>,40,50] so group 'a' has ONE present value:
 
-        df.groupby('key')['value'].std()
-          -> {'a': nan, 'b': 7.0710678118654755}   dtype float64
+        value float64 -> std dtype float64, group 'a' = np.float64(nan)
+        value Int64   -> std dtype Float64, group 'a' = <NA>   (NAType)
 
-    The four fp_p2c_011 fixtures already pinned na_n; only the oracle disagreed.
+    Both are pandas' real answers; they differ only in how the LANE was built.
+    The fixture format already distinguishes them — `na_n` is a float NaN and
+    `null` is pd.NA — so no format change is needed to record either, which is
+    the question br-frankenpandas-qcvzc was filed to decide.
+
+    BOTH ARMS ARE LOAD-BEARING. Keep only the Int64 one and the oracle may go
+    back to rewriting a genuine float NaN into a generic null (the original
+    defect). Keep only the float64 one and the oracle must mis-report pd.NA as a
+    float NaN, which is what this test asserted after 778bb landed and is why
+    CI's oracle-pytest step was red. (br-frankenpandas-qcvzc)
     """
     payload = {
         "operation": "groupby_std",
@@ -650,15 +666,42 @@ def test_groupby_std_renders_an_undefined_group_as_nan_not_none(oracle, pd):
             ],
         },
     }
+    # INT + NULL payload -> nullable Int64 lane -> Float64 extension -> pd.NA.
     values = oracle.dispatch(pd, payload)["expected_series"]["values"]
-    assert values[0] == {"kind": "null", "value": "na_n"}, (
-        "an undefined group std is a float NaN; rewriting it to a generic null "
-        "adapts the oracle to FrankenPandas instead of measuring pandas"
+    assert values[0] == {"kind": "null", "value": "null"}, (
+        "a nullable-Int64 lane answers std in pandas' Float64 extension, whose "
+        "missing is pd.NA; reporting it as a float NaN would mis-state which "
+        "lane was measured"
     )
     assert values[1]["kind"] == "float64"
 
     payload["operation"] = "groupby_var"
     assert oracle.dispatch(pd, payload)["expected_series"]["values"][0] == {
+        "kind": "null",
+        "value": "null",
+    }
+
+    # FLOAT64 payload -> numpy lane -> genuine float NaN. This is the original
+    # assertion, unchanged: the oracle must NOT collapse a real NaN to a generic
+    # null just because FrankenPandas cannot tell them apart.
+    float_payload = copy.deepcopy(payload)
+    float_payload["operation"] = "groupby_std"
+    float_payload["right"]["values"] = [
+        {"kind": "float64", "value": 10.0},
+        {"kind": "float64", "value": 20.0},
+        {"kind": "null", "value": "na_n"},
+        {"kind": "float64", "value": 40.0},
+        {"kind": "float64", "value": 50.0},
+    ]
+    float_values = oracle.dispatch(pd, float_payload)["expected_series"]["values"]
+    assert float_values[0] == {"kind": "null", "value": "na_n"}, (
+        "an undefined group std on a float64 lane is a float NaN; rewriting it "
+        "to a generic null adapts the oracle to FrankenPandas instead of "
+        "measuring pandas"
+    )
+
+    float_payload["operation"] = "groupby_var"
+    assert oracle.dispatch(pd, float_payload)["expected_series"]["values"][0] == {
         "kind": "null",
         "value": "na_n",
     }
