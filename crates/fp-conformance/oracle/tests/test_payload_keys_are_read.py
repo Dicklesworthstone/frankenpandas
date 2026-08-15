@@ -244,6 +244,41 @@ def test_groupby_agg_preserves_payload_dtype_for_every_aggregation(
     assert [value["kind"] for value in result["expected_series"]["values"]] == expected_kinds
 
 
+def test_series_loc_preserves_nullable_integer_payload_dtype(oracle, pd):
+    """A label selection must not infer float64 before it reaches pandas.
+
+    br-frankenpandas-6k29f: the former local constructor changed an int+null
+    fixture payload into float64, so selecting a present integer emitted a
+    float64 result that pandas would not produce from the encoded Series.
+    """
+    result = oracle.op_series_loc(
+        pd,
+        {
+            "left": {
+                "index": [
+                    {"kind": "int64", "value": 10},
+                    {"kind": "int64", "value": 11},
+                    {"kind": "int64", "value": 12},
+                ],
+                "values": [
+                    {"kind": "int64", "value": 1},
+                    {"kind": "null", "value": "null"},
+                    {"kind": "int64", "value": 3},
+                ],
+            },
+            "loc_labels": [
+                {"kind": "int64", "value": 12},
+                {"kind": "int64", "value": 10},
+            ],
+        },
+    )
+
+    assert result["expected_series"]["values"] == [
+        {"kind": "int64", "value": 3},
+        {"kind": "int64", "value": 1},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # options that ARE read somewhere but not APPLIED where they matter
 # ---------------------------------------------------------------------------
