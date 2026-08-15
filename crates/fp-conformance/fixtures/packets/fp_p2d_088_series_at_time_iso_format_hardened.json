@@ -5,31 +5,61 @@
   "operation": "series_at_time",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "206ee9161cebf99c916b2c24ee262cfc767e236d55d26cf322c424d01d8838a1",
+    "generated_at": "2026-08-15T22:04:27Z"
   },
   "time_value": "14:30:00",
   "left": {
     "name": "vals",
     "index": [
-      { "kind": "utf8", "value": "2024-01-15T14:30:00" },
-      { "kind": "utf8", "value": "2024-01-15T15:00:00" },
-      { "kind": "utf8", "value": "2024-01-16T14:30:00" }
+      {
+        "kind": "utf8",
+        "value": "2024-01-15T14:30:00"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-15T15:00:00"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-16T14:30:00"
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 },
-      { "kind": "int64", "value": 30 }
+      {
+        "kind": "int64",
+        "value": 10
+      },
+      {
+        "kind": "int64",
+        "value": 20
+      },
+      {
+        "kind": "int64",
+        "value": 30
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "utf8", "value": "2024-01-15T14:30:00" },
-      { "kind": "utf8", "value": "2024-01-16T14:30:00" }
+      {
+        "kind": "utf8",
+        "value": "2024-01-15 14:30:00"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-16 14:30:00"
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 30 }
+      {
+        "kind": "int64",
+        "value": 10
+      },
+      {
+        "kind": "int64",
+        "value": 30
+      }
     ]
   }
 }

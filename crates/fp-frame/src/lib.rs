@@ -22494,7 +22494,15 @@ impl Series {
             }
         }
 
-        self.reorder_by_positions(&keep)
+        // A temporal selector builds a datetime index from string input, so the
+        // result renders the parsed Timestamp rather than echoing the caller's
+        // spelling. br-frankenpandas-at-time-index-string-preserved-qddtp added
+        // `canonicalize_datetime_index_labels` for exactly this and applied it to
+        // the DATAFRAME selectors only; these two Series siblings kept the ISO
+        // `T`. (br-frankenpandas-2und8)
+        let mut selected = self.reorder_by_positions(&keep)?;
+        selected.index = canonicalize_datetime_index_labels(&selected.index);
+        Ok(selected)
     }
 
     /// Select rows where the time component is between start and end.
@@ -22518,7 +22526,10 @@ impl Series {
             }
         }
 
-        self.reorder_by_positions(&keep)
+        // See `Series::at_time` (br-frankenpandas-2und8).
+        let mut selected = self.reorder_by_positions(&keep)?;
+        selected.index = canonicalize_datetime_index_labels(&selected.index);
+        Ok(selected)
     }
 
     /// Select initial rows from a DatetimeIndex up to an offset.
@@ -131067,9 +131078,10 @@ mod tests {
         .unwrap();
 
         let result = s.between_time("09:00:00", "16:00:00").unwrap();
+        // Space, not 'T' — see `series_at_time` (br-frankenpandas-2und8).
         assert_eq!(
             result.index.labels(),
-            &["2024-01-01T12:30:00".into(), "2024-01-01T15:00:00".into()]
+            &["2024-01-01 12:30:00".into(), "2024-01-01 15:00:00".into()]
         );
         assert_eq!(result.values(), &[Scalar::Int64(2), Scalar::Int64(3)]);
     }
@@ -131088,9 +131100,17 @@ mod tests {
         .unwrap();
 
         let result = s.at_time("10:00:00").unwrap();
+        // The index renders the PARSED Timestamp, so the caller's ISO 'T'
+        // becomes a space. MEASURED, live pandas 2.2.3, on this exact input:
+        //   s.at_time('10:00:00').index
+        //     -> ['2024-01-01 10:00:00', '2024-01-02 10:00:00']
+        // This assertion previously pinned the 'T' form, which was FP echoing
+        // the caller's spelling — the defect
+        // br-frankenpandas-at-time-index-string-preserved-qddtp fixed for the
+        // DataFrame selectors and never reached here. (br-frankenpandas-2und8)
         assert_eq!(
             result.index.labels(),
-            &["2024-01-01T10:00:00".into(), "2024-01-02T10:00:00".into()]
+            &["2024-01-01 10:00:00".into(), "2024-01-02 10:00:00".into()]
         );
         assert_eq!(result.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
     }
@@ -138603,6 +138623,93 @@ mod tests {
 
         let result = df.at_time("10:00:00").unwrap();
         assert_eq!(result.len(), 2); // Two rows at 10:00
+    }
+
+    /// The SERIES temporal selectors canonicalize their index labels too.
+    ///
+    /// br-frankenpandas-at-time-index-string-preserved-qddtp fixed this for the
+    /// DataFrame selectors and closed; the two Series siblings kept echoing the
+    /// caller's ISO spelling. MEASURED, live pandas 2.2.3, on
+    /// `fp_p2d_088`'s exact input:
+    ///
+    /// ```text
+    ///   s.at_time('14:30:00').index
+    ///     -> ['2024-01-15 14:30:00', '2024-01-16 14:30:00']       SPACE, not T
+    ///   s.between_time('14:00:00','15:00:00').index
+    ///     -> ['2024-01-15 14:30:00', '2024-01-15 15:00:00',
+    ///         '2024-01-16 14:30:00']
+    /// ```
+    ///
+    /// NEGATIVE CASES: an ALREADY-space-separated index must come back
+    /// byte-identical, so this is a canonicalization and not a reformat that
+    /// happens to look right on ISO input; and a NON-datetime index must still
+    /// raise through `require_datetime_index` rather than be silently rewritten.
+    /// (br-frankenpandas-2und8)
+    #[test]
+    fn series_temporal_selection_canonicalizes_iso_index_labels_2und8() {
+        let series = |labels: Vec<IndexLabel>| {
+            Series::from_values(
+                "vals",
+                labels,
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap()
+        };
+        let iso = series(vec![
+            "2024-01-15T14:30:00".into(),
+            "2024-01-15T15:00:00".into(),
+            "2024-01-16T14:30:00".into(),
+        ]);
+
+        let at = iso.at_time("14:30:00").expect("at_time");
+        assert_eq!(
+            at.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-01-15 14:30:00".to_owned()),
+                IndexLabel::Utf8("2024-01-16 14:30:00".to_owned()),
+            ],
+            "at_time renders the parsed Timestamp, not the caller's ISO 'T'"
+        );
+        assert_eq!(at.values(), &[Scalar::Int64(10), Scalar::Int64(30)]);
+
+        let between = iso
+            .between_time("14:00:00", "15:00:00")
+            .expect("between_time");
+        assert_eq!(
+            between.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-01-15 14:30:00".to_owned()),
+                IndexLabel::Utf8("2024-01-15 15:00:00".to_owned()),
+                IndexLabel::Utf8("2024-01-16 14:30:00".to_owned()),
+            ]
+        );
+
+        // IDEMPOTENT: an already-canonical index is unchanged.
+        let spaced = series(vec![
+            "2024-01-15 14:30:00".into(),
+            "2024-01-15 15:00:00".into(),
+            "2024-01-16 14:30:00".into(),
+        ]);
+        let at_spaced = spaced.at_time("14:30:00").expect("at_time");
+        assert_eq!(
+            at_spaced.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-01-15 14:30:00".to_owned()),
+                IndexLabel::Utf8("2024-01-16 14:30:00".to_owned()),
+            ]
+        );
+
+        // A NON-datetime index still raises rather than being rewritten.
+        let not_temporal = Series::from_values(
+            "vals",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        assert!(
+            not_temporal.at_time("14:30:00").is_err(),
+            "require_datetime_index still guards the selector"
+        );
     }
 
     #[test]
