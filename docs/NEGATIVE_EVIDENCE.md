@@ -22166,6 +22166,55 @@ observed worker alongside thread count, governor, ISA and self-reported ELF
 SHA — this row does, which is why it survives the audit. A row that does not
 name its worker cannot be compared to any other row.
 
+**ADDENDUM 2026-08-15 — NAME THE HARNESS TOO, AND THIS ROW'S "CORROBORATION" IS
+EXACTLY THE CASE THAT REQUIRES IT.** frankenlibc measured malloc/free on a SINGLE
+worker (hz2) with two separately-sanctioned harnesses and got 5.9459x and
+12.385414x — a ~2x spread, with BOTH A/A nulls passing in tolerance. Harness
+disagreement is therefore as large as worker disagreement, and a passing null
+does not certify that a harness measures what you think it measures.
+
+This row's "Corroboration" paragraph above is precisely that shape: ONE primitive,
+TWO independently-written harnesses. Both are now identified by content hash,
+recovered from git rather than asserted:
+
+* **Sanctioned** `benches/vs_pandas_harness.py` — sha256
+  `5761dc7ccde282967b80ece103c7bec979a8c2d59f975c5c35b657b408c61499`, the content
+  at this row's own recorded `git 13ccc3287` (2026-08-14 18:35 -0400, ~5 min before
+  the row's 22:40:46Z invocation) and **byte-identical at HEAD today**, so the
+  harness behind the 5.105x is unambiguous and has not drifted since. `harness_source.sha256`
+  is `executable_identity(Path(__file__))`, the harness file's own content hash.
+* **Shadow** `benches/balanced_square_ab.py` — sha256
+  `ec679a4092a44cc1e16a6c176d2e8ca1d50f2f5d56b4583cd02d38030e7e9de6`, 485 lines,
+  landed `afe5c7e98` and retracted to a 54-line stub at `64e0ea52a`
+  (`8a82c71d6bcaea4dfb3bc9391a5ff8a851204200570632ecf4955801d4cf1494`).
+
+**THE TWO HARNESSES AGREE, AND THAT IS ITSELF THE FINDING.** Sanctioned 5.105x
+against the shadow's 4.8867x / 5.7239x / 4.9342x / 5.0338x — a total span of
+4.89–5.72x, about 17%, all with both nulls inside +/-2%. Set against frankenlibc's
+2x cross-harness spread on malloc/free, this primitive is cross-harness STABLE.
+Recorded as a result rather than used to pick a number: the honest report remains
+the range, with the sanctioned harness's 5.105x as the banked headline.
+
+⚠️ **BUT THE CORROBORATION CANNOT BE SHOWN SAME-WORKER, because neither the
+sanctioned 5.105x run nor the four shadow runs saved a JSON artifact.** The row
+was taken with `--json-stdout` (see Reproduce, below) and no file was written to
+`artifacts/bench/`; the shadow emitted none at all. So both harnesses' host is
+attested only by this section's prose (`thinkstation1`), not by a machine-readable
+`host_fingerprint`. Under the standing rule that makes the cross-harness agreement
+WORKER-SCOPED-BY-PROSE: good enough to record, not good enough to cite as a
+same-worker replication. The fix for future rows is to redirect `--json-stdout`
+into `artifacts/bench/` so the fingerprint block is persisted, and franken_numpy's
+result is the warning against skipping it — replicating a win on a SECOND worker
+made them RETRACT a sub-claim, "the deferral parallel cost is gone" reading 1.004x
+on one host and 0.928x on another, i.e. still ~7.8% cost.
+
+Corpus-wide retro-flag for both hazards:
+`artifacts/audits/perf_row_worker_harness_identifiability_2026-08-15.md`. Of 1227
+timed-row artifacts only **21** name both a worker and a harness revision; 1183
+name neither; 16 distinct harness content hashes are in play; and **180 of 180**
+multi-arm before/after pairs cannot be shown same-host same-invocation. All are
+flagged worker-scoped, none deleted or regenerated.
+
 **Reproduce:**
 
 ```
