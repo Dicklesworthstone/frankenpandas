@@ -279,6 +279,33 @@ def test_series_loc_preserves_nullable_integer_payload_dtype(oracle, pd):
     ]
 
 
+def test_series_iloc_preserves_nullable_integer_payload_dtype(oracle, pd):
+    """Positional selection must preserve the fixture's nullable integer input."""
+    result = oracle.op_series_iloc(
+        pd,
+        {
+            "left": {
+                "index": [
+                    {"kind": "int64", "value": 10},
+                    {"kind": "int64", "value": 11},
+                    {"kind": "int64", "value": 12},
+                ],
+                "values": [
+                    {"kind": "int64", "value": 1},
+                    {"kind": "null", "value": "null"},
+                    {"kind": "int64", "value": 3},
+                ],
+            },
+            "iloc_positions": [2, 0],
+        },
+    )
+
+    assert result["expected_series"]["values"] == [
+        {"kind": "int64", "value": 3},
+        {"kind": "int64", "value": 1},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # options that ARE read somewhere but not APPLIED where they matter
 # ---------------------------------------------------------------------------
