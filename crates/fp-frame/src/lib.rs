@@ -7894,8 +7894,27 @@ impl Series {
         };
         validate_alignment_plan(&plan)?;
 
-        let left_col = self.column.reindex_by_positions(&plan.left_positions)?;
-        let right_col = other.column.reindex_by_positions(&plan.right_positions)?;
+        // `Series.align` mints a gap on whichever side lacks a union label.
+        // A dense numpy integer Series cannot represent that gap, so pandas
+        // widens that *side* to float64 and uses NaN. Reindexing alone keeps
+        // the internal nullable-Int64 representation, which is right for a
+        // source that was already nullable but wrong for an all-valid source.
+        // Keep the distinction at this fill site: `Column` cannot know whether
+        // a caller's missing position is a pandas-introduced alignment gap.
+        let reindex_for_alignment = |column: &Column, positions: &[Option<usize>]| {
+            let reindexed = column.reindex_by_positions(positions)?;
+            if column.dtype() == DType::Int64
+                && column.validity().all()
+                && positions.iter().any(Option::is_none)
+            {
+                reindexed.astype(DType::Float64).map_err(FrameError::from)
+            } else {
+                Ok(reindexed)
+            }
+        };
+
+        let left_col = reindex_for_alignment(&self.column, &plan.left_positions)?;
+        let right_col = reindex_for_alignment(&other.column, &plan.right_positions)?;
 
         let left_out = Self::new(self.name.clone(), plan.union_index.clone(), left_col)?;
         let right_out = Self::new(other.name.clone(), plan.union_index, right_col)?;
@@ -49743,7 +49762,7 @@ impl std::fmt::Display for Series {
         for i in 0..show {
             let label = &self.index.labels()[i];
             let val = &self.column.values()[i];
-            writeln!(f, "{label}    {val}")?;
+            writeln!(f, "{label}    {}", format_repr_scalar(val))?;
         }
         if len > max_rows {
             writeln!(f, "...")?;
@@ -49755,6 +49774,20 @@ impl std::fmt::Display for Series {
             self.column.dtype()
         )
     }
+}
+
+fn format_repr_scalar(value: &Scalar) -> String {
+    match value {
+        Scalar::Float64(value) => format!("{value:?}"),
+        _ => value.to_string(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn repr_float64_keeps_the_decimal_point_93snp() {
+    assert_eq!(format_repr_scalar(&Scalar::Float64(2.0)), "2.0");
+    assert_eq!(format_repr_scalar(&Scalar::Float64(-0.0)), "-0.0");
 }
 
 impl std::fmt::Display for DataFrame {
@@ -49780,7 +49813,7 @@ impl std::fmt::Display for DataFrame {
         for (col_idx, name) in self.column_order.iter().enumerate() {
             let col = &self.columns[name];
             for i in 0..show {
-                let val_len = format!("{}", col.values()[i]).len();
+                let val_len = format_repr_scalar(&col.values()[i]).len();
                 if val_len > col_widths[col_idx] {
                     col_widths[col_idx] = val_len;
                 }
@@ -49803,7 +49836,7 @@ impl std::fmt::Display for DataFrame {
                 write!(
                     f,
                     "{:>width$}",
-                    format!("{val}"),
+                    format_repr_scalar(val),
                     width = col_widths[col_idx] + 2
                 )?;
             }
@@ -96098,6 +96131,51 @@ mod tests {
         assert!(ra.values()[0].is_missing());
         assert_eq!(ra.values()[1], Scalar::Int64(200));
         assert_eq!(ra.values()[2], Scalar::Int64(300));
+    }
+
+    #[test]
+    fn series_align_outer_widens_only_the_dense_integer_side_for_a_gap_nywa8() {
+        // pandas: the gap that `align` introduces widens a dense numpy integer
+        // Series to float64, while an already-nullable integer Series retains
+        // its nullable dtype.  This keeps the operation-introduced gap rule
+        // separate from carrying a source-supplied null through alignment.
+        let left = Series::new(
+            "left",
+            Index::new(vec![1_i64.into(), 2_i64.into()]),
+            Column::new(
+                DType::Int64Nullable,
+                vec![Scalar::Int64(10), Scalar::Null(NullKind::Null)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "right",
+            vec![2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let (left_aligned, right_aligned) = left.align(&right, AlignMode::Outer).unwrap();
+
+        assert_eq!(left_aligned.dtype(), DType::Int64Nullable);
+        assert_eq!(
+            left_aligned.values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
+        assert_eq!(right_aligned.dtype(), DType::Float64);
+        assert_eq!(
+            right_aligned.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ]
+        );
     }
 
     #[test]
