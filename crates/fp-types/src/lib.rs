@@ -633,6 +633,33 @@ impl Scalar {
             // Null(NaN) at Column::new time, while fixture oracles encode
             // the canonical missing marker as Null(Null).
             (Self::Null(_), Self::Null(_)) => true,
+            // The DTYPE-SENTINEL missings are missing too, and this function
+            // already says so for every other flavour. `missing_for_dtype`
+            // DEFINES the canonical missing for Timedelta64 as
+            // `Timedelta64(Timedelta::NAT)`, for Datetime64 as
+            // `Datetime64(Timestamp::NAT)` and for Period as ordinal
+            // `i64::MIN`, and `is_missing()` returns true for all three — but
+            // without this arm none of them could ever equal the `Null` marker
+            // an oracle records for pandas' NaT, so a parity check compared a
+            // raw i64::MIN bit pattern against a null and called it a value
+            // mismatch.
+            //
+            // OBSERVED on fp_p2d_021_series_to_timedelta_negative_null_hardened:
+            //   FP     timedelta64:-9223372036854775808
+            //   pandas null           (the format has no `na_t` marker, so
+            //                          `null` IS NaT there)
+            //
+            // `compare_join_expected` in fp-conformance already carried this as
+            // a manual `|| (left.is_missing() && right.is_missing())`; putting
+            // it here makes that clause redundant instead of special, and
+            // covers the series and dataframe comparators that lacked it.
+            //
+            // This is a COMPARISON rule only. It deliberately does not touch
+            // `missing_for_dtype`: fp-columnar's 2026-07-14 NullKind TRAP note
+            // records that the sentinel and `Null(NaT)` representations coexist
+            // inside one column and a uniform gather cannot reproduce the mix,
+            // which is a storage-model question. (br-frankenpandas-xwxci)
+            _ if self.is_missing() && other.is_missing() => true,
             _ => self == other,
         }
     }
@@ -7107,6 +7134,53 @@ mod tests {
         let left = Scalar::Float64(f64::NAN);
         let right = Scalar::Null(NullKind::Null);
         assert!(left.semantic_eq(&right));
+    }
+
+    /// A DTYPE-SENTINEL missing equals a `Null` marker, for every dtype that
+    /// has one.
+    ///
+    /// `missing_for_dtype` DEFINES the canonical missing for Timedelta64 as
+    /// `Timedelta64(NAT)`, for Datetime64 as `Datetime64(NAT)` and for Period as
+    /// ordinal `i64::MIN`, and `is_missing()` agrees — but `semantic_eq` used to
+    /// unify only the `Null`/NaN flavours, so an oracle's `null` for pandas' NaT
+    /// could never match FP's sentinel. Observed on
+    /// `fp_p2d_021_series_to_timedelta_negative_null_hardened`, where the
+    /// fixture pinned the raw `-9223372036854775808` as though it were data.
+    ///
+    /// THE NEGATIVE CASES ARE THE POINT — "both missing" must not become "any
+    /// sentinel matches anything":
+    /// - a NaT sentinel must NOT equal a PRESENT timedelta;
+    /// - two DIFFERENT present timedeltas must stay unequal;
+    /// - Period and Datetime64 must unify too, or the fix is Timedelta-only.
+    ///
+    /// (br-frankenpandas-xwxci)
+    #[test]
+    fn semantic_eq_unifies_dtype_sentinel_missing_with_null_xwxci() {
+        for sentinel in [
+            Scalar::Timedelta64(Timedelta::NAT),
+            Scalar::Datetime64(Timestamp::NAT),
+            Scalar::Period(Period::new(i64::MIN, PeriodFreq::Daily)),
+        ] {
+            assert!(sentinel.is_missing(), "{sentinel:?} must report missing");
+            for marker in [
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaT),
+            ] {
+                assert!(
+                    sentinel.semantic_eq(&marker),
+                    "{sentinel:?} vs {marker:?} are both missing"
+                );
+                assert!(marker.semantic_eq(&sentinel), "and symmetrically");
+            }
+        }
+
+        // NOT a blanket match: a sentinel differs from a PRESENT value.
+        let present = Scalar::Timedelta64(-60);
+        assert!(!Scalar::Timedelta64(Timedelta::NAT).semantic_eq(&present));
+        assert!(!present.semantic_eq(&Scalar::Null(NullKind::Null)));
+        // And two distinct present values stay distinct.
+        assert!(!present.semantic_eq(&Scalar::Timedelta64(-61)));
     }
 
     #[test]
