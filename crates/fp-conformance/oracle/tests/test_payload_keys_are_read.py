@@ -306,6 +306,33 @@ def test_series_iloc_preserves_nullable_integer_payload_dtype(oracle, pd):
     ]
 
 
+def test_series_take_preserves_nullable_integer_payload_dtype(oracle, pd):
+    """Take must retain integer kind rather than re-infer float64 for a null."""
+    result = oracle.op_series_take(
+        pd,
+        {
+            "left": {
+                "index": [
+                    {"kind": "int64", "value": 10},
+                    {"kind": "int64", "value": 11},
+                    {"kind": "int64", "value": 12},
+                ],
+                "values": [
+                    {"kind": "int64", "value": 1},
+                    {"kind": "null", "value": "null"},
+                    {"kind": "int64", "value": 3},
+                ],
+            },
+            "take_indices": [2, 0],
+        },
+    )
+
+    assert result["expected_series"]["values"] == [
+        {"kind": "int64", "value": 3},
+        {"kind": "int64", "value": 1},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # options that ARE read somewhere but not APPLIED where they matter
 # ---------------------------------------------------------------------------
