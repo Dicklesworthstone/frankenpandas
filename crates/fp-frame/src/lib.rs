@@ -12600,15 +12600,31 @@ impl Series {
             );
         }
 
-        // perf (br-frankenpandas-2o29o): validity-mask null check instead of a Scalar
-        // is_missing scan (no Vec<Scalar> materialization). Only consulted under the
-        // dtype==Int64 gate below, where validity <=> is_missing (Int64 has no NaN),
-        // so this is bit-transparent.
-        let has_nulls = self.column.has_nulls();
+        // A NULL DOES NOT DEMOTE THE LANE. This condition used to carry a
+        // trailing `&& !has_nulls`, from br-frankenpandas-aaa1e — written before
+        // br-frankenpandas-778bb removed the oracle's float64 forcing, back when
+        // an int lane carrying a null was assumed to have become float64. Under
+        // the corpus's declared model (DISCREPANCIES DISC-011) such a lane IS
+        // the nullable Int64 extension, and pandas clips it dtype-preservingly.
+        //
+        // MEASURED, live pandas 2.2.3, s = [1, <missing>, 10, <missing>],
+        // clip(2.0, 8.0) — the bounds are FLOATS in both arms:
+        //
+        //   dtype float64 -> float64 ['2.0', 'nan', '8.0', 'nan']
+        //   dtype Int64   -> Int64   ['2',   '<NA>', '8',  '<NA>']
+        //
+        // so clip preserves the INPUT dtype regardless of the bounds' dtype.
+        // The loop below already passes a missing value through untouched, so
+        // the null survives as itself rather than being clamped to a bound.
+        // `is_integer_bound` still gates: a 2.5 bound genuinely demands Float64.
+        // Sibling of br-frankenpandas-vc6iu, which removed the same pre-778bb
+        // assumption from groupby sum.
+        //
+        // This also retires br-frankenpandas-2o29o's `has_nulls` call, which
+        // existed ONLY to feed the removed condition. (br-frankenpandas-p5nku)
         let preserve_int64 = matches!(self.column.dtype(), DType::Int64)
             && is_integer_bound(lower)
-            && is_integer_bound(upper)
-            && !has_nulls;
+            && is_integer_bound(upper);
 
         let mut out = Vec::with_capacity(self.len());
         for val in self.column.values() {
@@ -99460,6 +99476,77 @@ mod tests {
         assert_eq!(clipped.values()[0], Scalar::Float64(0.0));
         assert_eq!(clipped.values()[1], Scalar::Float64(3.0));
         assert_eq!(clipped.values()[2], Scalar::Float64(5.0));
+    }
+
+    /// A NULL in an int lane does not demote clip's output to Float64.
+    ///
+    /// MEASURED, live pandas 2.2.3, `s = [1, <missing>, 10, <missing>]`,
+    /// `clip(2.0, 8.0)` — the bounds are FLOATS in both arms:
+    ///
+    /// ```text
+    ///   dtype float64 -> float64 ['2.0', 'nan', '8.0', 'nan']
+    ///   dtype Int64   -> Int64   ['2',   '<NA>', '8',  '<NA>']
+    /// ```
+    ///
+    /// so clip preserves the INPUT dtype regardless of the bounds' dtype. An
+    /// FP `Int64` column carrying a null IS the nullable `Int64` extension
+    /// (DISCREPANCIES DISC-011), so it takes the second row.
+    ///
+    /// EACH ARM KILLS A SPECIFIC WRONG FIX:
+    /// - the Int64-with-null arm, or the removed `!has_nulls` condition simply
+    ///   comes back;
+    /// - the FLOAT64-with-null arm, or "always preserve the input dtype" passes
+    ///   while silently turning float lanes into ints;
+    /// - the 2.5-bound arm, or dropping `is_integer_bound` passes and an
+    ///   Int64 lane starts reporting 2 where pandas gives 2.5;
+    /// - the null is asserted to SURVIVE as a null rather than being clamped to
+    ///   a bound, which is what a naive "clamp every element" loop would do.
+    ///
+    /// (br-frankenpandas-p5nku; sibling of br-frankenpandas-vc6iu)
+    #[test]
+    fn series_clip_keeps_a_nullable_int64_lane_p5nku() {
+        let idx = vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()];
+        let int_lane = Series::from_values(
+            "nums",
+            idx.clone(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let clipped = int_lane.clip(Some(2.0), Some(8.0)).expect("clip");
+        assert_eq!(clipped.column().dtype(), DType::Int64);
+        assert_eq!(clipped.values()[0], Scalar::Int64(2));
+        assert_eq!(clipped.values()[2], Scalar::Int64(8));
+        assert!(
+            clipped.values()[1].is_missing() && clipped.values()[3].is_missing(),
+            "the null survives clip rather than being clamped to a bound"
+        );
+
+        // A FLOAT64 lane with nulls stays Float64.
+        let float_lane = Series::from_values(
+            "nums",
+            idx.clone(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let clipped_float = float_lane.clip(Some(2.0), Some(8.0)).expect("clip");
+        assert_eq!(clipped_float.column().dtype(), DType::Float64);
+        assert_eq!(clipped_float.values()[0], Scalar::Float64(2.0));
+
+        // A NON-integer bound genuinely demands Float64, null or not.
+        let widened = int_lane.clip(Some(2.5), Some(8.0)).expect("clip");
+        assert_eq!(widened.column().dtype(), DType::Float64);
+        assert_eq!(widened.values()[0], Scalar::Float64(2.5));
     }
 
     #[test]
