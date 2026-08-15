@@ -235,6 +235,15 @@ jobs:
         # corrupt every generated fixture.
         run: python -m pytest crates/fp-conformance/oracle/tests/ -v
 
+      - name: Perf ratchet gate self-tests
+        # Per br-frankenpandas-a9fh8 and br-frankenpandas-s7x8z: the ratchet in
+        # scripts/apply_ratchet.sh gates on perf_ratchet.py's exit code, and two
+        # defects reached main inside it — the latency thresholds were inverted
+        # (a 50% slowdown returned ALLOW, a 50% speedup returned BLOCK), and it
+        # compared a candidate against a baseline from a different worker. Both
+        # are pure-Python and need no benchmark run, so they are cheap to hold.
+        run: python -m pytest scripts/tests/ -v
+
       # br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr: REPORT-ONLY, and
       # deliberately so until the corpus is repaired.
       #

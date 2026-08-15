@@ -14,9 +14,44 @@ Thresholds:
 Verdicts:
   - ALLOW: All thresholds pass, update baseline
   - BLOCK: Regression beyond threshold, fail CI
-  - QUARANTINE: Some measurements are contract-invalid or median-CI undecidable
+  - QUARANTINE: Some measurements are contract-invalid or median-CI undecidable,
+                OR baseline and candidate cannot be placed on the same worker
 
 CV is retained as provenance only. It never decides a ratchet verdict.
+
+WORKER COMPARABILITY (br-frankenpandas-s7x8z)
+---------------------------------------------
+A ratchet compares two runs. If they did not execute on the same worker, the
+difference between them is not a code change — it is a machine change, and this
+gate would automate the exact hazard the fleet measured on 2026-08-15:
+
+  frankenscipy ran the SAME cubic splu cell on two rch workers and got 1.2693x
+  and 0.0093x — a 13.6x swing — with BOTH A/A nulls PASSING. An A/A null
+  controls WITHIN-invocation noise; it says nothing about BETWEEN-worker
+  differences in CPU model, cache, memory bandwidth, or contention.
+
+That is not hypothetical here: three distinct hosts already coexist in this
+repo's banked rows (thinkstation1, a 64-thread Threadripper PRO 5975WX;
+frankenlibc-test, a 10-thread EPYC VM; vmi1149989).
+
+So this gate REFUSES rather than answers when the two runs cannot be placed on
+one worker. "Not comparable" is a third answer, distinct from "no regression"
+and from "regression", and it is the honest one — a cross-worker comparison can
+manufacture a BLOCK or hide one with equal ease, so the workload and category
+comparisons are not computed at all in that case.
+
+A run that names no host at all is uncomparable for the same reason: 144 of 165
+artifacts/bench rows and 1057 of 1058 tests/artifacts/perf rows predate the
+`host_fingerprint` block. Those are honest raw measurements; they simply cannot
+be placed on a machine, so they cannot ratchet against anything.
+
+There is deliberately NO --allow-cross-host flag. The remedy for a quarantine
+here is to re-measure the candidate on the baseline's worker (or re-baseline on
+the candidate's), not to wave the check through.
+
+DELETION CONDITION: this check can go when every row in .bench-history carries a
+`host_fingerprint` AND the ratchet selects its baseline per-worker, at which
+point a mismatch is unreachable rather than merely refused.
 
 Usage:
     python scripts/perf_ratchet.py --baseline .bench-history/latest.json --new artifacts/bench/current.json
@@ -59,6 +94,105 @@ UNCERTAIN_VERDICTS = {
     # Historical v3 artifact; retained only as legacy uncertainty.
     "DROPPED_HIGH_CV",
 }
+
+# The host_fingerprint fields that decide whether two runs are comparable.
+#
+# Chosen as the ones that change the RATIO, not merely the machine's name:
+# cpu_model and the ISA feature set change which kernels run at all; the thread
+# counts change how far a parallel arm scales; the affinity cap changes how much
+# of the box the process was allowed to use. host_identity is included so two
+# same-spec VMs on different physical hosts still refuse to be compared — the
+# splu swing was between workers of the same family.
+#
+# Governor is deliberately NOT here: frankenfs measured that an external-load
+# style veto metric does not predict the ratio (load varied 4.9x, ratio spread
+# 6.46%, r=-0.35), so gating on it would reject runs on a signal uncorrelated
+# with error. Governor stays provenance, like CV. (br-frankenpandas-s7x8z)
+COMPARABILITY_FIELDS = (
+    "host_identity",
+    "cpu_model",
+    "logical_threads",
+    "threads_per_core",
+    "affinity_logical_cpu_cap",
+    "runtime_detected_isa_features",
+)
+
+
+def comparability_identity(doc: dict[str, Any]) -> dict[str, Any] | None:
+    """The host facts two runs must agree on, or None if the run names no host.
+
+    None and a populated dict are BOTH refusals when they disagree; the caller
+    must not treat a missing fingerprint as a wildcard that matches anything.
+    """
+    fingerprint = doc.get("host_fingerprint")
+    if not isinstance(fingerprint, dict):
+        return None
+    if not fingerprint.get("host_identity"):
+        return None
+    identity: dict[str, Any] = {}
+    for field in COMPARABILITY_FIELDS:
+        value = fingerprint.get(field)
+        # Order within the ISA set is an enumeration detail, not a machine
+        # difference, so compare it as a set rendered canonically.
+        if isinstance(value, list):
+            value = sorted(str(item) for item in value)
+        identity[field] = value
+    return identity
+
+
+def describe_host(identity: dict[str, Any] | None) -> str:
+    if identity is None:
+        return "unknown (run carries no host_fingerprint.host_identity)"
+    return (
+        f"{identity.get('host_identity')} "
+        f"[{identity.get('cpu_model')}, "
+        f"{identity.get('logical_threads')} logical threads]"
+    )
+
+
+def host_comparability(baseline: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Decide whether these two runs may be ratcheted against each other."""
+    baseline_identity = comparability_identity(baseline)
+    new_identity = comparability_identity(new)
+
+    if baseline_identity is None or new_identity is None:
+        unplaceable = [
+            side
+            for side, identity in (("baseline", baseline_identity), ("candidate", new_identity))
+            if identity is None
+        ]
+        reason = (
+            f"{' and '.join(unplaceable)} names no worker, so the two runs cannot be "
+            f"placed on the same machine"
+        )
+        comparable = False
+    elif baseline_identity != new_identity:
+        differing = sorted(
+            field
+            for field in COMPARABILITY_FIELDS
+            if baseline_identity.get(field) != new_identity.get(field)
+        )
+        reason = (
+            f"baseline ran on {describe_host(baseline_identity)} and candidate ran on "
+            f"{describe_host(new_identity)}; differing: {', '.join(differing)}"
+        )
+        comparable = False
+    else:
+        reason = f"both runs on {describe_host(new_identity)}"
+        comparable = True
+
+    return {
+        "comparable": comparable,
+        "reason": reason,
+        "baseline_host": baseline_identity,
+        "candidate_host": new_identity,
+        "remedy": (
+            None
+            if comparable
+            else "re-measure the candidate on the baseline's worker, or re-baseline "
+            "on the candidate's; do not compare across workers"
+        ),
+    }
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -121,14 +255,30 @@ def compare_workload(baseline: dict, new: dict) -> dict[str, Any]:
     p90_change = ((n_p90 - b_p90) / b_p90 * 100) if b_p90 > 0 else 0
     throughput_change = ((n_throughput - b_throughput) / b_throughput * 100) if b_throughput > 0 else 0
 
+    # DIRECTION (br-frankenpandas-a9fh8). p50_us and p95_us are LATENCY: a
+    # POSITIVE change is slower, i.e. the regression. throughput_rows_sec is a
+    # RATE: a NEGATIVE change is the regression. The two conventions are
+    # opposite, and the latency pair used to be tested with the rate one:
+    #
+    #     if p50_change > -THRESHOLDS["primary_pct"]:   # +50% slower > +3%
+    #         pass                                      # ...swallowed
+    #     elif p50_change < THRESHOLDS["primary_pct"]:  # fires at -3%, a WIN
+    #
+    # so a 50% slowdown returned ALLOW and a 50% speedup returned BLOCK,
+    # reported as "p50 regressed -50.0%". THRESHOLDS entries are negative
+    # "allowed worsening" budgets, so the latency budget is their negation.
     violations = []
-    if p50_change > -THRESHOLDS["primary_pct"]:
-        pass
-    elif p50_change < THRESHOLDS["primary_pct"]:
-        violations.append(f"p50 regressed {p50_change:.1f}% (threshold: {THRESHOLDS['primary_pct']}%)")
+    latency_budget = -THRESHOLDS["primary_pct"]
+    if p50_change > latency_budget:
+        violations.append(
+            f"p50 regressed +{p50_change:.1f}% slower (budget: +{latency_budget:.1f}%)"
+        )
 
-    if p90_change < THRESHOLDS["p90_pct"]:
-        violations.append(f"p90 regressed {p90_change:.1f}% (threshold: {THRESHOLDS['p90_pct']}%)")
+    p90_budget = -THRESHOLDS["p90_pct"]
+    if p90_change > p90_budget:
+        violations.append(
+            f"p90 regressed +{p90_change:.1f}% slower (budget: +{p90_budget:.1f}%)"
+        )
 
     if throughput_change < THRESHOLDS["throughput_pct"]:
         violations.append(f"throughput dropped {throughput_change:.1f}% (threshold: {THRESHOLDS['throughput_pct']}%)")
@@ -175,11 +325,19 @@ def compare_category(baseline_results: list, new_results: list, category: str) -
 
     geomean_change = ((n_geomean - b_geomean) / b_geomean * 100) if b_geomean > 0 else 0
 
+    # Latency direction, same inversion as compare_workload — the geomean is
+    # over p50_us, so POSITIVE is slower. (br-frankenpandas-a9fh8)
     violations = []
-    if geomean_change < THRESHOLDS["geomean_pct"]:
-        violations.append(f"geomean regressed {geomean_change:.1f}% (threshold: {THRESHOLDS['geomean_pct']}%)")
-    if geomean_change < THRESHOLDS["per_category_pct"]:
-        violations.append(f"category regressed {geomean_change:.1f}% (threshold: {THRESHOLDS['per_category_pct']}%)")
+    geomean_budget = -THRESHOLDS["geomean_pct"]
+    if geomean_change > geomean_budget:
+        violations.append(
+            f"geomean regressed +{geomean_change:.1f}% slower (budget: +{geomean_budget:.1f}%)"
+        )
+    category_budget = -THRESHOLDS["per_category_pct"]
+    if geomean_change > category_budget:
+        violations.append(
+            f"category regressed +{geomean_change:.1f}% slower (budget: +{category_budget:.1f}%)"
+        )
 
     return {
         "category": category,
@@ -199,6 +357,39 @@ def run_ratchet(baseline_path: Path, new_path: Path) -> tuple[str, dict[str, Any
     baseline_results = baseline.get("results", [])
     new_results = new.get("results", [])
     decidable_new_results = [result for result in new_results if is_decidable(result)]
+
+    # Worker comparability decides whether there is a comparison to make AT ALL,
+    # so it runs before any threshold. The workload/category comparisons are
+    # deliberately left empty on refusal rather than computed-and-ignored: a
+    # cross-worker delta is not a weak signal to be down-weighted, it is a
+    # measurement of a different machine, and reporting it under a QUARANTINE
+    # would invite exactly the "well it only regressed 4%" reading that the
+    # 13.6x splu swing refutes. (br-frankenpandas-s7x8z)
+    comparability = host_comparability(baseline, new)
+    if not comparability["comparable"]:
+        report = {
+            "verdict": "QUARANTINE",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "baseline_file": str(baseline_path),
+            "new_file": str(new_path),
+            "thresholds": THRESHOLDS,
+            "host_comparability": comparability,
+            "workload_comparisons": [],
+            "category_comparisons": [],
+            "summary": {
+                "total_workloads": 0,
+                "workloads_passed": 0,
+                "workloads_failed": 0,
+                "categories_passed": 0,
+                "categories_failed": 0,
+                "uncertain_measurement_count": len(new_results),
+                "cv_is_provenance_only": True,
+                "refused_reason": "host_not_comparable",
+            },
+            "failed_workloads": [],
+            "failed_categories": [],
+        }
+        return "QUARANTINE", report
 
     baseline_by_key = {
         workload_key(r): r for r in baseline_results
@@ -241,6 +432,7 @@ def run_ratchet(baseline_path: Path, new_path: Path) -> tuple[str, dict[str, Any
         "baseline_file": str(baseline_path),
         "new_file": str(new_path),
         "thresholds": THRESHOLDS,
+        "host_comparability": comparability,
         "workload_comparisons": workload_comparisons,
         "category_comparisons": category_comparisons,
         "summary": {
@@ -262,6 +454,19 @@ def run_ratchet(baseline_path: Path, new_path: Path) -> tuple[str, dict[str, Any
 def update_baseline(new_path: Path, baseline_name: str = "latest") -> None:
     """Copy new results as the new baseline."""
     new = load_json(new_path)
+    # A baseline that names no worker quarantines every future comparison
+    # against it, so say so at the moment it is banked rather than leaving the
+    # next run to discover it. (br-frankenpandas-s7x8z)
+    identity = comparability_identity(new)
+    if identity is None:
+        print(
+            f"WARNING: {new_path} carries no host_fingerprint.host_identity. "
+            f"It is being banked as a baseline anyway, but every ratchet run "
+            f"against it will QUARANTINE as host-not-comparable until it is "
+            f"re-measured with the sanctioned harness."
+        )
+    else:
+        print(f"Baseline worker: {describe_host(identity)}")
     baseline_path = BASELINE_DIR / f"{baseline_name}.json"
     save_json(baseline_path, new)
 
@@ -300,6 +505,20 @@ def main():
         print(f"\n{'='*60}")
         print(f"PERFORMANCE RATCHET GATE: {verdict}")
         print(f"{'='*60}\n")
+
+        comparability = report.get("host_comparability", {})
+        if not comparability.get("comparable", True):
+            print("REFUSED: baseline and candidate are not worker-comparable.")
+            print(f"  {comparability.get('reason')}")
+            print(f"  Remedy: {comparability.get('remedy')}")
+            print(
+                "\n  No workload or category comparison was computed. A cross-worker"
+                "\n  delta measures a different machine, not a code change."
+                "\n  (br-frankenpandas-s7x8z)"
+            )
+            print(f"\nVerdict: {verdict}")
+            return 2
+        print(f"Worker: {comparability.get('reason')}")
 
         summary = report["summary"]
         print(f"Workloads: {summary['workloads_passed']}/{summary['total_workloads']} passed")
