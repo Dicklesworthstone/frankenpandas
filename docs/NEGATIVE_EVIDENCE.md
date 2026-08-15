@@ -22117,6 +22117,55 @@ code on this host; it does not explain the gap. Hardware, thread count, an
 intervening FrankenPandas improvement, and pandas storage backend are all live
 explanations, and this run picks none of them. No lever is credited here.
 
+**CORRECTION 2026-08-15 — THE REFUTATION IS WEAKER THAN THIS ROW STATES, AND
+THE REASON IS THAT THE OTHER SIDE NAMES NO HOST.** A fleet-wide hazard was
+measured elsewhere in the suite: frankenscipy ran the SAME cubic `splu` cell on
+two different rch workers and got 1.2693x on one and 0.0093x on the other — a
+13.6x swing — with **both A/A nulls PASSING**. Worker identity dominated the
+result and the null did not catch it, because an A/A null controls
+within-invocation noise and says nothing about between-worker differences in CPU
+model, cache, memory bandwidth or contention. Independently, frankenfs measured
+that an external-load veto metric does not predict the ratio at all (load varied
+4.9x, ratio spread 6.46%, r=-0.35), so gating on observed load rejects runs on a
+signal uncorrelated with error.
+
+Applied here, I checked the row this one claims to supersede.
+`artifacts/bench/proud_lane_m_str_startswith_arrow_1m_10m_20260728.json` has **no
+`host_fingerprint` key at all** — top-level keys are schema_version, timestamp,
+invocation_id, engine_identity, harness_source, parameters, results, summary —
+and its `.md` companion names no host, CPU, governor or thread count either. So
+the 0.420x row cannot be placed on any machine.
+
+That changes the verdict from "refuted but unexplained" to **NOT COMPARABLE**.
+This row is a valid same-invocation balanced-square ratio ON `thinkstation1`
+(Threadripper PRO 5975WX, 64 logical, governor `performance`), and it is
+correctly banked as such — both arms interleaved ABBAABBA inside
+`invocation_id=vs-pandas-20260814T224046.662898Z-pid1623299`, which is exactly
+the same-worker/same-invocation discipline the hazard argues for. What it cannot
+do is overturn a row whose worker is unrecoverable. Note the specific mechanism
+that makes this more than pedantry: the observed thread counts here are
+FrankenPandas 64 against pandas 1, and 64 threads is a property of
+`thinkstation1`, not of the code. On a 10-logical-thread EPYC VM — the shape of
+`frankenlibc-test`, where this workload's sibling rows were taken — that
+advantage largely disappears. A host difference alone is sufficient to produce
+the 0.420x/5.105x span with NO code change, and nothing in either row rules it
+out.
+
+The 5.105x headline stands. The clause "the 2026-07-28 0.420x row does not
+describe today's code" in this section's title is hereby **scoped to
+`thinkstation1`** and should not be cited as a general refutation. Re-deriving
+0.420x requires re-measuring the July workload on an identified host in one
+invocation; until then the July row is worker-scoped-to-unknown and is evidence
+of nothing.
+
+**Standing rule this establishes for the campaign ledger.** Never compare an arm
+measured on one worker against an arm measured on another; both arms must run in
+the SAME invocation on the SAME worker, which the campaign law already required
+and which now has an empirical price attached. Every banked row must name its
+observed worker alongside thread count, governor, ISA and self-reported ELF
+SHA — this row does, which is why it survives the audit. A row that does not
+name its worker cannot be compared to any other row.
+
 **Reproduce:**
 
 ```
