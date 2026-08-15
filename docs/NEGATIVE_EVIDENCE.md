@@ -22227,3 +22227,55 @@ python3 benches/vs_pandas_harness.py --category strings \
 Read the `.rch-target-<worker>-pool-<hash>` path out of the build log and `scp`
 the binary off that worker; `.cargo/config.toml` is intentionally empty and
 RUSTFLAGS is unset, so there is no `target-cpu=native` and the ELF is portable.
+
+---
+
+## REJECTED 2026-08-15 (CalmMink) — harness payload-dtype chooser (br-frankenpandas-vprpg)
+
+**Lever.** Give the Rust harness the oracle's `series_dtype_for_payload_values`:
+a payload whose non-null kinds are exactly `{int64}` and which carries a null
+builds `DType::Int64Nullable`, `{bool}` + null builds `DType::BoolNullable`.
+Wired into `build_series` only.
+
+**Hypothesis.** The harness had no dtype chooser, so an int+null payload became
+plain `Int64` while the oracle built `Int64Dtype()`. Aligning them should fix
+`fp_p2d_056_dataframe_merge_asof_backward_nan_left_key_strict` — the last case
+mismatch in the packet suite — because `merge_asof` rejects a nullable key
+against a numpy key, and fp-join already implements that (sopel, 870a1003c).
+
+**Blast radius, measured before running:** 117 lanes across 100 fixtures change
+dtype (104 `int64 -> Int64`, 13 `bool -> boolean`).
+
+**Measured result: REJECTED.** fp-conformance failing CASES went 1 -> 5.
+
+```
+before  dataframe_merge_asof_backward_nan_left_key_strict
+after   dataframe_merge_asof_backward_nan_left_key_strict   <- STILL failing
+        column_dtype_check_int_only_hardened                <- new
+        series_clip_with_nulls_hardened                     <- new
+        series_filter_non_boolean_mask_strict               <- new
+        series_mul_union_alignment_hardened                 <- new
+```
+
+**Why rejected.** Two independent reasons, and the first is the instructive one:
+
+1. It did not even fix its target. `fp_p2d_056` carries its data in
+   `frame`/`frame_right`, not `left`/`right`, so `build_series` is never called
+   for it — `build_dataframe` is. The lever could not have worked as scoped, and
+   only running it revealed that.
+2. It regressed four other cases, so FrankenPandas' kernels genuinely behave
+   differently for `Int64Nullable` than for `Int64`. `series_clip_with_nulls`
+   regressing is the sharpest signal: that fixture was re-banked hours earlier
+   under br-frankenpandas-p5nku on the `Int64` lane, and the nullable lane gives
+   a different answer.
+
+**What this rules out.** "Just mirror the oracle's chooser in the harness" is
+not a safe one-lever change, and widening it to `build_dataframe` would only
+enlarge the regression surface. Any future attempt must go per-operation with a
+failure-set diff each time, not corpus-wide.
+
+**Reproduce:** patch saved at
+`scratchpad/vprpg_full_experiment.patch`; apply, then
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-conformance`.
+
+No timing was measured, so this row names no worker and no harness.
