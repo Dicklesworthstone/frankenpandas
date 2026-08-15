@@ -599,10 +599,11 @@ def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[
 
     value_index = [label_from_json(item) for item in right["index"]]
     values = [scalar_from_json(item) for item in right["values"]]
-    if agg in {"min", "max", "first", "last"}:
-        value_dtype = series_dtype_for_payload_values(right["values"])
-    else:
-        value_dtype = "float64"
+    # Build every aggregation over the dtype encoded by the fixture payload.
+    # Forcing float64 here silently changed all-present integer inputs before
+    # sum/count/mean/etc. reached pandas, so the oracle reported a different
+    # operation than the fixture requested.
+    value_dtype = series_dtype_for_payload_values(right["values"])
     value_series = pd.Series(values, index=value_index, dtype=value_dtype)
     groupby_keys = payload.get("groupby_keys")
 
