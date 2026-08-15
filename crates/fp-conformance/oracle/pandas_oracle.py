@@ -2207,15 +2207,12 @@ def op_series_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(take_indices, list):
         raise OracleError("series_take requires take_indices list payload")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-
     try:
         indices = [int(value) for value in take_indices]
     except Exception as exc:  # pragma: no cover - defensive conversion
         raise OracleError(f"series_take indices must be integers: {exc}") from exc
 
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    series = fixture_series_from_payload(pd, left, "series_take")
     try:
         out = series.take(indices)
     except IndexError as exc:
