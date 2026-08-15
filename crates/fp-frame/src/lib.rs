@@ -45577,7 +45577,7 @@ impl DatetimeAccessor<'_> {
                 Scalar::Utf8(s)
                     if shape_lock
                         .as_deref()
-                        .is_none_or(|lock| datetime_shape_signature(s) == lock) =>
+                        .is_none_or(|lock| datetime_shape_matches(s, lock)) =>
                 {
                     func(s)
                 }
@@ -50045,21 +50045,19 @@ pub fn to_datetime_with_options(
         for row in 0..nrows {
             let span = &bytes[offsets[row]..offsets[row + 1]];
             // Contiguous-Utf8 spans are valid UTF-8 by construction.
-            let text = std::str::from_utf8(span).ok();
-            let signature = text.map(datetime_shape_signature);
-            match (&lock, signature) {
-                (_, None) => {
+            let Some(text) = std::str::from_utf8(span).ok() else {
+                all_fast = false;
+                break;
+            };
+            match &lock {
+                None => lock = Some(datetime_shape_signature(text)),
+                Some(expected) if !datetime_shape_matches(text, expected) => {
                     all_fast = false;
                     break;
                 }
-                (None, Some(first)) => lock = Some(first),
-                (Some(expected), Some(actual)) if *expected != actual => {
-                    all_fast = false;
-                    break;
-                }
-                (Some(_), Some(_)) => {}
+                Some(_) => {}
             }
-            match text.and_then(fast_iso_datetime_nanos) {
+            match fast_iso_datetime_nanos(text) {
                 Some(v) => nanos.push(v),
                 None => {
                     all_fast = false;
@@ -50140,7 +50138,7 @@ pub fn to_datetime_values_with_options(
                 Scalar::Utf8(s) => {
                     if shape_lock
                         .as_deref()
-                        .is_some_and(|lock| datetime_shape_signature(s) != lock)
+                        .is_some_and(|lock| !datetime_shape_matches(s, lock))
                     {
                         // A row the column's ONE guessed format cannot parse.
                         // (br-frankenpandas-hzayc)
@@ -50885,14 +50883,13 @@ fn infer_values_datetime_timezone_pattern(values: &[Scalar]) -> Option<DatetimeT
 /// into NaT because month 15 does not exist. Closing that needs the resolved
 /// field ORDER to travel with the lock and be honoured by the row parser, which
 /// this pass does not do.
-fn datetime_shape_signature(value: &str) -> String {
+fn for_each_datetime_shape_byte(value: &str, mut emit: impl FnMut(u8)) {
     let trimmed = value.trim();
-    let (body, tz) = if has_tz_suffix(trimmed) {
-        (strip_tz_suffix(trimmed).trim_end(), "z")
+    let (body, has_timezone) = if has_tz_suffix(trimmed) {
+        (strip_tz_suffix(trimmed).trim_end(), true)
     } else {
-        (trimmed, "")
+        (trimmed, false)
     };
-    let mut signature = String::with_capacity(body.len() + tz.len());
     let bytes = body.as_bytes();
     let mut index = 0;
     let mut at_start = true;
@@ -50903,24 +50900,48 @@ fn datetime_shape_signature(value: &str) -> String {
             while index < bytes.len() && bytes[index].is_ascii_digit() {
                 index += 1;
             }
-            signature.push(if at_start && index - start == 4 {
-                'Y'
+            emit(if at_start && index - start == 4 {
+                b'Y'
             } else {
-                'N'
+                b'N'
             });
         } else if byte.is_ascii_alphabetic() {
             while index < bytes.len() && bytes[index].is_ascii_alphabetic() {
                 index += 1;
             }
-            signature.push('A');
+            emit(b'A');
         } else {
-            signature.push(byte as char);
+            // The signature is an ASCII shape, not a copy of the input. Mapping
+            // each non-ASCII byte to one marker keeps its bytewise matcher and
+            // the allocated lock equivalent for every valid UTF-8 spelling.
+            emit(if byte.is_ascii() { byte } else { b'~' });
             index += 1;
         }
         at_start = false;
     }
-    signature.push_str(tz);
+    if has_timezone {
+        emit(b'z');
+    }
+}
+
+fn datetime_shape_signature(value: &str) -> String {
+    let mut signature = String::with_capacity(value.len());
+    for_each_datetime_shape_byte(value, |byte| signature.push(char::from(byte)));
     signature
+}
+
+/// Compare a datetime value with the inferred lock without allocating a
+/// per-row signature. The lock is ASCII by construction, so byte positions
+/// correspond exactly to the reducer output above.
+fn datetime_shape_matches(value: &str, lock: &str) -> bool {
+    let lock = lock.as_bytes();
+    let mut index = 0;
+    let mut matches = true;
+    for_each_datetime_shape_byte(value, |byte| {
+        matches &= lock.get(index).is_some_and(|expected| *expected == byte);
+        index += 1;
+    });
+    matches && index == lock.len()
 }
 
 /// The one shape a whole string column is parsed under, or `None` for no lock.
@@ -50965,7 +50986,7 @@ fn values_have_mixed_datetime_shape(values: &[Scalar]) -> bool {
         return false;
     };
     values.iter().any(|value| match value {
-        Scalar::Utf8(text) if !text.trim().is_empty() => datetime_shape_signature(text) != lock,
+        Scalar::Utf8(text) if !text.trim().is_empty() => !datetime_shape_matches(text, &lock),
         _ => false,
     })
 }
@@ -157992,6 +158013,22 @@ mod tests {
         let out = super::to_datetime_with_format(&s, Some("%d-%m-%Y")).unwrap();
         assert_eq!(out.values()[0], datetime64_scalar("2024-01-15 00:00:00"));
         assert_eq!(out.values()[1], datetime64_scalar("2024-01-16 00:00:00"));
+    }
+
+    #[test]
+    fn datetime_shape_matcher_reuses_the_inferred_lock_29x85() {
+        let lock = super::datetime_shape_signature("2024-06-15 12:34:56.123456");
+        assert!(super::datetime_shape_matches("2024-6-5 01:02:03.7", &lock));
+        assert!(!super::datetime_shape_matches(
+            "2024-06-15T12:34:56.123456",
+            &lock
+        ));
+        assert!(!super::datetime_shape_matches("2024-06-15", &lock));
+
+        // Signatures are ASCII shape descriptions. Non-ASCII input uses the
+        // same fixed marker in the allocated lock and bytewise matcher.
+        let unicode_lock = super::datetime_shape_signature("2024-06-15 café");
+        assert!(super::datetime_shape_matches("2024-6-5 naï", &unicode_lock));
     }
 
     #[test]
