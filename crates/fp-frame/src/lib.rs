@@ -8714,21 +8714,23 @@ impl Series {
 
     /// Select elements where `mask` is `True`.
     ///
-    /// Matches `series[bool_series]` boolean indexing in pandas.
-    /// The mask must be a Bool-typed Series. Indexes are aligned before
-    /// applying the mask. Missing values in the mask are treated as `False`.
+    /// Matches `series[bool_series]` boolean indexing in pandas. Indexes are
+    /// aligned before applying the mask, and missing values in the mask are
+    /// treated as `False`.
+    ///
+    /// A NON-boolean mask is NOT an error: pandas' `[]` silently stops
+    /// filtering and does a LABEL TAKE instead, and so do we — see
+    /// [`Self::take_by_label_selector`] for the measurements.
+    /// (br-frankenpandas-75i7h)
     pub fn filter(&self, mask: &Self) -> Result<Self, FrameError> {
         if !mask.column.dtype().is_bool()
-            && let Some(offending) = mask
+            && mask
                 .column
                 .values()
                 .iter()
-                .find(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
+                .any(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
         {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "boolean mask required for filter; found dtype {:?}",
-                offending.dtype()
-            )));
+            return self.take_by_label_selector(mask);
         }
 
         // Fast path: when indexes are identical AND no duplicates, skip alignment.
@@ -8798,6 +8800,55 @@ impl Series {
         }
 
         self.with_labels_and_values_preserving_name(new_labels, new_values)
+    }
+
+    /// `series[non_bool_series]` — the LABEL TAKE pandas silently falls back to.
+    ///
+    /// pandas' `Series.__getitem__` only filters when the key is boolean. Given
+    /// anything else it stops filtering entirely and looks the key's VALUES up
+    /// as labels, which is a take, not a filter, and which does not raise.
+    ///
+    /// MEASURED, live pandas 2.2.3, `s = Series([11,22,33], index=[0,1,2])`:
+    ///
+    /// ```text
+    ///   s[Series([1,0,1])]              values [22,11,22]  index [1,0,1]
+    ///   s[Series([True,False,True])]    values [11,33]     index [0,2]   (filter)
+    ///   s[Series([1,0], index=[99,100])] values [22,11]    index [1,0]
+    ///   s[Series([1.0,2.0])]            values [22,33]     index [1,2]
+    ///   s[Series([1,5])]                KeyError '[5] not in index'
+    ///   s[Series([1.0, nan])]           KeyError '[nan] not in index'
+    ///   Series([11,22,33], index=['a','b','c'])[Series(['b','a','b'])]
+    ///                                   values [22,11,22]  index ['b','a','b']
+    /// ```
+    ///
+    /// Three things the measurements settle that intuition gets wrong:
+    /// the selector's OWN index is irrelevant (row 3 — labels come from its
+    /// values); duplicates are preserved in selector order rather than
+    /// deduplicated; and a missing label FAILS CLOSED rather than yielding a
+    /// gap, which is the opposite of `reindex`.
+    ///
+    /// This is `Self::loc`'s contract exactly — selector order, duplicates
+    /// preserved, missing label fails closed — so this delegates rather than
+    /// reimplementing a second label resolver. The only work here is turning
+    /// the selector's values into `IndexLabel`s.
+    ///
+    /// ⚠️ NOT IMPLEMENTED, DELIBERATELY: pandas also accepts an INTEGER
+    /// selector against a NON-integer index and treats it POSITIONALLY
+    /// (`Series([11,22,33], index=['a','b','c'])[Series([0,2])]` -> `['a','c']`).
+    /// That path emits `FutureWarning: Series.__getitem__ treating keys as
+    /// positions is deprecated ... in a future version, integer keys will
+    /// always be treated as labels`, so pandas is removing it. Reproducing a
+    /// behaviour upstream has already deprecated would be building tech debt to
+    /// spec; such a selector fails closed here as a missing label, which is what
+    /// pandas itself will do. (br-frankenpandas-75i7h)
+    fn take_by_label_selector(&self, selector: &Self) -> Result<Self, FrameError> {
+        let labels = selector
+            .column
+            .values()
+            .iter()
+            .map(scalar_to_index_label)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.loc(&labels)
     }
 
     /// Label-based selection for a list of labels.
@@ -97378,6 +97429,24 @@ mod tests {
         assert_eq!(result.values()[1], Scalar::Int64(30));
     }
 
+    /// UPDATED for br-frankenpandas-75i7h. This test used to assert
+    /// `filter` REJECTS a non-boolean mask with "boolean mask required for
+    /// filter" — FrankenPandas' own pre-fix contract, which pandas does not
+    /// share. pandas stops filtering and takes by LABEL instead.
+    ///
+    /// The input still errors, so the test kept its name, but it errors for a
+    /// DIFFERENT REASON and the distinction is the whole point: the mask values
+    /// are `[1, 0]` against index `[1, 2]`, so label `0` is simply absent.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    /// ```text
+    ///   s = Series([10,20], index=[1,2])
+    ///   s[Series([1,0])]  -> KeyError: '[0] not in index'   NOT a dtype refusal
+    ///   s[Series([2,1])]  -> values [20,10]  index [2,1]    all labels present
+    /// ```
+    /// So the rejection survives on the missing label and disappears the moment
+    /// every label exists — asserted below, because a test that only checked
+    /// `is_err()` would still pass against the old dtype refusal.
     #[test]
     fn series_filter_rejects_non_boolean_mask() {
         let s = Series::from_values(
@@ -97395,7 +97464,21 @@ mod tests {
 
         let err = s.filter(&mask).unwrap_err();
         assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("boolean mask required for filter"))
+            matches!(&err, FrameError::CompatibilityRejected(msg) if msg.contains("loc label not found")),
+            "expected a MISSING-LABEL rejection, not a mask-dtype one; got {err:?}"
+        );
+
+        let present = Series::from_values(
+            "mask",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(1)],
+        )
+        .unwrap();
+        let out = s.filter(&present).unwrap();
+        assert_eq!(out.values(), &[Scalar::Int64(20), Scalar::Int64(10)]);
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::Int64(2), IndexLabel::Int64(1)]
         );
     }
 
@@ -100562,6 +100645,104 @@ mod tests {
         let err = s.loc(&[IndexLabel::Datetime64(999)]).unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("loc label not found"))
+        );
+    }
+
+    /// `series[non_bool_series]` is a LABEL TAKE, not a filter and not an error.
+    ///
+    /// Every assertion is a live pandas 2.2.3 measurement, listed on
+    /// `Series::take_by_label_selector`. br-frankenpandas-75i7h.
+    #[test]
+    fn series_filter_with_a_non_boolean_mask_takes_by_label_75i7h() {
+        let s = Series::from_values(
+            "vals",
+            vec![0.into(), 1.into(), 2.into()],
+            vec![Scalar::Int64(11), Scalar::Int64(22), Scalar::Int64(33)],
+        )
+        .unwrap();
+
+        // s[Series([1,0,1])] -> values [22,11,22] index [1,0,1].
+        // Duplicates preserved, selector order preserved, NOT deduplicated.
+        let selector = Series::from_values(
+            "mask",
+            vec![0.into(), 1.into(), 2.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)],
+        )
+        .unwrap();
+        let out = s.filter(&selector).unwrap();
+        assert_eq!(
+            out.values(),
+            &[Scalar::Int64(22), Scalar::Int64(11), Scalar::Int64(22)]
+        );
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1)
+            ]
+        );
+
+        // THE SELECTOR'S OWN INDEX IS IRRELEVANT — the labels come from its
+        // VALUES. Without this the implementation could pass by aligning.
+        let odd_index = Series::from_values(
+            "mask",
+            vec![99.into(), 100.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(0)],
+        )
+        .unwrap();
+        let out = s.filter(&odd_index).unwrap();
+        assert_eq!(out.values(), &[Scalar::Int64(22), Scalar::Int64(11)]);
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(0)]
+        );
+
+        // A BOOLEAN mask still FILTERS — the fallback must not swallow it.
+        let boolean = Series::from_values(
+            "mask",
+            vec![0.into(), 1.into(), 2.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+        let out = s.filter(&boolean).unwrap();
+        assert_eq!(out.values(), &[Scalar::Int64(11), Scalar::Int64(33)]);
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(2)]
+        );
+
+        // A missing label FAILS CLOSED (pandas: KeyError '[5] not in index'),
+        // which is the opposite of reindex — it does NOT mint a gap.
+        let missing = Series::from_values(
+            "mask",
+            vec![0.into(), 1.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(5)],
+        )
+        .unwrap();
+        assert!(s.filter(&missing).is_err());
+
+        // A Utf8 index takes by Utf8 label the same way.
+        let s2 = Series::from_values(
+            "vals",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(11), Scalar::Int64(22), Scalar::Int64(33)],
+        )
+        .unwrap();
+        let utf8_selector = Series::from_values(
+            "mask",
+            vec![0.into(), 1.into(), 2.into()],
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let out = s2.filter(&utf8_selector).unwrap();
+        assert_eq!(
+            out.values(),
+            &[Scalar::Int64(22), Scalar::Int64(11), Scalar::Int64(22)]
         );
     }
 
