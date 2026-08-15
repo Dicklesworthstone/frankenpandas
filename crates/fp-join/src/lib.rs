@@ -3950,6 +3950,11 @@ fn build_single_key_dense_cycle_i64_left_merge_output(
     else {
         return Ok(None);
     };
+    if !right_validity.all() {
+        // The generic gather promotes all-valid Int64 lanes when this join
+        // invents a gap. This lazy i64-only representation cannot do so.
+        return Ok(None);
+    }
 
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
     let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
@@ -4167,35 +4172,45 @@ fn build_single_key_dense_i64_left_merge_output(
             && let Some((output_len, right_validity)) =
                 dense_cycle_probe_output_len_and_validity(left_witness, right_witness)
         {
-            let index = Index::new_known_unique_int64_unit_range(0, output_len);
-            let mut columns = ColumnStore::new();
-            let mut column_order = Vec::with_capacity(specs.len());
-            for (spec, source) in specs.into_iter().zip(sources) {
-                let column = match spec.side {
-                    FusedInt64Side::Left => Column::from_i64_dense_cycle_probe_repeat(
-                        source,
-                        left_witness,
-                        right_witness,
-                        output_len,
-                    ),
-                    FusedInt64Side::Right => {
-                        Column::from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+            if !right_validity.all() {
+                // Fall through to the typed gather below, which widens the
+                // gap-bearing Int64 lanes to Float64 like pandas.
+            } else {
+                let index = Index::new_known_unique_int64_unit_range(0, output_len);
+                let mut columns = ColumnStore::new();
+                let mut column_order = Vec::with_capacity(specs.len());
+                for (spec, source) in specs.into_iter().zip(sources) {
+                    let column = match spec.side {
+                        FusedInt64Side::Left => Column::from_i64_dense_cycle_probe_repeat(
                             source,
                             left_witness,
                             right_witness,
-                            right_validity.clone(),
                             output_len,
-                        )
-                    }
-                };
-                debug_assert_eq!(column.len(), output_len);
-                insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+                        ),
+                        FusedInt64Side::Right => {
+                            Column::from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+                                source,
+                                left_witness,
+                                right_witness,
+                                right_validity.clone(),
+                                output_len,
+                            )
+                        }
+                    };
+                    debug_assert_eq!(column.len(), output_len);
+                    insert_merged_output_column(
+                        &mut columns,
+                        &mut column_order,
+                        spec.name,
+                        column,
+                    )?;
+                }
+                return Ok(Some(MergedDataFrame {
+                    index,
+                    columns,
+                    column_order,
+                }));
             }
-            return Ok(Some(MergedDataFrame {
-                index,
-                columns,
-                column_order,
-            }));
         }
     }
 
@@ -4253,6 +4268,9 @@ fn build_single_key_dense_i64_left_merge_output(
         };
         output_len = new_len;
         plan.push(run);
+    }
+    if plan.iter().any(|&(_, start, _)| start == UNMATCHED) {
+        return Ok(None);
     }
 
     // Shared right-lane segment descriptor (br-frankenpandas-yiqv5): the plan's
@@ -4584,35 +4602,45 @@ fn build_single_key_dense_i64_right_merge_output(
             && let Some((output_len, left_validity)) =
                 dense_cycle_probe_output_len_and_validity(right_witness, left_witness)
         {
-            let index = Index::new_known_unique_int64_unit_range(0, output_len);
-            let mut columns = ColumnStore::new();
-            let mut column_order = Vec::with_capacity(specs.len());
-            for (spec, source) in specs.into_iter().zip(sources) {
-                let column = match spec.side {
-                    FusedInt64Side::Left => {
-                        Column::from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+            if !left_validity.all() {
+                // See the LEFT merge mirror: only the typed gather can
+                // preserve pandas' Int64-to-Float64 widening for a new gap.
+            } else {
+                let index = Index::new_known_unique_int64_unit_range(0, output_len);
+                let mut columns = ColumnStore::new();
+                let mut column_order = Vec::with_capacity(specs.len());
+                for (spec, source) in specs.into_iter().zip(sources) {
+                    let column = match spec.side {
+                        FusedInt64Side::Left => {
+                            Column::from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+                                source,
+                                right_witness,
+                                left_witness,
+                                left_validity.clone(),
+                                output_len,
+                            )
+                        }
+                        FusedInt64Side::Right => Column::from_i64_dense_cycle_probe_repeat(
                             source,
                             right_witness,
                             left_witness,
-                            left_validity.clone(),
                             output_len,
-                        )
-                    }
-                    FusedInt64Side::Right => Column::from_i64_dense_cycle_probe_repeat(
-                        source,
-                        right_witness,
-                        left_witness,
-                        output_len,
-                    ),
-                };
-                debug_assert_eq!(column.len(), output_len);
-                insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+                        ),
+                    };
+                    debug_assert_eq!(column.len(), output_len);
+                    insert_merged_output_column(
+                        &mut columns,
+                        &mut column_order,
+                        spec.name,
+                        column,
+                    )?;
+                }
+                return Ok(Some(MergedDataFrame {
+                    index,
+                    columns,
+                    column_order,
+                }));
             }
-            return Ok(Some(MergedDataFrame {
-                index,
-                columns,
-                column_order,
-            }));
         }
     }
 
@@ -4669,6 +4697,9 @@ fn build_single_key_dense_i64_right_merge_output(
         };
         output_len = new_len;
         plan.push(run);
+    }
+    if plan.iter().any(|&(_, start, _)| start == UNMATCHED) {
+        return Ok(None);
     }
 
     // One shared validity mask for every left lane.
@@ -6543,7 +6574,7 @@ fn build_single_key_dense_left_merge_output(
             continue;
         }
 
-        let reindexed = col.reindex_by_positions(right_positions)?;
+        let reindexed = reindex_join_column_with_invented_gap(col, right_positions)?;
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -6624,14 +6655,14 @@ fn build_single_key_ordered_unique_left_merge_output(
             continue;
         }
 
-        let utf8_plan = if col.dtype() == DType::Utf8 {
-            right_utf8_plan
+        let reindexed = if col.dtype() == DType::Utf8 {
+            let utf8_plan = right_utf8_plan
                 .get_or_init(|| shared_optional_utf8_gather_plan(right_positions, right.len()))
-                .as_ref()
+                .as_ref();
+            reindex_with_shared_utf8_plan(col, right_positions, utf8_plan)?
         } else {
-            None
+            reindex_join_column_with_invented_gap(col, right_positions)?
         };
-        let reindexed = reindex_with_shared_utf8_plan(col, right_positions, utf8_plan)?;
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -6700,7 +6731,7 @@ fn build_single_key_ordered_unique_right_merge_output(
                 .expect("right key column must exist");
             identity_merge_column(right_key_col, n, &mut identity_positions)
         } else {
-            col.reindex_by_positions(left_positions)?
+            reindex_join_column_with_invented_gap(col, left_positions)?
         };
         insert_merged_output_column(&mut columns, &mut column_order, out_name, output)?;
     }
@@ -6783,7 +6814,7 @@ fn build_single_key_dense_right_merge_output(
                 .expect("right key column must exist");
             right_key_col.reindex_by_positions(right_positions)?
         } else {
-            col.reindex_by_positions(left_positions)?
+            reindex_join_column_with_invented_gap(col, left_positions)?
         };
         insert_merged_output_column(&mut columns, &mut column_order, out_name, output)?;
     }
@@ -9701,10 +9732,8 @@ pub fn merge_dataframes_on_with_options(
             } else {
                 let key_column = if let Some(positions) = all_present_left_positions {
                     take_positions_typed(col, positions)
-                } else if matches!(join_type, JoinType::Outer) {
-                    reindex_join_column_with_invented_gap(col, &left_positions)?
                 } else {
-                    col.reindex_by_positions(&left_positions)?
+                    reindex_join_column_with_invented_gap(col, &left_positions)?
                 };
                 insert_merged_output_column(
                     &mut columns,
@@ -9717,10 +9746,8 @@ pub fn merge_dataframes_on_with_options(
         }
         let reindexed = if let Some(positions) = all_present_left_positions {
             take_positions_typed(col, positions)
-        } else if matches!(join_type, JoinType::Outer) {
-            reindex_join_column_with_invented_gap(col, &left_positions)?
         } else {
-            col.reindex_by_positions(&left_positions)?
+            reindex_join_column_with_invented_gap(col, &left_positions)?
         };
         let out_name = if right_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.left.as_deref())
@@ -9744,10 +9771,8 @@ pub fn merge_dataframes_on_with_options(
         }
         let reindexed = if let Some(positions) = all_present_right_positions {
             take_positions_typed(col, positions)
-        } else if matches!(join_type, JoinType::Outer) {
-            reindex_join_column_with_invented_gap(col, &right_positions)?
         } else {
-            col.reindex_by_positions(&right_positions)?
+            reindex_join_column_with_invented_gap(col, &right_positions)?
         };
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
@@ -11296,14 +11321,13 @@ mod tests {
         ResolvedMergeSuffixes, build_dense_i64_inner_output_data,
         build_single_key_dense_cycle_i64_left_merge_output,
         build_single_key_dense_i64_left_merge_output,
-        build_single_key_dense_i64_right_merge_output, build_single_key_dense_left_merge_output,
-        build_single_key_inner_contiguous_no_overlap_output, dense_int64_left_positions,
-        join_series, join_series_with_options, join_series_with_trace,
-        lower_hex_overlap_plan_from_certificates, ordered_unique_utf8_inner_position_plan,
-        ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
-        scalar_utf8_left_positions, scalar_utf8_outer_positions,
-        sorted_contiguous_utf8_inner_positions, strictly_increasing_utf8_key_spans,
-        utf8_span_lower_bound,
+        build_single_key_dense_i64_right_merge_output,
+        build_single_key_inner_contiguous_no_overlap_output, join_series, join_series_with_options,
+        join_series_with_trace, lower_hex_overlap_plan_from_certificates,
+        ordered_unique_utf8_inner_position_plan, ordered_unique_utf8_inner_positions,
+        ordered_utf8_lower_hex_overlap_len, scalar_utf8_left_positions,
+        scalar_utf8_outer_positions, sorted_contiguous_utf8_inner_positions,
+        strictly_increasing_utf8_key_spans, utf8_span_lower_bound,
     };
 
     fn contiguous_utf8_column(values: &[&str]) -> Column {
@@ -12577,6 +12601,7 @@ mod tests {
         };
         let get_optional_i64 = |s: &Scalar| match s {
             Scalar::Int64(v) => Some(*v),
+            Scalar::Float64(v) if v.is_finite() && v.fract() == 0.0 => Some(*v as i64),
             value if value.is_missing() => None,
             _ => Some(i64::MIN),
         };
@@ -13119,15 +13144,15 @@ mod tests {
         );
         let right_values = merged_values(&merged, "rv")?;
         assert_eq!(right_values.len(), 7);
-        assert_eq!(right_values[0], Scalar::Int64(101));
+        assert_eq!(right_values[0], Scalar::Float64(101.0));
         assert_eq!(
             &right_values[1..3],
-            &[Scalar::Int64(100), Scalar::Int64(102)]
+            &[Scalar::Float64(100.0), Scalar::Float64(102.0)]
         );
         assert!(right_values[3].is_missing());
         assert_eq!(
             &right_values[4..6],
-            &[Scalar::Int64(100), Scalar::Int64(102)]
+            &[Scalar::Float64(100.0), Scalar::Float64(102.0)]
         );
         assert!(right_values[6].is_missing());
 
@@ -13175,7 +13200,7 @@ mod tests {
         let nat_right_values = merged_values(&nat_merged, "rv")?;
         assert_eq!(
             &nat_right_values[..2],
-            &[Scalar::Int64(10), Scalar::Int64(11)]
+            &[Scalar::Float64(10.0), Scalar::Float64(11.0)]
         );
         assert!(nat_right_values[2].is_missing());
 
@@ -13429,9 +13454,9 @@ mod tests {
         let left_values = merged_values(&merged, "lv")?;
         assert_eq!(left_values.len(), 5);
         assert!(left_values[0].is_missing());
-        assert_eq!(left_values[1], Scalar::Int64(0));
+        assert_eq!(left_values[1], Scalar::Float64(0.0));
         assert!(left_values[2].is_missing());
-        assert_eq!(left_values[3], Scalar::Int64(2));
+        assert_eq!(left_values[3], Scalar::Float64(2.0));
         assert!(left_values[4].is_missing());
 
         let nat = fp_types::Timestamp::NAT;
@@ -13476,7 +13501,10 @@ mod tests {
             &[Scalar::Datetime64(5), Scalar::Datetime64(7)],
         );
         let nat_left_values = merged_values(&nat_merged, "lv")?;
-        assert_eq!(&nat_left_values[..2], &[Scalar::Int64(0), Scalar::Int64(1)]);
+        assert_eq!(
+            &nat_left_values[..2],
+            &[Scalar::Float64(0.0), Scalar::Float64(1.0)]
+        );
         assert!(nat_left_values[2].is_missing());
 
         Ok(())
@@ -14438,7 +14466,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_cycle_left_join_output_matches_dense_left_builder() {
+    fn dense_cycle_left_join_declines_invented_gaps_66wab() {
         let left = DataFrame::from_dict(
             &["id", "v"],
             vec![
@@ -14497,7 +14525,7 @@ mod tests {
         let left_key = left.column("id").unwrap();
         let right_key = right.column("id").unwrap();
 
-        let fast = build_single_key_dense_cycle_i64_left_merge_output(
+        let dense_cycle = build_single_key_dense_cycle_i64_left_merge_output(
             &left,
             &right,
             &["id"],
@@ -14506,42 +14534,20 @@ mod tests {
             right_key,
             &suffixes,
         )
-        .unwrap()
-        .expect("dense-cycle route");
-        let old = build_single_key_dense_i64_left_merge_output(
-            &left,
-            &right,
-            &["id"],
-            &["id"],
-            left_key,
-            right_key,
-            &suffixes,
-        )
-        .unwrap()
-        .expect("dense left route");
-
-        assert_eq!(fast.index, old.index);
-        assert_eq!(fast.column_order, old.column_order);
-        assert_eq!(fast.columns, old.columns);
-        assert_eq!(
-            fast.columns.get("v").unwrap().as_i64_slice(),
-            old.columns.get("v").unwrap().as_i64_slice()
-        );
-        assert_eq!(
-            fast.columns.get("rv").unwrap().values(),
-            &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(100),
-                Scalar::Int64(101),
-                Scalar::Int64(200),
-                Scalar::Int64(201),
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(100),
-                Scalar::Int64(101),
-                Scalar::Int64(200),
-                Scalar::Int64(201),
-                Scalar::Null(NullKind::Null),
-            ]
+        .unwrap();
+        assert!(dense_cycle.is_none());
+        assert!(
+            build_single_key_dense_i64_left_merge_output(
+                &left,
+                &right,
+                &["id"],
+                &["id"],
+                left_key,
+                right_key,
+                &suffixes,
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -14936,15 +14942,19 @@ mod tests {
             merged.columns.get("val_a").unwrap().values(),
             &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
         );
-        // val_b: null for id=1, 200 for id=2, 300 for id=3
-        assert!(merged.columns.get("val_b").unwrap().values()[0].is_missing());
+        // val_b widens to Float64 because id=1 invents a missing value.
+        assert_eq!(merged.columns.get("val_b").unwrap().dtype(), DType::Float64);
+        assert_eq!(
+            merged.columns.get("val_b").unwrap().values()[0],
+            Scalar::Null(NullKind::NaN)
+        );
         assert_eq!(
             merged.columns.get("val_b").unwrap().values()[1],
-            Scalar::Int64(200)
+            Scalar::Float64(200.0)
         );
         assert_eq!(
             merged.columns.get("val_b").unwrap().values()[2],
-            Scalar::Int64(300)
+            Scalar::Float64(300.0)
         );
     }
 
@@ -15029,11 +15039,11 @@ mod tests {
             ]
         );
         let right_values = fast.columns.get("w").unwrap().values();
-        assert_eq!(right_values[0], Scalar::Int64(100));
+        assert_eq!(right_values[0], Scalar::Float64(100.0));
         assert!(right_values[1].is_missing());
-        assert_eq!(right_values[2], Scalar::Int64(200));
+        assert_eq!(right_values[2], Scalar::Float64(200.0));
         assert!(right_values[3].is_missing());
-        assert_eq!(right_values[4], Scalar::Int64(300));
+        assert_eq!(right_values[4], Scalar::Float64(300.0));
     }
 
     #[test]
@@ -15162,15 +15172,15 @@ mod tests {
         assert_eq!(left_values[4], Scalar::Int64(12));
         assert_eq!(left_values[6], Scalar::Int64(15));
         let right_values = fast.columns.get("w").unwrap().values();
-        assert_eq!(right_values[0], Scalar::Int64(200));
-        assert_eq!(right_values[1], Scalar::Int64(201));
-        assert_eq!(right_values[2], Scalar::Int64(400));
+        assert_eq!(right_values[0], Scalar::Float64(200.0));
+        assert_eq!(right_values[1], Scalar::Float64(201.0));
+        assert_eq!(right_values[2], Scalar::Float64(400.0));
         assert!(right_values[5].is_missing());
         assert!(right_values[6].is_missing());
     }
 
     #[test]
-    fn merge_left_dense_cycle_probe_output_matches_materialized_positions_yq96z() {
+    fn merge_left_dense_cycle_probe_declines_invented_gaps_66wab() {
         let left = DataFrame::from_dict(
             &["id", "v"],
             vec![
@@ -15236,37 +15246,74 @@ mod tests {
             right_key,
             &suffixes,
         )
-        .unwrap()
-        .expect("dense-cycle left route should accept");
-        let (left_positions, right_positions) =
-            dense_int64_left_positions(left_key, right_key).unwrap();
-        let materialized = build_single_key_dense_left_merge_output(
-            &left,
-            &right,
-            &["id"],
-            &["id"],
-            &left_positions,
-            &right_positions,
-            &suffixes,
+        .unwrap();
+        assert!(fused.is_none());
+    }
+
+    #[test]
+    fn partial_int64_merges_promote_invented_gaps_66wab() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(14),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
         )
         .unwrap();
 
-        assert_eq!(fused.index, materialized.index);
-        assert_eq!(fused.column_order, materialized.column_order);
-        assert_eq!(fused.columns, materialized.columns);
-        assert_eq!(
-            fused.columns.get("w").unwrap().values(),
-            &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(100),
-                Scalar::Int64(101),
-                Scalar::Int64(200),
-                Scalar::Int64(201),
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(100),
-                Scalar::Int64(101),
-            ]
-        );
+        let left_join = merge_dataframes(&left, &right, "id", JoinType::Left).unwrap();
+        let left_gap_column = left_join.columns.get("w").unwrap();
+        assert_eq!(left_gap_column.dtype(), DType::Float64);
+        assert_eq!(left_gap_column.values()[0], Scalar::Null(NullKind::NaN));
+        assert_eq!(left_gap_column.values()[1], Scalar::Float64(100.0));
+
+        let right_join = merge_dataframes(&right, &left, "id", JoinType::Right).unwrap();
+        let right_gap_column = right_join.columns.get("w").unwrap();
+        assert_eq!(right_gap_column.dtype(), DType::Float64);
+        assert_eq!(right_gap_column.values()[0], Scalar::Null(NullKind::NaN));
+        assert_eq!(right_gap_column.values()[1], Scalar::Float64(100.0));
     }
 
     #[test]
@@ -15996,12 +16043,12 @@ mod tests {
             ]
         );
         let left_values = fast.columns.get("v").unwrap().values();
-        assert_eq!(left_values[0], Scalar::Int64(10));
-        assert_eq!(left_values[1], Scalar::Int64(12));
-        assert_eq!(left_values[2], Scalar::Int64(10));
-        assert_eq!(left_values[3], Scalar::Int64(12));
+        assert_eq!(left_values[0], Scalar::Float64(10.0));
+        assert_eq!(left_values[1], Scalar::Float64(12.0));
+        assert_eq!(left_values[2], Scalar::Float64(10.0));
+        assert_eq!(left_values[3], Scalar::Float64(12.0));
         assert!(left_values[4].is_missing());
-        assert_eq!(left_values[5], Scalar::Int64(11));
+        assert_eq!(left_values[5], Scalar::Float64(11.0));
         let right_values = fast.columns.get("w").unwrap().values();
         assert_eq!(right_values[0], Scalar::Int64(200));
         assert_eq!(right_values[1], Scalar::Int64(200));
@@ -16012,7 +16059,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_right_dense_cycle_probe_output_matches_materialized_positions_yq96z() {
+    fn merge_right_dense_cycle_probe_declines_invented_gaps_66wab() {
         let left = DataFrame::from_dict(
             &["id", "v"],
             vec![
@@ -16078,37 +16125,8 @@ mod tests {
             right_key,
             &suffixes,
         )
-        .unwrap()
-        .expect("dense-cycle right route should accept");
-        let (left_positions, right_positions) =
-            dense_int64_right_positions(left_key, right_key).unwrap();
-        let materialized = build_single_key_dense_right_merge_output(
-            &left,
-            &right,
-            &["id"],
-            &["id"],
-            &left_positions,
-            &right_positions,
-            &suffixes,
-        )
         .unwrap();
-
-        assert_eq!(fused.index, materialized.index);
-        assert_eq!(fused.column_order, materialized.column_order);
-        assert_eq!(fused.columns, materialized.columns);
-        assert_eq!(
-            fused.columns.get("v").unwrap().values(),
-            &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(100),
-                Scalar::Int64(101),
-                Scalar::Int64(200),
-                Scalar::Int64(201),
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(100),
-                Scalar::Int64(101),
-            ]
-        );
+        assert!(fused.is_none());
     }
 
     #[test]
@@ -16349,9 +16367,9 @@ mod tests {
             ]
         );
         let left_values = fast.columns.get("v").unwrap().values();
-        assert_eq!(left_values[0], Scalar::Int64(10));
+        assert_eq!(left_values[0], Scalar::Float64(10.0));
         assert!(left_values[1].is_missing());
-        assert_eq!(left_values[2], Scalar::Int64(13));
+        assert_eq!(left_values[2], Scalar::Float64(13.0));
         assert!(left_values[3].is_missing());
         let right_values = fast.columns.get("w").unwrap().values();
         assert_eq!(right_values[0], Scalar::Int64(100));
@@ -16371,16 +16389,20 @@ mod tests {
             merged.columns.get("val_b").unwrap().values(),
             &[Scalar::Int64(200), Scalar::Int64(300), Scalar::Int64(400)]
         );
-        // val_a: 20 for id=2, 30 for id=3, null for id=4
+        // val_a widens to Float64 because id=4 invents a missing value.
+        assert_eq!(merged.columns.get("val_a").unwrap().dtype(), DType::Float64);
         assert_eq!(
             merged.columns.get("val_a").unwrap().values()[0],
-            Scalar::Int64(20)
+            Scalar::Float64(20.0)
         );
         assert_eq!(
             merged.columns.get("val_a").unwrap().values()[1],
-            Scalar::Int64(30)
+            Scalar::Float64(30.0)
         );
-        assert!(merged.columns.get("val_a").unwrap().values()[2].is_missing());
+        assert_eq!(
+            merged.columns.get("val_a").unwrap().values()[2],
+            Scalar::Null(NullKind::NaN)
+        );
     }
 
     #[test]
@@ -16606,9 +16628,9 @@ mod tests {
         assert_eq!(
             merged.columns.get("left_v").expect("left_v").values(),
             &[
-                Scalar::Int64(10),
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(30)
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(30.0)
             ]
         );
         assert_eq!(
