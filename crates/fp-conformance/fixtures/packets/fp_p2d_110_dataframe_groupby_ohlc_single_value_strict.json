@@ -5,50 +5,163 @@
   "operation": "dataframe_groupby_ohlc",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "70c8c26b55a1b419beed28d198d022f1ca8eb25070814ab1156eb18562be38cc",
-    "generated_at": "2026-08-09T12:18:38Z"
+    "oracle_script_sha256": "206ee9161cebf99c916b2c24ee262cfc767e236d55d26cf322c424d01d8838a1",
+    "generated_at": "2026-08-15T15:25:50Z"
   },
-  "groupby_columns": ["grp"],
+  "groupby_columns": [
+    "grp"
+  ],
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "columns": {
       "grp": [
-        { "kind": "utf8", "value": "a" },
-        { "kind": "utf8", "value": "b" },
-        { "kind": "utf8", "value": "b" }
+        {
+          "kind": "utf8",
+          "value": "a"
+        },
+        {
+          "kind": "utf8",
+          "value": "b"
+        },
+        {
+          "kind": "utf8",
+          "value": "b"
+        }
       ],
       "val": [
-        { "kind": "float64", "value": 50.0 },
-        { "kind": "float64", "value": 10.0 },
-        { "kind": "float64", "value": 20.0 }
+        {
+          "kind": "float64",
+          "value": 50.0
+        },
+        {
+          "kind": "float64",
+          "value": 10.0
+        },
+        {
+          "kind": "float64",
+          "value": 20.0
+        }
       ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "utf8",
+        "value": "b"
+      }
     ],
     "columns": {
-      "open": [
-        { "kind": "float64", "value": 50.0 },
-        { "kind": "float64", "value": 10.0 }
+      "val_open": [
+        {
+          "kind": "float64",
+          "value": 50.0
+        },
+        {
+          "kind": "float64",
+          "value": 10.0
+        }
       ],
-      "high": [
-        { "kind": "float64", "value": 50.0 },
-        { "kind": "float64", "value": 20.0 }
+      "val_high": [
+        {
+          "kind": "float64",
+          "value": 50.0
+        },
+        {
+          "kind": "float64",
+          "value": 20.0
+        }
       ],
-      "low": [
-        { "kind": "float64", "value": 50.0 },
-        { "kind": "float64", "value": 10.0 }
+      "val_low": [
+        {
+          "kind": "float64",
+          "value": 50.0
+        },
+        {
+          "kind": "float64",
+          "value": 10.0
+        }
       ],
-      "close": [
-        { "kind": "float64", "value": 50.0 },
-        { "kind": "float64", "value": 20.0 }
+      "val_close": [
+        {
+          "kind": "float64",
+          "value": 50.0
+        },
+        {
+          "kind": "float64",
+          "value": 20.0
+        }
+      ]
+    },
+    "column_order": [
+      "val_open",
+      "val_high",
+      "val_low",
+      "val_close"
+    ],
+    "column_multiindex": {
+      "tuples": [
+        [
+          {
+            "kind": "utf8",
+            "value": "val"
+          },
+          {
+            "kind": "utf8",
+            "value": "open"
+          }
+        ],
+        [
+          {
+            "kind": "utf8",
+            "value": "val"
+          },
+          {
+            "kind": "utf8",
+            "value": "high"
+          }
+        ],
+        [
+          {
+            "kind": "utf8",
+            "value": "val"
+          },
+          {
+            "kind": "utf8",
+            "value": "low"
+          }
+        ],
+        [
+          {
+            "kind": "utf8",
+            "value": "val"
+          },
+          {
+            "kind": "utf8",
+            "value": "close"
+          }
+        ]
+      ],
+      "names": [
+        null,
+        null
       ]
     }
   }

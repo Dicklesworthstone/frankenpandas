@@ -3512,10 +3512,28 @@ def dataframe_to_json(frame, datetime_as_typed: bool = False) -> dict[str, Any]:
     # (br-frankenpandas-0ezw7). Off by default so every other caller is
     # unchanged. Mixed-tz / object columns (pandas keeps them object) are NOT
     # datetime64[ns] dtype, so they still route through scalar_to_json.
+    # A MULTI-LEVEL column axis (df.groupby(k).agg({'x': ['sum','mean']}),
+    # resample(...).ohlc()) is flattened to '{level0}_{level1}...' for the
+    # `columns` keys and carried losslessly in `column_multiindex` below.
+    #
+    # str(name) on a tuple gives "('x', 'sum')", which is not a column
+    # FrankenPandas has and made fp_p2d_430 diverge as a column-SET mismatch.
+    # '_'.join matches the storage key FrankenPandas already uses for BOTH
+    # producers of a two-level column axis, so the flat view agrees and the
+    # tuples travel beside it. The join is ambiguous against a column literally
+    # named 'x_sum'; `column_multiindex` is the unambiguous record, and the
+    # ambiguity is FrankenPandas' existing storage model, not a new one.
+    # (br-frankenpandas-nv5ct)
+    column_axis_is_multi = getattr(frame.columns, "nlevels", 1) > 1
+
     columns: dict[str, list[dict[str, Any]]] = {}
     column_order: list[str] = []
     for position, name in enumerate(frame.columns.tolist()):
-        key = str(name)
+        key = (
+            "_".join(str(part) for part in name)
+            if column_axis_is_multi and isinstance(name, tuple)
+            else str(name)
+        )
         col = frame.iloc[:, position]
         if (
             datetime_as_typed
@@ -3548,6 +3566,8 @@ def dataframe_to_json(frame, datetime_as_typed: bool = False) -> dict[str, Any]:
             for values in frame.index.tolist()
         ]
         response["row_multiindex"] = multiindex_to_json(frame.index)
+    if column_axis_is_multi:
+        response["column_multiindex"] = multiindex_to_json(frame.columns)
     return response
 
 
@@ -5299,26 +5319,6 @@ def normalize_series_extractall_frame(frame):
     return out
 
 
-def normalize_groupby_ohlc_frame(frame):
-    if getattr(frame.columns, "nlevels", 1) <= 1:
-        return frame
-
-    top_level = [str(value) for value in frame.columns.get_level_values(0)]
-    unique_top_level = list(dict.fromkeys(top_level))
-    single_value_column = len(unique_top_level) == 1
-
-    flattened_names: list[str] = []
-    for column_name, stat_name in frame.columns.tolist():
-        if single_value_column:
-            flattened_names.append(str(stat_name))
-        else:
-            flattened_names.append(f"{column_name}_{stat_name}")
-
-    out = frame.copy()
-    out.columns = flattened_names
-    return out
-
-
 def apply_column_selector(frame, payload: dict[str, Any], op_name: str):
     """Apply the `column_order` COLUMN SELECTOR for loc/iloc, if one was sent.
 
@@ -5900,7 +5900,15 @@ def op_dataframe_groupby_ohlc(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     frame = dataframe_from_json(pd, frame_payload)
     try:
-        out = normalize_groupby_ohlc_frame(frame.groupby(columns).ohlc())
+        # No flattening. `normalize_groupby_ohlc_frame` used to collapse pandas'
+        # two-level OHLC column axis to FrankenPandas' naming here — and for a
+        # SINGLE value column it dropped the column name entirely, banking
+        # ['open','high','low','close'] as pandas' answer when pandas returns
+        # [('val','open'), …]. That is the oracle-adapted-to-FP masking pattern,
+        # and br-frankenpandas-nv5ct named this function as the prior art not to
+        # extend. Now that the fixture format carries `column_multiindex`, the
+        # oracle can report what pandas actually returns. (br-frankenpandas-nv5ct)
+        out = frame.groupby(columns).ohlc()
     except Exception as exc:
         raise OracleError(f"dataframe_groupby_ohlc failed: {exc}") from exc
 

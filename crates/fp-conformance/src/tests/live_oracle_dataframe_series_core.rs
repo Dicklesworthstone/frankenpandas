@@ -30556,8 +30556,9 @@ fn live_oracle_dataframe_groupby_agg_multi_basic() {
     };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let mut func_map = std::collections::HashMap::new();
-    func_map.insert("v".to_string(), vec!["sum".to_string(), "mean".to_string()]);
+    // Ordered pairs: the agg column axis follows the request
+    // (br-frankenpandas-nv5ct).
+    let func_map = vec![("v".to_string(), vec!["sum".to_string(), "mean".to_string()])];
     let result = frame
         .groupby(&["k"])
         .expect("groupby")

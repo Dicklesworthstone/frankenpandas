@@ -5,60 +5,186 @@
   "operation": "dataframe_groupby_agg_multi",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "ad65708e8f153fb905a47aec954aa8ca9af74025a600222a52617668c781ec10",
+    "generated_at": "2026-08-15T15:16:05Z"
   },
-  "groupby_columns": ["grp"],
+  "groupby_columns": [
+    "grp"
+  ],
   "groupby_agg_multi": {
-    "x": ["sum", "mean"],
-    "y": ["count"]
+    "x": [
+      "sum",
+      "mean"
+    ],
+    "y": [
+      "count"
+    ]
   },
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
-    "column_order": ["grp", "x", "y"],
+    "column_order": [
+      "grp",
+      "x",
+      "y"
+    ],
     "columns": {
       "grp": [
-        { "kind": "utf8", "value": "a" },
-        { "kind": "utf8", "value": "a" },
-        { "kind": "utf8", "value": "b" },
-        { "kind": "utf8", "value": "b" }
+        {
+          "kind": "utf8",
+          "value": "a"
+        },
+        {
+          "kind": "utf8",
+          "value": "a"
+        },
+        {
+          "kind": "utf8",
+          "value": "b"
+        },
+        {
+          "kind": "utf8",
+          "value": "b"
+        }
       ],
       "x": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 3.0 },
-        { "kind": "float64", "value": 10.0 },
-        { "kind": "float64", "value": 20.0 }
+        {
+          "kind": "float64",
+          "value": 1.0
+        },
+        {
+          "kind": "float64",
+          "value": 3.0
+        },
+        {
+          "kind": "float64",
+          "value": 10.0
+        },
+        {
+          "kind": "float64",
+          "value": 20.0
+        }
       ],
       "y": [
-        { "kind": "float64", "value": 100.0 },
-        { "kind": "float64", "value": 200.0 },
-        { "kind": "float64", "value": 300.0 },
-        { "kind": "float64", "value": 400.0 }
+        {
+          "kind": "float64",
+          "value": 100.0
+        },
+        {
+          "kind": "float64",
+          "value": 200.0
+        },
+        {
+          "kind": "float64",
+          "value": 300.0
+        },
+        {
+          "kind": "float64",
+          "value": 400.0
+        }
       ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "utf8",
+        "value": "b"
+      }
     ],
     "columns": {
-      "x_mean": [
-        { "kind": "float64", "value": 2.0 },
-        { "kind": "float64", "value": 15.0 }
-      ],
       "x_sum": [
-        { "kind": "float64", "value": 4.0 },
-        { "kind": "float64", "value": 30.0 }
+        {
+          "kind": "float64",
+          "value": 4.0
+        },
+        {
+          "kind": "float64",
+          "value": 30.0
+        }
+      ],
+      "x_mean": [
+        {
+          "kind": "float64",
+          "value": 2.0
+        },
+        {
+          "kind": "float64",
+          "value": 15.0
+        }
       ],
       "y_count": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 2 }
+        {
+          "kind": "int64",
+          "value": 2
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        }
+      ]
+    },
+    "column_order": [
+      "x_sum",
+      "x_mean",
+      "y_count"
+    ],
+    "column_multiindex": {
+      "tuples": [
+        [
+          {
+            "kind": "utf8",
+            "value": "x"
+          },
+          {
+            "kind": "utf8",
+            "value": "sum"
+          }
+        ],
+        [
+          {
+            "kind": "utf8",
+            "value": "x"
+          },
+          {
+            "kind": "utf8",
+            "value": "mean"
+          }
+        ],
+        [
+          {
+            "kind": "utf8",
+            "value": "y"
+          },
+          {
+            "kind": "utf8",
+            "value": "count"
+          }
+        ]
+      ],
+      "names": [
+        null,
+        null
       ]
     }
   }

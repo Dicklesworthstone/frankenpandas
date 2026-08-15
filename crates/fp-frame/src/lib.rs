@@ -58974,6 +58974,18 @@ impl DataFrame {
         self.row_multiindex.as_ref()
     }
 
+    /// The COLUMN axis when it has more than one level, as
+    /// `df.groupby(k).agg({'x': ['sum','mean']})` and `resample(...).ohlc()`
+    /// both produce. `None` means the flat `column_order` is the whole axis.
+    ///
+    /// Sibling of [`Self::row_multiindex`]; the field already existed but had no
+    /// reader outside this crate, so the conformance harness could not see a
+    /// two-level column axis at all. (br-frankenpandas-nv5ct)
+    #[must_use]
+    pub fn column_multiindex(&self) -> Option<&fp_index::MultiIndex> {
+        self.column_multiindex.as_ref()
+    }
+
     /// Borrowed view of the column store.
     ///
     /// Returns [`ColumnStore`], not `&BTreeMap<String, Column>`: the concrete
@@ -86527,46 +86539,36 @@ impl DataFrameGroupBy<'_> {
     /// Aggregate with a per-column list of functions.
     ///
     /// Matches `df.groupby(col).agg({'a': ['sum', 'mean'], 'b': ['min']})`
-    /// semantics. For each entry in `func_map`, every function is applied to
-    /// the named input column, producing one output column per (input_col,
-    /// func) pair named `{col}_{func}`. Output column order follows the
-    /// original DataFrame's column order; funcs within a column follow the
-    /// slice order supplied. Columns not in `func_map` are excluded, group-by
-    /// key columns are rejected, and an empty func list is rejected.
+    /// semantics: the result carries a TWO-LEVEL column axis of
+    /// `(input_col, func)` tuples, in the order the caller requested, and
+    /// `func_map` is an ordered slice rather than a map so that order can be
+    /// expressed at all.
+    ///
+    /// Storage keeps one column per `(input_col, func)` pair keyed
+    /// `{col}_{func}`, with the tuples alongside in `column_multiindex` — see
+    /// [`Self::with_agg_column_multiindex`] for why, and
+    /// [`Self::agg_dict_list_specs`] for the measured ordering rule.
+    ///
+    /// Columns absent from the frame are skipped (pandas raises — noted in
+    /// `agg_dict_list_specs`), group-by key columns are rejected, and an empty
+    /// func list is rejected.
     pub fn agg_dict_list(
         &self,
-        func_map: &std::collections::HashMap<String, Vec<String>>,
+        func_map: &[(String, Vec<String>)],
     ) -> Result<DataFrame, FrameError> {
+        let specs = self.agg_dict_list_specs(func_map)?;
+
         // Typed fast path (br-frankenpandas-m0gcq): same validation, but route
         // through `agg_typed_pairs` when as_index and every requested func is
-        // typed. Validation (empty list, key column) runs identically so error
-        // behavior is unchanged; a non-typed func falls through to the generic
-        // per-group `Vec<Scalar>` body below.
+        // typed. Validation runs in `agg_dict_list_specs` for BOTH paths, so
+        // error behavior does not depend on which one is taken.
         if self.as_index {
-            let mut specs: Vec<(String, String)> = Vec::new();
-            let mut all_typed = true;
-            for col_name in &self.df.column_order {
-                let funcs = match func_map.get(col_name) {
-                    Some(f) => f,
-                    None => continue,
-                };
-                if funcs.is_empty() {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "agg_dict_list: function list for column '{col_name}' must be non-empty"
-                    )));
-                }
-                if self.by.contains(col_name) {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "cannot aggregate group-by key column: '{col_name}'"
-                    )));
-                }
-                for func_name in funcs {
-                    all_typed &= Self::is_typed_agg_func(func_name);
-                    specs.push((col_name.clone(), func_name.clone()));
-                }
-            }
+            let all_typed = specs
+                .iter()
+                .all(|(_, func_name)| Self::is_typed_agg_func(func_name));
             if all_typed && !specs.is_empty() {
-                return self.agg_typed_pairs(&specs);
+                let typed = self.agg_typed_pairs(&specs)?;
+                return Self::with_agg_column_multiindex(typed, &specs);
             }
         }
 
@@ -86582,12 +86584,56 @@ impl DataFrameGroupBy<'_> {
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
 
-        for col_name in &self.df.column_order {
-            let funcs = match func_map.get(col_name) {
-                Some(f) => f,
-                None => continue,
-            };
+        // REQUEST order, not the frame's column order — see
+        // `agg_dict_list_specs`. This loop used to walk `self.df.column_order`.
+        for (col_name, func_name) in &specs {
+            let col = &self.df.columns[col_name];
+            let out_name = format!("{col_name}_{func_name}");
+            let mut agg_vals = Vec::with_capacity(n_groups);
 
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let group_vals: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
+
+                let agg_val = Self::apply_agg_func(func_name.as_str(), &group_vals, col.dtype())?;
+                agg_vals.push(agg_val);
+            }
+
+            result_cols.insert(out_name.clone(), Column::from_values(agg_vals)?);
+            col_order.push(out_name);
+        }
+
+        let out = self.format_output(result_cols, col_order, labels, &group_order, &groups)?;
+        Self::with_agg_column_multiindex(out, &specs)
+    }
+
+    /// Flatten `agg(dict-of-lists)` into ordered `(column, func)` pairs,
+    /// validating once for every execution path.
+    ///
+    /// ORDER IS THE REQUEST'S, not the frame's. MEASURED, live pandas 2.2.3, on
+    /// `DataFrame({'grp':..., 'x':..., 'y':...})` — note `y` is asked for first
+    /// and comes out first even though `x` precedes it in the frame:
+    ///
+    /// ```text
+    ///   agg({'x':['sum','mean'], 'y':['count']})
+    ///     -> [('x','sum'), ('x','mean'), ('y','count')]
+    ///   agg({'y':['count'], 'x':['mean','sum']})
+    ///     -> [('y','count'), ('x','mean'), ('x','sum')]
+    /// ```
+    ///
+    /// So the caller passes ORDERED pairs rather than a `HashMap`, whose
+    /// iteration order cannot express the request at all — that signature was
+    /// the structural reason FrankenPandas emitted frame order.
+    /// (br-frankenpandas-nv5ct)
+    fn agg_dict_list_specs(
+        &self,
+        func_map: &[(String, Vec<String>)],
+    ) -> Result<Vec<(String, String)>, FrameError> {
+        let mut specs = Vec::new();
+        for (col_name, funcs) in func_map {
             if funcs.is_empty() {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "agg_dict_list: function list for column '{col_name}' must be non-empty"
@@ -86598,31 +86644,89 @@ impl DataFrameGroupBy<'_> {
                     "cannot aggregate group-by key column: '{col_name}'"
                 )));
             }
-
-            let col = &self.df.columns[col_name];
-
+            // A column the frame does not have is skipped rather than rejected,
+            // preserving the behavior this function was factored out of.
+            // ⚠️ pandas RAISES here — measured, live pandas 2.2.3:
+            //   agg({'nope':['sum']}) -> KeyError "Column(s) ['nope'] do not exist"
+            // Left alone deliberately: that is an error-surface change with its
+            // own blast radius, not part of the column-axis fix, and no fixture
+            // covers it today.
+            if !self.df.columns.contains_key(col_name) {
+                continue;
+            }
             for func_name in funcs {
-                let out_name = format!("{col_name}_{func_name}");
-                let mut agg_vals = Vec::with_capacity(n_groups);
-
-                for gkey in &group_order {
-                    let row_indices = &groups[gkey];
-                    let group_vals: Vec<Scalar> = row_indices
-                        .iter()
-                        .map(|&i| col.values()[i].clone())
-                        .collect();
-
-                    let agg_val =
-                        Self::apply_agg_func(func_name.as_str(), &group_vals, col.dtype())?;
-                    agg_vals.push(agg_val);
+                // A repeated (column, func) pair would need TWO output columns
+                // with the same `{col}_{func}` storage key, and the column store
+                // is a `BTreeMap<String, Column>` — the second would overwrite
+                // the first while `column_order` grew to two entries, leaving a
+                // frame whose axis claims a column the store does not have.
+                //
+                // pandas ALLOWS it. Measured, live pandas 2.2.3:
+                //   agg({'x':['sum','sum']}).columns
+                //     -> [('x','sum'), ('x','sum')]
+                //
+                // So this is br-frankenpandas-ih4t0's duplicate-column-label gap
+                // reaching agg, and it gets ih4t0's established answer: reject
+                // honestly rather than silently collapse. It becomes
+                // representable when ih4t0 lands an order-preserving,
+                // duplicate-tolerant column store. (br-frankenpandas-nv5ct)
+                if specs
+                    .iter()
+                    .any(|(spec_col, spec_func)| spec_col == col_name && spec_func == func_name)
+                {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "agg_dict_list: duplicate aggregation '{func_name}' for column \
+                         '{col_name}' would need a duplicate output column label \
+                         (br-frankenpandas-ih4t0)"
+                    )));
                 }
-
-                result_cols.insert(out_name.clone(), Column::from_values(agg_vals)?);
-                col_order.push(out_name);
+                specs.push((col_name.clone(), func_name.clone()));
             }
         }
+        Ok(specs)
+    }
 
-        self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    /// Attach pandas' two-level column axis to an `agg(dict-of-lists)` result.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    ///   agg({'x':['sum','mean'],'y':['count']}).columns
+    ///     -> MultiIndex [('x','sum'), ('x','mean'), ('y','count')], nlevels 2
+    ///   .columns.names -> [None, None]
+    ///   a repeated func keeps its duplicate: agg({'x':['sum','sum']})
+    ///     -> [('x','sum'), ('x','sum')]
+    /// ```
+    ///
+    /// The LIST form is always two-level, even for a single-element list; the
+    /// scalar-valued dict form (`agg({'x':'sum'})`) stays flat and is a
+    /// different entry point, so this function is unconditional here.
+    ///
+    /// Storage keeps the flat `{col}_{func}` keys and `column_order`, with the
+    /// tuples carried positionally alongside — the same representation
+    /// `Resample::ohlc` already uses via `ohlc_column_multiindex`, rather than a
+    /// second column-store model. (br-frankenpandas-nv5ct)
+    fn with_agg_column_multiindex(
+        mut frame: DataFrame,
+        specs: &[(String, String)],
+    ) -> Result<DataFrame, FrameError> {
+        if specs.len() != frame.column_order.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "agg_dict_list: built {} columns for {} requested (column, func) pairs",
+                frame.column_order.len(),
+                specs.len()
+            )));
+        }
+        let top = specs
+            .iter()
+            .map(|(col_name, _)| IndexLabel::Utf8(col_name.clone()))
+            .collect();
+        let bottom = specs
+            .iter()
+            .map(|(_, func_name)| IndexLabel::Utf8(func_name.clone()))
+            .collect();
+        frame.column_multiindex = Some(fp_index::MultiIndex::from_arrays(vec![top, bottom])?);
+        Ok(frame)
     }
 
     /// Named aggregation: each tuple is `(output_name, input_column, function)`.
@@ -86729,86 +86833,23 @@ impl DataFrameGroupBy<'_> {
 
     /// Aggregate with multiple functions per column.
     ///
-    /// Matches `df.groupby(col).agg({'A': ['sum', 'mean'], 'B': ['count']})`.
-    /// Output columns are named `{col}_{func}`.
-    pub fn agg_multi(
-        &self,
-        func_map: &std::collections::HashMap<String, Vec<String>>,
-    ) -> Result<DataFrame, FrameError> {
-        // Typed fast path (br-frankenpandas-m0gcq): route through
-        // `agg_typed_pairs` when as_index and every requested func is typed.
-        // No empty-list check (matches the generic body, which skips a column
-        // whose func list is empty); key-column rejection runs identically.
-        if self.as_index {
-            let mut specs: Vec<(String, String)> = Vec::new();
-            let mut all_typed = true;
-            for col_name in &self.df.column_order {
-                let funcs = match func_map.get(col_name) {
-                    Some(f) => f,
-                    None => continue,
-                };
-                if self.by.contains(col_name) {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "cannot aggregate group-by key column: '{col_name}'"
-                    )));
-                }
-                for func_name in funcs {
-                    all_typed &= Self::is_typed_agg_func(func_name);
-                    specs.push((col_name.clone(), func_name.clone()));
-                }
-            }
-            if all_typed && !specs.is_empty() {
-                return self.agg_typed_pairs(&specs);
-            }
-        }
-
-        let (group_order, groups) = self.build_groups();
-        let n_groups = group_order.len();
-
-        let mut labels = Vec::with_capacity(n_groups);
-        for gkey in &group_order {
-            let first_row = groups[gkey][0];
-            labels.push(self.group_key_label(first_row));
-        }
-
-        let mut result_cols = BTreeMap::new();
-        let mut col_order = Vec::new();
-
-        for col_name in &self.df.column_order {
-            let funcs = match func_map.get(col_name) {
-                Some(f) => f,
-                None => continue,
-            };
-
-            if self.by.contains(col_name) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "cannot aggregate group-by key column: '{col_name}'"
-                )));
-            }
-
-            let col = &self.df.columns[col_name];
-
-            for func_name in funcs {
-                let out_name = format!("{col_name}_{func_name}");
-                let mut agg_vals = Vec::with_capacity(n_groups);
-
-                for gkey in &group_order {
-                    let row_indices = &groups[gkey];
-                    let group_vals: Vec<Scalar> = row_indices
-                        .iter()
-                        .map(|&i| col.values()[i].clone())
-                        .collect();
-
-                    let agg_val = Self::apply_agg_func(func_name, &group_vals, col.dtype())?;
-                    agg_vals.push(agg_val);
-                }
-
-                result_cols.insert(out_name.clone(), Column::from_values(agg_vals)?);
-                col_order.push(out_name);
-            }
-        }
-
-        self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    /// Matches `df.groupby(col).agg({'A': ['sum', 'mean'], 'B': ['count']})`,
+    /// returning pandas' two-level column axis — see [`Self::agg_dict_list`],
+    /// which this delegates to.
+    ///
+    /// This was a near-verbatim copy of `agg_dict_list`, differing ONLY in that
+    /// an empty function list is skipped here and rejected there. It is now that
+    /// one difference and nothing else, so the column-axis rule cannot drift
+    /// between the two entry points — which it would have, since the conformance
+    /// corpus reaches `agg_multi` while the fp-frame tests reach
+    /// `agg_dict_list`. (br-frankenpandas-nv5ct)
+    pub fn agg_multi(&self, func_map: &[(String, Vec<String>)]) -> Result<DataFrame, FrameError> {
+        let non_empty: Vec<(String, Vec<String>)> = func_map
+            .iter()
+            .filter(|(_, funcs)| !funcs.is_empty())
+            .cloned()
+            .collect();
+        self.agg_dict_list(&non_empty)
     }
 
     fn group_key_level_label(&self, row: usize, col_name: &str) -> IndexLabel {
@@ -90394,11 +90435,22 @@ impl DataFrameGroupBy<'_> {
                 }
             }
 
-            let prefix = if value_cols.len() > 1 {
-                format!("{col_name}_")
-            } else {
-                String::new()
-            };
+            // ALWAYS prefixed, including for a single value column.
+            //
+            // `ohlc_column_multiindex` unconditionally emits ('val','open')…,
+            // so dropping the prefix at one value column left the storage keys
+            // ('open') disagreeing with this frame's OWN column axis — invisible
+            // until the conformance harness started comparing the axis
+            // (br-frankenpandas-nv5ct).
+            //
+            // MEASURED, live pandas 2.2.3 — DataFrameGroupBy.ohlc is two-level
+            // at ANY column count, so the flat rendering is always prefixed:
+            //   DataFrame({'g':…,'v':…}).groupby('g').ohlc().columns
+            //     -> nlevels 2, [('v','open'),('v','high'),('v','low'),('v','close')]
+            //   adding a 'w' column just appends ('w','open')…
+            // (The FLAT ['open',…] axis is SeriesGroupBy.ohlc — `gb['v'].ohlc()`
+            // — which is a different entry point and keeps its own naming.)
+            let prefix = format!("{col_name}_");
             result_cols.insert(format!("{prefix}open"), Column::from_values(opens)?);
             result_cols.insert(format!("{prefix}high"), Column::from_values(highs)?);
             result_cols.insert(format!("{prefix}low"), Column::from_values(lows)?);
@@ -121103,6 +121155,126 @@ mod tests {
         }
     }
 
+    /// `agg(dict-of-lists)` returns pandas' TWO-LEVEL column axis, not a flat
+    /// `{col}_{func}` naming.
+    ///
+    /// MEASURED, live pandas 2.2.3, on the exact frame br-frankenpandas-nv5ct
+    /// was filed with:
+    ///
+    /// ```text
+    ///   df = DataFrame({'grp':['a','a','b','b'], 'x':[1.,3.,10.,20.],
+    ///                   'y':[100.,200.,300.,400.]})
+    ///   df.groupby('grp').agg({'x':['sum','mean'], 'y':['count']})
+    ///     list(out.columns)   -> [('x','sum'), ('x','mean'), ('y','count')]
+    ///     out.columns.nlevels -> 2
+    ///     out.columns.names   -> [None, None]
+    /// ```
+    ///
+    /// NEGATIVE CASES, each killing a specific wrong implementation:
+    /// - the tuples are asserted, so the pre-fix flat `x_sum`/`x_mean`/`y_count`
+    ///   naming with no axis at all fails;
+    /// - `nlevels()` is asserted to be exactly 2, so collapsing a single-column
+    ///   request to one level fails. pandas keeps two levels even for a
+    ///   one-element list; only the SCALAR-valued dict form is flat, and that
+    ///   is a different entry point;
+    /// - a REPEATED func is REJECTED rather than silently collapsed. pandas
+    ///   allows it (`agg({'x':['sum','sum']})` -> `[('x','sum'), ('x','sum')]`)
+    ///   but that needs two columns under one storage key, which
+    ///   br-frankenpandas-ih4t0 tracks. Asserting the rejection pins the
+    ///   fail-closed answer so a later implementation cannot quietly start
+    ///   overwriting one column with the other.
+    ///
+    /// The storage keys stay flat and unique alongside the axis, which is why
+    /// `column_order` is asserted too — the tuples must not drift out of step
+    /// with the columns they name. (br-frankenpandas-nv5ct)
+    #[test]
+    fn dataframe_groupby_agg_dict_list_returns_a_two_level_column_axis_nv5ct() {
+        let idx = vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()];
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                idx.clone(),
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "x",
+                idx.clone(),
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "y",
+                idx,
+                vec![
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(200.0),
+                    Scalar::Float64(300.0),
+                    Scalar::Float64(400.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .agg_dict_list(&[
+                ("x".to_string(), vec!["sum".to_string(), "mean".to_string()]),
+                ("y".to_string(), vec!["count".to_string()]),
+            ])
+            .unwrap();
+
+        let axis = result
+            .column_multiindex
+            .as_ref()
+            .expect("agg(dict-of-lists) carries a two-level column axis");
+        assert_eq!(axis.nlevels(), 2);
+        let tuple = |col: &str, func: &str| {
+            vec![
+                IndexLabel::Utf8(col.to_owned()),
+                IndexLabel::Utf8(func.to_owned()),
+            ]
+        };
+        assert_eq!(
+            axis.to_list(),
+            vec![tuple("x", "sum"), tuple("x", "mean"), tuple("y", "count"),]
+        );
+        assert_eq!(
+            result.column_order,
+            vec![
+                "x_sum".to_string(),
+                "x_mean".to_string(),
+                "y_count".to_string()
+            ]
+        );
+        assert_eq!(result.columns["x_sum"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(result.columns["x_mean"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(result.columns["x_sum"].values()[1], Scalar::Float64(30.0));
+
+        // A repeated func needs a duplicate output label (ih4t0): fail closed,
+        // never silently collapse two requested columns into one.
+        let repeated = df
+            .groupby(&["grp"])
+            .unwrap()
+            .agg_dict_list(&[("x".to_string(), vec!["sum".to_string(), "sum".to_string()])]);
+        assert!(
+            matches!(repeated, Err(FrameError::CompatibilityRejected(_))),
+            "repeated (col, func) must be rejected, got {repeated:?}"
+        );
+    }
+
     #[test]
     fn dataframe_groupby_agg_dict_list_per_column_funcs() {
         let df = DataFrame::from_series(vec![
@@ -121142,10 +121314,10 @@ mod tests {
         ])
         .unwrap();
 
-        let mut func_map: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        func_map.insert("x".to_string(), vec!["sum".to_string(), "mean".to_string()]);
-        func_map.insert("y".to_string(), vec!["min".to_string(), "max".to_string()]);
+        let func_map = vec![
+            ("x".to_string(), vec!["sum".to_string(), "mean".to_string()]),
+            ("y".to_string(), vec!["min".to_string(), "max".to_string()]),
+        ];
 
         let result = df
             .groupby(&["grp"])
@@ -121153,8 +121325,7 @@ mod tests {
             .agg_dict_list(&func_map)
             .unwrap();
 
-        // Order follows self.df.column_order (grp, x, y). grp is skipped
-        // (not in func_map), so we get x_sum, x_mean, y_min, y_max.
+        // Request order; here it coincides with frame order.
         assert_eq!(
             result.column_order,
             vec![
@@ -121195,9 +121366,7 @@ mod tests {
         ])
         .unwrap();
 
-        let mut func_map: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        func_map.insert("val".to_string(), vec!["sum".to_string()]);
+        let func_map = vec![("val".to_string(), vec!["sum".to_string()])];
 
         let result = df
             .groupby(&["grp"])
@@ -121216,9 +121385,7 @@ mod tests {
         ])
         .unwrap();
 
-        let mut func_map: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        func_map.insert("val".to_string(), Vec::new());
+        let func_map = vec![("val".to_string(), Vec::new())];
 
         let err = df
             .groupby(&["grp"])
@@ -121236,9 +121403,7 @@ mod tests {
         ])
         .unwrap();
 
-        let mut func_map: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        func_map.insert("grp".to_string(), vec!["count".to_string()]);
+        let func_map = vec![("grp".to_string(), vec!["count".to_string()])];
 
         let err = df
             .groupby(&["grp"])
@@ -121249,9 +121414,19 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_groupby_agg_dict_list_preserves_original_column_order() {
-        // func_map insertion order is arbitrary (HashMap); output order
-        // must match the original df.column_order.
+    fn dataframe_groupby_agg_dict_list_follows_request_order_not_frame_order() {
+        // MEASURED, live pandas 2.2.3, on THIS test's exact shape — frame order
+        // is (grp, first_col, second_col) and the request asks for second_col
+        // first:
+        //   df.groupby('grp').agg({'second_col':['sum'],'first_col':['sum']})
+        //     .columns -> [('second_col','sum'), ('first_col','sum')], nlevels 2
+        // so the REQUEST wins, not the frame.
+        //
+        // This test previously asserted the opposite, and it was not wrong to
+        // write: the old signature took a `HashMap`, whose iteration order is
+        // arbitrary, so frame order was the only reproducible answer available.
+        // The fix is the signature — ordered pairs can express the request —
+        // and this assertion inverts with it. (br-frankenpandas-nv5ct)
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
@@ -121274,12 +121449,11 @@ mod tests {
         ])
         .unwrap();
 
-        let mut func_map: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        // Insert second_col first to make sure HashMap iteration order
-        // doesn't leak into output.
-        func_map.insert("second_col".to_string(), vec!["sum".to_string()]);
-        func_map.insert("first_col".to_string(), vec!["sum".to_string()]);
+        // Ask for second_col FIRST, against the frame's order.
+        let func_map = vec![
+            ("second_col".to_string(), vec!["sum".to_string()]),
+            ("first_col".to_string(), vec!["sum".to_string()]),
+        ];
 
         let result = df
             .groupby(&["grp"])
@@ -121288,7 +121462,27 @@ mod tests {
             .unwrap();
         assert_eq!(
             result.column_order,
-            vec!["first_col_sum".to_string(), "second_col_sum".to_string()]
+            vec!["second_col_sum".to_string(), "first_col_sum".to_string()],
+            "the request order wins over the frame's column order"
+        );
+        // The two-level axis follows the same order.
+        let multiindex = result
+            .column_multiindex
+            .as_ref()
+            .expect("agg(dict-of-lists) carries a two-level column axis");
+        assert_eq!(multiindex.nlevels(), 2);
+        assert_eq!(
+            multiindex.to_list(),
+            vec![
+                vec![
+                    IndexLabel::Utf8("second_col".to_owned()),
+                    IndexLabel::Utf8("sum".to_owned())
+                ],
+                vec![
+                    IndexLabel::Utf8("first_col".to_owned()),
+                    IndexLabel::Utf8("sum".to_owned())
+                ],
+            ]
         );
     }
 
@@ -121489,9 +121683,10 @@ mod tests {
         ])
         .unwrap();
 
-        let mut func_map = std::collections::HashMap::new();
-        func_map.insert("x".to_string(), vec!["sum".to_string(), "mean".to_string()]);
-        func_map.insert("y".to_string(), vec!["count".to_string()]);
+        let func_map = vec![
+            ("x".to_string(), vec!["sum".to_string(), "mean".to_string()]),
+            ("y".to_string(), vec!["count".to_string()]),
+        ];
 
         let result = df.groupby(&["grp"]).unwrap().agg_multi(&func_map).unwrap();
         // Group "a": x=[1,3], y=[100,200]
@@ -121531,8 +121726,7 @@ mod tests {
         ])
         .unwrap();
 
-        let mut func_map = std::collections::HashMap::new();
-        func_map.insert("grp".to_string(), vec!["sum".to_string()]);
+        let func_map = vec![("grp".to_string(), vec!["sum".to_string()])];
 
         let err = df.groupby(&["grp"]).unwrap().agg_multi(&func_map);
         assert!(err.is_err());
@@ -140725,11 +140919,43 @@ mod tests {
         .unwrap();
         let gb = df.groupby(&["g"]).unwrap();
         let result = gb.ohlc().unwrap();
-        // Only one value column, so no prefix
-        assert_eq!(result.columns()["open"].values()[0], Scalar::Float64(10.0));
-        assert_eq!(result.columns()["high"].values()[0], Scalar::Float64(15.0));
-        assert_eq!(result.columns()["low"].values()[0], Scalar::Float64(10.0));
-        assert_eq!(result.columns()["close"].values()[0], Scalar::Float64(12.0));
+        // PREFIXED even at one value column. MEASURED, live pandas 2.2.3:
+        //   DataFrame({'g':…,'price':…}).groupby('g').ohlc().columns
+        //     -> nlevels 2, [('price','open'), ('price','high'),
+        //                    ('price','low'),  ('price','close')]
+        // The bare ['open',…] axis belongs to SeriesGroupBy.ohlc (gb['price']),
+        // a different entry point. Dropping the prefix here also left these
+        // storage keys contradicting this frame's OWN column_multiindex, which
+        // has always emitted ('price','open')…. (br-frankenpandas-nv5ct)
+        assert_eq!(
+            result.columns()["price_open"].values()[0],
+            Scalar::Float64(10.0)
+        );
+        assert_eq!(
+            result.columns()["price_high"].values()[0],
+            Scalar::Float64(15.0)
+        );
+        assert_eq!(
+            result.columns()["price_low"].values()[0],
+            Scalar::Float64(10.0)
+        );
+        assert_eq!(
+            result.columns()["price_close"].values()[0],
+            Scalar::Float64(12.0)
+        );
+        // The axis and the storage keys now agree.
+        let axis = result
+            .column_multiindex()
+            .expect("groupby.ohlc() carries a two-level column axis");
+        assert_eq!(axis.nlevels(), 2);
+        assert_eq!(
+            axis.to_list()[0],
+            vec![
+                IndexLabel::Utf8("price".to_owned()),
+                IndexLabel::Utf8("open".to_owned())
+            ]
+        );
+        assert_eq!(result.column_order.len(), axis.len());
     }
 
     #[test]

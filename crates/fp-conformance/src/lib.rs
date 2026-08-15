@@ -1704,6 +1704,63 @@ pub struct FixtureCategoricalColumn {
     pub ordered: Option<bool>,
 }
 
+/// `{column: [func, ...]}` in the order the fixture wrote it.
+///
+/// Ordered pairs rather than a map, so the request order pandas' agg column axis
+/// follows survives deserialization. (br-frankenpandas-nv5ct)
+pub type OrderedFuncMap = Vec<(String, Vec<String>)>;
+
+/// Read a `{column: [func, ...]}` JSON object into ordered pairs.
+///
+/// `serde_json` streams an object to a `MapAccess` visitor in DOCUMENT order, so
+/// collecting the entries here preserves what the fixture wrote — which
+/// `BTreeMap` (sorted) and `HashMap` (arbitrary) both destroy. That order is
+/// load-bearing: pandas' `agg(dict-of-lists)` column axis follows the request,
+/// so `{'y': [...], 'x': [...]}` must not come back x-first.
+/// (br-frankenpandas-nv5ct)
+fn deserialize_ordered_func_map<'de, D>(deserializer: D) -> Result<Option<OrderedFuncMap>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OrderedFuncMapVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for OrderedFuncMapVisitor {
+        type Value = Option<OrderedFuncMap>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map of column name to list of aggregation names")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_map(OrderedFuncMapVisitor)
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut pairs = Vec::with_capacity(access.size_hint().unwrap_or(0));
+            while let Some((column, funcs)) = access.next_entry::<String, Vec<String>>()? {
+                pairs.push((column, funcs));
+            }
+            Ok(Some(pairs))
+        }
+    }
+
+    deserializer.deserialize_option(OrderedFuncMapVisitor)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixtureMultiIndex {
     pub tuples: Vec<Vec<IndexLabel>>,
@@ -1719,6 +1776,15 @@ pub struct FixtureExpectedDataFrame {
     pub column_order: Option<Vec<String>>,
     #[serde(default)]
     pub row_multiindex: Option<FixtureMultiIndex>,
+    /// The COLUMN axis when pandas returns more than one level, e.g.
+    /// `df.groupby(k).agg({'x': ['sum','mean']})` -> `[('x','sum'),('x','mean')]`.
+    ///
+    /// Absent means a flat axis, so every existing fixture keeps its meaning.
+    /// Without this key the format could not express pandas' answer for the
+    /// dict-of-lists agg at all, which is why `fp_p2d_430` diverged as a column
+    /// SET mismatch against stringified tuples. (br-frankenpandas-nv5ct)
+    #[serde(default)]
+    pub column_multiindex: Option<FixtureMultiIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1808,8 +1874,15 @@ pub struct PacketFixture {
     pub groupby_columns: Option<Vec<String>>,
     #[serde(default)]
     pub groupby_observed: Option<bool>,
-    #[serde(default)]
-    pub groupby_agg_multi: Option<BTreeMap<String, Vec<String>>>,
+    /// `{column: [func, ...]}` in the order the FIXTURE WROTE IT.
+    ///
+    /// Ordered pairs, not a `BTreeMap`: pandas' agg column axis follows the
+    /// request order, and a `BTreeMap` sorts the keys, so the format itself
+    /// could not express the request. Deserialized from the same JSON object
+    /// shape as before via [`deserialize_ordered_func_map`], so no fixture file
+    /// changes. (br-frankenpandas-nv5ct)
+    #[serde(default, deserialize_with = "deserialize_ordered_func_map")]
+    pub groupby_agg_multi: Option<OrderedFuncMap>,
     #[serde(default)]
     pub frame: Option<FixtureDataFrame>,
     #[serde(default)]
@@ -3400,8 +3473,9 @@ struct OracleRequest {
     groupby_columns: Option<Vec<String>>,
     #[serde(default)]
     groupby_observed: Option<bool>,
-    #[serde(default)]
-    groupby_agg_multi: Option<BTreeMap<String, Vec<String>>>,
+    // Ordered pairs, same reason as the public field (br-frankenpandas-nv5ct).
+    #[serde(default, deserialize_with = "deserialize_ordered_func_map")]
+    groupby_agg_multi: Option<OrderedFuncMap>,
     frame: Option<FixtureDataFrame>,
     #[serde(default)]
     expr: Option<String>,
@@ -8854,11 +8928,12 @@ pub fn fuzz_groupby_agg_bytes(input: &[u8]) -> Result<(), String> {
             fuzz_validate_groupby_agg_result("agg", groupby.agg(&func_map), expected_groups, 1)
         }
         2 => {
-            let mut func_map = HashMap::new();
-            func_map.insert(
+            // Ordered pairs, not a map: agg_dict_list's column axis follows the
+            // REQUEST order (br-frankenpandas-nv5ct).
+            let func_map = vec![(
                 "val".to_owned(),
                 funcs.iter().map(|func| (*func).to_owned()).collect(),
-            );
+            )];
             fuzz_validate_groupby_agg_result(
                 "agg_dict_list",
                 groupby.agg_dict_list(&func_map),
@@ -14415,17 +14490,14 @@ fn require_resample_freq<'a>(
 fn require_groupby_agg_multi(
     fixture: &PacketFixture,
     operation_name: &str,
-) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+) -> Result<OrderedFuncMap, String> {
     let Some(func_map) = fixture.groupby_agg_multi.as_ref() else {
         return Err(format!(
             "groupby_agg_multi is required for {operation_name}"
         ));
     };
 
-    Ok(func_map
-        .iter()
-        .map(|(column, funcs)| (column.clone(), funcs.clone()))
-        .collect())
+    Ok(func_map.clone())
 }
 
 fn resolve_groupby_observed(fixture: &PacketFixture) -> bool {
@@ -17868,6 +17940,21 @@ fn compare_dataframe_expected(
         return Err(format!(
             "dataframe row_multiindex mismatch: actual={actual_row_multiindex:?}, expected={:?}",
             expected.row_multiindex
+        ));
+    }
+
+    // Column axis, sibling of the row check above (br-frankenpandas-nv5ct).
+    // Compared unconditionally in BOTH directions: a fixture pinning a
+    // two-level axis must fail on a flat actual, AND a flat fixture must fail on
+    // an actual that grew one, or the key would only ever be decorative.
+    let actual_column_multiindex = actual
+        .column_multiindex()
+        .map(multiindex_to_fixture)
+        .transpose()?;
+    if actual_column_multiindex != expected.column_multiindex {
+        return Err(format!(
+            "dataframe column_multiindex mismatch: actual={actual_column_multiindex:?}, expected={:?}",
+            expected.column_multiindex
         ));
     }
 
