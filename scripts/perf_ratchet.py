@@ -119,17 +119,40 @@ COMPARABILITY_FIELDS = (
 
 
 def comparability_identity(doc: dict[str, Any]) -> dict[str, Any] | None:
-    """The host facts two runs must agree on, or None if the run names no host.
+    """The facts two runs must agree on, or None if the run cannot be placed.
 
     None and a populated dict are BOTH refusals when they disagree; the caller
     must not treat a missing fingerprint as a wildcard that matches anything.
+
+    THE HARNESS IS PART OF THE IDENTITY, not just the machine
+    (br-frankenpandas-s7x8z). MEASURED BY THE FLEET 2026-08-15: frankenlibc ran
+    malloc/free on ONE worker (hz2) under two separately-sanctioned harnesses and
+    got 5.9459x and 12.385414x — a ~2x spread — with BOTH A/A nulls passing in
+    tolerance. So a passing null certifies neither the machine nor the
+    instrument, and a same-worker comparison across two harnesses is exactly as
+    meaningless as a cross-worker one.
+
+    That hazard is live in this repo, not imported: `artifacts/bench` holds
+    18 DISTINCT `harness_source.sha256` values, and `thinkstation1` alone carries
+    rows from three different harnesses.
+
+    Only the harness's `sha256` counts, never its `path`: the same harness
+    (f0a5cef1…) appears banked as both `/opt/fpbench/…` and `/data/projects/…`,
+    so keying on the path would refuse a run against itself purely for having
+    been staged somewhere else on the worker.
     """
     fingerprint = doc.get("host_fingerprint")
     if not isinstance(fingerprint, dict):
         return None
     if not fingerprint.get("host_identity"):
         return None
-    identity: dict[str, Any] = {}
+
+    harness = doc.get("harness_source")
+    harness_sha = harness.get("sha256") if isinstance(harness, dict) else None
+    if not harness_sha:
+        return None
+
+    identity: dict[str, Any] = {"harness_sha256": str(harness_sha)}
     for field in COMPARABILITY_FIELDS:
         value = fingerprint.get(field)
         # Order within the ISA set is an enumeration detail, not a machine
@@ -142,11 +165,12 @@ def comparability_identity(doc: dict[str, Any]) -> dict[str, Any] | None:
 
 def describe_host(identity: dict[str, Any] | None) -> str:
     if identity is None:
-        return "unknown (run carries no host_fingerprint.host_identity)"
+        return "unknown (run names no host_fingerprint.host_identity or no harness_source.sha256)"
     return (
         f"{identity.get('host_identity')} "
         f"[{identity.get('cpu_model')}, "
-        f"{identity.get('logical_threads')} logical threads]"
+        f"{identity.get('logical_threads')} logical threads] "
+        f"under harness {str(identity.get('harness_sha256'))[:12]}"
     )
 
 
@@ -162,14 +186,18 @@ def host_comparability(baseline: dict[str, Any], new: dict[str, Any]) -> dict[st
             if identity is None
         ]
         reason = (
-            f"{' and '.join(unplaceable)} names no worker, so the two runs cannot be "
-            f"placed on the same machine"
+            f"{' and '.join(unplaceable)} names no worker and/or no harness, so the two "
+            f"runs cannot be shown to have measured the same thing on the same machine"
         )
         comparable = False
     elif baseline_identity != new_identity:
+        # Iterate the IDENTITY's own keys, not COMPARABILITY_FIELDS — the latter
+        # is only the host half, so a pure HARNESS mismatch (the frankenlibc
+        # 5.9459x vs 12.385414x shape) would have reported an empty differing
+        # list and read as an unexplained refusal. (br-frankenpandas-s7x8z)
         differing = sorted(
             field
-            for field in COMPARABILITY_FIELDS
+            for field in set(baseline_identity) | set(new_identity)
             if baseline_identity.get(field) != new_identity.get(field)
         )
         reason = (
@@ -189,8 +217,9 @@ def host_comparability(baseline: dict[str, Any], new: dict[str, Any]) -> dict[st
         "remedy": (
             None
             if comparable
-            else "re-measure the candidate on the baseline's worker, or re-baseline "
-            "on the candidate's; do not compare across workers"
+            else "re-measure the candidate on the baseline's worker WITH the baseline's "
+            "harness, or re-baseline on the candidate's; do not compare across workers "
+            "or across harnesses"
         ),
     }
 
@@ -451,6 +480,87 @@ def run_ratchet(baseline_path: Path, new_path: Path) -> tuple[str, dict[str, Any
     return verdict, report
 
 
+def scope_annotation(doc: dict[str, Any]) -> dict[str, Any]:
+    """The comparability verdict for ONE banked artifact, as a storable block.
+
+    Derived from `comparability_identity`, so the annotation written into an
+    artifact can never disagree with the gate that refuses comparisons — the tool
+    that DEFINES comparability is the tool that records it. Purely a function of
+    the document (no timestamp), so re-running is idempotent and produces no
+    diff churn.
+    """
+    fingerprint = doc.get("host_fingerprint")
+    harness = doc.get("harness_source")
+    names_worker = bool(
+        isinstance(fingerprint, dict) and fingerprint.get("host_identity")
+    )
+    names_harness = bool(isinstance(harness, dict) and harness.get("sha256"))
+    identity = comparability_identity(doc)
+
+    if identity is not None:
+        note = (
+            "Names both its worker and its harness, so it may be compared to "
+            "another row that names the SAME pair."
+        )
+        status = "comparable"
+    else:
+        missing = [
+            label
+            for label, present in (("worker", names_worker), ("harness", names_harness))
+            if not present
+        ]
+        note = (
+            f"NOT COMPARABLE TO ANY OTHER ROW: names no {' and no '.join(missing)}. "
+            "The measurement itself is honest and is neither deleted nor "
+            "regenerated; it simply cannot be placed, so no ratio may be drawn "
+            "between it and another row."
+        )
+        status = "worker_scoped_unknown"
+
+    return {
+        "status": status,
+        "names_worker": names_worker,
+        "names_harness": names_harness,
+        "identity": identity,
+        "note": note,
+        "bead": "br-frankenpandas-s7x8z",
+    }
+
+
+def flag_scope(paths: list[Path], apply: bool) -> dict[str, int]:
+    """Annotate banked ratio artifacts with their comparability scope.
+
+    Retro-flagging, per the 2026-08-15 fleet directive and this bead's gap 1:
+    a row whose two arms cannot be shown to have run on the same machine under
+    the same harness is marked `worker_scoped_unknown` rather than silently
+    trusted. Nothing is deleted and nothing is regenerated.
+    """
+    counts: dict[str, int] = {
+        "comparable": 0,
+        "worker_scoped_unknown": 0,
+        "unchanged": 0,
+        "unparseable": 0,
+    }
+    for path in paths:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            counts["unparseable"] += 1
+            continue
+        if not isinstance(doc, dict) or "results" not in doc:
+            counts["unparseable"] += 1
+            continue
+        annotation = scope_annotation(doc)
+        counts[annotation["status"]] += 1
+        if doc.get("comparability_scope") == annotation:
+            counts["unchanged"] += 1
+            continue
+        if apply:
+            doc["comparability_scope"] = annotation
+            path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    return counts
+
+
 def update_baseline(new_path: Path, baseline_name: str = "latest") -> None:
     """Copy new results as the new baseline."""
     new = load_json(new_path)
@@ -479,7 +589,30 @@ def main():
     parser.add_argument("--baseline-name", default="latest", help="Name for baseline file")
     parser.add_argument("--output", type=Path, help="Write report to this file")
     parser.add_argument("--json", action="store_true", help="Output JSON instead of text")
+    parser.add_argument(
+        "--flag-scope",
+        type=Path,
+        help="Annotate every banked ratio artifact under this directory with its "
+        "comparability scope (worker + harness). Reports without --apply-scope.",
+    )
+    parser.add_argument(
+        "--apply-scope",
+        action="store_true",
+        help="Write the --flag-scope annotations instead of only reporting them.",
+    )
     args = parser.parse_args()
+
+    if args.flag_scope:
+        paths = sorted(args.flag_scope.glob("*.json"))
+        counts = flag_scope(paths, args.apply_scope)
+        verb = "annotated" if args.apply_scope else "would annotate"
+        print(f"{args.flag_scope}: {len(paths)} artifact(s)")
+        print(f"  comparable (names worker AND harness): {counts['comparable']}")
+        print(f"  worker_scoped_unknown                : {counts['worker_scoped_unknown']}")
+        print(f"  already current (no rewrite)         : {counts['unchanged']}")
+        print(f"  unparseable / not a results doc      : {counts['unparseable']}")
+        print(f"  {verb}: {counts['comparable'] + counts['worker_scoped_unknown']}")
+        return 0
 
     if args.update_baseline:
         update_baseline(args.update_baseline, args.baseline_name)
@@ -508,12 +641,13 @@ def main():
 
         comparability = report.get("host_comparability", {})
         if not comparability.get("comparable", True):
-            print("REFUSED: baseline and candidate are not worker-comparable.")
+            print("REFUSED: baseline and candidate are not comparable (worker + harness).")
             print(f"  {comparability.get('reason')}")
             print(f"  Remedy: {comparability.get('remedy')}")
             print(
-                "\n  No workload or category comparison was computed. A cross-worker"
-                "\n  delta measures a different machine, not a code change."
+                "\n  No workload or category comparison was computed. A cross-worker delta"
+                "\n  measures a different machine and a cross-harness delta measures a"
+                "\n  different instrument — neither measures a code change."
                 "\n  (br-frankenpandas-s7x8z)"
             )
             print(f"\nVerdict: {verdict}")

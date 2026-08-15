@@ -30,7 +30,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from perf_ratchet import comparability_identity, host_comparability, run_ratchet  # noqa: E402
+from perf_ratchet import (  # noqa: E402
+    comparability_identity,
+    host_comparability,
+    run_ratchet,
+    scope_annotation,
+)
 
 THINKSTATION = {
     "host_identity": "thinkstation1",
@@ -55,6 +60,22 @@ EPYC_VM = {
 }
 
 
+# Two distinct harnesses, the shape frankenlibc measured a ~2x spread between on
+# ONE worker. Only the sha256 is identity; `path` deliberately varies below
+# because the same harness is banked in this repo under both /opt/fpbench/... and
+# /data/projects/... (br-frankenpandas-s7x8z).
+HARNESS_A = {
+    "sha256": "f0a5cef146a089144075b01fb07a73bec78b681bc171fe51cd622a3f75dc7d9e",
+    "bytes": 142435,
+    "path": "/opt/fpbench/vs_pandas_harness.py",
+}
+HARNESS_B = {
+    "sha256": "cc98cbe5d187b262764114bac407553ed07aecd87de7aa1041e1e9a5b85a371e",
+    "bytes": 63051,
+    "path": "/data/projects/frankenpandas/benches/vs_pandas_harness.py",
+}
+
+
 def _row(p50: float) -> dict:
     return {
         "workload": "groupby_sum",
@@ -66,10 +87,12 @@ def _row(p50: float) -> dict:
     }
 
 
-def _doc(p50: float, fingerprint: dict | None) -> dict:
+def _doc(p50: float, fingerprint: dict | None, harness: dict | None = HARNESS_A) -> dict:
     doc: dict = {"results": [_row(p50)]}
     if fingerprint is not None:
         doc["host_fingerprint"] = fingerprint
+    if harness is not None:
+        doc["harness_source"] = harness
     return doc
 
 
@@ -192,6 +215,92 @@ def test_governor_is_provenance_not_a_gate():
     other_governor["cpu_governors"] = ["schedutil"]
     verdict, _ = _ratchet(_doc(100.0, THINKSTATION), _doc(101.0, other_governor))
     assert verdict == "ALLOW"
+
+
+def test_same_worker_different_harness_refuses():
+    """THE frankenlibc CASE, and the reason worker identity alone is not enough.
+
+    MEASURED BY THE FLEET 2026-08-15: malloc/free on ONE worker (hz2) under two
+    separately-sanctioned harnesses read 5.9459x and 12.385414x — a ~2x spread —
+    with BOTH A/A nulls passing in tolerance. Same machine, same primitive,
+    different instrument, and the null caught none of it.
+
+    Fails any implementation that keys comparability on the host alone, which is
+    what this gate did before the harness half was added.
+    """
+    verdict, report = _ratchet(
+        _doc(100.0, THINKSTATION, HARNESS_A), _doc(150.0, THINKSTATION, HARNESS_B)
+    )
+    assert verdict == "QUARANTINE", report
+    assert report["host_comparability"]["comparable"] is False
+    # The refusal must SAY it was the harness, not report an empty diff.
+    assert "harness_sha256" in report["host_comparability"]["reason"], report
+
+
+def test_missing_harness_is_not_a_wildcard():
+    """1057/1058 tests/artifacts/perf rows name no harness at all.
+
+    A run that cannot name its instrument is uncomparable for the same reason a
+    run that cannot name its machine is — otherwise `None == None` would declare
+    two unattributable runs comparable.
+    """
+    for baseline_h, candidate_h in ((None, HARNESS_A), (HARNESS_A, None), (None, None)):
+        verdict, report = _ratchet(
+            _doc(100.0, THINKSTATION, baseline_h), _doc(101.0, THINKSTATION, candidate_h)
+        )
+        assert verdict == "QUARANTINE", (baseline_h, candidate_h, report)
+        assert report["host_comparability"]["comparable"] is False
+
+
+def test_same_harness_staged_at_a_different_path_still_compares():
+    """Only the sha256 is identity; the path is not.
+
+    This repo banks the SAME harness (f0a5cef1…) as both /opt/fpbench/… and
+    /data/projects/…, so keying on the path would refuse a run against itself
+    purely for having been staged elsewhere on the worker — a false refusal,
+    which trains the reader to ignore QUARANTINE just as surely as a false pass.
+    """
+    relocated = dict(HARNESS_A)
+    relocated["path"] = "/data/projects/frankenpandas/benches/vs_pandas_harness.py"
+    verdict, report = _ratchet(
+        _doc(100.0, THINKSTATION, HARNESS_A), _doc(101.0, THINKSTATION, relocated)
+    )
+    assert verdict == "ALLOW", report
+
+
+def test_scope_annotation_agrees_with_the_gate_that_refuses():
+    """The retro-flag must never contradict the gate.
+
+    `scope_annotation` is derived from the SAME `comparability_identity` the
+    ratchet refuses on, so an artifact can never be stamped "comparable" while
+    the gate would quarantine it. That is the whole reason the flagger lives in
+    this file instead of being a one-off script: two implementations of
+    "comparable" would drift, and the stamped one is the one humans would quote.
+    """
+    placed = _doc(100.0, THINKSTATION, HARNESS_A)
+    annotation = scope_annotation(placed)
+    assert annotation["status"] == "comparable"
+    assert annotation["names_worker"] and annotation["names_harness"]
+    assert annotation["identity"] == comparability_identity(placed)
+
+    for fingerprint, harness in ((None, HARNESS_A), (THINKSTATION, None), (None, None)):
+        unplaced = _doc(100.0, fingerprint, harness)
+        annotation = scope_annotation(unplaced)
+        assert annotation["status"] == "worker_scoped_unknown", (fingerprint, harness)
+        assert annotation["identity"] is None
+        assert comparability_identity(unplaced) is None
+        # It must say WHICH half is missing, or the flag is not actionable.
+        if fingerprint is None:
+            assert "worker" in annotation["note"]
+        if harness is None:
+            assert "harness" in annotation["note"]
+
+
+def test_scope_annotation_is_idempotent():
+    """Purely a function of the document — no timestamp, so re-flagging the
+    corpus produces no diff churn and cannot be mistaken for new evidence."""
+    doc = _doc(100.0, THINKSTATION, HARNESS_A)
+    assert scope_annotation(doc) == scope_annotation(doc)
 
 
 def test_comparability_is_symmetric():

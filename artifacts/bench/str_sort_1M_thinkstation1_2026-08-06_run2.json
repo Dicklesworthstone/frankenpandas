@@ -3582,5 +3582,30 @@
       16
     ],
     "maximum_busy_fraction": 0.2
+  },
+  "comparability_scope": {
+    "status": "comparable",
+    "names_worker": true,
+    "names_harness": true,
+    "identity": {
+      "harness_sha256": "226ed4059793689cfbed7d0074d6b40d65ad3ee965c42c5801adc4ac2c17a5ae",
+      "host_identity": "thinkstation1",
+      "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+      "logical_threads": 64,
+      "threads_per_core": 2,
+      "affinity_logical_cpu_cap": 64,
+      "runtime_detected_isa_features": [
+        "aes",
+        "avx",
+        "avx2",
+        "bmi1",
+        "bmi2",
+        "fma",
+        "sse2",
+        "vaes"
+      ]
+    },
+    "note": "Names both its worker and its harness, so it may be compared to another row that names the SAME pair.",
+    "bead": "br-frankenpandas-s7x8z"
   }
 }
