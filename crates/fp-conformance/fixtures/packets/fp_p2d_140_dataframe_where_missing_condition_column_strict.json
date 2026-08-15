@@ -5,39 +5,114 @@
   "operation": "dataframe_where",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "206ee9161cebf99c916b2c24ee262cfc767e236d55d26cf322c424d01d8838a1",
+    "generated_at": "2026-08-15T19:58:24Z"
   },
-  "fill_value": { "kind": "int64", "value": -1 },
+  "fill_value": {
+    "kind": "int64",
+    "value": -1
+  },
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
-    "column_order": ["a", "b"],
+    "column_order": [
+      "a",
+      "b"
+    ],
     "columns": {
       "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        }
       ],
       "b": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
+        {
+          "kind": "int64",
+          "value": 3
+        },
+        {
+          "kind": "int64",
+          "value": 4
+        }
       ]
     }
   },
   "frame_right": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
-    "column_order": ["a"],
+    "column_order": [
+      "a"
+    ],
     "columns": {
       "a": [
-        { "kind": "bool", "value": true },
-        { "kind": "bool", "value": false }
+        {
+          "kind": "bool",
+          "value": true
+        },
+        {
+          "kind": "bool",
+          "value": false
+        }
       ]
     }
   },
-  "expected_error_contains": "condition missing column"
+  "expected_frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "columns": {
+      "a": [
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": -1
+        }
+      ],
+      "b": [
+        {
+          "kind": "int64",
+          "value": -1
+        },
+        {
+          "kind": "int64",
+          "value": -1
+        }
+      ]
+    },
+    "column_order": [
+      "a",
+      "b"
+    ]
+  }
 }

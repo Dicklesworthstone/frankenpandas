@@ -63917,6 +63917,60 @@ impl DataFrame {
         ))
     }
 
+    /// Align a `where`/`mask` condition column onto this frame's rows.
+    ///
+    /// `None` in the result means the condition is ABSENT OR UNDECIDABLE for
+    /// that cell — the column is missing from `cond`, the row did not align, or
+    /// the cell is not a `Bool`. Every such cell takes the else-branch
+    /// (`other`), for BOTH `where` and `mask`.
+    ///
+    /// A MISSING CONDITION COLUMN IS NOT AN ERROR. pandas reindexes `cond` onto
+    /// the frame's BOTH axes, so a column `cond` does not have simply becomes
+    /// all-absent. MEASURED, live pandas 2.2.3, `df = {'a':[1,2],'b':[3,4]}`:
+    ///
+    /// ```text
+    ///   cond = {'a':[True,False]}          (no 'b' at all)
+    ///     df.where(cond, -1) -> a [1,-1]   b [-1,-1]   stays int64
+    ///     df.mask (cond, -1) -> a [-1,2]   b [-1,-1]
+    ///   cond = {'a':[True],'b':[True]} on index [0]    (no row 1)
+    ///     df.where(cond, -1) -> a [1,-1]   b [3,-1]
+    ///   cond carrying an EXTRA column 'c'              -> 'c' IGNORED
+    /// ```
+    ///
+    /// Both ops answer `other` for an absent cell, and they differ only on a
+    /// PRESENT value — `where` keeps on `True`, `mask` keeps on `False`. That
+    /// asymmetry is why `mask` is `where(~cond)` with the inversion applied
+    /// BEFORE alignment: a missing column never reaches the `~`, which is also
+    /// why pandas raises `TypeError: bad operand type for unary ~: 'float'` for
+    /// `mask` when a PRESENT cond cell is a float NaN but not when the whole
+    /// column is absent. FrankenPandas routes that present-NaN case to `other`
+    /// like `where` rather than raising; no fixture covers it and adding a raise
+    /// would be an unmeasured error-surface change.
+    ///
+    /// The extra column is ignored for free because every caller iterates
+    /// `self.column_order`, never the condition's.
+    ///
+    /// (br-frankenpandas-xg7hf)
+    fn aligned_condition_cells(
+        cond: &Self,
+        col_name: &str,
+        positions: &[Option<usize>],
+        rows: usize,
+    ) -> Result<Vec<Option<bool>>, FrameError> {
+        let Some(cond_col) = cond.columns.get(col_name) else {
+            return Ok(vec![None; rows]);
+        };
+        let aligned = cond_col.reindex_by_positions(positions)?;
+        Ok(aligned
+            .values()
+            .iter()
+            .map(|cell| match cell {
+                Scalar::Bool(flag) => Some(*flag),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// Matches `df.where(cond, other)`. Applies element-wise to each column.
     /// If `other` is `None`, replaced values become NaN.
     pub fn where_cond(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
@@ -63936,22 +63990,28 @@ impl DataFrame {
                 .columns
                 .get(col_name)
                 .expect("column in order must exist");
-            let cond_col = cond.columns.get(col_name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "where: condition missing column '{col_name}'"
-                ))
-            })?;
-            let aligned_cond = cond_col.reindex_by_positions(&plan.right_positions)?;
+            // Keep iff the condition is PRESENT and True; absent/undecidable
+            // takes `other`, and a missing column is all-absent rather than an
+            // error. The old `Scalar::Null(_) => Null(NaN)` arm answered NaN
+            // where pandas answers `other` — invisible whenever `other` is None,
+            // because then the fill IS NaN. (br-frankenpandas-xg7hf)
+            let cond_cells = Self::aligned_condition_cells(
+                cond,
+                col_name,
+                &plan.right_positions,
+                data_col.len(),
+            )?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(aligned_cond.values())
-                .map(|(val, c)| match c {
-                    Scalar::Bool(true) => val.clone(),
-                    Scalar::Bool(false) => fill.clone(),
-                    Scalar::Null(_) => Scalar::Null(NullKind::NaN),
-                    _ => fill.clone(),
+                .zip(cond_cells)
+                .map(|(val, cell)| {
+                    if cell == Some(true) {
+                        val.clone()
+                    } else {
+                        fill.clone()
+                    }
                 })
                 .collect();
 
@@ -63991,22 +64051,27 @@ impl DataFrame {
                 .columns
                 .get(col_name)
                 .expect("column in order must exist");
-            let cond_col = cond.columns.get(col_name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "mask: condition missing column '{col_name}'"
-                ))
-            })?;
-            let aligned_cond = cond_col.reindex_by_positions(&plan.right_positions)?;
+            // mask keeps on a PRESENT False; everything else — True, absent, or
+            // undecidable — takes `other`. Sibling of `where_cond` above, and
+            // the only difference is which present value keeps.
+            // (br-frankenpandas-xg7hf)
+            let cond_cells = Self::aligned_condition_cells(
+                cond,
+                col_name,
+                &plan.right_positions,
+                data_col.len(),
+            )?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(aligned_cond.values())
-                .map(|(val, c)| match c {
-                    Scalar::Bool(true) => fill.clone(),
-                    Scalar::Bool(false) => val.clone(),
-                    Scalar::Null(_) => Scalar::Null(NullKind::NaN),
-                    _ => val.clone(),
+                .zip(cond_cells)
+                .map(|(val, cell)| {
+                    if cell == Some(false) {
+                        val.clone()
+                    } else {
+                        fill.clone()
+                    }
                 })
                 .collect();
 
@@ -64141,12 +64206,14 @@ impl DataFrame {
 
         for col_name in &self.column_order {
             let data_col = &self.columns[col_name];
-            let cond_col = cond.columns.get(col_name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "where_cond_df: condition missing column '{col_name}'"
-                ))
-            })?;
-            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
+            // A missing cond COLUMN is all-absent, not an error
+            // (br-frankenpandas-xg7hf); the NON-TRUE rule below is unchanged.
+            let cond_cells = Self::aligned_condition_cells(
+                cond,
+                col_name,
+                &cond_plan.right_positions,
+                data_col.len(),
+            )?;
             let aligned_other = other
                 .columns
                 .get(col_name)
@@ -64156,10 +64223,10 @@ impl DataFrame {
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(aligned_cond.values())
+                .zip(cond_cells)
                 .enumerate()
-                .map(|(i, (val, c))| match c {
-                    Scalar::Bool(true) => val.clone(),
+                .map(|(i, (val, cell))| match cell {
+                    Some(true) => val.clone(),
                     // A NON-TRUE condition — False OR MISSING — takes `other`.
                     // The condition is a SELECTOR, and an undecidable selector
                     // falls to the else-branch; pandas never propagates the
@@ -64297,12 +64364,14 @@ impl DataFrame {
 
         for col_name in &self.column_order {
             let data_col = &self.columns[col_name];
-            let cond_col = cond.columns.get(col_name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "mask_df_other: condition missing column '{col_name}'"
-                ))
-            })?;
-            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
+            // A missing cond COLUMN is all-absent, not an error
+            // (br-frankenpandas-xg7hf); the MISSING rule below is unchanged.
+            let cond_cells = Self::aligned_condition_cells(
+                cond,
+                col_name,
+                &cond_plan.right_positions,
+                data_col.len(),
+            )?;
             let aligned_other = other
                 .columns
                 .get(col_name)
@@ -64312,14 +64381,14 @@ impl DataFrame {
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(aligned_cond.values())
+                .zip(cond_cells)
                 .enumerate()
-                .map(|(i, (val, c))| match c {
-                    Scalar::Bool(true) => aligned_other
+                .map(|(i, (val, cell))| match cell {
+                    Some(true) => aligned_other
                         .as_ref()
                         .and_then(|oc| oc.values().get(i).cloned())
                         .unwrap_or(Scalar::Null(NullKind::NaN)),
-                    Scalar::Bool(false) => val.clone(),
+                    Some(false) => val.clone(),
                     // A MISSING condition takes `other`, same as in
                     // `where_cond_df`. mask is where(~cond), and inverting an
                     // undecidable selector leaves it undecidable, so it still
@@ -78149,20 +78218,26 @@ impl DataFrame {
         let mut result_cols = BTreeMap::new();
         for col_name in &self.column_order {
             let data_col = &self.columns[col_name];
-            let cond_col = cond_df.columns.get(col_name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "where_mask_df: condition missing column '{col_name}'"
-                ))
-            })?;
-            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
+            // Keep iff PRESENT and True. Two fixes here
+            // (br-frankenpandas-xg7hf): a missing cond COLUMN is all-absent
+            // rather than an error, and the old `_ => val.clone()` arm KEPT the
+            // value for an absent/undecidable cell where pandas takes `other`.
+            let cond_cells = Self::aligned_condition_cells(
+                cond_df,
+                col_name,
+                &cond_plan.right_positions,
+                data_col.len(),
+            )?;
             let vals: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(aligned_cond.values())
-                .map(|(val, c)| match c {
-                    Scalar::Bool(true) => val.clone(),
-                    Scalar::Bool(false) => other.clone(),
-                    _ => val.clone(),
+                .zip(cond_cells)
+                .map(|(val, cell)| {
+                    if cell == Some(true) {
+                        val.clone()
+                    } else {
+                        other.clone()
+                    }
                 })
                 .collect();
             result_cols.insert(col_name.clone(), Column::from_values(vals)?);
@@ -105838,6 +105913,135 @@ mod tests {
     }
 
     // --- DataFrame::where_cond / mask tests ---
+
+    /// A condition that does not cover the frame is ALIGNED, never refused.
+    ///
+    /// MEASURED, live pandas 2.2.3, `df = DataFrame({'a':[1,2],'b':[3,4]})`:
+    ///
+    /// ```text
+    ///   cond = {'a':[True,False]}                (no 'b' column at all)
+    ///     df.where(cond, -1) -> a [1,-1]  b [-1,-1]   SUCCEEDS, stays int64
+    ///     df.mask (cond, -1) -> a [-1,2]  b [-1,-1]   SUCCEEDS
+    ///   cond = {'a':[True],'b':[True]} on index [0]   (no row 1)
+    ///     df.where(cond, -1) -> a [1,-1]  b [3,-1]
+    ///   cond = {'a':[True,False],'b':[True,True],'c':[False,False]}
+    ///     df.where(cond, -1) -> a [1,-1]  b [3,4]     'c' IGNORED
+    /// ```
+    ///
+    /// FrankenPandas used to answer `CompatibilityRejected("where: condition
+    /// missing column 'b'")` for the first case — four corpus fixtures pinned
+    /// that error.
+    ///
+    /// EVERY ARM KILLS A SPECIFIC WRONG FIX:
+    /// - the missing-COLUMN arms, or the refusal simply comes back;
+    /// - `where` and `mask` are BOTH asserted on the same missing column and
+    ///   both give `other`, so an implementation that treats an absent cell as
+    ///   `False` and then lets `mask` invert it into "keep" fails — absence is
+    ///   not False, it is undecidable, and undecidable takes the else-branch in
+    ///   BOTH directions;
+    /// - the PRESENT-False cells (`a` differs between where and mask) pin that
+    ///   the two ops still disagree where the condition IS decidable, so a fix
+    ///   that routes everything to `other` fails;
+    /// - the missing-ROW arm, which is the second half of the same defect: the
+    ///   old `Scalar::Null(_) => Null(NaN)` arm answered NaN there. It is
+    ///   invisible unless `other` is Some, because with `other` None the fill IS
+    ///   NaN — which is exactly why it survived;
+    /// - the EXTRA-column arm, or an implementation that iterates the
+    ///   condition's columns instead of the frame's silently grows a column.
+    ///
+    /// (br-frankenpandas-xg7hf)
+    #[test]
+    fn dataframe_where_mask_align_a_partial_condition_xg7hf() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let fill = Scalar::Int64(-1);
+        let ints = |col: &Column| col.values().to_vec();
+
+        // MISSING COLUMN 'b'.
+        let partial = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Bool(true), Scalar::Bool(false)])],
+        )
+        .unwrap();
+
+        let wh = df.where_cond(&partial, Some(&fill)).expect("where aligns");
+        assert_eq!(ints(&wh.columns["a"]), vec![Scalar::Int64(1), fill.clone()]);
+        assert_eq!(
+            ints(&wh.columns["b"]),
+            vec![fill.clone(), fill.clone()],
+            "an absent condition column takes other for every row"
+        );
+
+        let mk = df.mask(&partial, Some(&fill)).expect("mask aligns");
+        assert_eq!(
+            ints(&mk.columns["a"]),
+            vec![fill.clone(), Scalar::Int64(2)],
+            "mask keeps on a PRESENT False, so it disagrees with where here"
+        );
+        assert_eq!(
+            ints(&mk.columns["b"]),
+            vec![fill.clone(), fill.clone()],
+            "but AGREES with where on the absent column: absence is not False"
+        );
+
+        // MISSING ROW 1.
+        let short = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into()]),
+            BTreeMap::from([
+                (
+                    "a".to_owned(),
+                    Column::from_values(vec![Scalar::Bool(true)]).unwrap(),
+                ),
+                (
+                    "b".to_owned(),
+                    Column::from_values(vec![Scalar::Bool(true)]).unwrap(),
+                ),
+            ]),
+            vec!["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+        let wh_short = df
+            .where_cond(&short, Some(&fill))
+            .expect("where aligns rows");
+        assert_eq!(
+            ints(&wh_short.columns["a"]),
+            vec![Scalar::Int64(1), fill.clone()]
+        );
+        assert_eq!(
+            ints(&wh_short.columns["b"]),
+            vec![Scalar::Int64(3), fill.clone()],
+            "an unaligned condition row takes other, NOT NaN"
+        );
+
+        // EXTRA column 'c' that the frame does not have.
+        let wide = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+                ("b", vec![Scalar::Bool(true), Scalar::Bool(true)]),
+                ("c", vec![Scalar::Bool(false), Scalar::Bool(false)]),
+            ],
+        )
+        .unwrap();
+        let wh_wide = df
+            .where_cond(&wide, Some(&fill))
+            .expect("where ignores extras");
+        assert_eq!(
+            wh_wide.column_order,
+            vec!["a".to_owned(), "b".to_owned()],
+            "a condition column the frame lacks is ignored, never added"
+        );
+        assert_eq!(
+            ints(&wh_wide.columns["b"]),
+            vec![Scalar::Int64(3), Scalar::Int64(4)]
+        );
+    }
 
     #[test]
     fn dataframe_where_cond_basic() {
