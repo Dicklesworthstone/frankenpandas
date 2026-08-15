@@ -2156,11 +2156,9 @@ def op_series_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(loc_labels, list):
         raise OracleError("series_loc requires loc_labels list payload")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
     labels = [label_from_json(item) for item in loc_labels]
 
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    series = fixture_series_from_payload(pd, left, "series_loc")
     try:
         out = series.loc[labels]
     except KeyError as exc:
