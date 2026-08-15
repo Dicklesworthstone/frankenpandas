@@ -188,6 +188,62 @@ def test_list_like_constructor_forwards_explicit_copy(oracle, monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    ("aggregation", "expected_kinds"),
+    [
+        ("sum", ["int64", "int64"]),
+        ("count", ["int64", "int64"]),
+        ("mean", ["float64", "float64"]),
+        ("median", ["float64", "float64"]),
+        ("std", ["float64", "float64"]),
+        ("var", ["float64", "float64"]),
+    ],
+)
+def test_groupby_agg_preserves_payload_dtype_for_every_aggregation(
+    oracle, pd, aggregation, expected_kinds
+):
+    """All groupby aggregations must receive the fixture's encoded input dtype.
+
+    br-frankenpandas-778bb: sum and count over an all-present integer payload
+    are int64 in pandas. The old non-selector branch forced float64 before
+    every aggregation, changing their observable output kinds.
+    """
+    payload = {
+        "left": {
+            "index": [
+                {"kind": "int64", "value": 0},
+                {"kind": "int64", "value": 1},
+                {"kind": "int64", "value": 2},
+                {"kind": "int64", "value": 3},
+            ],
+            "values": [
+                {"kind": "utf8", "value": "b"},
+                {"kind": "utf8", "value": "a"},
+                {"kind": "utf8", "value": "b"},
+                {"kind": "utf8", "value": "a"},
+            ],
+        },
+        "right": {
+            "index": [
+                {"kind": "int64", "value": 0},
+                {"kind": "int64", "value": 1},
+                {"kind": "int64", "value": 2},
+                {"kind": "int64", "value": 3},
+            ],
+            "values": [
+                {"kind": "int64", "value": 1},
+                {"kind": "int64", "value": 2},
+                {"kind": "int64", "value": 3},
+                {"kind": "int64", "value": 4},
+            ],
+        },
+    }
+
+    result = oracle.op_groupby_agg(pd, payload, aggregation, f"groupby_{aggregation}")
+
+    assert [value["kind"] for value in result["expected_series"]["values"]] == expected_kinds
+
+
 # ---------------------------------------------------------------------------
 # options that ARE read somewhere but not APPLIED where they matter
 # ---------------------------------------------------------------------------
