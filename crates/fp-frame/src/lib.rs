@@ -79397,32 +79397,66 @@ impl DataFrame {
         let n = plan.union_index.labels().len();
         let null = Scalar::Null(NullKind::NaN);
 
+        // An alignment gap belongs to the dtype of the column that receives it.
+        // The old shared `null` marker was correct only for an all-valid numpy
+        // integer column (which pandas widens to float64).  It accidentally
+        // changed nullable integer, datetime, and timedelta columns into a
+        // float/object-shaped result: their absent rows must be pd.NA/NaT, not
+        // NaN.  A column absent on this side has no dtype to preserve and stays
+        // the all-NaN float column mandated by pandas.
+        let absent_marker_for = |column: &Column| {
+            let is_all_valid_numpy_int =
+                column.dtype() == DType::Int64 && !column.values().iter().any(Scalar::is_missing);
+            if is_all_valid_numpy_int {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::missing_for_dtype(column.dtype())
+            }
+        };
+        let build_aligned_column = |column: Option<&Column>, positions: &[Option<usize>]| {
+            if let Some(column) = column {
+                let is_all_valid_numpy_int = column.dtype() == DType::Int64
+                    && !column.values().iter().any(Scalar::is_missing);
+                let absent = absent_marker_for(column);
+                let values = positions
+                    .iter()
+                    .map(|position| {
+                        position
+                            .map_or_else(|| absent.clone(), |index| column.values()[index].clone())
+                    })
+                    .collect();
+                // `from_values` infers the physical scalar family and loses an
+                // extension tag even when the source was explicitly `Int64`.
+                // Keep that tag for nullable columns; the sole exception is an
+                // all-valid numpy int column, whose newly introduced gap makes
+                // pandas promote it to Float64.
+                let output_dtype = if is_all_valid_numpy_int {
+                    DType::Float64
+                } else {
+                    column.dtype()
+                };
+                Column::new(output_dtype, values).map_err(FrameError::from)
+            } else {
+                Column::from_values(vec![null.clone(); n]).map_err(FrameError::from)
+            }
+        };
+
         // Build left DataFrame
         let mut left_cols = BTreeMap::new();
         for name in &all_columns {
-            let vals: Vec<Scalar> = if let Some(col) = self.columns.get(name) {
-                plan.left_positions
-                    .iter()
-                    .map(|pos| pos.map_or_else(|| null.clone(), |i| col.values()[i].clone()))
-                    .collect()
-            } else {
-                vec![null.clone(); n]
-            };
-            left_cols.insert(name.clone(), Column::from_values(vals)?);
+            left_cols.insert(
+                name.clone(),
+                build_aligned_column(self.columns.get(name), &plan.left_positions)?,
+            );
         }
 
         // Build right DataFrame
         let mut right_cols = BTreeMap::new();
         for name in &all_columns {
-            let vals: Vec<Scalar> = if let Some(col) = other.columns.get(name) {
-                plan.right_positions
-                    .iter()
-                    .map(|pos| pos.map_or_else(|| null.clone(), |i| col.values()[i].clone()))
-                    .collect()
-            } else {
-                vec![null.clone(); n]
-            };
-            right_cols.insert(name.clone(), Column::from_values(vals)?);
+            right_cols.insert(
+                name.clone(),
+                build_aligned_column(other.columns.get(name), &plan.right_positions)?,
+            );
         }
 
         let left =
@@ -126619,6 +126653,62 @@ mod tests {
         assert!(right.column("a").unwrap().values()[0].is_missing());
         assert_eq!(right.column("b").unwrap().values()[1], Scalar::Int64(10));
         assert_eq!(right.column("b").unwrap().values()[2], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn dataframe_align_derives_absent_marker_from_existing_column_dtype_nywa8() {
+        let nullable_int = Column::new(
+            DType::Int64Nullable,
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+        let datetime = Column::new(
+            DType::Datetime64,
+            vec![
+                Scalar::Datetime64(1_700_000_000_000_000_000),
+                Scalar::Datetime64(1_700_000_000_001_000_000),
+            ],
+        )
+        .unwrap();
+        let left = DataFrame::new(
+            Index::new(vec![0_i64.into(), 1_i64.into()]),
+            BTreeMap::from([
+                ("n".to_owned(), nullable_int),
+                ("when".to_owned(), datetime),
+            ]),
+        )
+        .unwrap();
+        let right = DataFrame::from_dict_with_index(
+            vec![("r", vec![Scalar::Int64(9), Scalar::Int64(10)])],
+            vec![1_i64.into(), 2_i64.into()],
+        )
+        .unwrap();
+
+        let (aligned, _) = left.align_on_index(&right, AlignMode::Outer).unwrap();
+
+        // A supplied nullable integer remains nullable when alignment adds a
+        // row.  The control also proves that its pre-existing missing marker is
+        // not rewritten to NaN.
+        assert_eq!(aligned.column("n").unwrap().dtype(), DType::Int64Nullable);
+        assert_eq!(
+            aligned.column("n").unwrap().values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
+        // Temporal data retains its temporal dtype and uses NaT for the row
+        // alignment minted instead of inheriting the global NaN marker.
+        assert_eq!(aligned.column("when").unwrap().dtype(), DType::Datetime64);
+        assert_eq!(
+            aligned.column("when").unwrap().values(),
+            &[
+                Scalar::Datetime64(1_700_000_000_000_000_000),
+                Scalar::Datetime64(1_700_000_000_001_000_000),
+                Scalar::Datetime64(Timestamp::NAT),
+            ]
+        );
     }
 
     #[test]
