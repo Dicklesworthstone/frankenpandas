@@ -1688,7 +1688,14 @@ pub struct FixtureExpectedSeries {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixtureDataFrame {
     pub index: Vec<IndexLabel>,
-    pub columns: BTreeMap<String, Vec<Scalar>>,
+    /// Column data, plus the order the fixture WROTE the columns in.
+    ///
+    /// A plain `BTreeMap` here sorted the names, so a frame whose JSON reads
+    /// `{lk1, lk2, left_v}` was handed to FrankenPandas as `left_v, lk1, lk2`
+    /// while the oracle — a Python dict, which preserves document order — got
+    /// the original. The two sides were being given different frames.
+    /// (br-frankenpandas-i9mgp)
+    pub columns: OrderedColumnData,
     #[serde(default)]
     pub column_order: Option<Vec<String>>,
     #[serde(default)]
@@ -1709,6 +1716,92 @@ pub struct FixtureCategoricalColumn {
 /// Ordered pairs rather than a map, so the request order pandas' agg column axis
 /// follows survives deserialization. (br-frankenpandas-nv5ct)
 pub type OrderedFuncMap = Vec<(String, Vec<String>)>;
+
+/// A fixture frame's `columns` object, keeping the order the fixture wrote.
+///
+/// Derefs to the `BTreeMap` it wraps, so every existing `.columns.get(..)` /
+/// `.keys()` / `.len()` / iteration site is unchanged; the only new capability
+/// is [`Self::document_order`], which `resolve_frame_column_order` consults
+/// instead of the sorted keys.
+///
+/// WHY THE MAP IS STILL THERE: name lookup is what the harness does with this
+/// everywhere else, and a fixture that repeats a column name is a separate
+/// question owned by br-frankenpandas-ih4t0. This type records order without
+/// claiming to represent duplicates — `document_order` therefore lists each
+/// name once, at its first occurrence. (br-frankenpandas-i9mgp)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OrderedColumnData {
+    map: BTreeMap<String, Vec<Scalar>>,
+    order: Vec<String>,
+}
+
+impl OrderedColumnData {
+    /// Column names in the order the fixture's JSON listed them.
+    #[must_use]
+    pub fn document_order(&self) -> &[String] {
+        &self.order
+    }
+}
+
+impl std::ops::Deref for OrderedColumnData {
+    type Target = BTreeMap<String, Vec<Scalar>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl From<BTreeMap<String, Vec<Scalar>>> for OrderedColumnData {
+    fn from(map: BTreeMap<String, Vec<Scalar>>) -> Self {
+        let order = map.keys().cloned().collect();
+        Self { map, order }
+    }
+}
+
+impl Serialize for OrderedColumnData {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        // Written back in DOCUMENT order so a re-banked fixture keeps the
+        // spelling it came in with rather than being silently re-sorted.
+        let mut map = serializer.serialize_map(Some(self.order.len()))?;
+        for name in &self.order {
+            if let Some(values) = self.map.get(name) {
+                map.serialize_entry(name, values)?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for OrderedColumnData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = OrderedColumnData;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a map of column name to values")
+            }
+
+            fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut map = BTreeMap::new();
+                let mut order = Vec::with_capacity(access.size_hint().unwrap_or(0));
+                while let Some((name, values)) = access.next_entry::<String, Vec<Scalar>>()? {
+                    if map.insert(name.clone(), values).is_none() {
+                        order.push(name);
+                    }
+                }
+                Ok(OrderedColumnData { map, order })
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
+    }
+}
 
 /// Read a `{column: [func, ...]}` JSON object into ordered pairs.
 ///
@@ -17718,7 +17811,10 @@ fn resolve_frame_column_order(frame: &FixtureDataFrame) -> Result<Vec<String>, S
         }
     }
 
-    for name in frame.columns.keys() {
+    // DOCUMENT order, not the map's sorted keys. An explicit `column_order`
+    // still wins (handled above); this only decides the order of the columns it
+    // did not name. (br-frankenpandas-i9mgp)
+    for name in frame.columns.document_order() {
         if seen.insert(name.clone()) {
             column_order.push(name.clone());
         }
@@ -24750,6 +24846,10 @@ pub fn write_case_evidence_jsonl(
 #[cfg(test)]
 #[path = "tests/harness_delegation_policy.rs"]
 mod harness_delegation_policy;
+
+#[cfg(test)]
+#[path = "tests/fixture_payload_order.rs"]
+mod fixture_payload_order;
 
 #[cfg(test)]
 #[path = "tests/live_oracle_dataframe_apply_alias.rs"]
