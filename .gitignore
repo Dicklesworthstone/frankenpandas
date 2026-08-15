@@ -25,6 +25,10 @@ __pycache__/
 
 # Local issue-tracker state
 .bv/
+.beads/.br_history/
+# Local FrankenSQLite WAL certification sidecars (machine-local, regenerated)
+.beads/*wal-cert
+.beads/*wal-cert-head
 
 # Ephemeral agent/runtime artifacts
 storage.sqlite3
