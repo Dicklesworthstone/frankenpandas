@@ -25341,3 +25341,58 @@ probes measure an accepted metric.
 **Full evidence:** `crates/fp-frame/src/lib.rs`
 `mod sgb_rolling_build_groups_share_lyaqi`; gate `cargo test -p fp-frame --lib`
 3306 passed / 0 failed / 30 ignored.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-mti15) — third `df_dot @1M` run settles it: BOTH nulls clean, effect still inside the noise margin, best-vs-best 0.561 — REJECT, no crossing exists at this shape
+
+The `@1M` crossing has now been measured three times on ONE ELF (`4a89472f…`),
+one harness family, one pandas artifact, at loads from 6 to 58. `uptime` read
+**11.83 (1-min) against 14.10 (5-min)** immediately before this run — the first
+genuinely CONVERGED window of the session, not a dip. Observed loadavg **12.26 at
+invocation start and 64.20 at end**.
+
+| run | load start -> end | gated ratio | verdict | failing clause | FP min / p50 / cv | pandas min / p50 / cv | best-vs-best |
+|---|---|---:|---|---|---|---|---:|
+| 1 | 21.24 -> 57.79 | 1.187x | CERTIFIED | none | 18.63 / 20.12 / 3.9% | 11.55 / 23.67 / 22.7% | 0.620 |
+| 2 | 6.12 -> 53.80 | 0.987x | refused | pandas null 0.9639 | 17.80 / 20.22 / 5.7% | 9.07 / 20.23 / 29.4% | 0.509 |
+| 3 | 12.26 -> 64.20 | 1.113x | refused | **effect inside margin** | 18.91 / 20.93 / 5.1% | 10.61 / 23.65 / 23.4% | **0.561** |
+
+**RUN 3 REMOVES THE EXCUSE.** Runs 1 and 2 could be argued about because the
+incumbent's A/A null misbehaved. Here **both nulls are clean** — FrankenPandas
+1.00030357 and pandas 0.99214309, both inside 2% — and the row is STILL refused,
+on a different clause: the claim's log effect 0.10668 against a required
+0.23228. The effect is real in the paired sense (CI [1.0228, 1.1911] excludes
+unity) and simply too small to survive its own null noise. A row that cannot
+clear twice the null half-width is not a crossing, it is a coin landing on edge.
+
+**THE THREE MEDIANS STRADDLE UNITY; THE THREE MINIMA DO NOT.** Gated: 1.187,
+0.987, 1.113. Best-vs-best: 0.620, 0.509, **0.561** — every run says the
+incumbent's best beats FrankenPandas' best by 1.6-2.0x, and FP's own p50
+reproduced three times inside 4% (20.12, 20.22, 20.93) at cv 3.9-5.7%. The stable
+quantity is FP's runtime; the unstable one is the incumbent's median, and the
+crossing was always a function of the latter.
+
+**THE DISPERSION DIAGNOSTIC FIRED ON ITS FIRST REAL ADJUDICATION.** This row was
+measured with harness `f73acf04…`, which now records best-vs-best on every gated
+row (br-frankenpandas-mti15). It emitted `direction_agrees_with_median: false`
+and `dispersion_warning: true` automatically — median 1.113 up, minima 0.561 down.
+The instrument built from the retraction caught the same class of row unaided,
+which is the only test of such an instrument that means anything.
+
+**A/A null control (same invocation):** run 3, 31 balanced-square rounds;
+FrankenPandas median ratio 1.00030357 and pandas median ratio 0.99214309, BOTH
+inside the 2%-of-unity limit — the first `@1M` run in which neither arm's null
+failed.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228 (78709880 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench-sse2
+
+**Decision: REJECT any `df_dot @1M` crossing.** The standing statement for this
+shape is: FrankenPandas runs it in a reproducible ~20.2-20.9 ms p50 and loses to
+the incumbent's best by **1.8x** (0.561). The retracted 1.187x row stays in the
+ledger as measured and stays retracted as a claim. Note the ELF predates HEAD —
+`fp-frame` moved under a peer's `lyaqi` work after `a3348cccf` — which is
+deliberate: runs 1, 2 and 3 are a controlled replication on ONE binary, and
+rebuilding would have confounded the comparison it exists to settle. Invocation
+`vs-pandas-20260816T201506.748613Z-pid3013074`, git `4ba575f31`.
+
+**Artifacts:** `artifacts/bench/mti15_df_dot_1M_thinkstation1_2026-08-16_stable_run3.json`
