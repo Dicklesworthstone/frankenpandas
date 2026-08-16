@@ -25999,3 +25999,53 @@ row certified at ambient load 42), but their ABSOLUTE times are not load-robust 
 all. The same shipped configuration measures 0.29-0.35 ms at load ~13 and
 0.56-0.61 ms at load ~70. Certification stability and timing stability are
 different properties and I conflated them.
+
+---
+
+## br-frankenpandas-h67zz — PREPARED EXPERIMENT (not yet run): does disabling the parallel arm make FP's A/A null stable? One window decides whether `floor @1M` is certifiable at all
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** design banked,
+NOT executed. `uptime` at decision time: **1-min 69.63 against 5-min 39.18**,
+rising — no certification, code work only. Also confirmed the clippy gate has NOT
+regressed under the day's heavy peer editing: `cargo clippy -p fp-frame
+-p fp-columnar --lib --no-deps -- -D warnings` EXIT=0.
+
+**THE QUESTION THIRTEEN RUNS COULD NOT ANSWER.** Across 13 `floor @1M` runs FP's
+A/A null was the blocker 5 times with pandas' null clean, and never the reverse
+at low dispersion. That is consistent with the banked `thread::scope` diagnosis
+but does not establish it, **because every one of those runs had the parallel arm
+ON**. There is no contrast in the data.
+
+**THE DESIGN.** Run the same workload twice, changing only
+`FP_ELEMENTWISE_MAX_WORKERS`. At `=1` the elementwise path short-circuits before
+the scope (`workers <= 1` returns the serial block), so FP does no per-call
+spawning; at `=8` it is today's default. Harness, ELF, host and incumbent are
+identical. Script:
+`/data/projects/.scratch/floor_serial_vs_parallel_null_experiment.sh`.
+
+**PREDICTION, recorded before running so it can be wrong:** if `thread::scope` is
+the cause, the `=1` arm's FP null should sit much closer to unity than the `=8`
+arm's and should certify far more often. **If both nulls are equally scattered,
+the diagnosis is WRONG** and the instability lives in the harness or the host,
+not in FP's threading — which would retract a claim I have leaned on in several
+entries today.
+
+**WHY IT IS WORTH A WINDOW.** It decides whether this cell is certifiable at all.
+If serial certifies, the project can bank a certified SERIAL baseline and treat
+the parallel speedup as a separate FP-vs-FP maintenance number. That is the only
+route to a certified row here that does not require the persistent-pool rewrite
+already shown infeasible under `#![forbid(unsafe_code)]` (the owned-chunk
+alternative is measured and rejected at 1.0207x slower, `284ul`).
+
+**It is also cheap:** two invocations, no build, and the prerequisite is already
+established — the `284ul` probe landed in `273a9e4f1` proves
+`FP_ELEMENTWISE_MAX_WORKERS` genuinely reaches the kernel (15,667,017 vs
+16,671,536 instructions per call), so the two arms really are different code.
+Without that check the experiment could have compared serial with serial and
+nobody could have told, which is exactly how `u5cg4`'s reverted arm went
+unnoticed.
+
+**PROCEDURE FOR WHOEVER RUNS IT:** read `uptime` ONCE and launch in the same
+action. Do not pre-sample — single-check-and-launch is 3-for-3 on windows holding
+today while ~40s multi-sample checks are 0-for-5, because the check consumes the
+window it verifies.
