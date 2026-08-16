@@ -962,27 +962,35 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
         (BoolNullable, Int64Nullable) | (Int64Nullable, BoolNullable) => Int64Nullable,
         (Bool, BoolNullable) | (BoolNullable, Bool) => BoolNullable,
         (Bool, Float64) | (Float64, Bool) => Float64,
-        (BoolNullable, Float64) | (Float64, BoolNullable) => Float64,
+        // MEASURED, live pandas 2.2.3:
+        //     pd.Series([True,None],dtype="boolean") + pd.Series([1.5,2.5,3.5])
+        //         -> Float64        (the EXTENSION dtype, not numpy float64)
+        // Flipped together with the Int64Nullable arm below; see the
+        // associativity note there for why they cannot move independently.
+        (BoolNullable, Float64) | (Float64, BoolNullable) => Float64Nullable,
 
         // Int64 promotions (nullable absorbs non-nullable)
         (Int64, Float64) | (Float64, Int64) => Float64,
-        // ⚠ THIS ARM IS KNOWN-WRONG AND IS DELIBERATELY LEFT ALONE IN THIS
-        // SLICE. MEASURED, live pandas 2.2.3, both spellings:
-        //     find_common_type([Int64, float64])  ->  Float64
-        //     pd.Series([1,None],dtype="Int64") + pd.Series([1.5,2.5])  ->  Float64
-        // i.e. the NULLABLE flavour wins and the answer is Float64Nullable, not
-        // Float64. Changing it is behaviour-visible all the way out through
-        // fp-columnar/fp-frame/fp-conformance, so it is its own reviewable slice
-        // with its own full-suite run; this commit only makes the destination
-        // dtype REPRESENTABLE. See br-frankenpandas-qkqfb and the f0aaa row it
-        // blocks.
-        (Int64Nullable, Float64) | (Float64, Int64Nullable) => Float64,
+        // MEASURED, live pandas 2.2.3, both spellings agree:
+        //     find_common_type([Int64, float64])                        -> Float64
+        //     pd.Series([1,None],dtype="Int64") + pd.Series([1.5,2.5])  -> Float64
+        // i.e. the NULLABLE flavour wins, so the answer is Float64Nullable.
+        //
+        // ⚠ THIS ARM AND THE BoolNullable ARM ABOVE ARE ONE ATOMIC CHANGE. The
+        // lattice is checked for associativity over ALL dtypes by
+        // `common_dtype_lattice_axioms_be314`, and flipping only this arm breaks
+        // it on (BoolNullable, Int64, Float64):
+        //     (BN ∨ I64) ∨ F64 = Int64Nullable ∨ Float64 = Float64Nullable
+        //     BN ∨ (I64 ∨ F64) = BN ∨ Float64            = Float64      ✗
+        // Both arms flip, or neither does. (br-frankenpandas-qkqfb, unblocks
+        // br-frankenpandas-f0aaa)
+        (Int64Nullable, Float64) | (Float64, Int64Nullable) => Float64Nullable,
         (Int64, Int64Nullable) | (Int64Nullable, Int64) => Int64Nullable,
 
-        // Float64Nullable promotions. Nothing PRODUCES this dtype yet, so these
-        // arms are unreachable from today's call graph -- they exist so the
-        // lattice is total and consistent the moment a producer lands, the same
-        // staging the fyr1z work used for its fallible siblings.
+        // Float64Nullable promotions. These are now REACHABLE: the two arms
+        // above produce Float64Nullable, so anything that folds a dtype list
+        // (melt's try_fold, combine_first's target_dtype) can feed it back in
+        // here. They are what makes that fold associative.
         //
         // MEASURED, live pandas 2.2.3 ARITHMETIC (which is what this function
         // models -- see the Bool arms above, which follow arithmetic rather than
@@ -15575,28 +15583,65 @@ mod float64_nullable_qkqfb {
         );
     }
 
-    /// ⚠ NEGATIVE CONTROL FOR THE SLICE BOUNDARY. This commit makes the dtype
-    /// REPRESENTABLE; it deliberately does NOT change what existing promotions
-    /// return, because that is behaviour-visible out through fp-columnar,
-    /// fp-frame and fp-conformance and needs its own full-suite run.
-    ///
-    /// So `Int64Nullable + Float64` still answers `Float64` even though pandas
-    /// says `Float64` (the EXTENSION one) — MEASURED:
+    /// The slice boundary this test used to pin has now been crossed: a
+    /// nullable lane widening against a numpy float answers the NULLABLE float.
+    /// MEASURED, live pandas 2.2.3, both spellings:
     /// ```text
-    ///   find_common_type([Int64, float64])  ->  Float64
+    ///   find_common_type([Int64, float64])                        ->  Float64
+    ///   pd.Series([1,None],dtype="Int64") + pd.Series([1.5,2.5])  ->  Float64
     /// ```
-    /// This test pins the CURRENT, known-wrong answer on purpose. When the next
-    /// slice flips that arm this test MUST be updated in the same commit, which
-    /// is exactly the tripwire intended: it makes the remaining divergence
-    /// impossible to forget and impossible to land silently.
+    /// (`Float64` there is the EXTENSION dtype — `Float64Dtype()` — not numpy
+    /// `float64`.) br-frankenpandas-qkqfb; unblocks br-frankenpandas-f0aaa.
     #[test]
-    fn int64nullable_plus_numpy_float_still_answers_the_old_dtype_qkqfb() {
+    fn int64nullable_plus_numpy_float_answers_the_nullable_float_qkqfb() {
         assert_eq!(
             common_dtype(DType::Int64Nullable, DType::Float64),
-            Ok(DType::Float64),
-            "SLICE BOUNDARY: pandas says Float64Nullable here; flipping this is \
-             the next slice of br-frankenpandas-qkqfb, and it unblocks \
-             br-frankenpandas-f0aaa"
+            Ok(DType::Float64Nullable)
         );
+        assert_eq!(
+            common_dtype(DType::Float64, DType::Int64Nullable),
+            Ok(DType::Float64Nullable)
+        );
+    }
+
+    /// The BoolNullable sibling, MEASURED on the same pandas:
+    /// ```text
+    ///   pd.Series([True,None],dtype="boolean") + pd.Series([1.5,2.5,3.5])
+    ///       -> Float64   (extension)
+    /// ```
+    /// The numpy-bool lane is NOT affected and stays on numpy float64, which is
+    /// the control that keeps this from being a blanket "nullable everywhere".
+    #[test]
+    fn boolnullable_plus_numpy_float_answers_the_nullable_float_qkqfb() {
+        assert_eq!(
+            common_dtype(DType::BoolNullable, DType::Float64),
+            Ok(DType::Float64Nullable)
+        );
+        assert_eq!(
+            common_dtype(DType::Bool, DType::Float64),
+            Ok(DType::Float64),
+            "numpy bool + numpy float stays entirely on the numpy side"
+        );
+    }
+
+    /// ⚠ WHY THOSE TWO ARMS CANNOT MOVE INDEPENDENTLY. This is the exact triple
+    /// that fails if only the Int64Nullable arm is flipped, spelled out so the
+    /// coupling survives someone later "simplifying" one arm back:
+    /// ```text
+    ///   (BoolNullable ∨ Int64) ∨ Float64 = Int64Nullable ∨ Float64 = Float64Nullable
+    ///   BoolNullable ∨ (Int64 ∨ Float64) = BoolNullable  ∨ Float64 = ???
+    /// ```
+    /// `common_dtype_lattice_axioms_be314` sweeps this for all 14 dtypes; this
+    /// test names the single witness so a failure is diagnosable without
+    /// re-deriving it from a 14³ sweep. (br-frankenpandas-qkqfb)
+    #[test]
+    fn the_nullable_float_flip_is_associative_on_its_witness_triple_qkqfb() {
+        let (bn, i64n, f64d) = (DType::BoolNullable, DType::Int64, DType::Float64);
+
+        let left = common_dtype(common_dtype(bn, i64n).unwrap(), f64d).unwrap();
+        let right = common_dtype(bn, common_dtype(i64n, f64d).unwrap()).unwrap();
+
+        assert_eq!(left, right, "promotion order must not change the result");
+        assert_eq!(left, DType::Float64Nullable);
     }
 }

@@ -186,11 +186,13 @@ jobs:
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
 
-      - name: Eager fp-frame tests (--no-fail-fast)
-        # br-frankenpandas-n35k2: one target today, but the flag costs nothing
-        # and this is the un-CI'd cfg (br-frankenpandas-it6kj) where a partial
-        # result is most likely to be misread as a pass.
-        run: cargo test -p fp-frame --lib --no-default-features --no-fail-fast
+      - name: Eager fp-frame tests
+        # br-frankenpandas-n35k2: deliberately NO --no-fail-fast here. `--lib`
+        # selects exactly one target, and that flag only governs whether cargo
+        # continues to the NEXT target, so it would be a no-op. The flag belongs
+        # on the multi-target invocations (:148 workspace, :159 --doc, :287
+        # fp-conformance), not on every cargo test line.
+        run: cargo test -p fp-frame --lib --no-default-features
 
   conformance:
     runs-on: ubuntu-latest
@@ -288,10 +290,15 @@ jobs:
 
       - name: Performance regression gate
         # br-frankenpandas-n35k2: --test names ONE target, so target ordering
-        # cannot hide anything here — but --no-fail-fast still makes the run
-        # report EVERY failing baseline instead of stopping at the first, which
-        # is what a regression gate is for.
-        run: cargo test -p fp-conformance --test perf_baselines --no-fail-fast -- --nocapture --ignored --skip perf_run_all_baselines
+        # cannot hide anything here and --no-fail-fast would be a no-op. It does
+        # NOT change which failures get reported — libtest already runs every
+        # test in a binary and reports them all. Reporting every failing baseline
+        # is libtest's default, not something this flag buys.
+        #
+        # This exact command string is pinned by fp-conformance's
+        # ci_supply_chain_policy::ci_workflow_runs_perf_regression_gate_instead_of_noop_bench.
+        # Change it there in the same commit or that test goes red.
+        run: cargo test -p fp-conformance --test perf_baselines -- --nocapture --ignored --skip perf_run_all_baselines
 
   gates:
     runs-on: ubuntu-latest
