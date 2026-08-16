@@ -26595,3 +26595,80 @@ profile that attributes those 1.9us at instruction level inside the timed region
 — not another structural guess. Seven levers on this op have been rejected with
 numbers; that is a map, but it is not progress on the ratio, and I am recording
 it as such.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-o57rj) — `round(2) @1M` was the family's last certified loss at 0.463x; two levers took it to 0.951x, and 40% of the call was a constructor scan that could only ever answer "no"
+
+With `floor`/`ceil`/`trunc` moved, `round2 @1M` became the worst ratio left in
+`math_unary` and the only one still carrying a hard `SLOWER` verdict with both A/A
+nulls clean — the strongest kind of target. Both levers are bit-identical and
+neither needs an ISA flag.
+
+**LEVER 1 — the branchless sign restore.** `round_ties_even_fast` nested a second
+branch inside the magnitude test: `if abs < 2^52 { let r = (abs+M)-M; if
+value.is_sign_negative() { -r } else { r } }`. `copysign` is a bit operation LLVM
+vectorizes; the nested `if` is not. Same map over 1M f64, one binary, interleaved:
+p50 766.5us branchy → **635.7us** branchless, **1.21x**, ZERO bit-differences over
+the live buffer and an edge corpus.
+
+**LEVER 2 — a scan that is provably always false.** The typed branch built its
+output with `from_f64_values_owned`, which re-reads the entire result asking
+`is_nan()` of every element to decide whether to route to the nullable
+constructor. On that branch the answer cannot be yes: the input is an all-valid
+(NaN-free) slice, `factor` is finite and non-zero, `x*factor` is finite or ±inf
+but never NaN, the magic round returns its input unchanged at ≥ 2^52 including
+±inf, and dividing either by a finite non-zero cannot make a NaN. **Measured
+directly: 505.1us per 1M against a 1226us call — ~40% of `round(2)` spent proving
+something the types already guaranteed.** The witness stays `None`, not
+`Some(true)`: `x*factor` CAN overflow a finite input to ±inf, so finiteness is
+genuinely unknown — which is also what the old constructor left unset, so nothing
+is lost but the scan.
+
+**Counted mechanism:** the deleted pass reads 8000000 bytes per 1M-row call and its
+`is_nan` predicate is false for all 1000000 elements on this branch; the required
+work is zero and the measured cost was 505.1us, so the scan failed to earn any part
+of its 1226us call.
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.997099 and
+pandas median ratio 1.001350 on the candidate row, FrankenPandas 1.005950 and
+pandas 1.018902 on the baseline row; all four inside the 2% limit, so both rows are
+gate-admissible on their nulls and the difference between them is the arms.
+
+**Median-CI decision:** candidate effect median 0.951 with 95% CI
+[0.885, 0.962]; baseline effect median 0.463 with 95% CI [0.449, 0.473]. The two
+intervals do not overlap, so the improvement is decided by the CI, not by a point
+estimate. Neither row clears the gate's ≈1.28x decidability margin against unity,
+so the candidate stands as NULL_UNDECIDABLE — indistinguishable from parity — and
+is NOT claimed as a crossing.
+
+**CV role:** provenance only, no vote — FP cv 8.01% / pandas cv 6.17% on the
+candidate row, FP 4.76% / pandas 6.08% on the baseline row, recorded because the
+gate is the median CI and the nulls.
+
+**Both rows, same window, same host, same harness, minutes apart:**
+
+```
+workload        math_unary/round2 @1M, balanced-square ABBAABBA, ONE invocation per row
+baseline ELF    62c9a184d45b39f4…   candidate ELF  ddd882f539be1a13…
+incumbent       pandas 2.2.3, artifact c10b13e6 · thinkstation1, governor powersave
+LOADAVG         baseline 24.99 → 23.47 · candidate 26.70 → 28.54 (in-run max 30.33)
+OBSERVED MHz    busy-core by arm, candidate: FP 4292.2 / pandas 4292.2, arm clock ratio 1.0
+```
+
+| row | FP p50 | pandas p50 | ratio | best-vs-best | verdict |
+|---|---|---|---|---|---|
+| baseline | 1191.29us | 551.31us | **0.463x** | 0.4633 | **SLOWER** (both nulls pass) |
+| candidate | **578.95us** | 553.40us | **0.951x** | 0.9466 | NULL_UNDECIDABLE (both nulls pass) |
+
+Same-binary A/B for the mechanism, ABBA, load 28.67: 1217.2us → **593.5us**,
+**2.051x**, best-vs-best 2.060x, in-binary A/A null 0.9998, whole-binary checksums
+IDENTICAL. `floor @1M` measured as an untouched control in the same pass: 1.009x.
+
+**The NaN-freedom claim is now a test, not a comment.**
+`round_typed_branch_never_mints_nan_and_stays_bit_identical_o57rj` asserts the
+output validity mask is fully set and no element is NaN for six `decimals` values
+over a corpus that includes ±inf and `f64::MAX`/`MIN` (which overflow `x*100`),
+pins the branchless kernel bit-for-bit against the branchy form it replaced over
+50k seeded values, and checks that the DEGENERATE factors — `decimals = -400`,
+where `factor` underflows to 0 and `inf * 0.0` really does make a NaN — still route
+to the NaN-deriving constructor and still come back missing. Without that last
+case the optimisation would silently mark a NaN slot VALID.
