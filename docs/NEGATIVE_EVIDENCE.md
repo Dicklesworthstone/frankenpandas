@@ -25895,3 +25895,57 @@ question, not an agent's call** — pinning the incumbent's thread count
 every banked row. Filed as br-frankenpandas-633fb with this evidence. Until then,
 `dim >= 316` rows should be read through the best-vs-best diagnostic, which is
 what the minima were added for.
+
+---
+
+## br-frankenpandas-h67zz — the revised procedure is 3-for-3 and produced the three tightest runs of thirteen; `floor @1M` cluster now n=7 at ≈0.127x
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** REFUSED on FP's
+null, but the procedure change from the previous entry is now validated.
+
+**Applied the revised rule:** ONE `uptime` read, launch in the SAME action, no
+sampling. Observed **load average 14.49, 22.42, 23.18** at that single read.
+
+```
+workload        math_unary/floor @1M, balanced-square ABBAABBA, ONE invocation
+fp-bench ELF    sha256 ad74e170f97b576a32d17be0832ac2b34f609bdb8c600abfad4dcb476737a673
+harness         sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3 · host thinkstation1, governor powersave, smt on
+LOADAVG         14.49 → 14.13   (start 14.49 22.42 23.18; end 14.13 22.21 23.11)
+```
+
+| arm | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | 1311.88us | **9.76%** | 0.957973 — 4.2% off, FAILS |
+| pandas | 171.95us | **9.65%** | 0.997110 — 0.3% off, passes |
+
+Point ratio **0.135x**. REFUSED.
+
+**THE PROCEDURE CHANGE IS WORKING, AND THE EVIDENCE IS NOW 3-FOR-3.** Every
+window I have entered by reading `uptime` once and launching in the same action
+has held: run 11 (12.77 → 12.11), run 12 (11.14 → 11.59), and this one (14.49 →
+14.13). Every window I entered after a ~40s multi-sample check collapsed — five
+for five. **And the three single-check runs are the three tightest of all
+thirteen**, by max-cv: **9.76%** here, 10.65% (run 11), 11.37% (run 12). The next
+best is 11.44%.
+
+That is observational, not controlled — the fleet's own behaviour varies and I
+have not randomised — but the association is now strong enough in both directions
+that I would not go back to pre-sampling.
+
+**BOTH ARMS UNDER 10% AND IT STILL DID NOT CERTIFY.** This is the tightest
+measurement of the series and FP's null still missed by 4.2% while pandas' was
+clean at 0.3%. That is the fifth time in this series where FP's null was the
+blocker and pandas' was fine, against zero occasions of the reverse at low
+dispersion — consistent with the banked `thread::scope` instability of the
+parallel arm, and reinforcing that **certification here is limited by FP's
+threading, not by the window**. The revised procedure buys better DISPERSION; it
+does not buy a clean FP null, and nothing available to me does.
+
+**THE SCREENED CLUSTER IS NOW n=7:** 0.120x, 0.122x, 0.123x, 0.126x, 0.130x,
+0.132x, 0.135x at max-cv 9.65–14.52%. `floor @1M` is best stated as **≈0.127x
+(n=7)**, a 12.5% spread across four ELFs and loads 6→31. That supersedes the
+≈0.125x from n=6; the estimate has moved less than 2% across the last three
+additions, which is itself evidence the cluster has converged.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run13_load14_elf_ad74e170.json`
