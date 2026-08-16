@@ -1061,11 +1061,6 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
     let mut saw_timedelta = false;
     let mut saw_datetime = false;
     let mut saw_non_utf8_non_null = false;
-    // br-frankenpandas-hlcgl: tracked separately from `saw_non_utf8_non_null`
-    // because the question is not "was there a non-string" but "was there a
-    // bool AND a non-bool numeric" — see the early return below.
-    let mut saw_bool = false;
-    let mut saw_non_bool_numeric = false;
 
     // NOTE (br-frankenpandas-nywa8): inferring Float64 from a NaN-KIND missing
     // looks like the right central fix for pandas' int64 -> float64 promotion,
@@ -1108,14 +1103,6 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
             }
             other => {
                 saw_non_utf8_non_null = true;
-                if matches!(other, DType::Bool | DType::BoolNullable) {
-                    saw_bool = true;
-                } else if matches!(
-                    other,
-                    DType::Int64 | DType::Int64Nullable | DType::Float64 | DType::Float64Nullable
-                ) {
-                    saw_non_bool_numeric = true;
-                }
                 current = common_dtype(current, other)?;
             }
         }
@@ -1124,36 +1111,6 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
             // Constructor inference follows pandas object-dtype behavior for
             // heterogeneous string/scalar payloads while arithmetic coercion
             // remains governed by the stricter common_dtype lattice.
-            return Ok(DType::Utf8);
-        }
-        if saw_bool && saw_non_bool_numeric {
-            // br-frankenpandas-hlcgl: BOOL IS NOT IN THE NUMERIC PROMOTION
-            // LATTICE. Any constructor payload mixing bool with a numeric falls
-            // to object in pandas, with the values left untouched — it does not
-            // widen bool to int the way int widens to float.
-            //
-            // MEASURED, live pandas 2.2.3, `pd.Series(...)`:
-            //
-            //   [True, 2, False] -> object   [True, 2, False]   values UNCHANGED
-            //   [True, 2.5]      -> object   [True, 2.5]
-            //   [True, 2, 2.5]   -> object
-            //   [True, 1]        -> object   even a bool/int pair that "looks" numeric
-            //   [False, 0]       -> object   and even when the values coincide
-            //   [1, 2.5]         -> float64  the BOOL-FREE mix still promotes
-            //   [True, False]    -> bool     a PURE bool payload is still bool
-            //   [1, 2]           -> int64
-            //
-            // The last three rows are why this is a separate predicate rather
-            // than a change to `common_dtype`: the numeric lattice is correct
-            // as it stands, and arithmetic coercion must keep using it. Only
-            // CONSTRUCTOR INFERENCE routes a bool/numeric mix to object, which
-            // is the same split the `saw_utf8` arm above already makes.
-            //
-            // `DType::Utf8` IS FrankenPandas' object dtype — `DType::Utf8.name()`
-            // is literally `"object"` — so this returns the existing bucket
-            // rather than introducing a dtype. fp-columnar's
-            // `preserve_utf8_object_bucket` then keeps the Scalars unconverted,
-            // which is what makes "values UNCHANGED" above hold.
             return Ok(DType::Utf8);
         }
         if saw_timedelta && saw_non_utf8_non_null {
@@ -15847,110 +15804,5 @@ mod sparse_dtype_pandas_name_3gxc6 {
                 "malformed sparse name {rendered}"
             );
         }
-    }
-}
-
-/// br-frankenpandas-hlcgl: bool is NOT in the numeric promotion lattice, so a
-/// constructor payload mixing bool with a numeric infers as object.
-///
-/// Every expectation was read off live pandas 2.2.3 before the code was written.
-/// The controls matter as much as the fix: three of these tests exist to prove
-/// the change did NOT widen into the numeric lattice or the pure-bool case.
-#[cfg(test)]
-mod bool_numeric_mix_infers_object_hlcgl {
-    use super::{DType, NullKind, Scalar, infer_dtype};
-
-    fn infer(values: Vec<Scalar>) -> DType {
-        infer_dtype(&values).expect("inference must not error on these payloads")
-    }
-
-    /// `pd.Series([True, 2, False])` -> object, values untouched.
-    #[test]
-    fn bool_mixed_with_int_is_object() {
-        assert_eq!(
-            infer(vec![Scalar::Bool(true), Scalar::Int64(2), Scalar::Bool(false)]),
-            DType::Utf8,
-            "DType::Utf8 is FrankenPandas' object bucket"
-        );
-        assert_eq!(DType::Utf8.name(), "object", "and it spells itself 'object'");
-    }
-
-    /// `pd.Series([True, 2.5])` and `[True, 2, 2.5]` -> object.
-    #[test]
-    fn bool_mixed_with_float_is_object() {
-        assert_eq!(
-            infer(vec![Scalar::Bool(true), Scalar::Float64(2.5)]),
-            DType::Utf8
-        );
-        assert_eq!(
-            infer(vec![
-                Scalar::Bool(true),
-                Scalar::Int64(2),
-                Scalar::Float64(2.5)
-            ]),
-            DType::Utf8
-        );
-    }
-
-    /// The rows that show this is about the bool/numeric MIX and not about the
-    /// values: pandas gives object for `[True, 1]` and `[False, 0]` even though
-    /// the values coincide with the bools' numeric readings.
-    #[test]
-    fn even_a_coinciding_bool_int_pair_is_object() {
-        assert_eq!(
-            infer(vec![Scalar::Bool(true), Scalar::Int64(1)]),
-            DType::Utf8
-        );
-        assert_eq!(
-            infer(vec![Scalar::Bool(false), Scalar::Int64(0)]),
-            DType::Utf8
-        );
-    }
-
-    /// CONTROL 1 — the bool-free numeric mix must STILL promote. If this moved,
-    /// the change leaked into the numeric lattice.
-    #[test]
-    fn a_bool_free_numeric_mix_still_promotes() {
-        assert_eq!(
-            infer(vec![Scalar::Int64(1), Scalar::Float64(2.5)]),
-            DType::Float64,
-            "int + float is still float64, not object"
-        );
-    }
-
-    /// CONTROL 2 — a PURE bool payload must still be bool.
-    #[test]
-    fn a_pure_bool_payload_is_still_bool() {
-        assert_eq!(
-            infer(vec![Scalar::Bool(true), Scalar::Bool(false)]),
-            DType::Bool
-        );
-    }
-
-    /// CONTROL 3 — a pure int payload is untouched.
-    #[test]
-    fn a_pure_int_payload_is_still_int64() {
-        assert_eq!(
-            infer(vec![Scalar::Int64(1), Scalar::Int64(2)]),
-            DType::Int64
-        );
-    }
-
-    /// SCOPE BOUNDARY, deliberately pinning TODAY's behaviour rather than
-    /// pandas'. `pd.Series([True, None])` is **object** in pandas 2.2.3, but
-    /// FrankenPandas infers Bool because `infer_dtype` skips nulls, and changing
-    /// that reaches into BoolNullable construction and the nywa8 null-kind
-    /// rules. That is a separate, unmeasured blast radius and is NOT part of
-    /// this bead — see the hlcgl comment recording the divergence.
-    ///
-    /// This test exists so the gap is visible and a future fix has to change an
-    /// assertion deliberately rather than discovering it by accident.
-    #[test]
-    fn bool_plus_null_is_a_known_divergence_and_stays_bool_for_now() {
-        assert_eq!(
-            infer(vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)]),
-            DType::Bool,
-            "pandas says object here; FP says Bool. Divergence recorded on hlcgl, not fixed here."
-        );
     }
 }
