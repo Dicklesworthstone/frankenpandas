@@ -7341,14 +7341,19 @@ mod tests {
             DType::Int64Nullable
         );
 
-        // Int64Nullable + Float64 -> Float64 (float always wins)
+        // Int64Nullable + Float64 -> Float64Nullable. The old comment here said
+        // "float always wins"; that is half right. The float wins, but the
+        // NULLABLE flavour of it does — MEASURED, live pandas 2.2.3:
+        //   pd.Series([1,None],dtype="Int64") + pd.Series([1.5,2.5]) -> Float64
+        // where that Float64 is the extension dtype (missing = pd.NA), not
+        // numpy float64 (missing = NaN). (br-frankenpandas-qkqfb)
         assert_eq!(
             common_dtype(DType::Int64Nullable, DType::Float64).unwrap(),
-            DType::Float64
+            DType::Float64Nullable
         );
         assert_eq!(
             common_dtype(DType::Float64, DType::Int64Nullable).unwrap(),
-            DType::Float64
+            DType::Float64Nullable
         );
 
         // Int64Nullable + Int64Nullable -> Int64Nullable
@@ -7382,9 +7387,21 @@ mod tests {
             DType::BoolNullable
         );
 
-        // BoolNullable + Float64 -> Float64
+        // BoolNullable + Float64 -> Float64Nullable. MEASURED, live pandas 2.2.3:
+        //   pd.Series([True,None],dtype="boolean") + pd.Series([1.5,2.5,3.5])
+        //     -> Float64   (extension)
+        // This arm moves together with the Int64Nullable one in
+        // nullable_int64_promotion_matrix; flipping either alone breaks lattice
+        // associativity. (br-frankenpandas-qkqfb)
         assert_eq!(
             common_dtype(DType::BoolNullable, DType::Float64).unwrap(),
+            DType::Float64Nullable
+        );
+
+        // CONTROL: the all-numpy pair is untouched and stays on the numpy side.
+        //   pd.Series([True,False],dtype="bool") + pd.Series([1.5,2.5]) -> float64
+        assert_eq!(
+            common_dtype(DType::Bool, DType::Float64).unwrap(),
             DType::Float64
         );
     }
@@ -7403,7 +7420,21 @@ mod tests {
     fn dtype_to_nullable_conversions() {
         assert_eq!(DType::Int64.to_nullable(), DType::Int64Nullable);
         assert_eq!(DType::Bool.to_nullable(), DType::BoolNullable);
-        assert_eq!(DType::Float64.to_nullable(), DType::Float64); // unchanged
+        // ⚠ THIS LINE WAS RED ON main SINCE fa6caee91 AND NOBODY SAW IT.
+        // It used to read `Float64.to_nullable() == Float64  // unchanged`,
+        // which was true only while FP had no nullable float at all. fa6caee91
+        // (br-frankenpandas-qkqfb slice 1) added DType::Float64Nullable and
+        // pointed to_nullable at it, but that commit was gated with
+        // `cargo check --all-targets` plus a NAME-FILTERED test run, so this
+        // pre-existing test was never executed and the break went unnoticed.
+        // Float64's nullable flavour IS Float64Nullable — that is the dtype's
+        // entire reason to exist — so the assertion is what was stale.
+        assert_eq!(DType::Float64.to_nullable(), DType::Float64Nullable);
+        assert_eq!(
+            DType::Float64Nullable.to_nullable(),
+            DType::Float64Nullable,
+            "idempotent: already nullable"
+        );
         assert_eq!(DType::Int64Nullable.to_nullable(), DType::Int64Nullable);
     }
 
