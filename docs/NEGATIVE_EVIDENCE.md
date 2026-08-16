@@ -23229,3 +23229,66 @@ a hypothesis, not a measurement, until a null passes.
 ~1.9ms, so the whole 9-round balanced square is seconds. That is exactly the
 shape route (b) wants — cheap enough to repeat many times across separated
 windows. The cell is not useless; it is unusable WHILE THE HOST IS LOADED.
+
+---
+
+## 2026-08-16 cod-pandas — REFUTED: route (b) too. A pre-run load check does NOT buy a quiet window (br-frankenpandas-1hjgz)
+
+Route (c) (smaller size) was refuted above. Route (b) was "short runs repeated
+across widely separated times", and the conditions looked right: host load
+average had fallen 53.59 -> 22.58, less than half, on 64 logical CPUs. Re-ran
+`df_dot @1M` on the same already-built sanctioned-profile ELF, 9 rounds (short by
+design), environment cleaned:
+
+```
+workload         linalg / df_dot @ 1M / float64
+verdict          NULL_UNDECIDABLE
+point ratio      0.829x   CI95 [0.74222, 0.87317]
+FP     p50       34806.36us   cv 62.05%   threads 8
+pandas p50       28633.06us   cv 46.38%   threads 64
+A/A null FP      1.012369  CI [0.845080, 1.800366]   *** FAIL ***
+A/A null pandas  0.979173  CI [0.503394, 1.662700]   *** FAIL ***
+ELF              86355328fe14f5e5e527ab60d330a2aa2590d2b9e48edb0c0a5a453675513585
+load average     22.58 at START of run  ->  77.95 at END of run
+```
+
+**THE QUIET WINDOW CLOSED DURING THE RUN.** Load more than tripled between the
+first round and the last. That is the whole finding, and it is more useful than
+the ratio: **on a shared swarm host, a pre-run load check does not predict in-run
+load, so it cannot be used as an admission gate.** The fleet's builds arrive
+asynchronously; sampling load at t=0 measures the moment you decided to start,
+not the interval you are about to occupy. This is why the sanctioned harness
+replaced its host-wide quiescence gate with the balanced square in the first
+place — and it is now clear that the balanced square does not rescue the case
+either, because interference that arrives MID-RUN is not a constant bias for the
+square to cancel.
+
+**THE FULL df_dot @1M SERIES, ALL ON THE SAME CODE:**
+
+```
+rounds  point ratio   FP null    pandas null   verdict            note
+     9      0.475x    1.0019     0.9886        decidable          pandas null passed by luck
+    25      0.743x    0.9979     0.9531        NULL_UNDECIDABLE   drift within the run
+     9      0.829x    1.0124     0.9792        NULL_UNDECIDABLE   load 22.6 -> 78.0 mid-run
+```
+
+Three attempts, one code state, point estimates spanning 0.475 to 0.829 — a
+factor of 1.75 between measurements of the same binary on the same host. No
+combination of round count, size, or start-time selection has produced a passing
+pandas null. **All three routes out of the 25-round retraction — (a) quiet host,
+(b) separated short runs, (c) smaller size — are now either refuted or
+unavailable while the swarm is building.**
+
+**What this does NOT license.** It does not license quoting 0.829, or 0.475, or
+any of them. It does not license "df.dot is within 20% of pandas". The honest
+statement of the vs-pandas position is unchanged from the retraction: FP is
+BEHIND pandas on a 1M dot, direction only, magnitude unmeasured. What is now
+additionally established is that the magnitude will stay unmeasured until the
+fleet stops building, and that no amount of harness tuning substitutes for that.
+
+**Standing recommendation:** stop spending slots re-running `df_dot @1M`. The
+next legitimate attempt needs an actually idle box — a maintenance window, not a
+lucky sample — and until then the FP-side self-comparison (the interleaved
+`FP_DOT_SERIAL` A/B, 5.61x, banked above) is the only df.dot number here that
+survives its own controls, precisely because both of its arms run inside one
+process and share whatever interference exists.
