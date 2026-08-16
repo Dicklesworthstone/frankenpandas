@@ -23418,3 +23418,85 @@ apply to it.
 
 **No build was run for this entry.** It is a correction derived by reading the
 ledger, filed under the freeze.
+
+---
+
+## 2026-08-16 cod-pandas — ALLOCATOR CROSS-PROJECT SIGNAL, read against FrankenPandas' hot paths: PARTIAL TRANSFER, and the obvious form of it is already spent here (br-frankenpandas-284ul / h67zz)
+
+Two sibling projects independently reidentified the allocator as their worst
+primitive (libc: 10-16x, displacing printf at 3.2x; torch: 0 of 21 lanes
+certifying, allocator prime suspect, null failures tracking load). Read here
+build-free, against the two worst ratios this project owns. **The transfer is
+partial, and the part that transfers is not the part those projects found.**
+
+**FIRST, THE LEVER THOSE PROJECTS ARE POINTING AT IS ALREADY TAKEN HERE.**
+FrankenPandas already links mimalloc as the `#[global_allocator]` on BOTH
+measured surfaces — `crates/fp-bench/src/main.rs:35` and
+`crates/fp-python/src/lib.rs:30`. So "swap the allocator" is not an available
+win; it is the status quo. That also means the measurement asymmetry runs in our
+FAVOUR: the FP arm gets mimalloc while the pandas arm gets CPython on glibc
+malloc. Any residual loss is therefore NOT explained by us being on a worse
+allocator, and nobody should bank one that way.
+
+**SECOND, THE ONE PLACE THE SIGNAL DOES LAND: `sqrt @1M`, the 0.805x row.**
+The unary elementwise path allocates, per call, at
+`par_map_slice_f64_with_witness`:
+
+```
+vec![0.0_f64; n]              8 MB at n = 1M   ZERO-INITIALISED, then fully overwritten
+vec![0_u64; n.div_ceil(64)]   125 KB           zero-initialised, then fully overwritten
+vec![(true, true); nchunks]   tiny
+Arc::new(data)                pointer move, NOT a copy — verified at :2746, this is
+                              Arc<Vec<f64>>, not Arc<[f64]>; no copy-on-produce here
+```
+
+The 8 MB buffer is written TWICE on a path whose whole cost is memory traffic:
+once as zeros at allocation, once with the results. `vec![0.0_f64; n]`
+specialises to `alloc_zeroed`, so the first write is either a kernel page-zero on
+fresh mmap (≈2048 minor faults at 4 KB) or a memset over a recycled mimalloc
+segment — which of the two it is depends on mimalloc's purge state between
+iterations, and THAT is exactly the "null failures track load" coupling the sibling
+projects report, because purge behaviour is timing- and pressure-dependent.
+
+**The arithmetic is why this is worth a measurement rather than a shrug:** the
+banked sqrt deficit is **260.66us** (fp p50 1338.84us vs pandas 1078.18us). An
+extra 8 MB of write traffic at a realistic 15-20 GB/s effective store bandwidth is
+**400-530us**, and 2048 minor faults at ~0.5us is ~1ms. Both bracket the deficit
+rather than being lost in it. This does not prove the double-write causes the
+loss — a fraction of that traffic may be absorbed by write-combining or already
+counted in pandas' own output allocation — but it is the same order of magnitude,
+which the AVX2-width story is not obliged to explain and currently does not.
+
+**THIRD, AND HONESTLY: IT DOES *NOT* EXPLAIN `df.dot`.** The dot path allocates
+far more OBJECTS but far less consequential volume: `vec![0.0_f64; len]` per
+output column (8 KB x 1000 = 8 MB total, but as 1000 separate allocations), plus
+per-column `Arc::from(slice.to_vec())` in `finite_f64_view` when the view is
+offset, plus 1000 BTreeMap node insertions. That is ~2000-3000 allocations against
+a 34ms arm. Even at a pessimistic 100ns per mimalloc round trip that is ~300us, or
+under 1% — nowhere near a 2x gap. **The allocator is not FrankenPandas' df.dot
+story, and I will not report it as one just because two sibling projects found it
+in theirs.** df.dot remains measurement-blocked for the separate reason already
+banked (three inconsistent ratios, failing nulls under swarm load).
+
+**WHAT TO MEASURE WHEN THE FREEZE LIFTS**, in this order, all on the
+`br-frankenpandas-284ul` instrument already written:
+
+1. The double-write, isolated. Compare the existing zero-then-overwrite against a
+   write-once assembly. The safe-Rust route is per-worker `collect()` into
+   per-chunk buffers — but note `Column::from_f64_all_valid_chunks` (:10203) takes
+   `Arc<[f64]>`, and `Arc::from(Vec)` is a fresh alloc + memcpy (the code says so
+   itself at :2068/:2086), so a naive chunked assembly trades a zeroing pass for a
+   COPY pass and may measure WORSE. Chunk type must become `Arc<Vec<f64>>` first,
+   or the lever is self-defeating. Write that down before building it.
+2. `MIMALLOC_PURGE_DELAY` as an explicit arm. The harness already sets it to 0 for
+   `astype_str_f64_telemetry_batches` only (`benches/vs_pandas_harness.py:126`,
+   :2917); every other workload runs mimalloc's default delayed purge, so the
+   allocator state between timed iterations is UNCONTROLLED for sqrt. Pin it and
+   see whether the variance the sibling projects attribute to load is partly ours.
+3. Only then the worker-cap / PAR_MIN sweep in 284ul. If the double-write is the
+   dominant term, thread-count conclusions drawn before fixing it will be wrong,
+   because more workers on a zero-then-write buffer scales the WRONG traffic.
+
+**Preflight note for whoever takes this:** do not re-run "swap in mimalloc" —
+it is already the global allocator on both measured surfaces, and re-discovering
+that would be the third time this campaign has re-measured a settled question.
