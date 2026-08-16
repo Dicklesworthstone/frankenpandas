@@ -24722,3 +24722,66 @@ at the top, and a loss at the bottom. Any single-number summary of `df.dot` is
 wrong.
 
 **Artifacts:** `artifacts/bench/oarkz_df_dot_100k_thinkstation1_2026-08-16_quiet_run1.json`
+
+---
+
+## br-frankenpandas-h67zz — cv AND the A/A null are INDEPENDENT diagnostics: `ceil` @1M has the high-cv arm passing its null and the low-cv arm failing it
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** REFUSED. `ceil`
+is now 0-for-2 on certification. The contribution is a clean counterexample to
+treating cv and the null as the same signal — I had been sliding toward that.
+
+Chosen as the highest-value certification target because `ceil` had **zero**
+certified rows while `floor` already had one, so a green `ceil` would have added a
+cell to the certified corpus rather than thickening an existing one.
+
+```
+workload        math_unary/ceil @1M, balanced-square ABBAABBA, ONE invocation
+fp-bench ELF    sha256 4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228
+harness         sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3 · host thinkstation1, governor powersave, smt on
+LOADAVG         21.93 → 36.08   (window was flagged at 13)
+```
+
+| arm | p50 | **cv** | **A/A null** | verdict on this arm |
+|---|---|---|---|---|
+| FrankenPandas | 3900.43us | **32.66%** (high) | **1.003250** | **PASSES** (0.3% off unity) |
+| pandas | 233.84us | **11.84%** (low) | **1.034500** | **FAILS** (3.5% off) |
+
+Point ratio (0.069), REFUSED, no ratio claimed.
+
+**THE INVERSION IS THE FINDING.** The noisy arm passed its null almost perfectly;
+the tight arm failed. So **cv and the A/A null do not measure the same thing and
+neither implies the other**:
+
+- **cv** is dispersion across all samples of one arm — how scattered the
+  individual timings are around that arm's own median.
+- **the A/A null** is the ratio of two same-engine half-medians — an ORDER or
+  DRIFT effect. It can be clean when dispersion is wide (noise that is symmetric
+  in time cancels between halves) and skewed when dispersion is narrow (a small
+  monotone drift moves both halves consistently).
+
+I have been drifting toward treating a low cv as implying a trustworthy run.
+**It does not.** A run needs both: low dispersion so the median means something,
+and a clean null so the two halves are not separated by drift. The cv screen I
+banked at n=8 screens for the first only, and this row is the counterexample that
+shows the second is not implied.
+
+**Consequence for the screen:** it stays as stated — *screen runs IN on low
+max-cv* — but it is a NECESSARY, not sufficient, condition, and the gate's null
+clause is doing independent work that cv cannot replace. That is a point in the
+gate's favour, and I am recording it having spent several entries pointing at what
+the gate misses.
+
+**THE WINDOW CLOSED AGAIN, AND FASTER.** Flagged at loadavg **13**; the run
+started at **21.93** and finished at **36.08** — nearly a tripling. This is the
+third consecutive attempt where the quiet window evaporated between observation
+and use (16.8→28.7 previously, 13→36.1 here). On this fleet a spotted quiet
+moment is already gone.
+
+**`ceil` remains 0-for-2 certified**, with point estimates 0.139x (max-cv 12.29%)
+and 0.069x (max-cv 32.66%) — a 2x spread that is exactly what the n=9 finding
+predicts for a high-cv sample. `floor @1M` ≈0.13x is unchanged and remains the
+only math_unary cell with any certified row.
+
+**Artifacts:** `artifacts/bench/ceil_1M_thinkstation1_2026-08-16_quietwindow_load22_elf_4a89472f.json`
