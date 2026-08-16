@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.metadata
+import inspect
 import json
 import math
 import os
@@ -3212,6 +3213,62 @@ def apply_balanced_square_gate(
     comparison["balanced_square"] = experiment
 
 
+def resolve_results_path(output: Path | None, timestamp: str) -> Path:
+    """Where this invocation's row will be written. Never None.
+
+    A measured row ALWAYS lands on disk. `--json-stdout` is a request for the
+    row on stdout as well, never instead — printing a fingerprint to a terminal
+    that is later closed does not bank it. (br-frankenpandas-s7x8z)
+    """
+    if output is not None:
+        return output
+    return RESULTS_DIR / f"bench_{timestamp.replace(':', '-')}.json"
+
+
+def _row_persistence_self_test() -> None:
+    """A measured row always has a destination, whatever the output flags.
+
+    THE DEFECT THIS PINS: the writer used to read
+
+        if args.output:      write to args.output
+        elif not args.json_stdout:   write to artifacts/bench/...
+
+    so `--json-stdout` with no `--output` measured a row and persisted NOTHING.
+    That is the sanctioned recipe in docs/NEGATIVE_EVIDENCE.md, which is why
+    the str_startswith_arrow @1M = 5.105x row has no artifact and its worker is
+    attested only by that ledger's prose. Every field that makes a row
+    comparable to another -- host_identity, cpu_model, logical_threads, the ISA
+    set, harness_source.sha256, the self-reported ELF SHA -- lives in the file
+    that was not written.
+
+    `json_stdout` is deliberately absent from `resolve_results_path`'s
+    signature: the destination cannot depend on it, so the regression cannot be
+    reintroduced by re-adding a branch on it.
+    """
+    stamp = "2026-08-16T00:00:00Z"
+    default = resolve_results_path(None, stamp)
+    if default.parent != RESULTS_DIR:
+        raise RuntimeError(f"default row destination escaped {RESULTS_DIR}: {default}")
+    if ":" in default.name:
+        raise RuntimeError(f"timestamp colons must be sanitized for the filename: {default}")
+    if not default.name.startswith("bench_") or not default.name.endswith(".json"):
+        raise RuntimeError(f"unexpected default artifact name: {default.name}")
+
+    explicit = Path("/tmp/somewhere/row.json")
+    if resolve_results_path(explicit, stamp) != explicit:
+        raise RuntimeError("an explicit --output must be honoured verbatim")
+
+    # The contract that actually regressed: the destination is a function of
+    # --output alone. Reject any signature that lets an output-format flag
+    # decide whether the row is kept.
+    parameters = list(inspect.signature(resolve_results_path).parameters)
+    if parameters != ["output", "timestamp"]:
+        raise RuntimeError(
+            "resolve_results_path must depend only on --output and the timestamp; "
+            f"got {parameters}"
+        )
+
+
 def _balanced_square_self_test() -> None:
     """Pin the busy-host pairing and its outer A/A null control."""
     if BALANCED_SQUARE != "ABBAABBA" or BALANCED_SQUARE.count("A") != 4:
@@ -3811,6 +3868,11 @@ def main():
         help="Exercise the fail-closed host-wide quiescence adjudicator and exit",
     )
     parser.add_argument(
+        "--row-persistence-self-test",
+        action="store_true",
+        help="Exercise the contract that a measured row is always written to disk",
+    )
+    parser.add_argument(
         "--corrected-null-gate-self-test",
         action="store_true",
         help="Exercise the corrected three-clause null gate and exit",
@@ -3851,6 +3913,11 @@ def main():
     if args.balanced_square_self_test:
         _balanced_square_self_test()
         print("balanced_square_self_test=pass")
+        return
+
+    if args.row_persistence_self_test:
+        _row_persistence_self_test()
+        print("row_persistence_self_test=pass")
         return
 
     if args.dependency_probe:
@@ -4268,15 +4335,25 @@ def main():
             "invocation_rejection": invocation_rejection,
         }
 
-        if args.output:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(json.dumps(output, indent=2))
-            print(f"\nResults written to: {args.output}")
-        elif not args.json_stdout:
-            RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-            out_file = RESULTS_DIR / f"bench_{timestamp.replace(':', '-')}.json"
-            out_file.write_text(json.dumps(output, indent=2))
-            print(f"\nResults written to: {out_file}")
+        # A MEASURED ROW ALWAYS LANDS ON DISK. `--json-stdout` used to SUPPRESS
+        # the artifact (`elif not args.json_stdout`), so the sanctioned recipe
+        # -- which passes `--json-stdout` and no `--output` -- measured a row
+        # and persisted nothing. Every fingerprint that makes a row comparable
+        # lives in that artifact: host_fingerprint.host_identity, cpu_model,
+        # logical_threads, the ISA feature set, harness_source.sha256 and the
+        # self-reported executing ELF SHA-256. Printing them to a terminal that
+        # is later closed is not banking them.
+        #
+        # THIS IS NOT HYPOTHETICAL. The str_startswith_arrow @1M = 5.105x row in
+        # docs/NEGATIVE_EVIDENCE.md was taken with exactly that recipe, so no
+        # file exists for it and its host is attested only by the ledger's prose.
+        # It is a fully compliant same-invocation balanced-square measurement
+        # that cannot be audited, purely because it was not saved.
+        # (br-frankenpandas-s7x8z)
+        out_file = resolve_results_path(args.output, timestamp)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(json.dumps(output, indent=2))
+        print(f"\nResults written to: {out_file}")
         if args.json_stdout:
             print(
                 "bench_result_json="
