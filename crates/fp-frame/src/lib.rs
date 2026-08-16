@@ -194742,3 +194742,168 @@ mod introduced_missing_is_nan_nywa8 {
         );
     }
 }
+
+/// Where the fixed per-call cost of a SMALL `df.dot` goes.
+///
+/// br-frankenpandas-03fp5. Solving `t = F + c·dim³` across two shapes on the
+/// serial arm puts FrankenPandas' `dim = 100` call at 0.1746 ms of kernel plus
+/// **0.0401 ms of fixed overhead** — 19% of the call — while live pandas 2.2.3
+/// does the whole thing in 0.1747 ms. So the kernel is already at parity and the
+/// gap at this shape IS the fixed cost. Five structural levers on the kernel have
+/// been rejected with numbers; this probe exists so the sixth attempt aims at a
+/// phase that was measured rather than guessed.
+#[cfg(test)]
+mod dot_small_shape_phase_split_03fp5 {
+    use std::time::Instant;
+
+    use fp_columnar::Column;
+    use fp_index::{Index, IndexLabel};
+    use fp_types::{DType, Scalar};
+
+    use super::DataFrame;
+
+    fn square(dim: usize) -> DataFrame {
+        let mut columns = std::collections::BTreeMap::new();
+        for c in 0..dim {
+            let values: Vec<Scalar> = (0..dim)
+                .map(|r| Scalar::Float64(0.5 + (r as f64) * 0.25 + (c as f64) * 0.125))
+                .collect();
+            columns.insert(
+                format!("c{c:04}"),
+                Column::new(DType::Float64, values).expect("col"),
+            );
+        }
+        DataFrame::new(
+            Index::new((0..dim as i64).map(IndexLabel::Int64).collect()),
+            columns,
+        )
+        .expect("frame")
+    }
+
+    #[test]
+    #[ignore = "timing probe: run explicitly with --ignored --nocapture"]
+    fn phase_split_at_dim_100() {
+        const DIM: usize = 100;
+        const REPS: usize = 200;
+        let frame = square(DIM);
+
+        // Warm: first call pays lazy one-time costs unrelated to the steady state.
+        for _ in 0..20 {
+            let out = frame.dot(&frame).expect("dot");
+            std::hint::black_box(&out);
+        }
+
+        let mut plan_only = Vec::with_capacity(REPS);
+        let mut plan_and_materialize = Vec::with_capacity(REPS);
+        let mut plan_materialize_and_read = Vec::with_capacity(REPS);
+
+        for _ in 0..REPS {
+            // A: build the result (construction + the eager materialize inside dot).
+            let t = Instant::now();
+            let out = frame.dot(&frame).expect("dot");
+            plan_and_materialize.push(t.elapsed().as_secs_f64() * 1e3);
+            std::hint::black_box(&out);
+
+            // B: the consumer read the bench performs — values() boxes every cell.
+            let out = frame.dot(&frame).expect("dot");
+            let t = Instant::now();
+            let mut acc = 0usize;
+            for name in out.column_names() {
+                acc += out.column(name.as_str()).expect("col").values().len();
+            }
+            plan_materialize_and_read.push(t.elapsed().as_secs_f64() * 1e3);
+            std::hint::black_box(acc);
+
+            // C: typed read of the same data — what a numeric consumer would do.
+            let out = frame.dot(&frame).expect("dot");
+            let t = Instant::now();
+            let mut acc = 0usize;
+            for name in out.column_names() {
+                acc += out
+                    .column(name.as_str())
+                    .expect("col")
+                    .as_f64_slice()
+                    .map_or(0, <[f64]>::len);
+            }
+            plan_only.push(t.elapsed().as_secs_f64() * 1e3);
+            std::hint::black_box(acc);
+        }
+
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+
+        // Second shape, so `t = F + c·dim³` can be solved IN THIS BUILD and the
+        // fixed construction cost separated from the GEMM without guessing.
+        let wide = square(200);
+        for _ in 0..5 {
+            std::hint::black_box(wide.dot(&wide).expect("dot"));
+        }
+        let mut wide_times = Vec::with_capacity(40);
+        for _ in 0..40 {
+            let t = Instant::now();
+            let out = wide.dot(&wide).expect("dot");
+            wide_times.push(t.elapsed().as_secs_f64() * 1e3);
+            std::hint::black_box(&out);
+        }
+
+        let t100 = median(plan_and_materialize);
+        let t200 = median(wide_times);
+        let w100 = 100.0_f64.powi(3);
+        let w200 = 200.0_f64.powi(3);
+        let c = (t200 - t100) / (w200 - w100);
+        let fixed = t100 - c * w100;
+        println!(
+            "dim={DIM} dot()={t100:.4}ms  values()-read={:.4}ms  as_f64_slice()-read={:.4}ms",
+            median(plan_materialize_and_read),
+            median(plan_only)
+        );
+        println!(
+            "dim=200 dot()={t200:.4}ms  ->  kernel={:.4}ms/call at dim=100, \
+             FIXED CONSTRUCTION={fixed:.4}ms ({:.0}% of the dim=100 call)",
+            c * w100,
+            100.0 * fixed / t100
+        );
+
+        // Split the fixed cost into ONE-TIME (A panel, index, frame assembly) and
+        // PER-OUTPUT-COLUMN (B view, lazy column, two name clones, BTreeMap
+        // insert) by varying only the number of output columns. Same A panel, so
+        // everything one-time is identical between the two.
+        let narrow = {
+            let mut columns = std::collections::BTreeMap::new();
+            let values: Vec<Scalar> = (0..DIM)
+                .map(|r| Scalar::Float64(0.25 + (r as f64) * 0.5))
+                .collect();
+            columns.insert(
+                "only".to_owned(),
+                Column::new(DType::Float64, values).expect("col"),
+            );
+            DataFrame::new(
+                Index::new((0..DIM as i64).map(IndexLabel::Int64).collect()),
+                columns,
+            )
+            .expect("narrow")
+        };
+        for _ in 0..20 {
+            std::hint::black_box(frame.dot(&narrow).expect("dot"));
+        }
+        let mut narrow_times = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            let t = Instant::now();
+            let out = frame.dot(&narrow).expect("dot");
+            narrow_times.push(t.elapsed().as_secs_f64() * 1e3);
+            std::hint::black_box(&out);
+        }
+        let t_one_col = median(narrow_times);
+        let kernel_per_col = c * w100 / 100.0;
+        let per_col_fixed = (t100 - t_one_col) / 99.0 - kernel_per_col;
+        let one_time = t_one_col - kernel_per_col - per_col_fixed;
+        println!(
+            "1-output-column dot()={t_one_col:.4}ms  ->  ONE-TIME={one_time:.4}ms, \
+             PER-OUTPUT-COLUMN fixed={:.4}us (x100 = {:.4}ms of the dim=100 call)",
+            per_col_fixed * 1000.0,
+            per_col_fixed * 100.0
+        );
+    }
+}
