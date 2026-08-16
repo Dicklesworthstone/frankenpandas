@@ -22508,3 +22508,60 @@ Cargo.lock rust-toolchain.toml benches scripts` with and without
 `RUSTFLAGS="-C target-feature=+sse4.1"`, confirm the roundpd counts differ, then
 run the harness in `host-wide-exclusive` mode on a host whose readiness probe
 says `clear`. Artifacts: `artifacts/bench/h67zz_sse41_*_vmi1167313_*_20260816.json`.
+
+---
+
+## br-frankenpandas-1elys — ACCEPT: the pre-sized FNV-1a hex tail is 1.4273x faster (worst bound), replicated across two workers
+
+**Date:** 2026-08-16 · **Agent:** CalmMink · **Verdict:** ACCEPT. The candidate
+was already in the tree; what was missing was a timed verdict, and the bead's own
+note explains why — two strict-remote release warm-ups on vmi1264463 and
+vmi1227854 both compiled the cold `asupersync` dependency tree and were
+interrupted at the no-output cutoff. A build timeout is not a reject. The tree is
+warm now, so here is the number.
+
+**What is compared.** `fnv1a_hex` (shipped: pre-sized `String::with_capacity(16)`
+plus a nibble table) against `former_fnv1a_hex` (the control kept in the test
+module: `format!("{hash:016x}")`). FNV arithmetic is identical in both; only the
+fixed-width hex tail differs.
+
+**Harness:** the in-crate `fp_runtime::asupersync::integrity::tests::`
+`fnv1a_hex_fixed_width_tail_ab_1elys`, written by the bead's original owner and
+already built to the convention — arms INTERLEAVED with the order alternating by
+block (21 blocks x 16384 renders), an A/A null measured in the same loop, 2000
+bootstrap resamples for the median CI, a hard `assert!` that the null median sits
+in 0.95..=1.05 with its CI straddling unity, and a self-reported ELF SHA-256 read
+from `/proc/self/exe`. Release profile.
+
+```
+run  worker       ELF sha256   A/A null  null CI95         speedup  speedup CI95
+ 1   vmi1227854   2b88f080..   1.0024    [0.9902,1.0183]   1.4570x  [1.4273,1.4876]
+ 2   vmi1227854   2b88f080..   1.0330    [0.9741,1.0672]   1.4861x  [1.4429,1.5531]
+ 3   vmi1167313   cdd90dae..   1.0107    [0.9926,1.0636]   1.7151x  [1.6337,1.7972]
+```
+
+**QUOTING THE WORST BOUND:** the pre-sized encoder is **1.4273x** faster than the
+`format!` tail (run 1's CI lower bound; worst point estimate 1.4570x). All three
+A/A nulls pass the harness's own gate. Runs 1 and 2 share a worker and a cached
+ELF; run 3 is an independent build on a second worker, which is why its ELF hash
+differs — and it is the strongest of the three, so the worst bound is set by the
+busier host rather than by the quiet one.
+
+**Parity is asserted, not assumed.** The A/B body begins with
+`assert_eq!(former_fnv1a_hex(bytes), fnv1a_hex(bytes))`, and a separate test,
+`fnv1a_hex_matches_former_formatter_on_digest_boundaries`, pins agreement across
+nibble-boundary payloads plus the two published FNV-1a vectors
+(`"" -> cbf29ce484222325`, `"hello" -> a430d84680aabd0b`). A faster digest that
+spelled a different digest would not be a faster digest.
+
+**Why this one replicated cleanly when 3nzz3's transport A/B did not.** Both are
+internal FP-vs-FP comparisons on shared hosts, but this harness alternates the
+arms INSIDE one process with no thread management anywhere near the timed region.
+br-frankenpandas-3nzz3's first harness put a `thread::scope` spawn inside the
+timed span and produced a 0.7966x A/A null that inverted its verdict. The
+difference is not the machine; it is what the timed span contains.
+
+**Scope of the claim.** This is FP-vs-FP on a 16-byte digest render, not a
+vs-pandas ratio, and the workload is a 42-byte payload — the tail dominates
+precisely because the FNV loop over it is short. It says nothing about digests of
+large artifacts, where the hash loop, not the formatting, is the cost.
