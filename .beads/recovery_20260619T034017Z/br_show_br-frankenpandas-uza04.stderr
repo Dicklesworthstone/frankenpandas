@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "DATABASE_ERROR",
+    "message": "Database error: database disk image is malformed: table rowid seek on root 6 missed scan-visible rowid 1420 on successor page 818",
+    "hint": null,
+    "retryable": false,
+    "context": null
+  }
+}

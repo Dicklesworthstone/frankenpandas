@@ -1,0 +1,3 @@
+repo_path=/data/projects/frankenpandas
+timestamp=20260619T034017Z
+issue_id=br-frankenpandas-uza04

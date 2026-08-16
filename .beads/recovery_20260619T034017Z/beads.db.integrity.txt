@@ -1,0 +1,2 @@
+*** in database main ***
+Tree 6 page 6 cell 0: Rowid 1420 out of order

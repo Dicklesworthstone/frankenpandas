@@ -23734,3 +23734,65 @@ FP A/A null 0.960553 (4% off unity, gate is 2%), pandas null 1.00102, FP cv
 as every df_dot attempt: the fleet resumed building the moment the freeze lifted.
 The 0.805x this lane started from is not refreshed by this run and is not
 replaced by 0.953x.
+
+---
+
+## br-frankenpandas-h67zz — `ceil` @1M re-run ABBA on a locally built hash-verified ELF: 0.139x (was 0.098x), FP threads 1 → 8, but the row is NULL_UNDECIDABLE
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** MEASURED,
+gate-refused on the pandas arm. Banking it because the FP side moved and the
+refusal does not touch that.
+
+`ceil @1M` was my worst banked vs-incumbent ratio (0.098x). Re-ran it ABBA in one
+invocation on a fresh local build.
+
+```
+host            thinkstation1  AMD Ryzen Threadripper PRO 5975WX 32C/64T
+                governor powersave, smt on, load 15.80 -> 15.42 across the run
+git_sha         669d45cbc
+fp-bench ELF    sha256 1858bb91cf9fd2d376319cc27dee803d449bb3b55d5815e8a14912d524a2c2c2
+                78732920 bytes, target/release-perf/fp-bench, profile release-perf
+                built locally, RCH_CARGO_WRAPPER_BYPASS=1, exe path read from
+                --message-format=json, no [RCH] line in the build log
+harness         benches/vs_pandas_harness.py
+                sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3
+design          balanced-square ABBAABBA, math_unary/ceil @1M, ONE invocation
+```
+
+| | ratio | FP p50 / cv | pandas p50 / cv | FP thr | pd thr |
+|---|---|---|---|---|---|
+| this run | 0.139x | 1378.19us / 5.04% | 179.44us / 12.29% | **8** | 1 |
+| 2026-08-16 earlier, ELF a3078566 | 0.098x | 1667.13us / — | 174.78us / — | **1** | — |
+
+**A/A null control (same invocation):** FP **0.980116** — inside ±2%, the FP arm
+is trustworthy. pandas **1.057477** — OUTSIDE the band, so the gate refuses the
+row and **no certified ratio is claimed**. pandas' cv is 12.29% here.
+
+**THE FP-SIDE MOVEMENT IS THE POINT, and the refusal does not bear on it.** FP's
+own arm is clean in both the null and the cv, and its p50 fell **1667us → 1378us
+(~17%)** between the two ELFs, with `thread_count_actually_used` going **1 → 8**.
+Something landed between `a3078566` and `1858bb91` that parallelised this path.
+I have not bisected it and am not attributing it — `br-frankenpandas-xv9qf`
+routed floor/ceil/trunc onto the parallel helper earlier, and the thread count
+finally reflecting that is consistent with, but not proof of, that lever taking
+effect on this build.
+
+**So the 0.098x row I banked earlier this day is superseded as a description of
+today's code**, and the honest current statement is "≈0.14x, gate-refused". It is
+still a large loss and the mechanism is unchanged: the default build cannot emit
+`roundsd`/`roundpd`, so this remains the ISA/policy question recorded in the
+cross-reference entry above, not a scheduling one.
+
+**⚠️ A TRAP THAT ALMOST PRODUCED A SILENT PANDAS-ONLY ROW.** The first attempt
+returned `verdict=CONTRACT_INVALID` with `frankenpandas: ['error']`. Cause, from
+stderr: `fp-bench binary not found at /data/tmp/cargo-target/release-perf/fp-bench`.
+`CARGO_TARGET_DIR` is set to the shared cargo-target in this environment; I
+unset it for the BUILD (`env -u CARGO_TARGET_DIR cargo build`) but not for the
+HARNESS RUN, so the harness looked in the shared dir, found nothing, **skipped
+the FrankenPandas arm entirely and timed pandas alone.** The harness refusing on
+the slot-timing contract is the only reason this did not become a row. Unset
+`CARGO_TARGET_DIR` on the RUN as well as the build, and treat
+`frankenpandas: ['error']` as "the FP arm did not execute", not as a slow result.
+
+**Artifacts:** `artifacts/bench/ceil_1M_thinkstation1_2026-08-16_local_elf_1858bb91.json`
