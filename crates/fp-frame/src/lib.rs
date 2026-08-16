@@ -79619,6 +79619,27 @@ impl DataFrame {
         };
         let build_aligned_column = |column: Option<&Column>, positions: &[Option<usize>]| {
             if let Some(column) = column {
+                // THE PROMOTION IS CONDITIONAL ON A GAP ACTUALLY LANDING IN
+                // THIS LANE, not merely on the lane being a dense integer.
+                // `Series::align` already gates on exactly this; the DataFrame
+                // path did not, so an all-valid Int64 column widened even when
+                // the alignment introduced nothing.
+                //
+                // MEASURED, live pandas 2.2.3:
+                // ```text
+                //   DataFrame({'a':[1,2]}).align(DataFrame({'b':[10,20]}),
+                //                                join='outer', axis=0)
+                //     -> a int64 [1,2]   b int64 [10,20]     SAME index, no gap,
+                //                                            NEITHER widens
+                //   Series([1,2],index=[0,1]).align(Series([10,20],index=[1,2]),
+                //                                   join='left')
+                //     -> left int64 [1,2]   right float64 [nan,10.0]
+                //   ... same pair, join='outer'
+                //     -> left float64 [1.0,2.0,nan]  right float64 [nan,10.0,20.0]
+                // ```
+                // A lane widens iff IT gains a gap; the join mode only decides
+                // which lanes do. (br-frankenpandas-nywa8)
+                let invents_a_gap = positions.iter().any(Option::is_none);
                 let is_all_valid_numpy_int = column.dtype() == DType::Int64
                     && !column.values().iter().any(Scalar::is_missing);
                 let absent = absent_marker_for(column);
@@ -79634,7 +79655,7 @@ impl DataFrame {
                 // Keep that tag for nullable columns; the sole exception is an
                 // all-valid numpy int column, whose newly introduced gap makes
                 // pandas promote it to Float64.
-                let output_dtype = if is_all_valid_numpy_int {
+                let output_dtype = if invents_a_gap && is_all_valid_numpy_int {
                     DType::Float64
                 } else {
                     column.dtype()
@@ -96276,9 +96297,13 @@ mod tests {
             la.values(),
             &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
         );
-        // "a" and "c" not in right -> null
+        // "a" and "c" not in right -> null. The RIGHT lane gains those gaps, so
+        // it widens; the left lane gains none and stays int64.
+        // MEASURED: Series([1,2,3],index=list('abc')).align(
+        //           Series([20,40],index=['b','d']), join='left')
+        //   -> left int64 [1,2,3]   right float64 [nan, 20.0, nan]
         assert!(ra.values()[0].is_missing());
-        assert_eq!(ra.values()[1], Scalar::Int64(20));
+        assert_eq!(ra.values()[1], Scalar::Float64(20.0));
         assert!(ra.values()[2].is_missing());
     }
 
@@ -96304,8 +96329,12 @@ mod tests {
             ra.values(),
             &[Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]
         );
-        // Only "b" matched in left.
-        assert_eq!(la.values()[0], Scalar::Int64(2));
+        // Only "b" matched in left, so the LEFT lane gains the gaps and widens
+        // while the right lane keeps int64 — the asserted `ra` above.
+        // MEASURED: Series([1,2],index=['a','b']).align(
+        //           Series([20,30,40],index=list('bcd')), join='right')
+        //   -> left float64 [2.0, nan, nan]   right int64 [20,30,40]
+        assert_eq!(la.values()[0], Scalar::Float64(2.0));
         assert!(la.values()[1].is_missing());
         assert!(la.values()[2].is_missing());
     }
@@ -96331,11 +96360,15 @@ mod tests {
             la.index().labels(),
             &[1_i64.into(), 2_i64.into(), 3_i64.into()]
         );
-        assert_eq!(la.values()[1], Scalar::Int64(20));
+        // Outer: BOTH lanes gain a gap, so both widen.
+        // MEASURED: Series([10,20],index=[1,2]).align(
+        //           Series([200,300],index=[2,3]), join='outer')
+        //   -> left float64 [10.0,20.0,nan]   right float64 [nan,200.0,300.0]
+        assert_eq!(la.values()[1], Scalar::Float64(20.0));
         assert!(la.values()[2].is_missing());
         assert!(ra.values()[0].is_missing());
-        assert_eq!(ra.values()[1], Scalar::Int64(200));
-        assert_eq!(ra.values()[2], Scalar::Int64(300));
+        assert_eq!(ra.values()[1], Scalar::Float64(200.0));
+        assert_eq!(ra.values()[2], Scalar::Float64(300.0));
     }
 
     #[test]
@@ -127405,15 +127438,24 @@ mod tests {
         assert_eq!(left.len(), 3);
         assert_eq!(right.len(), 3);
 
-        // Left should have column 'a' with values [1, 2, NaN] and column 'b' with [NaN, NaN, NaN]
-        assert_eq!(left.column("a").unwrap().values()[0], Scalar::Int64(1));
-        assert_eq!(left.column("a").unwrap().values()[1], Scalar::Int64(2));
+        // Both lanes gain a gap under this outer align, so both widen.
+        // MEASURED: DataFrame({'a':[1,2]},index=[0,1]).align(
+        //           DataFrame({'b':[10,20]},index=[1,2]), join='outer', axis=0)
+        //   -> left  a float64 [1.0, 2.0, nan]
+        //      right b float64 [nan, 10.0, 20.0]
+        assert_eq!(left.column("a").unwrap().values()[0], Scalar::Float64(1.0));
+        assert_eq!(left.column("a").unwrap().values()[1], Scalar::Float64(2.0));
         assert!(left.column("a").unwrap().values()[2].is_missing());
 
-        // Right should have column 'a' with [NaN, NaN, NaN] and column 'b' with [NaN, 10, 20]
         assert!(right.column("a").unwrap().values()[0].is_missing());
-        assert_eq!(right.column("b").unwrap().values()[1], Scalar::Int64(10));
-        assert_eq!(right.column("b").unwrap().values()[2], Scalar::Int64(20));
+        assert_eq!(
+            right.column("b").unwrap().values()[1],
+            Scalar::Float64(10.0)
+        );
+        assert_eq!(
+            right.column("b").unwrap().values()[2],
+            Scalar::Float64(20.0)
+        );
     }
 
     #[test]
@@ -127559,7 +127601,12 @@ mod tests {
             &[0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
         assert!(alias.0.column("b").unwrap().values()[0].is_missing());
-        assert_eq!(alias.1.column("b").unwrap().values()[1], Scalar::Int64(10));
+        // 'b' gains a gap on both sides of this outer align, so it widens —
+        // same measurement as `dataframe_align_outer`.
+        assert_eq!(
+            alias.1.column("b").unwrap().values()[1],
+            Scalar::Float64(10.0)
+        );
     }
 
     #[test]
@@ -142821,10 +142868,18 @@ mod tests {
             diff.index().labels(),
             &[IndexLabel::Int64(0), IndexLabel::Int64(2)]
         );
-        assert_eq!(diff.columns()["self"].values()[0], Scalar::Int64(1));
+        // ⚠️ NO PANDAS ORACLE BACKS THIS SHAPE. pandas REFUSES a compare across
+        // differently-labelled Series — measured, 2.2.3:
+        //   Series([1,2],index=[0,1]).compare(Series([2,3],index=[1,2]))
+        //   -> ValueError: Can only compare identically-labeled Series objects
+        // Aligning first is FrankenPandas' own contract, so these values are an
+        // FP-defined expectation, not a parity claim. They are float because
+        // both lanes gain a gap in that alignment and therefore widen, which IS
+        // the pandas-measured align rule (br-frankenpandas-nywa8).
+        assert_eq!(diff.columns()["self"].values()[0], Scalar::Float64(1.0));
         assert!(diff.columns()["other"].values()[0].is_missing());
         assert!(diff.columns()["self"].values()[1].is_missing());
-        assert_eq!(diff.columns()["other"].values()[1], Scalar::Int64(3));
+        assert_eq!(diff.columns()["other"].values()[1], Scalar::Float64(3.0));
     }
 
     #[test]
