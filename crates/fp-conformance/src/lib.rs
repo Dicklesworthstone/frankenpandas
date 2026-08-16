@@ -9851,7 +9851,15 @@ fn run_fixture_operation(
         FixtureOperation::SeriesDtypeCheck => {
             let series = build_series_for_dtype_check(fixture)?;
             // See ColumnDtypeCheck above (br-frankenpandas-62d1s).
-            let actual_dtype = series.dtype().name().to_owned();
+            //
+            // `dtype_name()`, not `dtype().name()` (br-frankenpandas-3gxc6): a
+            // sparse Series reports the parameterized `Sparse[int64, 0]` that
+            // pandas spells, and `DType::name()` can only answer the bare
+            // `"Sparse"` because `DType::Sparse` carries no subtype or fill.
+            // Every other dtype is byte-identical through this call. Both the
+            // strict and hardened arms route through it, so the two modes
+            // cannot disagree about a dtype name.
+            let actual_dtype = series.dtype_name();
             let expected = match expected {
                 ResolvedExpected::Dtype(dtype) => dtype,
                 _ => return Err("expected_dtype is required for series_dtype_check".to_owned()),
@@ -19141,7 +19149,15 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesDtypeCheck => {
             let series = build_series_for_dtype_check(fixture)?;
             // See ColumnDtypeCheck above (br-frankenpandas-62d1s).
-            let actual_dtype = series.dtype().name().to_owned();
+            //
+            // `dtype_name()`, not `dtype().name()` (br-frankenpandas-3gxc6): a
+            // sparse Series reports the parameterized `Sparse[int64, 0]` that
+            // pandas spells, and `DType::name()` can only answer the bare
+            // `"Sparse"` because `DType::Sparse` carries no subtype or fill.
+            // Every other dtype is byte-identical through this call. Both the
+            // strict and hardened arms route through it, so the two modes
+            // cannot disagree about a dtype name.
+            let actual_dtype = series.dtype_name();
             let expected = match expected {
                 ResolvedExpected::Dtype(dtype) => dtype,
                 _ => return Err("expected_dtype required for series_dtype_check".to_owned()),
