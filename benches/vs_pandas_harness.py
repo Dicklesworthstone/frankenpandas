@@ -3174,6 +3174,64 @@ def run_balanced_square_cell(
     )
 
 
+def best_vs_best(fp_result: TimingResult, pd_result: TimingResult) -> dict[str, Any]:
+    """Each arm's FASTEST observed sample, and whether it agrees with the median.
+
+    br-frankenpandas-mti15. A gated row is a comparison of MEDIANS, and a median
+    is only a property of the code when both arms are tight. On 2026-08-16 a
+    `df_dot @1M` row certified at 1.187x FASTER and was retracted two hours later:
+    FrankenPandas' p50 reproduced to 0.5% across two runs while the incumbent's
+    samples spanned 9.07-29.79 ms inside single invocations, so the crossing was a
+    property of where the incumbent's median happened to land. Comparing the two
+    arms' MINIMA — the least contended sample each engine managed — said 0.620 and
+    0.509, i.e. a loss, in both runs.
+
+    So this records the minima beside the gated median and, more usefully, flags
+    when the two statistics point in OPPOSITE directions. That disagreement is the
+    signature of a dispersion-driven row, and it is what a reader needs in order
+    not to repeat my mistake.
+
+    This is diagnostic only. It does NOT feed the verdict, the gate, or any
+    clause: the three-clause contract is shared across the campaign and is not
+    something one agent rewrites. It only adds fields.
+    """
+    fp_min = float(min(fp_result.times_us))
+    pd_min = float(min(pd_result.times_us))
+    ratio = pd_min / fp_min if fp_min > 0 else float("inf")
+    return {
+        "frankenpandas_min_us": round(fp_min, 4),
+        "pandas_min_us": round(pd_min, 4),
+        "ratio": round(ratio, 4),
+        "definition": "pandas_min_us / frankenpandas_min_us, over every timed sample in this invocation",
+        "gate_input": False,
+    }
+
+
+def annotate_best_vs_best(
+    comparison: dict[str, Any],
+    fp_result: TimingResult,
+    pd_result: TimingResult,
+) -> None:
+    """Attach `best_vs_best` and raise a dispersion warning on disagreement.
+
+    br-frankenpandas-mti15. `direction_agrees_with_median` is false when one
+    statistic says FrankenPandas is faster and the other says the incumbent is —
+    the exact shape of the retracted row. A row carrying
+    `dispersion_warning: true` should not be quoted as a property of the code
+    without a replication, whatever its verdict says.
+    """
+    if not fp_result.times_us or not pd_result.times_us:
+        return
+    detail = best_vs_best(fp_result, pd_result)
+    median_ratio = comparison.get("ratio")
+    if isinstance(median_ratio, (int, float)) and median_ratio > 0:
+        agrees = (detail["ratio"] > 1.0) == (float(median_ratio) > 1.0)
+        detail["median_ratio"] = float(median_ratio)
+        detail["direction_agrees_with_median"] = agrees
+        comparison["dispersion_warning"] = not agrees
+    comparison["best_vs_best"] = detail
+
+
 def apply_balanced_square_gate(
     comparison: dict[str, Any],
     fp_result: TimingResult,
@@ -3211,6 +3269,8 @@ def apply_balanced_square_gate(
         "NULL_UNDECIDABLE"
     )
     comparison["balanced_square"] = experiment
+    # Diagnostic, after the verdict and deliberately not an input to it.
+    annotate_best_vs_best(comparison, fp_result, pd_result)
 
 
 def resolve_results_path(output: Path | None, timestamp: str) -> Path:
@@ -3267,6 +3327,67 @@ def _row_persistence_self_test() -> None:
             "resolve_results_path must depend only on --output and the timestamp; "
             f"got {parameters}"
         )
+
+
+def _best_vs_best_self_test() -> None:
+    """Pin the dispersion diagnostic on the row that made it necessary.
+
+    br-frankenpandas-mti15. The fixture is not synthetic-pretty: it is the
+    retracted `df_dot @1M` row. FrankenPandas tight around 20 ms (min 18.63),
+    pandas dispersed with a 23.67 ms median but an 11.55 ms best. The gated
+    median said 1.187x FASTER; the minima said 0.620, a loss. A diagnostic that
+    cannot separate those two is worthless, so this asserts it does.
+    """
+    def arm(engine: str, samples: list[float]) -> TimingResult:
+        return TimingResult(
+            workload="synthetic",
+            category="linalg",
+            size="1M",
+            dtype="float64",
+            engine=engine,
+            times_us=samples,
+            null_arm_a_us=samples[:2],
+            null_arm_b_us=samples[:2],
+            null_ratios=[1.0, 1.0],
+        )
+
+    # 1. AGREEMENT: both statistics say FrankenPandas is faster.
+    fp_tight = arm("frankenpandas", [50.0, 51.0, 52.0, 50.5])
+    pd_tight = arm("pandas", [100.0, 101.0, 99.0, 100.5])
+    agreeing: dict[str, Any] = {"ratio": 2.0}
+    annotate_best_vs_best(agreeing, fp_tight, pd_tight)
+    detail = agreeing["best_vs_best"]
+    if detail["frankenpandas_min_us"] != 50.0 or detail["pandas_min_us"] != 99.0:
+        raise RuntimeError("best-vs-best must report each arm's fastest sample")
+    if round(detail["ratio"], 4) != 1.98:
+        raise RuntimeError("best-vs-best ratio must be pandas_min / frankenpandas_min")
+    if not detail["direction_agrees_with_median"] or agreeing["dispersion_warning"]:
+        raise RuntimeError("a tight, agreeing pair must not raise a dispersion warning")
+
+    # 2. NEGATIVE CASE: the retracted row. Median says FASTER, minima say LOSS.
+    fp_real = arm("frankenpandas", [18.63e3, 20.12e3, 21.65e3, 22.89e3])
+    pd_real = arm("pandas", [11.55e3, 23.67e3, 28.10e3, 29.79e3])
+    retracted: dict[str, Any] = {"ratio": 1.187}
+    annotate_best_vs_best(retracted, fp_real, pd_real)
+    detail = retracted["best_vs_best"]
+    if detail["ratio"] >= 1.0:
+        raise RuntimeError("the retracted fixture's minima must show a LOSS")
+    if detail["direction_agrees_with_median"]:
+        raise RuntimeError("median and minima disagree here — the diagnostic missed it")
+    if not retracted["dispersion_warning"]:
+        raise RuntimeError("a direction disagreement must raise the dispersion warning")
+
+    # 3. The diagnostic must never touch the verdict.
+    if "verdict" in retracted or "median_ci_gate" in retracted:
+        raise RuntimeError("best-vs-best must not write verdict or gate fields")
+    if detail["gate_input"]:
+        raise RuntimeError("best-vs-best must declare itself a non-gate input")
+
+    # 4. An empty arm must be skipped rather than divide by zero.
+    empty: dict[str, Any] = {"ratio": 1.0}
+    annotate_best_vs_best(empty, arm("frankenpandas", []), pd_tight)
+    if "best_vs_best" in empty:
+        raise RuntimeError("an arm with no samples must not produce a best-vs-best row")
 
 
 def _balanced_square_self_test() -> None:
@@ -3374,6 +3495,9 @@ def compute_comparison(fp_result: TimingResult, pd_result: TimingResult,
                 "SLOWER" if gate["decidable"] else
                 "NULL_UNDECIDABLE"
             )
+            # br-frankenpandas-mti15: the legacy independent-sample path gets the
+            # same diagnostic, so no gated row anywhere can lack it.
+            annotate_best_vs_best(result, fp_result, pd_result)
         else:
             result["ratio"] = None
             result["verdict"] = "CONTRACT_INVALID"
@@ -3863,6 +3987,14 @@ def main():
         help="Exercise the balanced-square paired ratio and A/A null contract",
     )
     parser.add_argument(
+        "--best-vs-best-self-test",
+        action="store_true",
+        help=(
+            "Exercise the best-vs-best dispersion diagnostic on the retracted "
+            "df_dot @1M fixture (median says FASTER, minima say LOSS)"
+        ),
+    )
+    parser.add_argument(
         "--host-exclusivity-self-test",
         action="store_true",
         help="Exercise the fail-closed host-wide quiescence adjudicator and exit",
@@ -3913,6 +4045,11 @@ def main():
     if args.balanced_square_self_test:
         _balanced_square_self_test()
         print("balanced_square_self_test=pass")
+        return
+
+    if args.best_vs_best_self_test:
+        _best_vs_best_self_test()
+        print("best_vs_best_self_test=pass")
         return
 
     if args.row_persistence_self_test:
