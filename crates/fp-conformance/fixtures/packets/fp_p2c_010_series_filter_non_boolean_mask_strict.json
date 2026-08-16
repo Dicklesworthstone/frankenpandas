@@ -5,8 +5,8 @@
   "operation": "series_filter",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "ab8c305f8dcd9de46deb273b79af1f064489e36afedfff97a0d117665a597e79",
-    "generated_at": "2026-08-16T00:53:07Z"
+    "oracle_script_sha256": "31c08766052d5a224b26442c7ec96c29e06057505e6d16a8fe5fad8167cacde2",
+    "generated_at": "2026-08-16T11:24:45Z"
   },
   "left": {
     "name": "data",

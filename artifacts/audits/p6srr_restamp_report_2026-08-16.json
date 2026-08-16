@@ -1,0 +1,666 @@
+{
+  "fixtures_examined": 1259,
+  "agree_current": 0,
+  "agree_provenance_only": 1144,
+  "restampable": 1144,
+  "restamped": 1144,
+  "restamp_refused": [],
+  "move_classes": {
+    "KIND int64->float64": 1,
+    "VALUE": 1,
+    "ERROR expected-but-succeeded": 1
+  },
+  "roundtrip_classes": {},
+  "provenance_verdicts": {},
+  "moved_unattributed": [
+    {
+      "fixture": "fp_p2d_017_series_constructor_bool_numeric_coerces_int_strict.json",
+      "keys": [
+        "expected_series"
+      ],
+      "why": "values[0] mismatch: {'kind': 'int64', 'value': 1} vs {'kind': 'float64', 'value': 1.0}",
+      "classes": [
+        "KIND int64->float64"
+      ],
+      "example": ".values[0].kind: 'int64' vs 'float64'",
+      "roundtrip_implicated": [],
+      "provenance": ""
+    },
+    {
+      "fixture": "fp_p2d_017_series_dtype_sparse_strict.json",
+      "keys": [
+        "expected_dtype"
+      ],
+      "why": "",
+      "classes": [
+        "VALUE"
+      ],
+      "example": ".: 'Sparse' vs 'Sparse[int64, 0]'",
+      "roundtrip_implicated": [],
+      "provenance": ""
+    },
+    {
+      "fixture": "fp_p2d_025_dataframe_iloc_duplicate_column_selector_error_strict.json",
+      "keys": [
+        "expected_error_contains"
+      ],
+      "why": "",
+      "classes": [
+        "ERROR expected-but-succeeded"
+      ],
+      "example": "",
+      "roundtrip_implicated": [],
+      "provenance": ""
+    }
+  ],
+  "moved_attributed": [],
+  "unsupported_operation": [
+    {
+      "fixture": "fp_p2d_129_excel_round_trip_basic_strict.json",
+      "error": "oracle error: unsupported operation: 'excel_round_trip'"
+    },
+    {
+      "fixture": "fp_p2d_129_feather_round_trip_basic_strict.json",
+      "error": "oracle error: unsupported operation: 'feather_round_trip'"
+    },
+    {
+      "fixture": "fp_p2d_129_ipc_stream_round_trip_basic_strict.json",
+      "error": "oracle error: unsupported operation: 'ipc_stream_round_trip'"
+    },
+    {
+      "fixture": "fp_p2d_129_parquet_round_trip_basic_strict.json",
+      "error": "oracle error: unsupported operation: 'parquet_round_trip'"
+    },
+    {
+      "fixture": "fp_p2d_129_parquet_round_trip_with_nulls_strict.json",
+      "error": "oracle error: unsupported operation: 'parquet_round_trip'"
+    },
+    {
+      "fixture": "fp_p2d_357_feather_round_trip_null_hardened.json",
+      "error": "oracle error: unsupported operation: 'feather_round_trip'"
+    },
+    {
+      "fixture": "fp_p2d_358_excel_round_trip_null_hardened.json",
+      "error": "oracle error: unsupported operation: 'excel_round_trip'"
+    },
+    {
+      "fixture": "fp_p2d_359_ipc_stream_round_trip_null_hardened.json",
+      "error": "oracle error: unsupported operation: 'ipc_stream_round_trip'"
+    },
+    {
+      "fixture": "fp_p2d_418_dataframe_compare_result_names_strict.json",
+      "error": "oracle error: unsupported operation: 'dataframe_compare'"
+    },
+    {
+      "fixture": "fp_p2d_427_series_to_arrow_nullable_int_roundtrip_strict.json",
+      "error": "oracle error: unsupported operation: 'series_to_arrow_round_trip'"
+    }
+  ],
+  "other_errors": [
+    {
+      "fixture": "fp_p2c_010_series_filter_duplicate_index_null_mask_hardened.json",
+      "error": "oracle error: series_filter mask application failed: Cannot mask with non-boolean array containing NA / NaN values"
+    },
+    {
+      "fixture": "fp_p2c_010_series_filter_duplicate_index_null_mask_strict.json",
+      "error": "oracle error: series_filter mask application failed: Cannot mask with non-boolean array containing NA / NaN values"
+    },
+    {
+      "fixture": "fp_p2d_018_dataframe_from_records_matrix_short_rows_null_fill_hardened.json",
+      "error": "oracle error: dataframe_from_records failed: 3 columns passed, passed data had 2 columns"
+    },
+    {
+      "fixture": "fp_p2d_021_dataframe_constructor_list_like_explicit_index_and_padding_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: 2 columns passed, passed data had 1 columns"
+    },
+    {
+      "fixture": "fp_p2d_021_dataframe_constructor_list_like_extra_columns_null_fill_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: 3 columns passed, passed data had 2 columns"
+    },
+    {
+      "fixture": "fp_p2d_022_dataframe_constructor_list_like_ragged_with_explicit_columns_and_index_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: 3 columns passed, passed data had 2 columns"
+    },
+    {
+      "fixture": "fp_p2d_025_series_clip_array_bounds_missing_entries_strict.json",
+      "error": "oracle error: series_clip failed: Invalid value '-inf' for dtype Int64"
+    },
+    {
+      "fixture": "fp_p2d_078_series_xs_single_match_strict.json",
+      "error": "oracle error: series_xs currently requires duplicate-label selections that return a Series"
+    },
+    {
+      "fixture": "fp_p2d_094_dataframe_asof_before_first_strict.json",
+      "error": "oracle error: dataframe_asof selection failed: '<' not supported between instances of 'int' and 'Timestamp'"
+    },
+    {
+      "fixture": "fp_p2d_094_dataframe_asof_match_strict.json",
+      "error": "oracle error: dataframe_asof selection failed: '<' not supported between instances of 'int' and 'Timestamp'"
+    },
+    {
+      "fixture": "fp_p2d_098_dataframe_xs_single_match_strict.json",
+      "error": "oracle error: dataframe_xs currently requires duplicate-label selections that return a DataFrame"
+    },
+    {
+      "fixture": "fp_p2d_162_dataframe_quantile_skips_nonnumeric_strict.json",
+      "error": "oracle error: dataframe_quantile failed: numpy boolean subtract, the `-` operator, is not supported, use the bitwise_xor, the `^` operator, or the logical_xor function instead."
+    },
+    {
+      "fixture": "fp_p2d_174_series_str_startswith_empty_pattern_strict.json",
+      "error": "oracle error: series_str_startswith requires non-empty regex_pattern"
+    },
+    {
+      "fixture": "fp_p2d_175_series_str_endswith_empty_pattern_strict.json",
+      "error": "oracle error: series_str_endswith requires non-empty regex_pattern"
+    },
+    {
+      "fixture": "fp_p2d_421_series_dt_to_pydatetime_warn_false_naive_strict.json",
+      "error": "oracle error: series_dt_to_pydatetime failed: DatetimeProperties.to_pydatetime() got an unexpected keyword argument 'warn'"
+    },
+    {
+      "fixture": "fp_p2d_421_series_dt_to_pydatetime_warn_false_tzaware_strict.json",
+      "error": "oracle error: series_dt_to_pydatetime failed: DatetimeProperties.to_pydatetime() got an unexpected keyword argument 'warn'"
+    }
+  ],
+  "expected_error_agreements": [
+    {
+      "fixture": "fp_p2c_004_series_join_cross_rejected_strict.json",
+      "error": "oracle error: series_join failed: Can not pass on, right_on, left_on or set right_index=True or left_index=True",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2c_010_dataframe_iloc_negative_out_of_bounds_hardened.json",
+      "error": "oracle error: dataframe_iloc position lookup failed: positional indexers are out-of-bounds",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2c_010_dataframe_iloc_negative_out_of_bounds_strict.json",
+      "error": "oracle error: dataframe_iloc position lookup failed: positional indexers are out-of-bounds",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2c_010_dataframe_iloc_out_of_bounds_strict.json",
+      "error": "oracle error: dataframe_iloc position lookup failed: positional indexers are out-of-bounds",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2c_010_dataframe_loc_missing_label_strict.json",
+      "error": "oracle error: dataframe_loc label lookup failed: \"None of [Index(['missing'], dtype='object')] are in the [index]\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2c_010_series_iloc_negative_out_of_bounds_hardened.json",
+      "error": "oracle error: series_iloc position lookup failed: positional indexers are out-of-bounds",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2c_010_series_iloc_negative_out_of_bounds_strict.json",
+      "error": "oracle error: series_iloc position lookup failed: positional indexers are out-of-bounds",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2c_010_series_iloc_out_of_bounds_strict.json",
+      "error": "oracle error: series_iloc position lookup failed: positional indexers are out-of-bounds",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2c_010_series_loc_missing_label_strict.json",
+      "error": "oracle error: series_loc label lookup failed: \"None of [Index(['missing'], dtype='object')] are in the [index]\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_016_csv_round_trip_extra_field_error_hardened.json",
+      "error": "oracle error: csv_round_trip failed: Error tokenizing data. C error: Expected 2 fields in line 3, saw 3\n",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_016_csv_round_trip_unclosed_quote_error_strict.json",
+      "error": "oracle error: csv_round_trip failed: Error tokenizing data. C error: EOF inside string starting at row 1",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_017_dataframe_from_series_no_payload_error_hardened.json",
+      "error": "oracle error: dataframe_from_series requires at least one series payload (left/right/groupby_keys)",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_018_dataframe_from_dict_explicit_index_mismatch_error_hardened.json",
+      "error": "oracle error: dataframe_from_dict failed: Length of values (2) does not match length of index (1)",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_018_dataframe_from_dict_length_mismatch_error_hardened.json",
+      "error": "oracle error: dataframe_from_dict failed: All arrays must be of the same length",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_018_dataframe_from_records_explicit_index_mismatch_error_hardened.json",
+      "error": "oracle error: dataframe_from_records failed: Length of values (2) does not match length of index (1)",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_018_dataframe_from_records_matrix_row_width_exceeds_columns_error_hardened.json",
+      "error": "oracle error: dataframe_from_records failed: 2 columns passed, passed data had 3 columns",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_019_dataframe_constructor_kwargs_frame_missing_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_kwargs requires frame payload",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_020_dataframe_constructor_dict_of_series_no_payload_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_dict_of_series requires at least one series payload (left/right/groupby_keys)",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_020_dataframe_constructor_scalar_missing_fill_value_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_scalar requires fill_value payload",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_020_dataframe_constructor_scalar_missing_index_error_strict.json",
+      "error": "oracle error: dataframe_constructor_scalar failed: DataFrame constructor not properly called!",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_021_dataframe_constructor_list_like_index_length_mismatch_error_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: Length of values (2) does not match length of index (1)",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_021_dataframe_constructor_list_like_missing_matrix_rows_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like requires matrix_rows list payload",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_021_dataframe_constructor_list_like_row_width_exceeds_columns_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: 2 columns passed, passed data had 3 columns",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_022_dataframe_constructor_list_like_empty_columns_nonempty_rows_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: 0 columns passed, passed data had 1 columns",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_022_dataframe_constructor_list_like_index_length_mismatch_large_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: Length of values (3) does not match length of index (2)",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_022_dataframe_constructor_list_like_missing_matrix_rows_error_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like requires matrix_rows list payload",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_022_dataframe_constructor_list_like_row_width_exceeds_columns_by_two_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: 2 columns passed, passed data had 4 columns",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_022_series_timedelta_total_seconds_numeric_passthrough_strict.json",
+      "error": "oracle error: series_timedelta_total_seconds: Can only use .dt accessor with datetimelike values",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_023_dataframe_constructor_list_like_dtype_bool_invalid_int_error_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: Need to pass bool-like values",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_023_dataframe_constructor_list_like_dtype_int64_lossy_float_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: Trying to coerce float values to integers",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_023_dataframe_constructor_list_like_dtype_unknown_error_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: unsupported constructor dtype 'object'",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_boolean_pyarrow_unsupported_error_hardened.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: unsupported constructor dtype 'boolean[pyarrow]'",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_datetime64_unsupported_error_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: unsupported constructor dtype 'datetime64[ns]'",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_uint64_unsupported_error_strict.json",
+      "error": "oracle error: dataframe_constructor_list_like failed: unsupported constructor dtype 'uint64'",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_from_dict_dtype_category_unsupported_error_hardened.json",
+      "error": "oracle error: dataframe_from_dict failed: unsupported constructor dtype 'category'",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_025_dataframe_iloc_missing_column_error_hardened.json",
+      "error": "oracle error: dataframe_iloc column lookup failed: \"None of [Index(['missing'], dtype='object')] are in the [columns]\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_025_dataframe_iloc_out_of_bounds_error_strict.json",
+      "error": "oracle error: dataframe_iloc position lookup failed: positional indexers are out-of-bounds",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_025_dataframe_loc_missing_column_error_hardened.json",
+      "error": "oracle error: dataframe_loc column lookup failed: \"None of [Index(['missing'], dtype='object')] are in the [columns]\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_025_dataframe_loc_missing_label_error_strict.json",
+      "error": "oracle error: dataframe_loc label lookup failed: \"None of [Index(['missing'], dtype='object')] are in the [index]\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_028_dataframe_concat_axis1_duplicate_column_error_hardened.json",
+      "error": "oracle error: dataframe_concat axis=1 duplicate columns unsupported: dup",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_028_dataframe_concat_axis1_duplicate_column_error_strict.json",
+      "error": "oracle error: dataframe_concat axis=1 duplicate columns unsupported: dup",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_028_dataframe_concat_axis1_duplicate_index_left_error_strict.json",
+      "error": "oracle error: dataframe_concat failed: Reindexing only valid with uniquely valued Index objects",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_028_dataframe_concat_axis1_duplicate_index_right_error_hardened.json",
+      "error": "oracle error: dataframe_concat failed: Reindexing only valid with uniquely valued Index objects",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_028_dataframe_concat_invalid_axis_error_strict.json",
+      "error": "oracle error: dataframe_concat failed: No axis named 2 for object type DataFrame",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_029_dataframe_concat_axis1_inner_duplicate_column_error_hardened.json",
+      "error": "oracle error: dataframe_concat axis=1 duplicate columns unsupported: dup",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_029_dataframe_concat_axis1_inner_duplicate_column_error_strict.json",
+      "error": "oracle error: dataframe_concat axis=1 duplicate columns unsupported: dup",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_029_dataframe_concat_axis1_inner_duplicate_index_error_hardened.json",
+      "error": "oracle error: dataframe_concat failed: Reindexing only valid with uniquely valued Index objects",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_029_dataframe_concat_axis1_invalid_join_error_strict.json",
+      "error": "oracle error: dataframe_concat failed: Only can inner (intersect) or outer (union) join the other axis",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_030_dataframe_concat_axis0_invalid_join_error_strict.json",
+      "error": "oracle error: dataframe_concat failed: Only can inner (intersect) or outer (union) join the other axis",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_030_dataframe_concat_invalid_axis_error_hardened.json",
+      "error": "oracle error: dataframe_concat failed: No axis named 2 for object type DataFrame",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_031_dataframe_concat_axis0_invalid_join_error_strict.json",
+      "error": "oracle error: dataframe_concat failed: Only can inner (intersect) or outer (union) join the other axis",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_031_dataframe_concat_invalid_axis_error_hardened.json",
+      "error": "oracle error: dataframe_concat failed: No axis named 7 for object type DataFrame",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_032_dataframe_concat_axis0_invalid_join_error_strict.json",
+      "error": "oracle error: dataframe_concat failed: Only can inner (intersect) or outer (union) join the other axis",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_032_dataframe_concat_invalid_axis_error_hardened.json",
+      "error": "oracle error: dataframe_concat failed: No axis named 2 for object type DataFrame",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_035_dataframe_merge_validate_invalid_value_error_strict.json",
+      "error": "oracle error: dataframe_merge failed: \"diagonal\" is not a valid argument. Valid arguments are:\n- \"1:1\"\n- \"1:m\"\n- \"m:1\"\n- \"m:m\"\n- \"one_to_one\"\n- \"one_to_many\"\n- \"many_to_one\"\n- \"many_to_many\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_036_dataframe_merge_suffixes_duplicate_output_error_hardened.json",
+      "error": "oracle error: dataframe_merge failed: Passing 'suffixes' which cause duplicate columns {'val_L'} is not allowed.",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_036_dataframe_merge_suffixes_missing_error_strict.json",
+      "error": "oracle error: dataframe_merge failed: columns overlap but no suffix specified: Index(['val'], dtype='object')",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_039_dataframe_merge_cross_rejects_index_flags_hardened.json",
+      "error": "oracle error: dataframe_merge failed: Can not pass on, right_on, left_on or set right_index=True or left_index=True",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_039_dataframe_merge_cross_rejects_keys_strict.json",
+      "error": "oracle error: dataframe_merge failed: Can not pass on, right_on, left_on or set right_index=True or left_index=True",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_040_dataframe_sort_values_missing_column_error_strict.json",
+      "error": "oracle error: dataframe_sort_values column 'missing' not found",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_046_series_fillna_cast_error_strict.json",
+      "error": "oracle error: series_fillna failed: Invalid value 'oops' for dtype Int64",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_050_dataframe_fillna_cast_error_strict.json",
+      "error": "oracle error: dataframe_fillna failed: Invalid value 'oops' for dtype Int64",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_053_dataframe_reset_index_drop_false_collision_error_strict.json",
+      "error": "oracle error: dataframe_reset_index failed: cannot insert level_0, already exists",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_053_dataframe_set_index_missing_column_error_strict.json",
+      "error": "oracle error: dataframe_set_index failed: \"None of ['missing'] are in the columns\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_053_dataframe_set_index_verify_integrity_duplicate_error_strict.json",
+      "error": "oracle error: dataframe_set_index failed: Index has duplicate keys: Index([10], dtype='int64', name='id')",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_054_dataframe_drop_duplicates_missing_subset_column_error_strict.json",
+      "error": "oracle error: dataframe_drop_duplicates failed: Index(['missing'], dtype='object')",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_056_dataframe_merge_asof_backward_nan_left_key_strict.json",
+      "error": "oracle error: dataframe_merge_asof failed: incompatible merge keys [0] Int64Dtype() and dtype('int64'), must be the same type",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_078_series_xs_key_not_found_hardened.json",
+      "error": "oracle error: series_xs failed: 'missing'",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_080_series_bool_multi_element_hardened.json",
+      "error": "oracle error: series_bool failed: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_097_dataframe_bool_multi_element_hardened.json",
+      "error": "oracle error: dataframe_bool failed: The truth value of a DataFrame is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_098_dataframe_xs_key_not_found_hardened.json",
+      "error": "oracle error: dataframe_xs failed: 'missing'",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_104_dataframe_groupby_get_group_not_found_hardened.json",
+      "error": "oracle error: dataframe_groupby_get_group failed: 'missing'",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_126_dataframe_eval_missing_column_error_strict.json",
+      "error": "oracle error: dataframe_eval failed: name 'missing' is not defined",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_126_dataframe_query_non_boolean_mask_error_strict.json",
+      "error": "oracle error: dataframe_query failed: \"None of [Index([11, 22], dtype='int64')] are in the [index]\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_127_dataframe_pivot_table_unsupported_agg_hardened.json",
+      "error": "oracle error: dataframe_pivot_table failed: 'geo_mean' is not a valid function for 'DataFrameGroupBy' object",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_128_dataframe_pivot_duplicate_strict.json",
+      "error": "oracle error: dataframe_pivot failed: Index contains duplicate entries, cannot reshape",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_133_dataframe_insert_duplicate_column_error_strict.json",
+      "error": "oracle error: dataframe_insert failed: cannot insert a, already exists",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_133_dataframe_insert_length_mismatch_hardened.json",
+      "error": "oracle error: dataframe_insert failed: Length of values (1) does not match length of index (2)",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_134_dataframe_assign_length_mismatch_hardened.json",
+      "error": "oracle error: dataframe_assign failed: Length of values (1) does not match length of index (2)",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_136_dataframe_reindex_duplicate_source_error_strict.json",
+      "error": "oracle error: dataframe_reindex failed: cannot reindex on an axis with duplicate labels",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_138_dataframe_drop_columns_missing_error_strict.json",
+      "error": "oracle error: dataframe_drop_columns failed: \"['z'] not found in axis\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_144_dataframe_shift_invalid_axis_strict.json",
+      "error": "oracle error: dataframe_shift failed: No axis named 2 for object type DataFrame",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_245_series_dt_total_seconds_basic_strict.json",
+      "error": "oracle error: series_dt_total_seconds failed: only leading negative signs are allowed",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_262_series_loc_missing_label_error_strict.json",
+      "error": "oracle error: series_loc label lookup failed: \"None of [Index(['z'], dtype='object')] are in the [index]\"",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_263_series_iloc_negative_out_of_bounds_strict.json",
+      "error": "oracle error: series_iloc position lookup failed: positional indexers are out-of-bounds",
+      "origin": "pandas"
+    },
+    {
+      "fixture": "fp_p2d_417_series_categorical_from_codes_out_of_bounds_strict.json",
+      "error": "oracle error: series_categorical_from_codes failed: codes need to be between -1 and len(categories)-1",
+      "origin": "pandas"
+    }
+  ],
+  "error_agreement_pandas": 71,
+  "error_agreement_stamped": 71,
+  "error_agreement_not_attestable": [
+    {
+      "fixture": "fp_p2d_017_dataframe_from_series_no_payload_error_hardened.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_019_dataframe_constructor_kwargs_frame_missing_error_hardened.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_020_dataframe_constructor_dict_of_series_no_payload_error_hardened.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_020_dataframe_constructor_scalar_missing_fill_value_error_hardened.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_021_dataframe_constructor_list_like_missing_matrix_rows_error_hardened.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_022_dataframe_constructor_list_like_missing_matrix_rows_error_strict.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_023_dataframe_constructor_list_like_dtype_unknown_error_strict.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_boolean_pyarrow_unsupported_error_hardened.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_datetime64_unsupported_error_strict.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_constructor_list_like_dtype_uint64_unsupported_error_strict.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_024_dataframe_from_dict_dtype_category_unsupported_error_hardened.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_028_dataframe_concat_axis1_duplicate_column_error_hardened.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_028_dataframe_concat_axis1_duplicate_column_error_strict.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_029_dataframe_concat_axis1_inner_duplicate_column_error_hardened.json",
+      "origin": "oracle_adapter"
+    },
+    {
+      "fixture": "fp_p2d_029_dataframe_concat_axis1_inner_duplicate_column_error_strict.json",
+      "origin": "oracle_adapter"
+    }
+  ],
+  "uncompared_keys": {},
+  "coverage": {
+    "SEMANTIC": 1131,
+    "STRUCTURAL": 16
+  }
+}

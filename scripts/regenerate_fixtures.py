@@ -470,6 +470,36 @@ def rebuild(fixture: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]
     return updated
 
 
+def corpus_wide_apply_refused(
+    *, apply: bool, restamp_agreeing: bool, glob: str, limit: int
+) -> bool:
+    """Is this a corpus-wide `--apply` that must be refused?
+
+    The ban exists to stop a bulk REGENERATION sweeping expected values in from
+    the oracle — that is how a real divergence gets laundered into the corpus as
+    pinned truth.
+
+    `--restamp-agreeing` is exempt, because it is a different operation wearing
+    the same flag. It reads no expected value at all (`restamp` copies only
+    `fixture_provenance`), it fires only where `restampable` proved the current
+    oracle reproduced everything the fixture pins, and with no `--attributions`
+    the allowlist is empty so zero MOVED fixtures can be written. That is the
+    same carve-out the `--attributions` check in `main` already makes, for the
+    same reason.
+
+    Without the exemption the restamp mode is unrunnable at the only scale it
+    exists for: br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr is 1144
+    agreeing fixtures pinning a stale script hash, and `restamp`'s own docstring
+    calls itself "the honest remedy for the bulk of p6srr". Batching it behind
+    `--limit 400` to satisfy the guard's letter would be evading the guard, which
+    is worse than narrowing it in the open.
+
+    Lifted out of `main` so the rule is assertable without running the corpus —
+    the argument-level test for it previously had to invoke the whole sweep.
+    """
+    return apply and not restamp_agreeing and glob == "*.json" and not limit
+
+
 def restampable(verdict: dict[str, Any]) -> bool:
     """May this fixture's provenance stamp be refreshed?
 
@@ -553,6 +583,13 @@ def restamp_text(raw: str, old: dict[str, str], new: dict[str, str]) -> str:
         # copied from the final line so the corpus keeps its own formatting.
         closing = block.rfind("}")
         head, tail = block[:closing], block[closing:]
+        # The whitespace that indented the CLOSING BRACE lives at the end of
+        # `head`, and `rstrip()` below removes it. Capture it first, or the `}`
+        # is re-emitted at column 0 — which is still valid JSON, so nothing
+        # fails, it just silently deforms every fixture this touches. That is
+        # exactly the noise `restamp_text` exists to avoid: it landed in 71 files
+        # before this was caught by reading the diff rather than the exit code.
+        closing_indent = head[head.rfind("\n") + 1 :] if "\n" in head else ""
         stripped = head.rstrip()
         indent = ""
         last_newline = stripped.rfind("\n")
@@ -561,7 +598,7 @@ def restamp_text(raw: str, old: dict[str, str], new: dict[str, str]) -> str:
                 : len(stripped[last_newline + 1 :])
                 - len(stripped[last_newline + 1 :].lstrip())
             ]
-        entry = f'{stripped},\n{indent}"{key}": {json.dumps(value)}\n'
+        entry = f'{stripped},\n{indent}"{key}": {json.dumps(value)}\n{closing_indent}'
         block = entry + tail
     return raw[:open_brace] + block + raw[end:]
 
@@ -728,7 +765,12 @@ def main() -> int:
                              "attribution pass driven by counts rather than by a visible slice.")
     args = parser.parse_args()
 
-    if args.apply and args.glob == "*.json" and not args.limit:
+    if corpus_wide_apply_refused(
+        apply=args.apply,
+        restamp_agreeing=args.restamp_agreeing,
+        glob=args.glob,
+        limit=args.limit,
+    ):
         print(
             "--apply requires an explicit --glob or --limit: corpus-wide regeneration is forbidden",
             file=sys.stderr,

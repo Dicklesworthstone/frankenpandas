@@ -5,8 +5,8 @@
   "operation": "series_tail",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "31c08766052d5a224b26442c7ec96c29e06057505e6d16a8fe5fad8167cacde2",
+    "generated_at": "2026-08-16T11:25:10Z"
   },
   "left": {
     "name": "vals",

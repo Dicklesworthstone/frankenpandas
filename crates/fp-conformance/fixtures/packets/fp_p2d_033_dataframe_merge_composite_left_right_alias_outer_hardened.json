@@ -5,8 +5,8 @@
   "operation": "dataframe_merge",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "16ecd687f9124ef58e583f2a88717a3dc00392ea2eb91e57d7899de5fb71cfd5",
-    "generated_at": "2026-08-15T14:01:34Z"
+    "oracle_script_sha256": "31c08766052d5a224b26442c7ec96c29e06057505e6d16a8fe5fad8167cacde2",
+    "generated_at": "2026-08-16T11:25:06Z"
   },
   "join_type": "outer",
   "left_on_keys": [

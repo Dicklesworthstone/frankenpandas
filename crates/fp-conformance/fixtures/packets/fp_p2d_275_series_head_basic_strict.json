@@ -5,8 +5,8 @@
   "operation": "series_head",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "70c8c26b55a1b419beed28d198d022f1ca8eb25070814ab1156eb18562be38cc",
-    "generated_at": "2026-08-09T12:19:43Z"
+    "oracle_script_sha256": "31c08766052d5a224b26442c7ec96c29e06057505e6d16a8fe5fad8167cacde2",
+    "generated_at": "2026-08-16T11:25:59Z"
   },
   "head_n": 3,
   "left": {
