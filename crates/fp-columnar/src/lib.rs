@@ -912,6 +912,20 @@ impl Float64ChunkBuffer {
             Self::Owned(data) => data.as_slice(),
         }
     }
+
+    /// The underlying `Arc<[f64]>`, when there is one to share.
+    ///
+    /// br-frankenpandas-284ul. `Owned` deliberately returns `None`: it holds an
+    /// `Arc<Vec<f64>>`, and producing an `Arc<[f64]>` from it means allocating
+    /// and copying — the exact cost the owned backing exists to avoid. Callers
+    /// wanting a zero-copy view must treat `None` as "no view available" and take
+    /// their ordinary path, never as an error.
+    fn shared_arc(&self) -> Option<&Arc<[f64]>> {
+        match self {
+            Self::Shared(data) => Some(data),
+            Self::Owned(_) => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -8158,6 +8172,14 @@ fn par_map_slice_f64_with_witness_with_policy<T: Copy + Sync, F: Fn(T) -> f64 + 
     (out, words, all_valid, all_finite)
 }
 
+/// One `(buffer, start, len)` chunk triple per worker, as produced by
+/// [`par_map_slice_f64_to_owned_chunks`] and consumed by
+/// [`Column::from_f64_all_valid_owned_chunks`].
+///
+/// br-frankenpandas-284ul. Named rather than written inline because
+/// `clippy::type_complexity` refuses the bare tuple under `-D warnings`.
+type OwnedFloat64Chunks = Vec<(Arc<Vec<f64>>, usize, usize)>;
+
 /// Write-once sibling of [`map_block_with_witness`]: BUILDS its output buffer
 /// instead of overwriting a pre-zeroed one.
 ///
@@ -8213,7 +8235,7 @@ fn par_map_slice_f64_to_owned_chunks<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
     f: F,
     max_workers: usize,
     par_min: usize,
-) -> (Vec<(Arc<Vec<f64>>, usize, usize)>, Vec<u64>, bool, bool) {
+) -> (OwnedFloat64Chunks, Vec<u64>, bool, bool) {
     let n = input.len();
     let mut words = vec![0_u64; n.div_ceil(64)];
     let available = std::thread::available_parallelism()
@@ -11572,7 +11594,14 @@ impl Column {
                     return None;
                 }
                 let chunk = &chunks[0];
-                Some((Arc::clone(&chunk.data), chunk.start))
+                // br-frankenpandas-284ul. This hands out a ZERO-COPY `Arc<[f64]>`
+                // view, which only the `Shared` backing can supply — an `Owned`
+                // chunk holds `Arc<Vec<f64>>` and could only satisfy this by
+                // allocating and copying, which is precisely the cost the owned
+                // form exists to avoid. Returning `None` routes the caller to its
+                // ordinary path instead, at the cost of the view, never at the
+                // cost of correctness.
+                Some((Arc::clone(chunk.data.shared_arc()?), chunk.start))
             }
             _ => match &self.data {
                 Some(ColumnData::Float64(data)) => {
