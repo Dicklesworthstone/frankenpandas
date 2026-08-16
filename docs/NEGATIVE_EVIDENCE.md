@@ -26286,3 +26286,60 @@ composed of parked cores, and that on `df_dot` shapes both arms' working cores
 agree to within 0.5%. A workload whose threads are periodically idle enough to be
 parked mid-measurement could genuinely straddle the floor, and this instrument
 would now show it.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-633fb) — placement impact MEASURED for this harness: SMT folding moves `df_dot @10k` by 3.2%, under its own 10.3% noise; at `@1M` the test is blocked because the INCUMBENT ignores the CPU mask
+
+The fleet's placement audits came back mixed, so the instruction was to measure
+the impact here rather than inherit anyone's conclusion. `uptime` 12.12 1-min /
+16.48 5-min at the start, 13.66 / 16.33 at the end.
+
+**DESIGN: same logical width, half the physical cores.** Regime A is
+`--pin-cpus one-per-core` = 32 logical on 32 physical. Regime B is
+`0-15,32-47` = 32 logical on **16** physical, i.e. every core carrying both SMT
+siblings. Thread counts, mask width and workload are identical; only co-residency
+differs. Interleaved A/B/A/B/A/B, 9 balanced-square rounds each.
+
+| regime | physical cores | ratios | median | within-regime spread |
+|---|---:|---|---:|---:|
+| A one-per-core | 32 | 0.580, 0.522, 0.565 | 0.565 | **10.3%** |
+| B SMT-folded | 16 | 0.565, 0.547, 0.547 | 0.547 | 3.3% |
+
+**Between-regime difference: 3.2%. Within-regime spread in A alone: 10.3%.** The
+placement effect on this shape is smaller than the harness's own run-to-run
+noise, so for `df_dot @10k` the cross-core spread is not what moves the ratio.
+
+**THE REGIMES REALLY DID DIFFER — checked, because a null result on an
+instrument that never varied would be worthless.** Recorded per-arm placement: in
+A the arms sat on distinct physical cores (FP core 14; pandas cores 14, 16, 22).
+In B they sat on SMT siblings of ONE core — FP on cpu46 and pandas on cpu14, both
+core 14 — which A never produced. Per-arm clock ratios stayed 1.0000-1.0059 in
+every one of the six runs, so neither regime introduced a frequency difference.
+
+**AT `dim = 1000` THE TEST CANNOT BE RUN, AND THE REASON IS THE INCUMBENT.** All
+four pinned `@1M` attempts returned `CONTRACT_INVALID`, and the harness was right
+to refuse them:
+
+| affinity cap | pandas threads used | FrankenPandas threads used |
+|---:|---:|---:|
+| 32 | **64** | 32 |
+
+**pandas/OpenBLAS sizes its thread pool from the machine, not from the affinity
+mask** — it spawned 64 threads inside a 32-CPU cpuset, a 2:1 oversubscription of
+its own arm, while FrankenPandas correctly observed the cap and used 32. The
+thread-provenance contract catches exactly this and invalidates the row. So the
+placement question at the parallel shapes is inseparable from the incumbent's
+thread-pool sizing, which is the open contract decision in
+br-frankenpandas-633fb, not something an agent settles by pinning harder.
+
+**This also feeds back into today's refusals.** The incumbent oversubscribing its
+own arm 2:1 when constrained is a plausible contributor to the A/A null
+instability that refused every `dim >= 316` row today (26 rows, 23% certified,
+mean pandas null deviation 0.0436). It is not proof of that mechanism, and I am
+not claiming it as one.
+
+**Scope, stated because the fleet's results differ:** this is `df_dot`, on
+thinkstation1, at `dim = 100`, with a 1-thread subject arm. It says nothing about
+a workload whose threads are numerous enough to spread across a folded mask, and
+nothing about anyone else's host. What it does say is that for the shape where I
+CAN measure it, placement is below my noise floor — so my banked `df_dot` rows do
+not need re-basing on placement grounds.
