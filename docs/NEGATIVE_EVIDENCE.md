@@ -24309,3 +24309,62 @@ admissible evidence. Both are shared-contract changes and neither is mine to mak
 unilaterally.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run7_load31_elf_4a89472f.json`
+
+---
+
+## br-frankenpandas-h67zz — n=8 refines the cv criterion: use max(FP, pandas) cv, not FP's alone. Clean separation at a gap between 14.5% and 32%, across THREE ELFs
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** eighth run, and
+the one that discriminates between two versions of the rule I proposed. No new
+ratio claimed.
+
+Run 8: `math_unary/floor @1M`, balanced-square ABBAABBA, ONE invocation, load
+45.14→41.09, **ratio 0.109x**, FP p50 1809.48us cv **15.42%**, pandas p50
+194.97us cv **31.97%**.
+**A/A null control (same invocation):** FP **0.979555** (2.0% off, fails
+marginally), pandas **0.944867** (5.5% off, fails). REFUSED, no ratio claimed.
+
+**ELF `f5748e7719c90f166ac7cf2c905e61efbfff27a08b35392b34d1e26ae6e4bbaa`** — a
+THIRD binary, rebuilt by a peer after `a3348cccf` landed work-proportional dot
+worker sizing. **Verified that commit does not touch this workload's path**: it
+adds only `dot_`-prefixed helpers (`dot_worker_count`,
+`dot_materialization_work_per_worker`) and has ZERO diff lines matching
+`par_map_slice_f64_with_witness` / `typed_float_unary` /
+`elementwise_witness_policy` / `FP_ELEMENTWISE`. So `floor` executes unchanged
+code and this run is comparable to the earlier seven.
+
+**THE REFINEMENT.** I had been classifying runs by FP's cv. Run 8 breaks that:
+FP cv 15.42% looks admissible, but its **pandas arm is at 31.97%**, and the ratio
+lands at 0.109x — outside the 0.123–0.132 cluster. Sorting all eight by
+**max(FP cv, pandas cv)** instead separates them with no overlap and a wide gap:
+
+| max cv | FP cv | pandas cv | load | ELF | ratio | gate |
+|---|---|---|---|---|---|---|
+| **11.44%** | 7.44% | 11.44% | 6.41 | `1858bb91…` | **0.132x** | CERTIFIED |
+| **11.95%** | 11.95% | 9.74% | 31.91 | `4a89472f…` | **0.126x** | refused |
+| **12.17%** | 11.69% | 12.17% | 19.41 | `4a89472f…` | **0.130x** | refused |
+| **14.52%** | 14.34% | 14.52% | 30.84 | `4a89472f…` | **0.123x** | refused |
+| *— gap: 14.52% → 31.97% —* | | | | | | |
+| 31.97% | 15.42% | 31.97% | 45.14 | `f5748e77…` | 0.109x | refused |
+| 34.08% | 34.08% | 26.3% | 37.9→48.1 | `4a89472f…` | 0.072x | **CERTIFIED** |
+| 45.41% | 25.93% | 45.41% | 86.1→76.8 | `4a89472f…` | 0.076x | refused |
+| 78.50% | 34.52% | 78.5% | 88.4→90.1 | `4a89472f…` | 0.165x | refused |
+
+**The four runs below the gap span 0.123x–0.132x (7%). The four above span
+0.072x–0.165x (2.3x).** The tight four come from **two different ELFs** and loads
+6→31; the loose four include the third ELF. So the cluster is a property of the
+code, reproducible across binaries, and the scatter is a property of the
+measurement conditions.
+
+**WHY max() IS THE RIGHT STATISTIC, stated so it is falsifiable:** the reported
+ratio is FP median ÷ pandas median, so instability in EITHER median propagates
+into it. Screening on the FP arm alone assumes the incumbent is always steady,
+and run 8 is the counterexample — the incumbent was the noisy one. Any future
+run where the two arms' cv differ substantially is a further test of this; if one
+appears with a high FP cv, a low pandas cv, and a ratio inside the cluster, this
+refinement is wrong.
+
+**`floor @1M` remains ≈0.13x** — now n=4 under the corrected screen, unchanged by
+this run, which the screen excludes.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run8_load45_elf_f5748e77.json`
