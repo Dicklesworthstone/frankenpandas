@@ -257,3 +257,12 @@
 3. Must list affected test cases
 4. Must include review date
 5. Tests for ACCEPTED divergences use XFAIL markers where applicable
+
+### DISC-025: `str.encode` returns byte LENGTHS, where pandas returns bytes objects
+- **Reference:** MEASURED, live pandas 2.2.3 on `pd.Series(['foo','hello world',None], dtype=object)`: `s.str.encode('utf-8')` → `[b'foo', b'hello world', None]`, dtype `object`, element types `bytes`/`bytes`/`NoneType` — a bytes object per element, with a supplied `None` preserved. For contrast `s.str.len()` → `[3.0, 11.0, nan]`, dtype `float64`.
+- **Our impl:** `StringAccessor::encode` (`crates/fp-frame/src/lib.rs`) is `apply_str_int(|s| s.len() as i64)` — it returns the UTF-8 byte LENGTH, `Int64` with no nulls and `Float64`/NaN when any null is present. Rust strings are always valid UTF-8, so the encoding argument is a genuine no-op; what is not a no-op is returning a number where pandas returns bytes. It is `str.len` under another name, and the two results agree on nothing except arity.
+- **Impact:** any caller treating `encode` as pandas' `encode` gets a length, not the bytes. The null MARKER is correct given this implementation — a numeric result cannot hold a `None`, so NaN is right by the `br-frankenpandas-lufpu` result-dtype rule — which is why `fp_p2d_413_series_str_encode_with_nulls_hardened` legitimately pins float64 values. The fixture is therefore consistent, but it pins a divergence as expected behaviour, the same shape as DISC-009 and `br-frankenpandas-0g9m9`.
+- **Resolution:** WILL-FIX / INVESTIGATING — decision tracked by `br-frankenpandas-rw01l`. Three options: return real bytes (needs somewhere to put them; FP has no bytes dtype, so this leans on the DISC-005 object bucket or a new one), refuse `encode` explicitly as unsupported (honest, and loses nothing since the current answer cannot be consumed as bytes), or keep byte lengths as a documented divergence. This entry is the third option's minimum and stands regardless of which is chosen.
+- **Found by:** verifying `74910f3eb`'s re-bank under `br-frankenpandas-q0ktc`. That re-bank is correct about the null markers; the implementation it reasons from is what nobody had checked. The in-code comment asserted "matches pandas", which is what let it sit unnoticed — now corrected in place.
+- **Tests affected:** `fp_p2d_413_series_str_encode_with_nulls_hardened` (consistent with the current implementation, not with pandas). `decode()` is the sibling identity op and should be re-checked when this is decided.
+- **Review date:** 2026-08-16

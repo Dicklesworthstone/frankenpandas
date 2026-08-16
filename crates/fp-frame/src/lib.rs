@@ -45406,8 +45406,23 @@ impl StringAccessor<'_> {
     /// returns float64 for nullable integers (nulls become NaN).
     pub fn encode(&self, _encoding: &str) -> Result<Series, FrameError> {
         // In Rust, strings are always valid UTF-8, so "encoding" is a no-op.
-        // Return the byte lengths for compatibility. Int64 with no nulls,
-        // Float64 (NaN) when any null is present — matches pandas.
+        // Return the byte lengths. Int64 with no nulls, Float64 (NaN) when any
+        // null is present.
+        //
+        // ⚠️ THIS DOES NOT MATCH pandas, and the comment used to claim it did.
+        // MEASURED, live pandas 2.2.3 on `pd.Series(['foo','hello world',None])`:
+        //
+        //     s.str.encode('utf-8') -> [b'foo', b'hello world', None]   object
+        //     s.str.len()           -> [3.0, 11.0, nan]                 float64
+        //
+        // pandas returns a BYTES object per element and preserves a supplied
+        // None; this returns a NUMBER and mints NaN. It is `str.len` under
+        // another name, and the two agree on nothing but arity. See DISC-025;
+        // the decision (real bytes / explicit refusal / documented divergence)
+        // is br-frankenpandas-rw01l.
+        //
+        // The false claim is why this sat unnoticed: it was read as parity while
+        // fp_p2d_413 quietly pinned the byte lengths as expected output.
         let name = format!("{}_encoded", self.series.name());
         self.apply_str_int(|s| s.len() as i64, &name)
     }
