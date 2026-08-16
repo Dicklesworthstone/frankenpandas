@@ -24668,3 +24668,57 @@ generalise to other shapes: `df_dot @10k` remains a certified **0.633x** LOSS
 `mulpd` (br-frankenpandas-oxv4u), so the win is a scheduling win, not an ISA one.
 
 **Artifacts:** `artifacts/bench/jk9ht_df_dot_1M_thinkstation1_2026-08-16_quiet_run1.json`
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oarkz) — `df_dot @100k` CERTIFIES at 7.255x, and the observed thread count is the shipped work rule's own prediction — incumbent-win
+
+The biggest number `df.dot` has ever produced had never been certified: earlier
+`@100k` runs read 5.06x and 7.00x and were both refused NULL_UNDECIDABLE under
+fleet load. Same ELF, same harness, same pandas artifact, quiet window.
+
+| | FrankenPandas | pandas 2.2.3 |
+|---|---:|---:|
+| p50 | **1.6568 ms** | 12.1823 ms |
+| cv | 4.74% | 22.08% |
+| observed threads | **15** | 64 |
+| A/A null median | 1.005086 | 1.013059 |
+
+**THE 15 IS THE POINT, NOT AN ASIDE.** `dim = isqrt(100k) = 316`, so the shipped
+rule computes `work / 2e6 = 316^3 / 2e6 = 15` workers — and 15 is what the process
+OBSERVED itself using. The worker-sizing lever banked earlier today predicted this
+number from the work alone, before the row existed, and the old flat cap of 8
+would have run this shape at roughly half the parallelism. The rule is not merely
+harmless here; it is visible in the measurement.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228 (78709880 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench
+
+**A/A null control (same invocation):** 21 balanced-square rounds; FrankenPandas
+median ratio 1.005086 CI [0.9859, 1.0208]; pandas median ratio 1.013059 CI
+[0.9061, 1.1597]. Both inside the 2%-of-unity limit.
+
+**Median-CI decision:** median effect 7.255x; CI [6.94768938, 8.12566767] excludes
+unity, and the claim's log effect 1.98164024 cleared the required threshold
+0.29636797 by 6.7x. Unlike the `@1M` row banked above — which cleared its
+threshold by 2% — this one is nowhere near its decision boundary, so it does not
+depend on a lucky window.
+
+**CV role:** provenance only; CV had no vote.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f invocation_id=vs-pandas-20260816T192240.347788Z-pid1777824 measured_ratio=7.255x
+
+**Host and load.** thinkstation1, Threadripper PRO 5975WX 32C/64T, governor
+powersave, 64 CPUs in affinity, harness `6d884360…`, git `ab6906603`. **loadavg
+12.15 at invocation start, 54.85 at end** — the quietest start of the session, and
+the fleet resumed building before it finished. Both figures are recorded because
+the four earlier refusals on this op were all load artefacts on the incumbent arm.
+
+**Shape dependence, restated so this number is not over-read.** `df.dot` now has
+three certified rows on one ELF, and they disagree by an order of magnitude:
+**7.255x @100k**, **1.187x @1M**, **0.633x @10k** (the last on the AVX2 ELF,
+br-frankenpandas-03fp5). The op is a win in the middle of its range, a narrow win
+at the top, and a loss at the bottom. Any single-number summary of `df.dot` is
+wrong.
+
+**Artifacts:** `artifacts/bench/oarkz_df_dot_100k_thinkstation1_2026-08-16_quiet_run1.json`
