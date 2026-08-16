@@ -23973,3 +23973,62 @@ asymmetrically threaded pair is a property of the code alone.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run2_load48_elf_4a89472f.json`
 (run 1 is `…_local_elf_1858bb91.json`, banked above)
+
+---
+
+## br-frankenpandas-h67zz — ⚠️ I PREDICTED THE WRONG DIRECTION: at load 90 `floor` gets BETTER (0.165x), not worse. The mechanism I banked one entry ago is refuted; the instability finding survives
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** prediction
+tested and FAILED. Correcting my own entry directly above.
+
+The entry above explains the 0.132x / 0.072x split with a mechanism: *"a loaded
+box takes cores away from the parallel arm and barely touches the serial one, so
+the cross-engine ratio moves with load."* That predicts a MONOTONE relationship —
+more load, worse ratio. I ran `floor @1M` a third time deliberately at the
+highest load available to test it.
+
+| run | ELF | load | FP p50 / cv | pandas p50 / cv | FP thr | pd thr | ratio | verdict |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `1858bb91…` | 6.41 | 1343.79us / 7.44% | 176.58us / 11.44% | 8 | 1 | 0.132x | CERTIFIED |
+| 2 | `4a89472f…` | 37.91→48.11 | 3931.14us / 34.08% | 237.54us / 26.3% | 8 | 1 | 0.072x | CERTIFIED |
+| 3 | `4a89472f…` | **88.44→90.09** | 2442.36us / 34.52% | **339.38us / 78.5%** | 8 | 1 | **0.165x** | NULL_UNDECIDABLE |
+
+**A/A null control (same invocation), run 3:** FP **0.915327** — 8.5% off unity,
+a hard fail — and pandas **0.981022**, 1.9% off, just inside. The row is refused
+and **no ratio is claimed for run 3.**
+
+**THE PREDICTION FAILED IN DIRECTION.** I expected worse than 0.072x at load 90.
+The point estimate came back **0.165x — better than both prior runs**, because
+between runs 2 and 3 FP actually got FASTER (3931 → 2442us) while pandas got
+much SLOWER (237 → 339us, cv **78.5%**). The serial arm was hit harder than the
+parallel one, which is the opposite of the mechanism I asserted.
+
+**So the mechanism is refuted and I am withdrawing it.** "Contention costs the
+8-thread arm more than the 1-thread arm" is not a reliable description of this
+fleet; at extreme load BOTH arms are erratic and which one suffers more is not
+predictable from thread count. I stated it one entry ago with more confidence
+than one comparison could support — two points defined a line and I read a
+mechanism off it.
+
+**WHAT SURVIVES, AND IT IS THE PART THAT MATTERS:**
+
+1. **The ratio is load-SENSITIVE and unstable.** Across loads 6 → 90 the point
+   estimate spans 0.072x to 0.165x — a factor of **2.3** — on the same workload
+   and the same code. Any single row is a sample from that spread.
+2. **A green A/A null does not certify load-invariance.** Run 2 passed both nulls
+   and still sat 1.8x from run 1. That claim needed no mechanism to be true and
+   is unaffected by this refutation.
+3. **cv is the tell that the gate ignores.** Run 1 (trustworthy) had FP cv 7.44%
+   and pandas 11.44%. Runs 2 and 3 had 34%, and run 3's pandas arm 78.5%. The
+   three-clause gate is null-based and CV is provenance-only, so it certified run
+   2 at cv 34%. **A row whose cv is in the tens should not be quoted as a
+   property of the code even when the gate accepts it.**
+
+**PRACTICAL RULE, replacing the directional one:** quote vs-incumbent ratios from
+LOW-CONTENTION runs with single-digit cv, and treat load as an admission
+criterion rather than a covariate to reason about. The honest current number for
+`floor @1M` remains run 1's **0.132x** (FP cv 7.44%, load 6.41) — not because
+low load flatters FP, which run 3 shows it may not, but because it is the only
+run whose dispersion is small enough to describe the code.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run3_load90_elf_4a89472f.json`
