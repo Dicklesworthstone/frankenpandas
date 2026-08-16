@@ -5,34 +5,99 @@
   "operation": "series_filter",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "ab8c305f8dcd9de46deb273b79af1f064489e36afedfff97a0d117665a597e79",
+    "generated_at": "2026-08-16T00:53:07Z"
   },
   "left": {
     "name": "data",
     "index": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" },
-      { "kind": "utf8", "value": "z" }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 11 },
-      { "kind": "int64", "value": 22 },
-      { "kind": "int64", "value": 33 }
+      {
+        "kind": "int64",
+        "value": 11
+      },
+      {
+        "kind": "int64",
+        "value": 22
+      },
+      {
+        "kind": "int64",
+        "value": 33
+      }
     ]
   },
   "right": {
     "name": "mask",
     "index": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" },
-      { "kind": "utf8", "value": "z" }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ]
   },
-  "expected_error_contains": "boolean mask required for filter"
+  "expected_series": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "values": [
+      {
+        "kind": "int64",
+        "value": 22
+      },
+      {
+        "kind": "int64",
+        "value": 11
+      },
+      {
+        "kind": "int64",
+        "value": 22
+      }
+    ]
+  }
 }
