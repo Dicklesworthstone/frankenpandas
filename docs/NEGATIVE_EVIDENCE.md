@@ -25730,3 +25730,54 @@ large wall-clock gap now knows it is latency, not extra work.
 **Probe:** `instr_sqrt_1m_under_current_policy_284ul` in
 `crates/fp-columnar/src/lib.rs`, `FP_284UL_REPS`-driven. Gate:
 `cargo test -p fp-columnar --lib` 622 passed / 0 failed / 58 ignored, EXIT=0.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-mti15) — a MINIMUM-based A/A null is 3.5x WORSE than the median-based one: my own proposed gate improvement is refuted by data already on disk — REJECT
+
+Load was low but unconverged (`uptime` 7.37 1-min against 18.91 5-min), so no
+certification. Instead I tested a method lever I had been talking myself into.
+
+The reasoning was seductive: 9 of the 12 `df_dot` rows measured today were refused
+on the incumbent's A/A null, while the incumbent's MINIMUM reproduced to 0.3%
+across an 8x load swing (entry above). If the minimum is the load-invariant
+statistic, why not compute the A/A null on minima too, and let rows certify under
+contention? I was one edit from implementing it.
+
+**It is wrong, and every artifact needed to show that was already banked.** For all
+12 `df_dot` rows measured today I recomputed each arm's null as
+`min(arm_a) / min(arm_b)` beside the shipped `median(arm_a / arm_b)`:
+
+| statistic | rows with BOTH nulls inside 2% | pandas null: mean deviation | max deviation |
+|---|---:|---:|---:|
+| median-based (shipped) | **3 of 12** | **0.0291** | 0.1099 |
+| min-based (proposed) | 2 of 12 | 0.1025 | **0.3111** |
+
+**Counted mechanism:** the min-based null is 3.5x further from unity on average
+and its worst case is 31% off. A minimum is an extreme-order statistic — the single
+luckiest sample of an arm — so a ratio of two minima compounds the tail noise of
+both halves, while a median is robust by construction. The `oarkz_dot_old_100k`
+row is the clearest case: its median-based pandas null is 1.0100, its min-based
+null 1.3111.
+
+**THE DISTINCTION THAT MATTERS, because I nearly lost it.** "The minimum is
+stable" and "a ratio of minima is a good null" are different claims. Pandas'
+minimum reproduced to 0.3% ACROSS two long runs, where each run's min is drawn
+from ~120 samples and converges to the engine's floor. A within-run A/A null
+splits the same invocation into two half-samples, where each min is one draw from
+a tail. Best-vs-best remains a good CROSS-RUN diagnostic — it is what exposed the
+retracted `@1M` crossing, and the harness rightly records it — and it is a bad
+WITHIN-RUN null. Same number, two uses, opposite verdicts.
+
+**Decision: REJECT** the min-based null control; not implemented, and the shipped
+three-clause gate is unchanged. The refusals stand as refusals.
+
+**A/A null control (same invocation):** not applicable — this entry re-analyses
+the null controls of 12 previously banked rows rather than measuring anything, so
+it is load-independent and no host state conditions it. The 12 rows' own
+median-based FrankenPandas nulls ranged 0.9889 to 1.0528 and pandas nulls 0.8901
+to 1.0328; those are the numbers being re-analysed.
+
+**Incidental, and worth its own line:** only **3 of 12** `df_dot` rows measured on
+this host today had BOTH A/A nulls inside 2%. A 75% refusal rate is a property of
+the fleet, not of the gate or the code, and it is the reason so much of today's
+`df.dot` evidence is FrankenPandas-versus-FrankenPandas rather than
+vs-incumbent.
