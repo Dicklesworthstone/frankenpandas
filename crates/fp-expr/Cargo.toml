@@ -20,6 +20,14 @@ fp-types = { path = "../fp-types", version = "0.2.0" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
+# br-frankenpandas-qm012. Test-only: the A/B harness self-reports the SHA-256 of
+# the executing test ELF, because the fleet has measured the same cell 3x apart
+# on two workers and a row that cannot name its binary is not comparable to any
+# other row. fp-runtime's sha256_hex is private, and this is a dev-dependency, so
+# nothing is added to the shipped crate.
+[dev-dependencies]
+sha2 = "0.11.0"
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

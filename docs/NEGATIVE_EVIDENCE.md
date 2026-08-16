@@ -22565,3 +22565,110 @@ difference is not the machine; it is what the timed span contains.
 vs-pandas ratio, and the workload is a 42-byte payload — the tail dominates
 precisely because the FNV loop over it is short. It says nothing about digests of
 large artifacts, where the hash loop, not the formatting, is the cost.
+
+## br-frankenpandas-f0aaa — REFUTED (my own claim): a nullable Int64 lane does NOT widen when it gains an alignment gap
+
+Recorded by MagentaFortress, 2026-08-16. Probe script kept at
+`/data/projects/.scratch/f0aaa_probe2.py` (shared, so the four discriminating rows can be re-run
+without rewriting them); live pandas 2.2.3.
+
+**The refuted claim is mine.** On 2026-08-16 02:18 I commented on br-frankenpandas-f0aaa that
+"the gate is too narrow — a nullable Int64 lane must widen too, just to the NULLABLE float."
+It does not. Both controls I reasoned from (an all-valid nullable lane, and one carrying pd.NA)
+had **both** sides gaining an alignment gap, so neither could separate "the nullable lane widens"
+from "the numpy lane beside it widens and `common_dtype` carries the result". I generalised from
+an under-determined experiment.
+
+The discriminating case is the one where **only** the nullable lane gains a gap:
+
+    Int64[a,b]   (all valid) * int64[a,b,c]   ->  Int64      does NOT widen
+    Int64[a,b]   (has pd.NA) * int64[a,b,c]   ->  Int64      still does not
+    boolean[a,b]             * int64[a,b,c]   ->  Int64      nullable bool likewise
+    int64[a,b]               * Int64[a,b,c]   ->  Float64    the NUMPY lane does widen
+
+Three rows where the nullable lane gains a gap and the result stays integral. My claim predicted
+Float64 for all three.
+
+**What is true instead**, and it is CalmMink's rule from the patch parked at
+`/data/projects/.scratch/f0aaa_per_lane_promotion.patch`: a lane widens iff **it** gains a gap
+**and** it is numpy `Int64`/`Bool`. A nullable lane holds pd.NA natively and never widens;
+`common_dtype` then carries the result. This reproduces all six probed rows, including the pair
+with identical dtypes and different answers that no "gaps anywhere" rule can reproduce.
+
+**Why this is worth a ledger line rather than a quiet correction.** The wrong version is the
+*intuitive* one — "the lane has a hole in it, so it must widen to hold the hole" — and it survives
+any experiment where both sides gain gaps, which is the shape of the corpus fixture that motivated
+the bead. It will be re-derived by the next person who probes only that fixture's shape. The
+control that kills it costs one line: gap on the nullable side only.
+
+Related: the widening is caused by the INVENTED alignment gap, not by a supplied null — with no
+gap at all, a nullable lane carrying pd.NA still returns Int64.
+
+---
+
+## br-frankenpandas-qm012 — ACCEPT: the typed-witness guard is 2480x on the validation call, and the A/A null caught my own harness bias twice
+
+**Date:** 2026-08-16 · **Agent:** CalmMink · **Verdict:** ACCEPT, with a scope
+caveat that matters more than the number.
+
+The lever shipped at **e87777b5e** on 2026-08-04, in a commit titled "frame/expr
+surface follow-ups with beads sync" that cites no bead — the shared-index sweep
+pattern, so the authoring bead was lost and it read as unlanded. `validate_filter_mask`
+returns early when `mask.column().as_bool_slice().is_some()`, instead of walking
+`mask.values()` to prove a dtype that `filter_rows` re-derives from the same bool
+slice on the very next call. The bead stayed open because its routing-only profile
+harness was removed after repeated rch release invalidation, leaving no timed path.
+
+**Harness:** `fp_expr::validate_filter_mask_typed_witness_ab_qm012`, new here,
+built to the shape br-frankenpandas-1elys established — arms interleaved with the
+order alternating by block (21 blocks x 64 masks x 10 000 rows), an A/A null in
+the same loop with a hard gate, a 2000-resample bootstrap median CI, and a
+self-reported ELF SHA-256.
+
+**THE TRAP THIS HARNESS HAD TO DESIGN AROUND.** `ScalarValues` caches its
+materialization in a `OnceLock<Vec<Scalar>>`, so the FIRST `values()` call on a
+lazily-typed column pays everything and every later call is free. A loop that
+validated one reused mask would have timed the expensive path once and nothing
+afterwards, and the control would have looked nearly as fast as the guard. Every
+timed call gets a FRESH mask, built outside the timed span.
+
+```
+harness     worker       ELF          A/A null  null CI95         speedup     speedup CI95
+biased      vmi1153651   7f4b73a1..   0.9758    [0.9197,1.0387]   2375.5x     [2261.3,2823.7]
+biased      vmi1153651   7f4b73a1..   1.0081    [0.9649,1.0740]   2984.3x     [2780.0,3352.2]
+biased      vmi1167313   b0cf08fc..   0.9308 X  [0.8640,0.9513]   (void)
+FIXED       vmi1167313   79cc003d..   1.0029    [0.9653,1.0342]   2599.5x     [2480.7,2902.8]
+FIXED       vmi1167313   79cc003d..   1.0032    [0.8597,1.1249]   2923.4x     [2672.6,3473.2]
+FIXED       vmi1227854   732a6ea9..   0.8588 X  [0.7158,0.9445]   (void)
+```
+
+**QUOTING THE WORST BOUND from the two runs that share a harness AND pass their
+nulls: 2480.7x** (run 4's CI lower bound; worst point estimate 2599.5x).
+
+**THE NULL CAUGHT MY OWN BIAS, AND I HAD MADE THE 3nzz3 MISTAKE AGAIN.** The
+first harness scored the A/A as always-first-over-always-second. Both halves run
+the same function, so the only thing separating them is POSITION — and position
+is not neutral, because the control materializes 640 000 Scalars per call and the
+earlier half pays allocator warm-up the later one does not. That read 0.9308 on
+vmi1167313 against a 0.95 limit, while passing on a busier host where the drift
+averaged out. Flipping which half is the numerator by block cancels it: the same
+host, same load, went to 1.0029. This is the second time in one session that an
+uncounterbalanced null measured the very drift it existed to remove.
+
+**Two rows are REJECTED and stay rejected.** The biased-harness vmi1167313 run,
+and the fixed-harness vmi1227854 run whose null fell to 0.8588 on a loaded host.
+Their point estimates (2615.5x, 3057.4x) sit inside the range of the accepted
+rows, which is corroboration and not evidence. I did not promote them.
+
+**SCOPE — read this before quoting the number.** This is a microbenchmark of ONE
+function on a 10 000-row all-valid typed Bool mask. The ratio is enormous because
+the two arms are not doing comparable work: the guard is an `Option` check, and
+the control materializes and scans 10 000 `Scalar`s. It does NOT mean `df.query()`
+got 2480x faster — it means this validation stopped being O(n) with an allocation,
+and the end-to-end effect is bounded by validation's share of a query, which this
+harness does not measure. A nullable or Scalar-backed mask still takes the
+elementwise path and is unaffected.
+
+**Parity is asserted, not assumed:** a companion non-ignored test pins that the
+guard accepts exactly what the scan accepts for typed and nullable Bool masks,
+and that a non-boolean mask is refused by BOTH with a byte-identical error.

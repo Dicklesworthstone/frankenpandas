@@ -9453,3 +9453,237 @@ mod tests {
         assert_eq!(result.len(), 2);
     }
 }
+
+/// br-frankenpandas-qm012 — A/B for the typed-witness guard in `validate_filter_mask`.
+///
+/// The lever shipped at e87777b5e (in a commit that cites no bead, which is why
+/// it read as unlanded): for an all-valid typed `Bool` mask, `validate_filter_mask`
+/// returns early instead of walking `mask.values()`. `filter_rows` then consumes
+/// the same column through its bool slice, so the scan proved a dtype the very
+/// next call re-derives for free.
+///
+/// The bead stayed open because its routing-only profile harness was removed
+/// after repeated rch release invalidation, leaving no timed path. This supplies
+/// one, in the shape br-frankenpandas-1elys established: arms INTERLEAVED with
+/// the order alternating by block, an A/A null measured in the same loop and
+/// gated, a bootstrap median CI, and a self-reported ELF SHA-256.
+///
+/// ⚠ THE MEASUREMENT TRAP THIS HARNESS EXISTS TO AVOID. `ScalarValues` stores
+/// its materialization in a `OnceLock<Vec<Scalar>>`, so the FIRST `values()` call
+/// on a lazily-typed column pays the whole cost and every later call is free. A
+/// loop that validated one reused mask would therefore time the expensive path
+/// once and near-nothing thereafter, and the control would look almost as fast as
+/// the guard. Every timed call here gets a FRESH mask, and the masks are built
+/// OUTSIDE the timed span so construction is not being measured either.
+#[cfg(test)]
+mod validate_filter_mask_typed_witness_ab_qm012 {
+    use std::{
+        hint::black_box,
+        time::{Duration, Instant},
+    };
+
+    use fp_columnar::Column;
+    use fp_frame::Series;
+    use fp_index::Index;
+    use fp_types::{DType, Scalar};
+
+    use super::{ExprError, FrameError, validate_filter_mask};
+
+    const ROWS: usize = 10_000;
+    const MASKS_PER_CALL: usize = 64;
+    const BLOCKS: usize = 21;
+    const BOOTSTRAPS: usize = 2_000;
+
+    /// The pre-e87777b5e validation: no typed witness, always walk the values.
+    fn former_validate_filter_mask(mask: &Series) -> Result<(), ExprError> {
+        if let Some(offending) = mask
+            .values()
+            .iter()
+            .find(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
+        {
+            return Err(ExprError::Frame(FrameError::CompatibilityRejected(
+                format!(
+                    "boolean mask required for query-style filter; found dtype {:?}",
+                    offending.dtype()
+                ),
+            )));
+        }
+        Ok(())
+    }
+
+    /// An all-valid typed Bool mask — the only shape the guard short-circuits.
+    fn typed_bool_mask() -> Series {
+        let values: Vec<Scalar> = (0..ROWS).map(|i| Scalar::Bool(i % 3 != 0)).collect();
+        let column = Column::new(DType::Bool, values).expect("bool column");
+        assert!(
+            column.as_bool_slice().is_some(),
+            "the fixture must be TYPED, or this measures the wrong thing entirely"
+        );
+        Series::new(
+            "mask",
+            Index::new((0..ROWS as i64).map(Into::into).collect()),
+            column,
+        )
+        .expect("mask series")
+    }
+
+    fn fresh_masks() -> Vec<Series> {
+        (0..MASKS_PER_CALL).map(|_| typed_bool_mask()).collect()
+    }
+
+    fn elapsed(masks: &[Series], validate: fn(&Series) -> Result<(), ExprError>) -> Duration {
+        let started = Instant::now();
+        for mask in masks {
+            black_box(validate(black_box(mask))).expect("mask validates");
+        }
+        started.elapsed()
+    }
+
+    fn median(values: &mut [f64]) -> f64 {
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    }
+
+    fn bootstrap_median_ci(samples: &[f64]) -> (f64, f64) {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut medians = Vec::with_capacity(BOOTSTRAPS);
+        let mut resample = vec![0.0; samples.len()];
+        for _ in 0..BOOTSTRAPS {
+            for value in &mut resample {
+                state ^= state << 7;
+                state ^= state >> 9;
+                *value = samples[(state as usize) % samples.len()];
+            }
+            medians.push(median(&mut resample));
+        }
+        medians.sort_by(f64::total_cmp);
+        (
+            medians[BOOTSTRAPS / 40],
+            medians[BOOTSTRAPS - BOOTSTRAPS / 40 - 1],
+        )
+    }
+
+    /// PARITY FIRST: the guard must accept exactly what the scan accepts, and a
+    /// non-Bool mask must still be REJECTED with the same message. A faster
+    /// validator that validates less is not a faster validator.
+    #[test]
+    fn typed_witness_agrees_with_the_former_scan() {
+        let good = typed_bool_mask();
+        assert!(validate_filter_mask(&good).is_ok());
+        assert!(former_validate_filter_mask(&good).is_ok());
+
+        // A nullable Bool mask keeps the elementwise path in BOTH.
+        let nullable = Series::new(
+            "mask",
+            Index::new((0..3_i64).map(Into::into).collect()),
+            Column::new(
+                DType::Bool,
+                vec![
+                    Scalar::Bool(true),
+                    Scalar::Null(fp_types::NullKind::Null),
+                    Scalar::Bool(false),
+                ],
+            )
+            .expect("nullable bool column"),
+        )
+        .expect("series");
+        assert!(validate_filter_mask(&nullable).is_ok());
+        assert!(former_validate_filter_mask(&nullable).is_ok());
+
+        // A non-boolean mask must be refused, identically, by both.
+        let numeric = Series::new(
+            "mask",
+            Index::new((0..3_i64).map(Into::into).collect()),
+            Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(2)],
+            )
+            .expect("int column"),
+        )
+        .expect("series");
+        let guarded = validate_filter_mask(&numeric);
+        let former = former_validate_filter_mask(&numeric);
+        assert!(guarded.is_err() && former.is_err());
+        assert_eq!(
+            format!("{:?}", guarded.unwrap_err()),
+            format!("{:?}", former.unwrap_err()),
+            "the guard must reject with the SAME error as the scan"
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn validate_filter_mask_typed_witness_ab_qm012() {
+        // Parity is re-asserted inside the timed test too, so a regression
+        // cannot be reported as a speedup.
+        let probe = typed_bool_mask();
+        assert!(validate_filter_mask(&probe).is_ok());
+        assert!(former_validate_filter_mask(&probe).is_ok());
+
+        let mut aa_ratios = Vec::with_capacity(BLOCKS);
+        let mut ab_ratios = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            // Fresh masks per arm per block, built OUTSIDE the timed span: the
+            // OnceLock cache means a reused mask would make the control free.
+            let (former_ns, candidate_ns) = if block % 2 == 0 {
+                let a = fresh_masks();
+                let f = elapsed(&a, former_validate_filter_mask);
+                let b = fresh_masks();
+                let c = elapsed(&b, validate_filter_mask);
+                (f, c)
+            } else {
+                let b = fresh_masks();
+                let c = elapsed(&b, validate_filter_mask);
+                let a = fresh_masks();
+                let f = elapsed(&a, former_validate_filter_mask);
+                (f, c)
+            };
+            ab_ratios.push(former_ns.as_secs_f64() / candidate_ns.as_secs_f64());
+
+            // THE A/A NULL MUST BE COUNTERBALANCED TOO, and this is the second
+            // time the campaign has learned it. Both halves run the SAME
+            // function, so the only thing that separates them is POSITION — and
+            // position is not neutral here: the control materializes 640k
+            // Scalars per call, so the earlier half pays allocator warm-up the
+            // later one does not. Scoring the null as always-first-over-always-
+            // second therefore measures that drift rather than cancelling it,
+            // and it read 0.9308 on vmi1167313 (gate limit 0.95) while passing
+            // on a busier host where the drift averaged out. Flipping which half
+            // is the numerator by block cancels it, exactly as the A/B arms
+            // above are already counterbalanced. (br-frankenpandas-qm012, same
+            // shape as the 0.7966x null in br-frankenpandas-3nzz3.)
+            let first_set = fresh_masks();
+            let first = elapsed(&first_set, former_validate_filter_mask).as_secs_f64();
+            let second_set = fresh_masks();
+            let second = elapsed(&second_set, former_validate_filter_mask).as_secs_f64();
+            aa_ratios.push(if block % 2 == 0 {
+                first / second
+            } else {
+                second / first
+            });
+        }
+
+        let aa_median = median(&mut aa_ratios);
+        let ab_median = median(&mut ab_ratios);
+        let (aa_low, aa_high) = bootstrap_median_ci(&aa_ratios);
+        let (ab_low, ab_high) = bootstrap_median_ci(&ab_ratios);
+        let executable = std::fs::read("/proc/self/exe").expect("read executing test ELF");
+        let elf_sha256 = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&executable);
+            hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        eprintln!(
+            "VALIDATE_MASK_QM012 elf_sha256={elf_sha256} rows={ROWS} masks_per_call={MASKS_PER_CALL} blocks={BLOCKS} aa_median={aa_median:.4} aa_median_ci95=[{aa_low:.4},{aa_high:.4}] candidate_speedup_median={ab_median:.4} candidate_speedup_median_ci95=[{ab_low:.4},{ab_high:.4}]"
+        );
+        assert!(
+            (0.95..=1.05).contains(&aa_median) && aa_low <= 1.0 && aa_high >= 1.0,
+            "A/A null gate failed: median={aa_median:.4}, CI=[{aa_low:.4},{aa_high:.4}]"
+        );
+    }
+}
