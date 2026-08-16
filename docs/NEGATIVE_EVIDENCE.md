@@ -26807,3 +26807,47 @@ message. Confirm by disassembling the INLINED `map_slice` instantiations (count
 `ymm`/packed ops per element in each) before writing any mechanism claim down.
 This is the same failure the entry above is about, one level up: a number that
 reproduces is not a mechanism that is understood.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-o57rj) — `floor @10M` re-run in the session's quietest window: BOTH A/A nulls clean, effect CI EXCLUDES UNITY, arms on an identical clock. FP 1.056x
+
+The earlier `floor @10M` crossing (1.071x) was taken at loadavg 16.6→21.5 and both
+A/A nulls FAILED, so it was a number without a gate behind it. This is the same
+ELF re-measured at loadavg 6.85, and it holds.
+
+```
+workload        math_unary/floor @10M, balanced-square ABBAABBA, ONE invocation
+fp-bench ELF    sha256 7f3029199c1ca8fc… (built from HEAD 2243aec2b)
+incumbent       pandas 2.2.3, artifact c10b13e6 · thinkstation1, governor powersave, smt on
+LOADAVG         6.85 → 8.19 (start 6.85 8.84 15.80; end 8.19 9.01 15.50; in-run 1-min 7.74–8.82)
+OBSERVED MHz    busy-core BY ARM: FrankenPandas 4292.2 / pandas 4292.2 — arm clock ratio 1.0000
+                host median 1429.0 (min 1429.0, max 3433.8, n=73 samples)
+THREADS         FP peak 2 · pandas peak 66
+```
+
+| arm | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **8892.96us** | 7.90% | **1.005625 — PASSES** |
+| pandas | 9653.94us | 5.33% | **1.012410 — PASSES** |
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=7f3029199c1ca8fcad0dd0e1b1a17d3a9d3aa0e5cca9c1efc9b0e9f9bd8d7b45 (78736648 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.005625 and
+pandas median ratio 1.012410, both inside the 2% limit — the first `floor @10M`
+row in this campaign where NEITHER arm's null fails.
+
+**Median-CI decision:** effect median 1.056 with 95% CI **[1.01676, 1.10917]**,
+which EXCLUDES UNITY, and best-vs-best 1.1065 agrees in direction (FP min 7964.1us
+vs pandas min 8811.9us). It does NOT clear the gate's ≈1.28x decidability margin,
+so the verdict stays NULL_UNDECIDABLE and this is **not** banked as a certified
+win. What it does establish, with both nulls clean and the arms provably on the
+same clock, is that the crossing is real and not incumbent dispersion — the failure
+mode that retracted the 1.187x `df_dot` row.
+
+**CV role:** provenance only, no vote — FP 7.90%, pandas 5.33%.
+
+**The clock provenance is the part worth keeping.** Host median MHz reads 1429.0
+while BOTH arms' busy cores read 4292.2, ratio 1.0000. A row quoting the host
+median here would understate both arms by 3x and is meaningless for a comparison;
+the per-arm busy-core figure is the one that belongs beside a ratio. Same
+conclusion the placement audit reached from the other direction.
