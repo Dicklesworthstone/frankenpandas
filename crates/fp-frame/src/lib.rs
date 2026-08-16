@@ -194757,7 +194757,7 @@ mod dot_small_shape_phase_split_03fp5 {
     use std::time::Instant;
 
     use fp_columnar::Column;
-    use fp_index::{Index, IndexLabel};
+    use fp_index::Index;
     use fp_types::{DType, Scalar};
 
     use super::DataFrame;
@@ -194765,19 +194765,19 @@ mod dot_small_shape_phase_split_03fp5 {
     fn square(dim: usize) -> DataFrame {
         let mut columns = std::collections::BTreeMap::new();
         for c in 0..dim {
-            let values: Vec<Scalar> = (0..dim)
-                .map(|r| Scalar::Float64(0.5 + (r as f64) * 0.25 + (c as f64) * 0.125))
+            // Built exactly as fp-bench's `build_square_f64_frame` does:
+            // `from_f64_values` over a plain `Vec<f64>`. Going through
+            // `Column::new` from `Scalar`s yields a different backing, and a
+            // probe on a representation the benchmark never uses would describe
+            // the wrong hot path.
+            let values: Vec<f64> = (0..dim)
+                .map(|r| 0.5 + (r as f64) * 0.25 + (c as f64) * 0.125)
                 .collect();
-            columns.insert(
-                format!("c{c:04}"),
-                Column::new(DType::Float64, values).expect("col"),
-            );
+            columns.insert(format!("c{c:04}"), Column::from_f64_values(values));
         }
-        DataFrame::new(
-            Index::new((0..dim as i64).map(IndexLabel::Int64).collect()),
-            columns,
-        )
-        .expect("frame")
+        // The bench uses a KNOWN unit-range index; `Index::new` over materialised
+        // labels is a different object, and `dot` clones the index per call.
+        DataFrame::new(Index::new_known_unique_int64_unit_range(0, dim), columns).expect("frame")
     }
 
     #[test]
@@ -194879,11 +194879,8 @@ mod dot_small_shape_phase_split_03fp5 {
                 "only".to_owned(),
                 Column::new(DType::Float64, values).expect("col"),
             );
-            DataFrame::new(
-                Index::new((0..DIM as i64).map(IndexLabel::Int64).collect()),
-                columns,
-            )
-            .expect("narrow")
+            DataFrame::new(Index::new_known_unique_int64_unit_range(0, DIM), columns)
+                .expect("narrow")
         };
         for _ in 0..20 {
             std::hint::black_box(frame.dot(&narrow).expect("dot"));
