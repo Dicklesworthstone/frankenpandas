@@ -8116,6 +8116,115 @@ fn par_map_slice_f64_with_witness_with_policy<T: Copy + Sync, F: Fn(T) -> f64 + 
     (out, words, all_valid, all_finite)
 }
 
+/// Write-once sibling of [`map_block_with_witness`]: BUILDS its output buffer
+/// instead of overwriting a pre-zeroed one.
+///
+/// br-frankenpandas-284ul. `Vec::with_capacity` + `extend` writes each element
+/// exactly once. The caller's `vec![0.0_f64; n]` specialises to `alloc_zeroed`,
+/// which on a recycled mimalloc block is a full memset BEFORE the map writes the
+/// same bytes again — 16 MB of stores at n = 1M where 8 MB would do.
+///
+/// Bit-identical to `map_block_with_witness`: same `f`, same 64-value blocking,
+/// same `!is_nan` validity bit, same `is_finite` accumulation, same
+/// `low_bit_mask` completeness check, same order.
+fn map_block_to_owned_with_witness<T: Copy, F: Fn(T) -> f64>(
+    words_c: &mut [u64],
+    in_c: &[T],
+    f: &F,
+) -> (Vec<f64>, bool, bool) {
+    let (mut all_valid, mut all_finite) = (true, true);
+    let mut out: Vec<f64> = Vec::with_capacity(in_c.len());
+    for (word, in_b) in words_c.iter_mut().zip(in_c.chunks(64)) {
+        let base = out.len();
+        out.extend(in_b.iter().map(|&x| f(x)));
+        let out_b = &out[base..];
+        let mut bits = 0_u64;
+        for (k, &y) in out_b.iter().enumerate() {
+            all_finite &= y.is_finite();
+            bits |= u64::from(!y.is_nan()) << k;
+        }
+        all_valid &= bits == low_bit_mask(out_b.len());
+        *word = bits;
+    }
+    (out, all_valid, all_finite)
+}
+
+/// Write-once, chunk-returning sibling of
+/// [`par_map_slice_f64_with_witness_with_policy`].
+///
+/// br-frankenpandas-284ul. Each worker BUILDS its own output buffer and hands it
+/// back as an `Arc<Vec<f64>>`, which [`Column::from_f64_all_valid_owned_chunks`]
+/// takes by pointer move. Nothing is pre-zeroed and nothing is concatenated, so
+/// the 8 MB memset the shared-buffer form pays inside the timed region disappears
+/// rather than being traded for an 8 MB copy — which is what a chunked producer
+/// feeding the `Arc<[f64]>` constructor would have done.
+///
+/// Chunks stay 64-aligned for the same reason as the shared form: a validity word
+/// covers 64 values, so a boundary that is not a multiple of 64 would put two
+/// workers on one `u64`.
+///
+/// The witness word buffer stays `vec![0_u64; ..]`, deliberately: at n = 1M it is
+/// 125 KB against the values' 8 MB, so zeroing it is noise and keeping it shared
+/// avoids a second assembly step.
+fn par_map_slice_f64_to_owned_chunks<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
+    input: &[T],
+    f: F,
+    max_workers: usize,
+    par_min: usize,
+) -> (Vec<(Arc<Vec<f64>>, usize, usize)>, Vec<u64>, bool, bool) {
+    let n = input.len();
+    let mut words = vec![0_u64; n.div_ceil(64)];
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let cap = if max_workers == 0 {
+        available
+    } else {
+        max_workers
+    };
+    let workers = available.min(cap);
+
+    if workers <= 1 || n < par_min {
+        let (out, all_valid, all_finite) = map_block_to_owned_with_witness(&mut words, input, &f);
+        let chunks = if n == 0 {
+            Vec::new()
+        } else {
+            vec![(Arc::new(out), 0_usize, n)]
+        };
+        return (chunks, words, all_valid, all_finite);
+    }
+
+    // `.max(1)` for the same reason as the shared form: with `par_min` a
+    // parameter, a short input can reach here, and an unguarded `chunk` of 0
+    // divides by zero in `chunk / 64`.
+    let chunk = n.div_ceil(workers).div_ceil(64).max(1) * 64;
+    let block_count = n.div_ceil(chunk);
+    let mut built: Vec<Option<(Vec<f64>, bool, bool)>> = (0..block_count).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        for ((slot, words_c), in_c) in built
+            .iter_mut()
+            .zip(words.chunks_mut(chunk / 64))
+            .zip(input.chunks(chunk))
+        {
+            let f = &f;
+            scope.spawn(move || {
+                *slot = Some(map_block_to_owned_with_witness(words_c, in_c, f));
+            });
+        }
+    });
+
+    let mut chunks = Vec::with_capacity(block_count);
+    let (mut all_valid, mut all_finite) = (true, true);
+    for slot in built {
+        let (out, valid, finite) = slot.expect("every block is written by exactly one worker");
+        all_valid &= valid;
+        all_finite &= finite;
+        let len = out.len();
+        chunks.push((Arc::new(out), 0_usize, len));
+    }
+    (chunks, words, all_valid, all_finite)
+}
+
 /// `i64` sibling of [`par_map_vec_f64`] for compute-bound i64 index maps
 /// (python_mod_i64 / python_floor_div_i64 — integer idiv + sign adjustment).
 fn par_map_vec_i64<G: Fn(usize) -> i64 + Sync>(n: usize, g: G) -> Vec<i64> {
@@ -45332,6 +45441,104 @@ mod tests {
                 "fixture operands sum exactly in any order, so the bit-identity \
                  test above could not detect a reassociated kernel"
             );
+        }
+
+        /// The write-once chunked producer must agree with the shared-buffer form
+        /// EXACTLY — values, witness words, and both flags — at every policy.
+        ///
+        /// br-frankenpandas-284ul. The whole claim of the lever is that removing the
+        /// pre-zeroing changes cost and nothing else. If these two ever disagree, the
+        /// lever is not an optimisation, it is a behaviour change, and the A/B that
+        /// follows would be comparing two different functions.
+        ///
+        /// Length 4097 is deliberately NOT a multiple of 64: it forces a ragged final
+        /// validity word, which is where an off-by-one in the block loop shows up.
+        #[test]
+        fn write_once_chunks_match_the_shared_buffer_path_exactly() {
+            let input: Vec<f64> = (0..4097_usize)
+                .map(|i| match i {
+                    64 => f64::NAN,
+                    129 => f64::INFINITY,
+                    4096 => f64::NEG_INFINITY,
+                    _ => 0.5 + (i as f64) * 0.25,
+                })
+                .collect();
+            let square_root = |x: f64| x.sqrt();
+
+            for workers in [0_usize, 1, 2, 3, 8, 64] {
+                for par_min in [0_usize, 1, 64, 4097, 200_000] {
+                    let (shared_out, shared_words, shared_valid, shared_finite) =
+                        crate::par_map_slice_f64_with_witness_with_policy(
+                            &input,
+                            square_root,
+                            workers,
+                            par_min,
+                        );
+                    let (chunks, owned_words, owned_valid, owned_finite) =
+                        crate::par_map_slice_f64_to_owned_chunks(
+                            &input,
+                            square_root,
+                            workers,
+                            par_min,
+                        );
+
+                    let owned_out: Vec<f64> = chunks
+                        .iter()
+                        .flat_map(|(data, start, len)| data[*start..*start + *len].to_vec())
+                        .collect();
+                    assert_eq!(
+                        owned_out.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                        shared_out.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                        "values differ at workers={workers} par_min={par_min}"
+                    );
+                    assert_eq!(
+                        owned_words, shared_words,
+                        "witness words differ at workers={workers} par_min={par_min}"
+                    );
+                    assert_eq!(
+                        (owned_valid, owned_finite),
+                        (shared_valid, shared_finite),
+                        "flags differ at workers={workers} par_min={par_min}"
+                    );
+                    assert_eq!(
+                        chunks.iter().map(|(_, _, len)| *len).sum::<usize>(),
+                        input.len(),
+                        "chunks must cover the input exactly at workers={workers} par_min={par_min}"
+                    );
+                }
+            }
+        }
+
+        /// NEGATIVE CASE: every chunk boundary must be a multiple of 64.
+        ///
+        /// br-frankenpandas-284ul. A validity word covers 64 values. If the producer
+        /// split at an arbitrary boundary — the obvious `n / workers` — two workers
+        /// would write the same `u64` and the witness would be silently corrupt for
+        /// interior blocks while the VALUES stayed perfectly correct. That is a
+        /// nullability bug invisible to any value-comparing test, and it would surface
+        /// later as wrong `isna()` results on large frames rather than as a failure
+        /// here. Asserted directly on the chunk lengths so the property is pinned even
+        /// if the equivalence test above is ever weakened.
+        #[test]
+        fn write_once_chunk_boundaries_never_split_a_validity_word() {
+            let input: Vec<f64> = (0..10_000_usize).map(|i| 1.0 + i as f64).collect();
+            for workers in [2_usize, 3, 7, 8, 64] {
+                let (chunks, _, _, _) =
+                    crate::par_map_slice_f64_to_owned_chunks(&input, |x: f64| x.sqrt(), workers, 1);
+                let mut boundary = 0_usize;
+                for (i, (_, _, len)) in chunks.iter().enumerate() {
+                    if i + 1 < chunks.len() {
+                        assert_eq!(
+                            len % 64,
+                            0,
+                            "interior chunk {i} of length {len} splits a validity word \
+                             at workers={workers}"
+                        );
+                    }
+                    boundary += len;
+                }
+                assert_eq!(boundary, input.len(), "chunks must tile the input");
+            }
         }
 
         /// Owned and shared chunk backings must be observationally identical.
