@@ -1654,3 +1654,57 @@ def test_series_to_arrow_round_trip_preserves_dtype_index_and_nulls(oracle, pd):
     assert kinds == ["int64", "null", "int64"], kinds
     assert out["values"][0]["value"] == 10
     assert out["values"][2]["value"] == 30
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["feather_round_trip", "parquet_round_trip", "ipc_stream_round_trip"],
+)
+def test_arrow_container_round_trips_preserve_the_frame(oracle, pd, operation):
+    """Three operations had NO oracle handler (br-frankenpandas-nvnvr).
+
+    Their fixtures asserted `expected_bool: true` for a round trip pandas was
+    never asked to perform. MEASURED, live pandas 2.2.3 + pyarrow 24.0.0: all
+    three preserve the frame exactly, INCLUDING a nullable Int64 column carrying
+    nulls, so `frame.equals(back)` is pandas' own answer rather than a
+    reimplementation of the question.
+
+    The round trip runs through `io.BytesIO`, never a temp file, so the oracle
+    stays a pure stdin/stdout adapter — no filesystem litter, no race with
+    another agent on a shared checkout, and nothing written to a disk that is
+    currently the fleet's binding constraint.
+    """
+    payload = {
+        "operation": operation,
+        "frame": {
+            "index": [
+                {"kind": "int64", "value": 0},
+                {"kind": "int64", "value": 1},
+                {"kind": "int64", "value": 2},
+            ],
+            "columns": {
+                # An int lane carrying a null: the payload-dtype chooser builds
+                # this as nullable Int64, which is the case most likely to be
+                # lost by a container that drops pandas metadata.
+                "ints": [
+                    {"kind": "int64", "value": 10},
+                    {"kind": "null", "value": "null"},
+                    {"kind": "int64", "value": 30},
+                ],
+                "floats": [
+                    {"kind": "float64", "value": 1.5},
+                    {"kind": "float64", "value": 2.5},
+                    {"kind": "float64", "value": 3.5},
+                ],
+            },
+            "column_order": ["ints", "floats"],
+        },
+    }
+    out = oracle.dispatch(pd, payload)
+    assert out["expected_bool"] is True, f"{operation} did not round-trip"
+
+
+def test_arrow_round_trip_requires_a_frame_payload(oracle, pd):
+    """The guard is narrowed to the container choice, not removed."""
+    with pytest.raises(Exception):
+        oracle.dispatch(pd, {"operation": "feather_round_trip"})

@@ -5,8 +5,8 @@
   "operation": "ipc_stream_round_trip",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "4b3fc0baee4e9d2e23ebef540381bdebb156f40cdab6611d283cfb7976f218fc",
+    "generated_at": "2026-08-16T12:37:56Z"
   },
   "frame": {
     "index": [

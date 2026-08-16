@@ -6809,6 +6809,78 @@ def op_dataframe_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def _arrow_frame_round_trip(pd, payload: dict[str, Any], op_name: str, fmt: str) -> dict[str, Any]:
+    """Write a frame to an Arrow-family container and read it back.
+
+    These three operations had NO oracle handler, so their fixtures asserted a
+    round trip pandas was never asked to perform (br-frankenpandas-nvnvr).
+
+    IN MEMORY, NOT A TEMP FILE. pyarrow takes any file-like object, so the whole
+    round trip runs through `io.BytesIO`. That keeps the oracle a pure
+    stdin/stdout adapter — it never touches the filesystem, so it cannot leave
+    litter, cannot race another agent on a shared checkout, and cannot fail for
+    reasons that have nothing to do with pandas. It also writes nothing to a disk
+    that is currently the fleet's binding constraint.
+
+    MEASURED, live pandas 2.2.3 + pyarrow 24.0.0 — all three preserve the frame
+    exactly, including a nullable Int64 column carrying nulls:
+
+        plain      feather/parquet/ipc  equals=True  ['int64','float64']
+        with nulls feather/parquet/ipc  equals=True  ['Int64','float64']
+
+    so `frame.equals(back)` is pandas' own answer to the question the fixture
+    asks, not a reimplementation of it.
+    """
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError(f"{op_name} requires frame payload")
+
+    try:
+        pa = importlib.import_module("pyarrow")
+    except Exception as exc:  # pragma: no cover - environment without pyarrow
+        raise OracleError(f"{op_name} requires pyarrow: {exc}") from exc
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        table = pa.Table.from_pandas(frame)
+        buf = io.BytesIO()
+        if fmt == "feather":
+            feather = importlib.import_module("pyarrow.feather")
+            feather.write_feather(table, buf)
+            buf.seek(0)
+            back = feather.read_feather(buf)
+        elif fmt == "parquet":
+            parquet = importlib.import_module("pyarrow.parquet")
+            parquet.write_table(table, buf)
+            buf.seek(0)
+            back = parquet.read_table(buf).to_pandas()
+        elif fmt == "ipc":
+            writer = pa.ipc.new_stream(buf, table.schema)
+            writer.write_table(table)
+            writer.close()
+            back = pa.ipc.open_stream(io.BytesIO(buf.getvalue())).read_all().to_pandas()
+        else:  # pragma: no cover - guarded by the callers below
+            raise OracleError(f"{op_name} unknown arrow container {fmt!r}")
+    except OracleError:
+        raise
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+
+    return {"expected_bool": bool(frame.equals(back))}
+
+
+def op_feather_round_trip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _arrow_frame_round_trip(pd, payload, "feather_round_trip", "feather")
+
+
+def op_parquet_round_trip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _arrow_frame_round_trip(pd, payload, "parquet_round_trip", "parquet")
+
+
+def op_ipc_stream_round_trip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _arrow_frame_round_trip(pd, payload, "ipc_stream_round_trip", "ipc")
+
+
 def op_series_to_arrow_round_trip(pd, payload: dict[str, Any]) -> dict[str, Any]:
     """Series -> Arrow -> Series, preserving values, index and dtype.
 
@@ -8709,6 +8781,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_drop_columns(pd, payload)
     if op in {"dataframe_replace", "data_frame_replace"}:
         return op_dataframe_replace(pd, payload)
+    if op in {"feather_round_trip"}:
+        return op_feather_round_trip(pd, payload)
+    if op in {"parquet_round_trip"}:
+        return op_parquet_round_trip(pd, payload)
+    if op in {"ipc_stream_round_trip"}:
+        return op_ipc_stream_round_trip(pd, payload)
     if op in {"series_to_arrow_round_trip", "series_to_arrow"}:
         return op_series_to_arrow_round_trip(pd, payload)
     if op in {"dataframe_compare", "data_frame_compare"}:

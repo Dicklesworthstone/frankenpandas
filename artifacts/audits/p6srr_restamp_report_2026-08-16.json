@@ -1,9 +1,9 @@
 {
   "fixtures_examined": 1259,
   "agree_current": 0,
-  "agree_provenance_only": 1147,
-  "restampable": 1147,
-  "restamped": 1147,
+  "agree_provenance_only": 1153,
+  "restampable": 1153,
+  "restamped": 1153,
   "restamp_refused": [],
   "move_classes": {
     "KIND int64->float64": 2,
@@ -107,32 +107,8 @@
       "error": "oracle error: unsupported operation: 'excel_round_trip'"
     },
     {
-      "fixture": "fp_p2d_129_feather_round_trip_basic_strict.json",
-      "error": "oracle error: unsupported operation: 'feather_round_trip'"
-    },
-    {
-      "fixture": "fp_p2d_129_ipc_stream_round_trip_basic_strict.json",
-      "error": "oracle error: unsupported operation: 'ipc_stream_round_trip'"
-    },
-    {
-      "fixture": "fp_p2d_129_parquet_round_trip_basic_strict.json",
-      "error": "oracle error: unsupported operation: 'parquet_round_trip'"
-    },
-    {
-      "fixture": "fp_p2d_129_parquet_round_trip_with_nulls_strict.json",
-      "error": "oracle error: unsupported operation: 'parquet_round_trip'"
-    },
-    {
-      "fixture": "fp_p2d_357_feather_round_trip_null_hardened.json",
-      "error": "oracle error: unsupported operation: 'feather_round_trip'"
-    },
-    {
       "fixture": "fp_p2d_358_excel_round_trip_null_hardened.json",
       "error": "oracle error: unsupported operation: 'excel_round_trip'"
-    },
-    {
-      "fixture": "fp_p2d_359_ipc_stream_round_trip_null_hardened.json",
-      "error": "oracle error: unsupported operation: 'ipc_stream_round_trip'"
     }
   ],
   "other_errors": [
@@ -683,7 +659,7 @@
   ],
   "uncompared_keys": {},
   "coverage": {
-    "SEMANTIC": 1137,
+    "SEMANTIC": 1143,
     "STRUCTURAL": 16
   }
 }
