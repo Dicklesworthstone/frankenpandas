@@ -23500,3 +23500,55 @@ banked (three inconsistent ratios, failing nulls under swarm load).
 **Preflight note for whoever takes this:** do not re-run "swap in mimalloc" —
 it is already the global allocator on both measured surfaces, and re-discovering
 that would be the third time this campaign has re-measured a settled question.
+
+---
+
+## br-frankenpandas-h67zz — CROSS-REFERENCE: my default-build `floor`/`ceil` losses and CyanLynx's v3 KEEP are the same ops with opposite verdicts, and the delta is entirely the build flag
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** ledger-mining, no
+new measurement, no build (freeze at the 42G floor). Linking two entries in this
+file that answer each other and were not cross-referenced.
+
+**The pair:**
+
+| entry | build | floor | ceil | trunc | verdict |
+|---|---|---|---|---|---|
+| 2026-08-16 MagentaFortress (above) | DEFAULT, no `+sse4.1` | 0.099x | 0.098x | ~0.10x | certified LOSS |
+| 2026-07-31 CyanLynx — "math-unary x86-64-v3 wins … — KEEP" | immutable x86-64-v3 | **1.285x** | **1.452x** | **1.303x** | KEEP, CI excludes unity |
+
+Same three operations. One build flag apart. The default build is ~10x SLOWER
+than pandas; the v3 build is FASTER.
+
+**⚠️ I AM DELIBERATELY NOT DIVIDING THESE.** It is tempting to report "the flag is
+worth ~13x", and that number would be unsound: the rows are from DIFFERENT HOSTS
+(threadripperje / Threadripper PRO 5995WX, affinity 0-9 vs thinkstation1 /
+5975WX, all 64 logical) and DIFFERENT ELFs, and this repo has a banked lesson
+that worker identity alone has moved a ratio by 13.6x with both A/A nulls
+passing. A ratio-of-ratios across hosts is not a measurement. What the pair
+supports is the qualitative statement — the flag moves these ops from a large
+loss to a win — and nothing quantitative.
+
+**WHAT THIS SETTLES ABOUT THE REMAINING WORK, which is the point of writing it
+down.** My entry above concluded the deficit "is a build-flag question owned by
+this bead, not something source routing reaches", and treated that as an
+inference from the libm-lowering mechanism. It is not an inference: it is
+already measured, twice, from both sides. The source side is also closed —
+br-frankenpandas-xv9qf moved these ops off the serial helper onto the parallel
+one (`373fe94c5`) and the ratio did not move.
+
+So `h67zz` is not blocked on an engineering lever. It is blocked on a POLICY
+decision, and that decision has already been taken once in the negative:
+`2026-07-31 CyanLynx` records **"Decision: REJECT blanket global x86-64-v3 Cargo
+target policy. No production policy changed."** with its own retry predicates
+(profile the residual for sqrt; the companion entry records that v3 LOSES sqrt
+and log, so it is not a free win across the family).
+
+**THE ACTIONABLE SHAPE, for whoever takes h67zz next:** the open question is not
+"can floor be made faster" — it demonstrably can, and by whom is recorded. It is
+whether a TARGETED enablement (these four ops, or a `#[target_feature]`-gated
+path, rather than the rejected blanket global flag) is admissible under the
+project's no-dependency-smuggling and portability rules, given that the same
+flag REGRESSES sqrt and log. That is a scoping-and-policy question to put to the
+user, not a lever to write. Filing a lever against it without answering it first
+would repeat the `1hjgz` pattern recorded elsewhere in this file: writing code
+against a premise the ledger had already settled.
