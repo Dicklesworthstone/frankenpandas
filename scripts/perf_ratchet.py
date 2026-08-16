@@ -540,6 +540,7 @@ def flag_scope(paths: list[Path], apply: bool) -> dict[str, int]:
         "worker_scoped_unknown": 0,
         "unchanged": 0,
         "unparseable": 0,
+        "foreign_schema": 0,
     }
     for path in paths:
         try:
@@ -547,8 +548,25 @@ def flag_scope(paths: list[Path], apply: bool) -> dict[str, int]:
         except (OSError, json.JSONDecodeError):
             counts["unparseable"] += 1
             continue
-        if not isinstance(doc, dict) or "results" not in doc:
+        # A WELL-FORMED ARTIFACT IN A DIFFERENT SCHEMA IS NOT AN ERROR, AND
+        # MUST NOT HIDE IN THE ERROR BUCKET. `unparseable` used to absorb both
+        # malformed JSON and every valid banked row that simply is not a
+        # harness results document — raw hyperfine dumps (`{"times_us": ...}`),
+        # samply profiles, csv round-trip checksums. Measured over
+        # tests/artifacts/perf: 2 files are genuinely bad JSON and 65 are
+        # foreign-schema, so a single count of 67 reads as "67 broken files"
+        # when it is really "65 rows this retro-flag silently skipped".
+        #
+        # They are the rows LEAST able to name a worker — none of those shapes
+        # carries a host_fingerprint at all — so counting them as errors is
+        # exactly the shape where an incomplete sweep reads as a finished one.
+        # Split so the skipped class is visible in the summary.
+        # (br-frankenpandas-s7x8z gap 1)
+        if not isinstance(doc, dict):
             counts["unparseable"] += 1
+            continue
+        if "results" not in doc:
+            counts["foreign_schema"] += 1
             continue
         annotation = scope_annotation(doc)
         counts[annotation["status"]] += 1
@@ -610,7 +628,11 @@ def main():
         print(f"  comparable (names worker AND harness): {counts['comparable']}")
         print(f"  worker_scoped_unknown                : {counts['worker_scoped_unknown']}")
         print(f"  already current (no rewrite)         : {counts['unchanged']}")
-        print(f"  unparseable / not a results doc      : {counts['unparseable']}")
+        print(f"  malformed JSON (not annotatable)     : {counts['unparseable']}")
+        print(
+            f"  SKIPPED, foreign schema (no 'results'): {counts['foreign_schema']}"
+            "   <-- banked rows this sweep did NOT flag"
+        )
         print(f"  {verb}: {counts['comparable'] + counts['worker_scoped_unknown']}")
         return 0
 

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from perf_ratchet import (  # noqa: E402
     comparability_identity,
+    flag_scope,
     host_comparability,
     run_ratchet,
     scope_annotation,
@@ -307,6 +308,55 @@ def test_comparability_is_symmetric():
     forward = host_comparability(_doc(1.0, THINKSTATION), _doc(1.0, EPYC_VM))
     backward = host_comparability(_doc(1.0, EPYC_VM), _doc(1.0, THINKSTATION))
     assert forward["comparable"] is backward["comparable"] is False
+
+
+def test_flag_scope_separates_a_foreign_schema_row_from_malformed_json():
+    """A banked row in another schema is SKIPPED, not broken — say so.
+
+    `flag_scope` lumped malformed JSON and every non-harness artifact into one
+    `unparseable` count. Measured over tests/artifacts/perf that is 2 bad files
+    and 65 valid ones (raw hyperfine `{"times_us": ...}` dumps, samply
+    profiles, csv round-trip checksums), so a single count of 67 reads as "67
+    broken files" while really meaning "65 banked rows this sweep never
+    flagged".
+
+    Those are the rows LEAST able to name a worker — none of those shapes
+    carries a host_fingerprint — so burying them in an error bucket is exactly
+    how an incomplete retro-flag reads as a finished one.
+    (br-frankenpandas-s7x8z gap 1)
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "malformed.json").write_text("{not json", encoding="utf-8")
+        (root / "hyperfine.json").write_text(
+            json.dumps({"times_us": [1.0, 2.0]}), encoding="utf-8"
+        )
+        (root / "row.json").write_text(
+            json.dumps(_doc(100.0, THINKSTATION, HARNESS_A)), encoding="utf-8"
+        )
+        counts = flag_scope(sorted(root.glob("*.json")), apply=False)
+
+    assert counts["unparseable"] == 1, counts
+    assert counts["foreign_schema"] == 1, counts
+    assert counts["comparable"] == 1, counts
+    # The whole point: the two skip reasons no longer share a number.
+    assert counts["unparseable"] != counts["unparseable"] + counts["foreign_schema"]
+
+
+def test_flag_scope_does_not_annotate_without_apply():
+    """Reporting must never write. A retro-flag that mutates on a dry run
+    would make the corpus diff before anyone approved the sweep."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        target = root / "row.json"
+        original = json.dumps(_doc(100.0, THINKSTATION, HARNESS_A))
+        target.write_text(original, encoding="utf-8")
+        flag_scope([target], apply=False)
+        assert target.read_text(encoding="utf-8") == original
+
+        flag_scope([target], apply=True)
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert written["comparability_scope"]["status"] == "comparable"
 
 
 def _main() -> int:

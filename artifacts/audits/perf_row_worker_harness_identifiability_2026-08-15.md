@@ -85,6 +85,41 @@ same invocation. They are separate-file, separate-invocation A/Bs by constructio
 All 180 are hereby WORKER-SCOPED, and the 486 orphans are not comparable to anything
 at all.
 
+## Reconciliation and closure, 2026-08-16 (br-frankenpandas-s7x8z gap 1)
+
+The retro-flag is now APPLIED in-file, not merely tabulated here, and the two
+counts on this bead reconcile exactly:
+
+| where | annotated | foreign schema (skipped) | malformed |
+|---|---|---|---|
+| `artifacts/bench` | 152 (131 worker_scoped_unknown + 21 comparable) | 13 | 2 |
+| `tests/artifacts/perf` | 993 (all worker_scoped_unknown, 0 comparable) | 65 | 2 |
+| **total** | **1145** | **78** | **4** |
+
+1145 + 78 + 4 = **1227**, the exact figure this audit scanned, so nothing is
+unaccounted for.
+
+**Why the earlier sweep looked complete when it was not.** `flag_scope` was only
+ever pointed at `artifacts/bench`, and it skipped any document without a
+`results` key while counting it as `unparseable`. So 993 eligible rows under
+`tests/artifacts/perf` had never been annotated, and 78 valid-but-foreign rows
+were hidden inside an error bucket alongside 4 genuinely malformed files. The
+summary now separates `malformed JSON` from `SKIPPED, foreign schema`, because a
+single count of 67 reads as "67 broken files" when it means "65 banked rows this
+sweep never flagged" — the same shape as an incomplete run reading as a finished
+one. Pinned by `test_flag_scope_separates_a_foreign_schema_row_from_malformed_json`.
+
+**The 486 orphan arms are subsumed.** Of the arm-tagged files whose partner is
+absent from the corpus, 470 now carry `worker_scoped_unknown`, 15 are
+foreign-schema and 1 is malformed. An orphan that cannot name a worker is
+already not comparable to anything, so orphan-ness adds no risk beyond the flag
+it now carries. It remains worth knowing that the partner file is missing, which
+is why the class is still named here.
+
+**The annotation is idempotent** — `scope_annotation` is a pure function of the
+document with no timestamp — so re-running the sweep reports 993 "already
+current" and produces no diff. Verified by re-run.
+
 ## Full row table
 
 | verdict | host | harness | artifact |

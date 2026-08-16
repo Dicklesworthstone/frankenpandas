@@ -1,28 +1,36 @@
 {
- "host": "AMD Threadripper PRO 5975WX",
- "pandas": "2.2.3",
- "n": 100000,
- "results": {
-  "drop_duplicates_100k": {
-   "p50": 5.6648,
-   "p95": 7.6848,
-   "p99": 9.236,
-   "min": 5.56,
-   "runs": 30
+  "host": "AMD Threadripper PRO 5975WX",
+  "pandas": "2.2.3",
+  "n": 100000,
+  "results": {
+    "drop_duplicates_100k": {
+      "p50": 5.6648,
+      "p95": 7.6848,
+      "p99": 9.236,
+      "min": 5.56,
+      "runs": 30
+    },
+    "sort_single_100k": {
+      "p50": 3.1889,
+      "p95": 5.0299,
+      "p99": 5.6409,
+      "min": 3.0202,
+      "runs": 30
+    },
+    "filter_bool_100k": {
+      "p50": 0.382,
+      "p95": 0.4045,
+      "p99": 0.4284,
+      "min": 0.3754,
+      "runs": 30
+    }
   },
-  "sort_single_100k": {
-   "p50": 3.1889,
-   "p95": 5.0299,
-   "p99": 5.6409,
-   "min": 3.0202,
-   "runs": 30
-  },
-  "filter_bool_100k": {
-   "p50": 0.382,
-   "p95": 0.4045,
-   "p99": 0.4284,
-   "min": 0.3754,
-   "runs": 30
+  "comparability_scope": {
+    "status": "worker_scoped_unknown",
+    "names_worker": false,
+    "names_harness": false,
+    "identity": null,
+    "note": "NOT COMPARABLE TO ANY OTHER ROW: names no worker and no harness. The measurement itself is honest and is neither deleted nor regenerated; it simply cannot be placed, so no ratio may be drawn between it and another row.",
+    "bead": "br-frankenpandas-s7x8z"
   }
- }
 }
