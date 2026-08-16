@@ -23292,3 +23292,71 @@ lucky sample — and until then the FP-side self-comparison (the interleaved
 `FP_DOT_SERIAL` A/B, 5.61x, banked above) is the only df.dot number here that
 survives its own controls, precisely because both of its arms run inside one
 process and share whatever interference exists.
+
+---
+
+## br-frankenpandas-1hjgz — REFUTED: the column-parallel `df.dot` lever has NO detectable effect; the toggle A/B puts it inside serial-to-serial drift
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** REJECT on the
+lever as landed. This is the interleaved A/B this bead's own method note asked
+for, and it does not support the committed 0.475x.
+
+**No build was run for this.** The already-hashed local ELF was re-executed with
+only the environment toggle changed — same binary, same host, adjacent in time.
+
+```
+fp-bench ELF    sha256 86355328fe14f5e5e527ab60d330a2aa2590d2b9e48edb0c0a5a453675513585
+                78415608 bytes, release-perf, built locally (RCH_CARGO_WRAPPER_BYPASS=1)
+git_sha         c23e94f5f28e069b3a93e115ccb8ab2194639300  (the commit that landed the lever)
+host            thinkstation1, governor powersave, smt on
+design          linalg/df_dot @1M, balanced-square, ONE invocation per arm,
+                order S,P,S so a monotonic host drift cannot masquerade as an arm effect
+load            19.17 rising to 24.05 across the three arms
+```
+
+| slot | arm | `FP_DOT_SERIAL` | FP p50 | FP cv | verdict vs pandas |
+|---|---|---|---|---|---|
+| 1 | serial | `1` | 183492.52us | 8.86% | NULL_UNDECIDABLE (0.134x) |
+| 2 | **parallel** | unset | **187242.41us** | 15.92% | SLOWER (0.138x) |
+| 3 | serial | `1` | 202102.10us | 19.21% | SLOWER (0.143x) |
+
+**A/A null control (same invocation):** FP median ratio 1.002994 (slot 1),
+1.009527 (slot 2), 0.996883 (slot 3) — all three inside ±2%, so the FP arm is
+trustworthy in every slot. The vs-pandas verdicts vary only because the pandas
+arm is noisy on a load-19-to-24 box; the FP timings are not in question.
+
+**THE RESULT, and it is not close.** The two SERIAL arms differ from each other
+by **18.6ms** (183.5 → 202.1). Serial and parallel differ by **3.7ms**. The
+parallel measurement sits *inside* the serial-to-serial spread, and the slowest
+arm of all three is a serial one that ran last, exactly tracking the rising load.
+**The between-arm difference is smaller than the within-arm drift**, so the
+lever's effect is not merely small — it is undetectable at this noise level.
+
+An earlier parallel-arm invocation on the same ELF gave 201954.47us (cv 8.28%,
+null 1.001786), which is likewise inside the serial spread. Four measurements,
+two per arm, no separation.
+
+**This refutes the 0.475x in `c23e94f5f`'s commit message** ("column-parallel
+df.dot materialization — MEASURED 0.136x -> 0.475x"). I am not speculating about
+how that number arose and I did not re-run whatever produced it; what I can say
+is that on a hash-verified build of that exact commit, toggling the code path it
+introduced changes nothing measurable. Before the 0.475x is relied on, it should
+be reproduced with the toggle held as the only variable.
+
+**WHY THE LEVER PLAUSIBLY CANNOT WIN HERE, offered as a hypothesis and NOT as a
+measured claim:** the ledger's own diagnosis assumed the `n` output columns are
+the parallel dimension, and at `dim = isqrt(1M) = 1000` there are 1000 of them —
+but each is only a 1000-element AXPY over `k = 1000`, i.e. the whole result is
+one 2-GFLOP dependent chain over a shared A panel. If the A panel does not fit in
+per-core cache, the columns contend for memory bandwidth rather than running
+independently, and thread count stops buying throughput. That is a bandwidth
+story, not a scheduling one, and it would explain why per-thread throughput
+looked competitive while the total did not move. **Unmeasured** — it needs a
+counted mechanism (cache misses or IPC), not another wall-clock A/B.
+
+**`thread_count_actually_used` reads 1 in all three arms**, including the
+parallel one, but per the h67zz entry that field cannot see `thread::scope`
+workers that join inside the call, so it is not evidence either way. The p50s are
+the evidence, and they agree with each other.
+
+**Artifacts:** `artifacts/bench/dot_toggle_{serial1,parallel2,serial3}_1M_thinkstation1_2026-08-16.json`
