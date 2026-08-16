@@ -24032,3 +24032,49 @@ low load flatters FP, which run 3 shows it may not, but because it is the only
 run whose dispersion is small enough to describe the code.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run3_load90_elf_4a89472f.json`
+
+---
+
+## br-frankenpandas-h67zz — the load admission boundary for a `floor @1M` row sits between 48 and 77, measured: 4 runs, 2 certified, 2 refused
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** turning the
+hand-wavy "run at low load" rule from the entry above into an empirical
+threshold. Fourth run of the same workload; no ratio claimed from it.
+
+All four runs: `math_unary/floor @1M`, balanced-square ABBAABBA, ONE invocation
+each, harness `6d884360…`, pandas 2.2.3, thinkstation1, governor powersave, FP 8
+threads vs pandas 1 throughout.
+
+| run | ELF | load | ratio | verdict | FP cv | pd cv | A/A FP | A/A pandas |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `1858bb91…` | 6.41 | **0.132x** | **CERTIFIED** | 7.44% | 11.44% | 1.001168 | 1.003951 |
+| 2 | `4a89472f…` | 37.91→48.11 | **0.072x** | **CERTIFIED** | 34.08% | 26.3% | 0.994966 | 1.008250 |
+| 3 | `4a89472f…` | 88.44→90.09 | (0.165) | REFUSED | 34.52% | 78.5% | 0.915327 | 0.981022 |
+| 4 | `4a89472f…` | 86.14→76.75 | (0.076) | REFUSED | 25.93% | 45.41% | **1.071929** | **1.071788** |
+
+**THE BOUNDARY IS BRACKETED, NOT GUESSED.** Two runs at load ≤ 48 cleared the
+three-clause gate; two runs at load ≥ 77 were refused on their A/A nulls. So on
+this host the admission threshold for this workload lies **between 48 and 77**,
+and "check the load first" now has a number attached rather than a feeling. It is
+a bracket from four samples, not a precise cutoff, and it is specific to this
+host and this workload's ~1.3ms FP arm.
+
+**RUN 4 CARRIES A DIAGNOSTIC SIGNATURE WORTH RECOGNISING.** Its two A/A nulls
+failed by almost exactly the same amount — FP **1.071929**, pandas **1.071788**,
+a difference of 1.4e-4. Independent engine noise does not do that. Both arms
+being slowed by the same proportion across the invocation is what a MONOTONE
+HOST DRIFT looks like: the box degraded steadily while the run proceeded, so
+every arm's late samples are slower than its early ones by a common factor.
+Contrast run 3, where the nulls failed by different amounts and in different
+directions (0.915 vs 0.981) — that is genuine per-arm turbulence. **Paired,
+near-identical null failures mean "the host moved under you"; divergent ones mean
+"the arms were individually unstable".** The gate refuses both, correctly, but
+the two say different things about whether a retry at a quieter moment would
+help — for run 4 it would.
+
+**Nothing here changes the reported number.** `floor @1M` remains **0.132x**, the
+run 1 value, for the reason banked above: it is the only run whose dispersion
+(FP cv 7.44%) is small enough to describe the code rather than the fleet. Runs 2,
+3 and 4 span 0.072x to 0.165x and are evidence about the host.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run4_load80_elf_4a89472f.json`
