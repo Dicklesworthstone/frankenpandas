@@ -25457,3 +25457,61 @@ at next**, since a 100-row group is small enough that per-group fixed costs and
 imbalance plausibly dominate any per-group parallel gain.
 
 **No loadavg-bearing timing row is banked here** because no timing was measured.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oxv4u, mti15) — hardware counters: the `df.dot` parallel arm wastes NO instructions, and AVX2 retires 3.26x fewer of them for a bit-identical result — counted mechanism, no new perf claim
+
+Host was moderate and not converged (`uptime` 15.58 1-min against 25.80 5-min),
+so no certification was attempted. Instead I counted what four rejected
+structural levers had only been letting me infer. All figures are whole-process
+`perf stat` over one `fp-bench linalg/df_dot @1M` invocation, loadavg 13.82-20.17
+across the four runs, ELFs `4a89472f…` (baseline) and `76661ac3…` (+avx2,+fma).
+
+**PART 1 — the parallel arm is not wasting work; it is sharing hardware.**
+
+| arm, ELF `4a89472f…` | instructions | cycles | IPC | clock | CPUs utilized | cache-miss |
+|---|---:|---:|---:|---:|---:|---:|
+| serial | 179.16 G | 42.71 G | **4.19** | 4.104 GHz | 1.01 | 1.76% |
+| 63 workers | 179.64 G | 71.82 G | **2.50** | 3.099 GHz | 19.56 | 2.33% |
+
+**Counted mechanism:** the instruction count is UNCHANGED — 179.16 G against
+179.64 G, a difference of 0.27% — so column-parallel materialization introduces
+essentially zero instruction overhead. The 1.68x rise in cycles is entirely IPC
+(4.19 -> 2.50, SMT pairs sharing execution units on 32 physical cores) and clock
+(4.104 -> 3.099 GHz, the all-core turbo ceiling; 0.60 x 0.76 = 0.46, which is the
+observed per-CPU efficiency). **There is no algorithmic slack in the parallel
+path**, which is the retrospective explanation for why output-column fusion,
+register blocking, j-tiling and caller-as-worker all failed: each tried to remove
+work that the counters say was never there.
+
+**PART 2 — the ISA gap is an instruction-count gap, and it is bigger than the
+wall-clock suggested.**
+
+| ELF, 63 workers | instructions | cycles | IPC | CPU time | CPUs utilized |
+|---|---:|---:|---:|---:|---:|
+| `4a89472f…` baseline (SSE2) | **179.63 G** | 74.07 G | 2.43 | 23.45 s | 19.26 |
+| `76661ac3…` +avx2,+fma | **55.08 G** | 43.56 G | 1.26 | 13.89 s | 14.49 |
+
+**Counted mechanism:** identical program, identical workload, identical output
+(both ELFs report checksum `4957dea0fe3e2ed1`), and the AVX2 build retires
+**3.26x fewer instructions** and burns **1.69x less CPU time**. The reduction
+exceeds the 2x that 4-wide-versus-2-wide vectors alone would give, because half
+as many loop iterations also means half the address arithmetic, compares and
+branches. IPC FALLS (2.43 -> 1.26) precisely because each surviving instruction
+does four times the work — an IPC drop here is the signature of success, which is
+worth stating because IPC is the number most likely to be misread as a
+regression.
+
+**Why the wall-clock gain (1.19-1.24x measured earlier) is so much smaller than
+1.69x of CPU time:** `CPUs utilized` falls 19.26 -> 14.49. With a third of the
+instructions the job runs out of parallel slack sooner and spends
+proportionally more of its wall time in the serial phases and the all-core turbo
+ceiling. **The ISA lever converts CPU time into headroom far better than it
+converts wall-clock**, which is exactly the kind of thing a ratio hides and a
+counter shows.
+
+**No new perf claim is banked here.** No wall-clock ratio is asserted, nothing is
+certified, and nothing is landed: the AVX2 build remains unadopted pending the
+workspace-manifest decision recorded in br-frankenpandas-oxv4u. What this entry
+adds is the counted basis for that decision — 3.26x fewer instructions,
+bit-identical output — and the counted refutation of any further "remove waste
+from the parallel path" lever on this kernel: **there is 0.27% of it.**
