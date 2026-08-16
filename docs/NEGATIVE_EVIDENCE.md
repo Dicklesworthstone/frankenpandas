@@ -26899,3 +26899,49 @@ measured in-repo against live pandas, so it stands.
 window and my own `uptime` read 15.24 rising to 24.79 across the run. The load
 figure quoted to an agent is stale on arrival; read it yourself, and read it again
 after.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-o57rj) — `math_unary @1M` CANNOT be certified against this gate in ANY window: the INCUMBENT's arm is too short to settle, and this is the quietest window of the session
+
+`ceil @1M` re-run on the HEAD ELF in the most stable conditions I have seen all
+session — loadavg moved **5.23 → 5.35** across the entire run, in-run 1-minute
+spread **0.05**, both arms' busy cores at an identical **4292.2 MHz** (arm clock
+ratio 1.0000).
+
+```
+workload        math_unary/ceil @1M, balanced-square ABBAABBA, ONE invocation
+fp-bench ELF    sha256 7f3029199c1ca8fc… (built from HEAD 2243aec2b)
+incumbent       pandas 2.2.3, artifact c10b13e6 · thinkstation1, governor powersave
+LOADAVG         5.23 → 5.35 (in-run 1-min min 5.30, max 5.35)
+OBSERVED MHz    busy-core BY ARM: FP 4292.2 / pandas 4292.2, ratio 1.0000
+                host median 1429.0 (min 1429.0, max 2515.7, n=73)
+THREADS         FP peak 2 · pandas peak 66
+```
+
+| arm | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | 695.18us | 8.66% | **0.997476 — PASSES** |
+| pandas | 170.82us | 7.95% | **1.020147 — FAILS by 0.01 over the 2% limit** |
+
+Point ratio 0.245x, CI [0.2190, 0.2560], best-vs-best 0.2425, directions agree.
+
+**THE FINDING IS THE NULL, NOT THE RATIO.** This is the fourth 1M row in this
+family where FP's A/A null passes and the INCUMBENT's fails. It is no longer
+attributable to the host: at loadavg 5.2 with a 0.05 spread and both arms on one
+clock, there is no quieter window to retreat to. pandas' arm at 1M is ~170us, and
+**a 170us arm cannot hold a 2% median null on this host** — the timer and scheduler
+noise floor is simply a larger fraction of it. The campaign spent thirteen runs
+concluding the opposite about FP, because FP's arm used to be the noisy one; now
+that FP is serial and stable, the same limit shows up on the other side.
+
+**Consequence, and it is actionable:** stop trying to certify `math_unary @1M`.
+The gate cannot be satisfied there by any amount of window-hunting. Measure this
+family at **10M**, where both arms run ~9-10ms and both nulls DO pass (see the
+`floor @10M` row above: FP 1.005625, pandas 1.012410, both clean). Quote 1M rows as
+screened point estimates only, exactly as the old `floor @1M` cluster was.
+
+**Second observation, recorded because it cuts against the intuition the campaign
+has been operating on:** between the load-16 window and this load-5 one, FP barely
+moved (747 → 695us p50) while pandas got materially FASTER (219 → 171us), so the
+measured ratio fell from 0.297x to 0.245x. **A quieter host made our number look
+WORSE**, because the incumbent has more to gain from idle cores than a
+single-threaded arm does. "Wait for quiet" is not a neutral act on a ratio.
