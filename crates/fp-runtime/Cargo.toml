@@ -22,6 +22,14 @@ serde_json = { workspace = true }
 sha2 = "0.11.0"
 thiserror = { workspace = true }
 
+# br-frankenpandas-3nzz3. `pub mod asupersync` is behind the `asupersync`
+# feature, so the transport A/B cannot compile without it. Declaring the
+# requirement here keeps a bare `cargo build --examples` working instead of
+# failing on a target it was never meant to build.
+[[example]]
+name = "transport_receive_ab"
+required-features = ["asupersync"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
