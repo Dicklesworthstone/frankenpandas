@@ -63961,13 +63961,42 @@ impl DataFrame {
                         // where: keep self iff cond true; mask: iff cond false.
                         if mask_mode { !*b } else { *b }
                     }
-                    Scalar::Null(_) => {
-                        // cond missing -> Null(NaN), regardless of mode.
-                        out_valid.set(i, false);
-                        continue;
-                    }
-                    // Non-Bool cond: where -> fill, mask -> keep self.
-                    _ => mask_mode,
+                    // A MISSING condition is not a missing RESULT. The condition
+                    // is a SELECTOR: undecidable means "not the keep-branch", so
+                    // the cell takes `other` in BOTH modes. This arm used to
+                    // propagate the condition's missingness into the output
+                    // (`out_valid.set(i, false)`), which is what
+                    // br-frankenpandas-yf758's two translation-covariance
+                    // proptests caught.
+                    //
+                    // MEASURED, live pandas 2.2.3, nullable-boolean cond
+                    // [NA, True, False] over [1.0, 2.0, 3.0] with other=99.0:
+                    // ```text
+                    //   df.where(cond, 99.0) -> [99.0, 2.0, 99.0]
+                    //   df.mask (cond, 99.0) -> [99.0, 99.0, 3.0]
+                    // ```
+                    // Row 0 is the NA-cond cell and takes 99.0 in BOTH modes;
+                    // pandas never yields NaN there. Rows 1-2 differ between the
+                    // modes, which is the control proving this is about the
+                    // selector and not about the data.
+                    //
+                    // br-frankenpandas-fixture-divergence-triage-9s0c4 already
+                    // established this and fixed the DataFrame-`other` variants
+                    // (see `where_and_mask_treat_a_null_condition_as_false`);
+                    // this SCALAR-`other` typed path is the sibling it missed.
+                    //
+                    // The non-Bool arm collapses into the same rule and for the
+                    // same reason. `aligned_condition_cells` — the general
+                    // path's reader — maps EVERY non-Bool cell (Null or
+                    // otherwise) to `None`, and the general path then keeps only
+                    // on `Some(true)` for where / `Some(false)` for mask. The old
+                    // `_ => mask_mode` arm therefore also disagreed in mask mode:
+                    // it KEPT SELF on a non-Bool cond where the general path
+                    // takes `other`. A typed fast path has to be bit-identical
+                    // to the path it short-circuits, so keep-self is now exactly
+                    // "a PRESENT Bool of the right polarity" and everything else
+                    // takes `other`.
+                    _ => false,
                 };
                 if keep_self {
                     out[i] = sd[i];
@@ -94233,6 +94262,142 @@ mod tests {
             &[Scalar::Float64(100.0), Scalar::Float64(20.0)],
             "mask inverts, so the null row still takes `other` but row 1 keeps 20.0"
         );
+    }
+
+    /// The SCALAR-`other` sibling of `where_and_mask_treat_a_null_condition_as_false`
+    /// above, which the 9s0c4 fix missed (br-frankenpandas-yf758).
+    ///
+    /// That test covers `where_cond_df` / `mask_df_other`. The scalar-`other`
+    /// entry points reach `where_mask_typed_f64`, a separate typed fast path that
+    /// still propagated the condition's missingness into the result and, in mask
+    /// mode, kept self on a non-Bool condition where the general path takes
+    /// `other`.
+    ///
+    /// MEASURED, live pandas 2.2.3, nullable-boolean cond `[NA, True, False]`
+    /// over `[1.0, 2.0, 3.0]` with `other=99.0`:
+    ///
+    /// ```text
+    ///   df.where(cond, 99.0) -> [99.0, 2.0, 99.0]
+    ///   df.mask (cond, 99.0) -> [99.0, 99.0, 3.0]
+    /// ```
+    ///
+    /// Row 0 is the NA-cond cell: it takes 99.0 in BOTH modes and is never NaN.
+    /// Rows 1-2 disagree between the modes, which is the control proving this is
+    /// about the SELECTOR and not about the data.
+    #[test]
+    fn scalar_where_and_mask_take_other_on_a_null_condition_yf758() {
+        let index = || (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>();
+        let subject = DataFrame::from_dict_with_index(
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+            index(),
+        )
+        .unwrap();
+        let cond = DataFrame::from_dict_with_index(
+            vec![(
+                "a",
+                vec![
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                ],
+            )],
+            index(),
+        )
+        .unwrap();
+        let fill = Scalar::Float64(99.0);
+
+        let got = |df: &DataFrame| df.column("a").unwrap().values().to_vec();
+
+        assert_eq!(
+            got(&subject.where_cond(&cond, Some(&fill)).unwrap()),
+            vec![
+                Scalar::Float64(99.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(99.0)
+            ],
+            "a null condition is not a null RESULT: where takes `other` there"
+        );
+        assert_eq!(
+            got(&subject.mask(&cond, Some(&fill)).unwrap()),
+            vec![
+                Scalar::Float64(99.0),
+                Scalar::Float64(99.0),
+                Scalar::Float64(3.0)
+            ],
+            "mask inverts rows 1-2 but the null row still takes `other`"
+        );
+    }
+
+    /// The property br-frankenpandas-yf758's proptests actually assert, reduced
+    /// to its cause: the answer must not depend on which internal path ran.
+    ///
+    /// `where_mask_typed_f64` engages only for Float64 columns, so an Int64 frame
+    /// took the general Scalar path and a Float64 frame took the typed path. The
+    /// two disagreed on a null condition, so translating the data (Int64 -> f64)
+    /// changed the answer and `where(x + c, cond, fill + c)` stopped equalling
+    /// `where(x, cond, fill) + c`.
+    ///
+    /// A naive implementation that fixes only the Float64 path in isolation still
+    /// passes the test above; this one fails unless BOTH paths agree.
+    #[test]
+    fn typed_and_scalar_where_paths_agree_on_a_null_condition_yf758() {
+        let index = || (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>();
+        let cond = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Null(NullKind::Null), Scalar::Bool(true)])],
+            index(),
+        )
+        .unwrap();
+        let fill = Scalar::Float64(7.5);
+
+        // Same values, two dtypes: Int64 takes the general path, Float64 takes
+        // the typed path.
+        let int_frame = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            index(),
+        )
+        .unwrap();
+        let float_frame = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+            index(),
+        )
+        .unwrap();
+        assert_eq!(int_frame.column("a").unwrap().dtype(), DType::Int64);
+        assert_eq!(float_frame.column("a").unwrap().dtype(), DType::Float64);
+
+        for mask_mode in [false, true] {
+            let run = |df: &DataFrame| {
+                let out = if mask_mode {
+                    df.mask(&cond, Some(&fill)).unwrap()
+                } else {
+                    df.where_cond(&cond, Some(&fill)).unwrap()
+                };
+                out.column("a")
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| v.to_f64().ok())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                run(&int_frame),
+                run(&float_frame),
+                "mask_mode={mask_mode}: the general and typed paths must agree, \
+                 or translating an Int64 frame to Float64 changes the answer"
+            );
+            // And the null row is `other` in both modes, not a missing cell.
+            assert_eq!(
+                run(&float_frame)[0],
+                Some(7.5),
+                "mask_mode={mask_mode}: null condition takes `other`"
+            );
+        }
     }
 
     /// `pct_change()` FORWARD-FILLS before differencing — that is pandas 2.2.3's
