@@ -30,6 +30,7 @@ import json
 import math
 import os
 import platform
+import shutil
 import re
 import socket
 import subprocess
@@ -2921,6 +2922,14 @@ def run_fp_workload_subprocess(
     # from the static workload matrix.
     argv = [str(bench_binary), "--category", category, "--workload", workload,
             "--size", size, "--dtype", dtype, "--json"]
+    # br-frankenpandas-633fb: pin the child to the SAME cpus the pandas arm runs
+    # on. `taskset` is preferred over preexec_fn because it is safe regardless of
+    # this process's thread state; if it is unavailable the child still inherits
+    # the mask, and the row records `mask_source` so the difference is visible.
+    mask_spec = cpu_mask_spec(arm_cpu_mask())
+    taskset = shutil.which("taskset")
+    if mask_spec and taskset:
+        argv = [taskset, "-c", mask_spec, *argv]
     if data_dir is not None:
         # Only the pipeline category consumes this. The pandas arm has already
         # materialized the job's inputs here, so both engines read identical
@@ -3086,6 +3095,78 @@ def _balanced_square_aggregate(
     )
 
 
+ARM_CPU_MASK: list[int] | None = None
+ARM_CPU_MASK_SOURCE = "inherited"
+
+
+def cpu_mask_spec(cpus: list[int]) -> str:
+    """Compact "0-7,16-23" rendering of a CPU set."""
+    if not cpus:
+        return ""
+    ordered = sorted(cpus)
+    parts: list[str] = []
+    start = previous = ordered[0]
+    for cpu in ordered[1:]:
+        if cpu == previous + 1:
+            previous = cpu
+            continue
+        parts.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = cpu
+    parts.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(parts)
+
+
+def parse_cpu_spec(spec: str) -> list[int]:
+    """Inverse of `cpu_mask_spec`, for --pin-cpus."""
+    cpus: set[int] = set()
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            low, high = chunk.split("-", 1)
+            cpus.update(range(int(low), int(high) + 1))
+        else:
+            cpus.add(int(chunk))
+    return sorted(cpus)
+
+
+def arm_cpu_mask() -> list[int]:
+    """The CPU set BOTH arms are made to run on.
+
+    br-frankenpandas-633fb. A ratio whose arms sat on differently-clocked cores is
+    a frequency ratio in disguise, and inheritance is not enforcement: the pandas
+    arm runs in this process and the FrankenPandas arm in a child, so without an
+    explicit step the row can only assert that they matched. This returns the mask
+    that is applied to BOTH — reasserted on the child at exec — so the row can say
+    HOW it was ensured rather than that it was observed afterwards.
+    """
+    if ARM_CPU_MASK is not None:
+        return list(ARM_CPU_MASK)
+    try:
+        return sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return []
+
+
+def arm_core_placement() -> dict[str, Any]:
+    """How both arms were made to run on comparable cores, for the row."""
+    mask = arm_cpu_mask()
+    spec = cpu_mask_spec(mask)
+    mechanism = (
+        f"identical CPU mask applied to both arms ({ARM_CPU_MASK_SOURCE}); "
+        f"the pandas arm runs in this process and the FrankenPandas child is "
+        f"launched under `taskset -c {spec}`, so neither arm can be scheduled "
+        f"onto cores the other was excluded from"
+    )
+    return {
+        "cpu_mask": spec,
+        "cpus": len(mask),
+        "mask_source": ARM_CPU_MASK_SOURCE,
+        "same_cores_ensured_by": mechanism,
+    }
+
+
 def host_state_snapshot() -> dict[str, Any]:
     """Loadavg and observed CPU MHz at this instant.
 
@@ -3164,7 +3245,7 @@ def summarize_host_state(
 
     Diagnostic only; it feeds no clause of the gate.
     """
-    summary: dict[str, Any] = {"gate_input": False}
+    summary: dict[str, Any] = {"gate_input": False, "arm_core_placement": arm_core_placement()}
     loads = [s["loadavg"][0] for _, s in samples if s.get("loadavg")]
     if loads:
         summary["loadavg_1min"] = {
@@ -3548,6 +3629,24 @@ def _host_state_self_test() -> None:
         raise RuntimeError("equal busy-core clocks must read as one window")
     if idle_skew["host_median_mhz_after_arm"] != {"frankenpandas": 1500.0, "pandas": 3950.0}:
         raise RuntimeError("the box-median must still be recorded, separately labelled")
+
+    # CORE PLACEMENT: the row must SAY how both arms were kept comparable.
+    placement = summarize_host_state([])["arm_core_placement"]
+    if not placement["cpu_mask"] or placement["cpus"] < 1:
+        raise RuntimeError("the arm CPU mask must be recorded, not left empty")
+    if "taskset" not in placement["same_cores_ensured_by"]:
+        raise RuntimeError("the row must name the mechanism, not just assert parity")
+    if placement["cpu_mask"] not in placement["same_cores_ensured_by"]:
+        raise RuntimeError("the stated mechanism must quote the mask it applied")
+
+    # The mask spec round-trips, including the disjoint case a NUMA pin produces.
+    for spec in ("0", "0-3", "0-7,32-39", "1,3,5"):
+        if cpu_mask_spec(parse_cpu_spec(spec)) != spec:
+            raise RuntimeError(f"cpu mask spec failed to round-trip: {spec}")
+    if parse_cpu_spec("0-3") != [0, 1, 2, 3]:
+        raise RuntimeError("cpu spec ranges must be inclusive")
+    if parse_cpu_spec(" , ") != []:
+        raise RuntimeError("an empty spec must parse to an empty set, not raise")
 
     # TOP-K: an arm's cores are the k fastest, k = its OBSERVED thread count.
     def vec(arm: str, freqs: list[float]) -> tuple[str, dict[str, Any]]:
@@ -4279,6 +4378,14 @@ def main():
         help="Exercise the balanced-square paired ratio and A/A null contract",
     )
     parser.add_argument(
+        "--pin-cpus",
+        help=(
+            "CPU set (e.g. 0-15 or 0-7,32-39) applied to BOTH arms: this process "
+            "runs the pandas arm there and the FrankenPandas child is launched "
+            "under taskset with the same set. Recorded in every row"
+        ),
+    )
+    parser.add_argument(
         "--host-state-self-test",
         action="store_true",
         help="Exercise the per-arm CPU MHz / loadavg instrument and its clock-skew flag",
@@ -4353,6 +4460,24 @@ def main():
         _host_state_self_test()
         print("host_state_self_test=pass")
         return
+
+    if args.pin_cpus:
+        requested = parse_cpu_spec(args.pin_cpus)
+        if not requested:
+            parser.error(f"--pin-cpus parsed to an empty CPU set: {args.pin_cpus!r}")
+        try:
+            os.sched_setaffinity(0, set(requested))
+        except (AttributeError, OSError) as error:
+            parser.error(f"--pin-cpus could not be applied: {error}")
+        applied = sorted(os.sched_getaffinity(0))
+        if applied != requested:
+            parser.error(
+                f"--pin-cpus asked for {cpu_mask_spec(requested)} but the kernel "
+                f"granted {cpu_mask_spec(applied)}"
+            )
+        globals()["ARM_CPU_MASK"] = applied
+        globals()["ARM_CPU_MASK_SOURCE"] = f"--pin-cpus {args.pin_cpus}"
+        print(f"arm_cpu_mask={cpu_mask_spec(applied)} source=--pin-cpus")
 
     if args.row_persistence_self_test:
         _row_persistence_self_test()
