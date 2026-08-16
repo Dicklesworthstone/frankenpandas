@@ -6713,7 +6713,7 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
     match dtype {
         DType::Bool | DType::BoolNullable => Scalar::Bool(payload % 2 == 1),
         DType::Int64 | DType::Int64Nullable => Scalar::Int64(i64::from(payload % 11) - 5),
-        DType::Float64 => Scalar::Float64(match payload % 6 {
+        DType::Float64 | DType::Float64Nullable => Scalar::Float64(match payload % 6 {
             0 => 0.0,
             1 => 1.0,
             2 => -1.0,

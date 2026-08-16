@@ -8280,7 +8280,7 @@ pub fn read_jsonl(path: &Path) -> Result<DataFrame, IoError> {
 fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
     match dtype {
         DType::Int64 | DType::Int64Nullable => ArrowDataType::Int64,
-        DType::Float64 => ArrowDataType::Float64,
+        DType::Float64 | DType::Float64Nullable => ArrowDataType::Float64,
         DType::Utf8 => ArrowDataType::Utf8,
         DType::Categorical => ArrowDataType::Utf8,
         DType::Bool | DType::BoolNullable => ArrowDataType::Boolean,
@@ -8306,7 +8306,7 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             }
             Arc::new(builder.finish())
         }
-        DType::Float64 => {
+        DType::Float64 | DType::Float64Nullable => {
             let mut builder = Float64Builder::with_capacity(column.len());
             for value in column.values() {
                 match value {
@@ -8461,6 +8461,12 @@ fn nullable_extension_tag(dtype: DType) -> Option<&'static str> {
     match dtype {
         DType::Int64Nullable => Some("Int64Nullable"),
         DType::BoolNullable => Some("BoolNullable"),
+        // Arrow has ONE Float64, so this collides with DType::Float64 exactly
+        // the way Int64Nullable collides with Int64 -- it needs the same tag or
+        // it decays on the round trip, which is the defect
+        // br-frankenpandas-13q8k fixed for the other two.
+        // (br-frankenpandas-qkqfb)
+        DType::Float64Nullable => Some("Float64Nullable"),
         _ => None,
     }
 }
@@ -8477,6 +8483,7 @@ fn retag_from_field_metadata(col: Column, field: &Field) -> Column {
     let declared = match tag.as_str() {
         "Int64Nullable" => DType::Int64Nullable,
         "BoolNullable" => DType::BoolNullable,
+        "Float64Nullable" => DType::Float64Nullable,
         _ => return col,
     };
     if col.dtype() == declared {
@@ -10923,7 +10930,7 @@ pub trait SqlConnection {
 fn dtype_to_sql(dtype: DType) -> &'static str {
     match dtype {
         DType::Int64 | DType::Int64Nullable => "INTEGER",
-        DType::Float64 => "REAL",
+        DType::Float64 | DType::Float64Nullable => "REAL",
         DType::Utf8 => "TEXT",
         DType::Categorical => "TEXT",
         DType::Bool | DType::BoolNullable => "INTEGER",

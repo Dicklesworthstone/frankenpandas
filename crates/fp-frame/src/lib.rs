@@ -421,6 +421,7 @@ fn dtype_memory_width(dtype: DType) -> usize {
         DType::Int64
         | DType::Int64Nullable
         | DType::Float64
+        | DType::Float64Nullable
         | DType::Categorical
         | DType::Timedelta64
         | DType::Datetime64
@@ -3023,7 +3024,7 @@ fn dtype_to_table_schema_type(dtype: DType) -> &'static str {
     match dtype {
         DType::Bool | DType::BoolNullable => "boolean",
         DType::Int64 | DType::Int64Nullable => "integer",
-        DType::Float64 => "number",
+        DType::Float64 | DType::Float64Nullable => "number",
         DType::Utf8 | DType::Categorical => "string",
         DType::Timedelta64 => "duration",
         DType::Datetime64 => "datetime",
@@ -3683,7 +3684,7 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
         return val.clone();
     }
     match dtype {
-        DType::Float64 => match val.to_f64() {
+        DType::Float64 | DType::Float64Nullable => match val.to_f64() {
             Ok(f) => Scalar::Float64(f),
             Err(_) => Scalar::Null(NullKind::NaN),
         },
@@ -57396,7 +57397,7 @@ impl DataFrame {
                 return false;
             }
             match column.dtype() {
-                DType::Float64 => {
+                DType::Float64 | DType::Float64Nullable => {
                     // Typed all-valid no-NaN buffer (matches the prior per-value
                     // `Scalar::Float64(v) if !v.is_nan()` filter exactly: an
                     // all-valid Float64 column has no NaN, and as_f64_slice
@@ -58782,7 +58783,7 @@ impl DataFrame {
                                     ))
                                 })?
                             }
-                            DType::Float64 => {
+                            DType::Float64 | DType::Float64Nullable => {
                                 raw.parse::<f64>().map(Scalar::Float64).map_err(|_| {
                                     FrameError::CompatibilityRejected(format!(
                                         "cannot parse float64 value '{raw}' in column '{}'",

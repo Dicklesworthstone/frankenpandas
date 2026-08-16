@@ -77,6 +77,28 @@ pub enum DType {
     #[serde(rename = "Int64")]
     Int64Nullable,
     Float64,
+    /// Nullable Float64 extension dtype. Matches pandas `Float64Dtype()` / `pd.NA`.
+    ///
+    /// Distinct from [`DType::Float64`] the way `Int64Nullable` is distinct from
+    /// `Int64`: same 8-byte payload, different missing value. MEASURED, live
+    /// pandas 2.2.3 — a Float64 lane stores `pd.NA`, and it does so even when
+    /// the input was an explicit NaN:
+    ///
+    /// ```text
+    ///   pd.Series([1.5, None], dtype="Float64")[1]      -> <NA>   (is pd.NA)
+    ///   pd.Series([float("nan")], dtype="Float64")[0]   -> <NA>   COERCED
+    ///   pd.Series([1.5, None])[1]                       -> nan    (numpy)
+    /// ```
+    ///
+    /// which is why [`Scalar::missing_for_dtype`] gives this dtype
+    /// `NullKind::Null` and gives `Float64` `NullKind::NaN`.
+    ///
+    /// The serde spelling is pandas' spelling: `float64` is the numpy dtype and
+    /// `Float64` is the extension dtype, so this rename does NOT collide with
+    /// `Float64` — the enum is `rename_all = "snake_case"`, exactly as
+    /// `Int64Nullable`/`Int64` already are. (br-frankenpandas-qkqfb)
+    #[serde(rename = "Float64")]
+    Float64Nullable,
     #[serde(alias = "string", alias = "str")]
     Utf8,
     Categorical,
@@ -94,7 +116,10 @@ impl DType {
     /// Returns true if the dtype is numeric (integer or floating point).
     #[must_use]
     pub const fn is_numeric(&self) -> bool {
-        matches!(self, Self::Int64 | Self::Int64Nullable | Self::Float64)
+        matches!(
+            self,
+            Self::Int64 | Self::Int64Nullable | Self::Float64 | Self::Float64Nullable
+        )
     }
 
     /// Returns true if the dtype is an integer type.
@@ -106,7 +131,7 @@ impl DType {
     /// Returns true if the dtype is a floating point type.
     #[must_use]
     pub const fn is_floating(&self) -> bool {
-        matches!(self, Self::Float64)
+        matches!(self, Self::Float64 | Self::Float64Nullable)
     }
 
     /// Returns true if the dtype is boolean.
@@ -168,6 +193,9 @@ impl DType {
             Self::Int64 => "int64",
             Self::Int64Nullable => "Int64",
             Self::Float64 => "float64",
+            // MEASURED: str(pd.Float64Dtype()) == "Float64", the same
+            // capital-letter convention as Int64/boolean.
+            Self::Float64Nullable => "Float64",
             Self::Utf8 => "object",
             Self::Datetime64 => "datetime64[ns]",
             Self::Timedelta64 => "timedelta64[ns]",
@@ -187,7 +215,10 @@ impl DType {
         match self {
             Self::Bool | Self::BoolNullable => 'b',
             Self::Int64 | Self::Int64Nullable => 'i',
-            Self::Float64 => 'f',
+            // MEASURED: pd.Float64Dtype().kind == 'f', matching numpy float64 —
+            // the extension dtype reports its underlying kind, exactly as
+            // Int64Nullable reports 'i'.
+            Self::Float64 | Self::Float64Nullable => 'f',
             Self::Utf8 => 'O',
             Self::Datetime64 => 'M',
             Self::Timedelta64 => 'm',
@@ -209,6 +240,7 @@ impl DType {
             Self::Int64
             | Self::Int64Nullable
             | Self::Float64
+            | Self::Float64Nullable
             | Self::Datetime64
             | Self::Timedelta64
             | Self::Period => 8,
@@ -228,6 +260,7 @@ impl DType {
                 | Self::Period
                 | Self::Interval
                 | Self::Int64Nullable
+                | Self::Float64Nullable
                 | Self::BoolNullable
         )
     }
@@ -238,7 +271,10 @@ impl DType {
     /// unlike numpy dtypes which promote to float64.
     #[must_use]
     pub const fn is_nullable(&self) -> bool {
-        matches!(self, Self::Int64Nullable | Self::BoolNullable)
+        matches!(
+            self,
+            Self::Int64Nullable | Self::Float64Nullable | Self::BoolNullable
+        )
     }
 
     /// Returns the non-nullable equivalent dtype.
@@ -249,6 +285,7 @@ impl DType {
     pub const fn to_non_nullable(&self) -> Self {
         match self {
             Self::Int64Nullable => Self::Int64,
+            Self::Float64Nullable => Self::Float64,
             Self::BoolNullable => Self::Bool,
             other => *other,
         }
@@ -262,6 +299,7 @@ impl DType {
     pub const fn to_nullable(&self) -> Self {
         match self {
             Self::Int64 => Self::Int64Nullable,
+            Self::Float64 => Self::Float64Nullable,
             Self::Bool => Self::BoolNullable,
             other => *other,
         }
@@ -307,7 +345,7 @@ impl DType {
         match self {
             Self::Bool | Self::BoolNullable => '?',
             Self::Int64 | Self::Int64Nullable => 'l',
-            Self::Float64 => 'd',
+            Self::Float64 | Self::Float64Nullable => 'd',
             Self::Utf8 => 'O',
             Self::Datetime64 => 'M',
             Self::Timedelta64 => 'm',
@@ -323,7 +361,7 @@ impl DType {
         match self {
             Self::Bool | Self::BoolNullable => 0,
             Self::Int64 | Self::Int64Nullable => 7,
-            Self::Float64 => 12,
+            Self::Float64 | Self::Float64Nullable => 12,
             Self::Utf8 => 17,
             Self::Datetime64 => 21,
             Self::Timedelta64 => 22,
@@ -347,7 +385,7 @@ impl DType {
         match self {
             Self::Bool | Self::BoolNullable => "|b1",
             Self::Int64 | Self::Int64Nullable => "<i8",
-            Self::Float64 => "<f8",
+            Self::Float64 | Self::Float64Nullable => "<f8",
             Self::Utf8 => "|O8",
             Self::Datetime64 => "<M8[ns]",
             Self::Timedelta64 => "<m8[ns]",
@@ -592,6 +630,14 @@ impl Scalar {
     pub fn missing_for_dtype(dtype: DType) -> Self {
         match dtype {
             DType::Float64 => Self::Null(NullKind::NaN),
+            // NOT NaN, and this is the whole reason the dtype exists. MEASURED,
+            // live pandas 2.2.3: a Float64 lane stores pd.NA, and it coerces an
+            // explicit NaN INPUT to pd.NA —
+            //     pd.Series([float("nan")], dtype="Float64")[0]  ->  <NA>
+            // whereas the numpy lane above keeps a real NaN. Giving this dtype
+            // NullKind::NaN would make the two flavours indistinguishable, which
+            // is exactly the gap br-frankenpandas-qkqfb was filed for.
+            DType::Float64Nullable => Self::Null(NullKind::Null),
             DType::Timedelta64 => Self::Timedelta64(Timedelta::NAT),
             DType::Datetime64 => Self::Datetime64(Timestamp::NAT),
             DType::Period => Self::Period(Period::new(i64::MIN, PeriodFreq::Daily)),
@@ -900,8 +946,8 @@ pub enum TypeError {
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
     use DType::{
-        Bool, BoolNullable, Categorical, Datetime64, Float64, Int64, Int64Nullable, Null, Sparse,
-        Timedelta64,
+        Bool, BoolNullable, Categorical, Datetime64, Float64, Float64Nullable, Int64,
+        Int64Nullable, Null, Sparse, Timedelta64,
     };
 
     let out = match (left, right) {
@@ -920,8 +966,40 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
 
         // Int64 promotions (nullable absorbs non-nullable)
         (Int64, Float64) | (Float64, Int64) => Float64,
+        // ⚠ THIS ARM IS KNOWN-WRONG AND IS DELIBERATELY LEFT ALONE IN THIS
+        // SLICE. MEASURED, live pandas 2.2.3, both spellings:
+        //     find_common_type([Int64, float64])  ->  Float64
+        //     pd.Series([1,None],dtype="Int64") + pd.Series([1.5,2.5])  ->  Float64
+        // i.e. the NULLABLE flavour wins and the answer is Float64Nullable, not
+        // Float64. Changing it is behaviour-visible all the way out through
+        // fp-columnar/fp-frame/fp-conformance, so it is its own reviewable slice
+        // with its own full-suite run; this commit only makes the destination
+        // dtype REPRESENTABLE. See br-frankenpandas-qkqfb and the f0aaa row it
+        // blocks.
         (Int64Nullable, Float64) | (Float64, Int64Nullable) => Float64,
         (Int64, Int64Nullable) | (Int64Nullable, Int64) => Int64Nullable,
+
+        // Float64Nullable promotions. Nothing PRODUCES this dtype yet, so these
+        // arms are unreachable from today's call graph -- they exist so the
+        // lattice is total and consistent the moment a producer lands, the same
+        // staging the fyr1z work used for its fallible siblings.
+        //
+        // MEASURED, live pandas 2.2.3 ARITHMETIC (which is what this function
+        // models -- see the Bool arms above, which follow arithmetic rather than
+        // find_common_type, since find_common_type answers `object` for every
+        // bool+numeric pair and FrankenPandas has no object dtype yet, that
+        // being br-frankenpandas-hlcgl):
+        //     Float64(ext) + float64(numpy)          -> Float64
+        //     Int64(ext)   + Float64(ext)            -> Float64
+        //     boolean(ext) + Float64(ext)            -> Float64
+        // The nullable float absorbs every other numeric flavour, which also
+        // makes it the top of the numeric lattice and keeps promotion
+        // associative.
+        (Float64Nullable, Float64) | (Float64, Float64Nullable) => Float64Nullable,
+        (Float64Nullable, Int64) | (Int64, Float64Nullable) => Float64Nullable,
+        (Float64Nullable, Int64Nullable) | (Int64Nullable, Float64Nullable) => Float64Nullable,
+        (Float64Nullable, Bool) | (Bool, Float64Nullable) => Float64Nullable,
+        (Float64Nullable, BoolNullable) | (BoolNullable, Float64Nullable) => Float64Nullable,
 
         // Datetime/Timedelta
         (Timedelta64, Timedelta64) => Timedelta64,
@@ -1032,6 +1110,18 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     {
         return Ok(value);
     }
+    // Float64 <-> Float64Nullable: same 8-byte payload, and a PRESENT value
+    // round-trips unchanged in both directions. MEASURED, live pandas 2.2.3:
+    //     pd.Series([1.5, None], dtype="Float64").astype("float64") -> [1.5, nan]
+    //     pd.Series([1.5, None]).astype("Float64")                  -> [1.5, <NA>]
+    // Only the MISSING marker differs, and a missing input never reaches here --
+    // `value.is_missing()` below routes it to `missing_for_dtype(target)`, which
+    // is what converts NaN <-> pd.NA. (br-frankenpandas-qkqfb)
+    if (from == DType::Float64 && target == DType::Float64Nullable)
+        || (from == DType::Float64Nullable && target == DType::Float64)
+    {
+        return Ok(value);
+    }
     if target == DType::Utf8 {
         return Ok(Scalar::Utf8(scalar_to_string_for_astype(value)));
     }
@@ -1112,7 +1202,10 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             }
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Float64 => match &value {
+        // Both float flavours accept the same source values; they differ only in
+        // the missing marker, which is handled above. MEASURED:
+        //     pd.Series([1,None],dtype="Int64").astype("Float64") -> [1.0, <NA>]
+        DType::Float64 | DType::Float64Nullable => match &value {
             Scalar::Bool(v) => Ok(Scalar::Float64(if *v { 1.0 } else { 0.0 })),
             Scalar::Int64(v) => Ok(Scalar::Float64(*v as f64)),
             Scalar::Utf8(s) => s
@@ -6276,18 +6369,21 @@ mod tests {
 
     /// br-frankenpandas-be314: common_dtype is the dtype-promotion lattice
     /// underpinning every binary op, alignment, and concat (dtype coercion is a
-    /// crown-jewel correctness area). Exhaustively (all 13x13 DType pairs) assert
+    /// crown-jewel correctness area). Exhaustively (all 14x14 DType pairs) assert
     /// its lattice axioms — an asymmetric arm would make df1+df2 and df2+df1
     /// disagree on dtype.
     #[test]
     fn common_dtype_lattice_axioms_be314() {
-        const ALL: [DType; 13] = [
+        const ALL: [DType; 14] = [
             DType::Null,
             DType::Bool,
             DType::BoolNullable,
             DType::Int64,
             DType::Int64Nullable,
             DType::Float64,
+            // br-frankenpandas-qkqfb: a new variant is only safe once the
+            // commutativity and associativity sweeps below cover it.
+            DType::Float64Nullable,
             DType::Utf8,
             DType::Categorical,
             DType::Timedelta64,
@@ -6415,13 +6511,14 @@ mod tests {
     /// stays missing.
     #[test]
     fn missing_for_dtype_always_missing_1ews0() {
-        const ALL: [DType; 13] = [
+        const ALL: [DType; 14] = [
             DType::Null,
             DType::Bool,
             DType::BoolNullable,
             DType::Int64,
             DType::Int64Nullable,
             DType::Float64,
+            DType::Float64Nullable,
             DType::Utf8,
             DType::Categorical,
             DType::Timedelta64,
@@ -15283,6 +15380,223 @@ mod tests {
         println!(
             "PROFILE_INTERVAL_PARSE_P95_RATIO={:.6}",
             former_p95 as f64 / candidate_p95 as f64
+        );
+    }
+}
+
+/// `DType::Float64Nullable` — pandas' `Float64Dtype()`, the dtype a nullable
+/// Int64 lane widens INTO (br-frankenpandas-qkqfb).
+///
+/// Every rule asserted here was measured against live pandas 2.2.3 before it was
+/// written; the measurement is quoted next to the assertion it justifies.
+#[cfg(test)]
+mod float64_nullable_qkqfb {
+    use super::{DType, NullKind, Scalar, cast_scalar, common_dtype};
+
+    /// THE POINT OF THE DTYPE. A numpy float lane's missing value is a real NaN;
+    /// the extension lane's is pd.NA. If both mapped to the same marker the two
+    /// flavours would be indistinguishable and the dtype would buy nothing.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    /// ```text
+    ///   pd.Series([1.5, None], dtype="Float64")[1]     -> <NA>   (is pd.NA)
+    ///   pd.Series([1.5, None])[1]                      -> nan
+    ///   pd.Series([float("nan")], dtype="Float64")[0]  -> <NA>   COERCED
+    /// ```
+    #[test]
+    fn the_two_float_flavours_have_different_missing_markers_qkqfb() {
+        assert_eq!(
+            Scalar::missing_for_dtype(DType::Float64Nullable),
+            Scalar::Null(NullKind::Null),
+            "the extension lane stores pd.NA"
+        );
+        assert_eq!(
+            Scalar::missing_for_dtype(DType::Float64),
+            Scalar::Null(NullKind::NaN),
+            "the numpy lane stores a real NaN"
+        );
+        // The negative case: collapsing these two is precisely the defect, so
+        // assert they are NOT equal rather than only asserting each value.
+        assert_ne!(
+            Scalar::missing_for_dtype(DType::Float64Nullable),
+            Scalar::missing_for_dtype(DType::Float64),
+        );
+    }
+
+    /// MEASURED: `str(pd.Float64Dtype())` is `"Float64"`, and the numpy dtype is
+    /// `"float64"`. dtype-check fixtures assert pandas' SPELLING
+    /// (br-frankenpandas-62d1s), so the capital F is load-bearing, not cosmetic.
+    #[test]
+    fn spelling_is_pandas_spelling_qkqfb() {
+        assert_eq!(DType::Float64Nullable.name(), "Float64");
+        assert_eq!(DType::Float64.name(), "float64");
+        assert_ne!(DType::Float64Nullable.name(), DType::Float64.name());
+    }
+
+    /// The serde spelling has to survive a round trip AND stay distinct from the
+    /// numpy flavour. `rename_all = "snake_case"` turns `Float64` into
+    /// `"float64"`, which is what leaves `"Float64"` free for the extension —
+    /// the same trick `Int64Nullable` already relies on. A naive
+    /// `#[serde(rename = "Float64")]` on the WRONG variant would collide, and
+    /// this test is what would catch it.
+    #[test]
+    fn serde_round_trips_and_does_not_collide_with_numpy_float64_qkqfb() {
+        let ext = serde_json::to_string(&DType::Float64Nullable).expect("serialize");
+        let numpy = serde_json::to_string(&DType::Float64).expect("serialize");
+        assert_eq!(ext, "\"Float64\"");
+        assert_eq!(numpy, "\"float64\"");
+        assert_ne!(ext, numpy);
+
+        assert_eq!(
+            serde_json::from_str::<DType>(&ext).expect("deserialize"),
+            DType::Float64Nullable
+        );
+        assert_eq!(
+            serde_json::from_str::<DType>(&numpy).expect("deserialize"),
+            DType::Float64
+        );
+    }
+
+    /// It is a float, it is numeric, and it is a nullable extension — all three,
+    /// or downstream dtype dispatch silently skips it.
+    #[test]
+    fn predicates_place_it_in_the_right_families_qkqfb() {
+        assert!(DType::Float64Nullable.is_floating());
+        assert!(DType::Float64Nullable.is_numeric());
+        assert!(DType::Float64Nullable.is_any_real_numeric());
+        assert!(DType::Float64Nullable.is_nullable());
+        assert!(DType::Float64Nullable.is_extension());
+        // And NOT these: an integer predicate that accepted it would let a
+        // float value through an int-only fast path.
+        assert!(!DType::Float64Nullable.is_integer());
+        assert!(!DType::Float64Nullable.is_signed_integer());
+        assert!(!DType::Float64Nullable.is_bool());
+        // MEASURED: pd.Float64Dtype().kind == 'f', matching numpy float64 --
+        // the extension reports its UNDERLYING kind, as Int64Nullable does.
+        assert_eq!(DType::Float64Nullable.kind(), 'f');
+        assert_eq!(DType::Float64Nullable.kind(), DType::Float64.kind());
+        assert_eq!(DType::Float64Nullable.itemsize(), 8);
+    }
+
+    /// The nullable/non-nullable pairing must be a genuine involution, or a
+    /// round trip through either accessor silently changes flavour.
+    #[test]
+    fn nullable_pairing_is_an_involution_qkqfb() {
+        assert_eq!(DType::Float64.to_nullable(), DType::Float64Nullable);
+        assert_eq!(DType::Float64Nullable.to_non_nullable(), DType::Float64);
+        // Idempotent at both ends.
+        assert_eq!(DType::Float64Nullable.to_nullable(), DType::Float64Nullable);
+        assert_eq!(DType::Float64.to_non_nullable(), DType::Float64);
+        // The other families are untouched by the new variant.
+        assert_eq!(DType::Int64.to_nullable(), DType::Int64Nullable);
+        assert_eq!(DType::Bool.to_nullable(), DType::BoolNullable);
+    }
+
+    /// MEASURED ARITHMETIC, live pandas 2.2.3 -- this function models arithmetic
+    /// promotion, not `find_common_type` (see the Bool arms in `common_dtype`):
+    /// ```text
+    ///   Float64(ext) + float64(numpy)  -> Float64
+    ///   Int64(ext)   + Float64(ext)    -> Float64
+    ///   boolean(ext) + Float64(ext)    -> Float64
+    ///   Float64(ext) - Float64(ext)    -> Float64
+    /// ```
+    /// The nullable float absorbs every other numeric flavour.
+    #[test]
+    fn the_nullable_float_absorbs_every_numeric_flavour_qkqfb() {
+        for other in [
+            DType::Float64,
+            DType::Int64,
+            DType::Int64Nullable,
+            DType::Bool,
+            DType::BoolNullable,
+            DType::Float64Nullable,
+        ] {
+            assert_eq!(
+                common_dtype(DType::Float64Nullable, other),
+                Ok(DType::Float64Nullable),
+                "Float64Nullable + {other:?}"
+            );
+            // Commutativity is asserted wholesale by
+            // common_dtype_lattice_axioms_be314; repeated here because an
+            // asymmetric arm makes df1+df2 disagree with df2+df1.
+            assert_eq!(
+                common_dtype(other, DType::Float64Nullable),
+                Ok(DType::Float64Nullable),
+                "{other:?} + Float64Nullable"
+            );
+        }
+        // Null is the lattice identity and must not absorb it.
+        assert_eq!(
+            common_dtype(DType::Null, DType::Float64Nullable),
+            Ok(DType::Float64Nullable)
+        );
+    }
+
+    /// A PRESENT value crosses between the two float flavours unchanged; only the
+    /// MISSING marker is converted.
+    ///
+    /// MEASURED:
+    /// ```text
+    ///   pd.Series([1.5,None],dtype="Float64").astype("float64") -> [1.5, nan]
+    ///   pd.Series([1,None],  dtype="Int64").astype("Float64")   -> [1.0, <NA>]
+    /// ```
+    #[test]
+    fn casts_preserve_values_and_convert_only_the_marker_qkqfb() {
+        let present = Scalar::Float64(1.5);
+        assert_eq!(
+            cast_scalar(&present, DType::Float64Nullable),
+            Ok(Scalar::Float64(1.5))
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Float64(1.5), DType::Float64),
+            Ok(Scalar::Float64(1.5))
+        );
+        // Int -> nullable float widens the value, as pandas does.
+        assert_eq!(
+            cast_scalar(&Scalar::Int64(1), DType::Float64Nullable),
+            Ok(Scalar::Float64(1.0))
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Bool(true), DType::Float64Nullable),
+            Ok(Scalar::Float64(1.0))
+        );
+
+        // THE MARKER CONVERSION, in both directions. This is the assertion a
+        // "just alias Float64Nullable to Float64" implementation fails.
+        assert_eq!(
+            cast_scalar(&Scalar::Null(NullKind::NaN), DType::Float64Nullable),
+            Ok(Scalar::Null(NullKind::Null)),
+            "numpy NaN entering an extension lane becomes pd.NA"
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Null(NullKind::Null), DType::Float64),
+            Ok(Scalar::Null(NullKind::NaN)),
+            "pd.NA entering a numpy lane becomes NaN"
+        );
+    }
+
+    /// ⚠ NEGATIVE CONTROL FOR THE SLICE BOUNDARY. This commit makes the dtype
+    /// REPRESENTABLE; it deliberately does NOT change what existing promotions
+    /// return, because that is behaviour-visible out through fp-columnar,
+    /// fp-frame and fp-conformance and needs its own full-suite run.
+    ///
+    /// So `Int64Nullable + Float64` still answers `Float64` even though pandas
+    /// says `Float64` (the EXTENSION one) — MEASURED:
+    /// ```text
+    ///   find_common_type([Int64, float64])  ->  Float64
+    /// ```
+    /// This test pins the CURRENT, known-wrong answer on purpose. When the next
+    /// slice flips that arm this test MUST be updated in the same commit, which
+    /// is exactly the tripwire intended: it makes the remaining divergence
+    /// impossible to forget and impossible to land silently.
+    #[test]
+    fn int64nullable_plus_numpy_float_still_answers_the_old_dtype_qkqfb() {
+        assert_eq!(
+            common_dtype(DType::Int64Nullable, DType::Float64),
+            Ok(DType::Float64),
+            "SLICE BOUNDARY: pandas says Float64Nullable here; flipping this is \
+             the next slice of br-frankenpandas-qkqfb, and it unblocks \
+             br-frankenpandas-f0aaa"
         );
     }
 }

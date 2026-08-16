@@ -1429,7 +1429,10 @@ impl ColumnData {
     #[must_use]
     pub fn from_scalars(values: &[Scalar], dtype: DType) -> Self {
         match dtype {
-            DType::Float64 => {
+            // Both float flavours share this f64 payload; they differ only in
+            // the missing marker, which the validity mask carries separately.
+            // (br-frankenpandas-qkqfb)
+            DType::Float64 | DType::Float64Nullable => {
                 let data: Vec<f64> = values
                     .iter()
                     .map(|v| match v {
@@ -20337,6 +20340,7 @@ impl Column {
             DType::Int64
             | DType::Int64Nullable
             | DType::Float64
+            | DType::Float64Nullable
             | DType::Datetime64
             | DType::Timedelta64
             | DType::Period => 8,
