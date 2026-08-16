@@ -67817,6 +67817,32 @@ impl DataFrame {
             }
 
             if all_b_finite {
+                // Materialize the n output columns in ONE scope, parallel
+                // across columns (br-frankenpandas-1hjgz).
+                //
+                // Each output column is lazy behind its own `OnceLock`, and the
+                // consumer reads them one at a time — which is why a `df.dot`
+                // row records `thread_count_actually_used = 1` and why the
+                // measured ratio is 0.136x (FP 209ms vs pandas 28ms at 1M).
+                // Per-thread throughput is already competitive; the kernel was
+                // simply running on one core.
+                //
+                // Doing it HERE rather than leaving it to the first reader is
+                // the whole point: at this moment all n columns are known and
+                // independent, so one scope covers the entire result. A reader
+                // arriving column-by-column can never recover that.
+                //
+                // Bit-identical: no column's arithmetic changes, only which
+                // thread calls its unchanged materializer. `OnceLock` keeps
+                // exactly-once semantics, so a concurrent reader sees the same
+                // bytes either way — which also means this is safe to skip
+                // (`FP_DOT_SERIAL=1`) without changing any result.
+                let pending: Vec<&Column> = col_order
+                    .iter()
+                    .filter_map(|name| result_cols.get(name))
+                    .collect();
+                Column::materialize_dot_columns_parallel(&pending);
+
                 return Ok(Self {
                     columns: result_cols.into(),
                     column_order: col_order.into(),
@@ -194174,5 +194200,135 @@ mod union_align_per_lane_promotion_f0aaa {
             .mul(&numpy_int64(&["c", "a", "d"], &[5, 3, 7]))
             .expect("mul");
         assert_eq!(dtype_of(&out), DType::Float64Nullable);
+    }
+}
+
+/// br-frankenpandas-1hjgz: `df.dot` materializes its output columns in ONE
+/// scope, parallel across columns.
+///
+/// `df.dot` is FrankenPandas' worst measured vs-pandas ratio that is not
+/// ISA-blocked — 0.136x at 1M (FP 209ms vs pandas 28ms, A/A nulls 0.9807 /
+/// 0.9883, both decidable, ELF a3078566 on thinkstation1). The ledger entry
+/// locates the cause as single-core execution rather than a slow kernel, so the
+/// lever is scheduling, not arithmetic.
+///
+/// These tests pin the property that makes that lever safe: the parallel and
+/// serial paths must agree BIT-FOR-BIT, not merely approximately. A GEMM is
+/// exactly where "approximately" hides a reassociated sum.
+#[cfg(test)]
+mod dot_column_parallel_materialization_1hjgz {
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::DataFrame;
+
+    /// Deterministic non-trivial values. Integers scaled by a non-power-of-two
+    /// so products are not exactly representable in a way that would make a
+    /// reassociated sum accidentally agree.
+    fn frame(name_prefix: &str, rows: usize, cols: usize, seed: f64) -> DataFrame {
+        let index = Index::new((0..rows as i64).map(Into::into).collect());
+        let mut columns = std::collections::BTreeMap::new();
+        for c in 0..cols {
+            let values: Vec<f64> = (0..rows)
+                .map(|r| ((r * 7 + c * 13) as f64).mul_add(0.1, seed) / 3.0)
+                .collect();
+            columns.insert(
+                format!("{name_prefix}{c}"),
+                Column::from_f64_values(values),
+            );
+        }
+        DataFrame::new(index, columns).expect("frame")
+    }
+
+    fn dot_values(a: &DataFrame, b: &DataFrame) -> Vec<Vec<f64>> {
+        let out = a.dot(b).expect("dot");
+        out.column_names()
+            .iter()
+            .map(|name| {
+                out.column(name)
+                    .expect("column")
+                    .as_f64_slice()
+                    .expect("typed f64 output")
+                    .to_vec()
+            })
+            .collect()
+    }
+
+    /// THE LOAD-BEARING TEST. Whatever the scheduling does, every output bit
+    /// must be unchanged — `assert_eq!` on f64, deliberately not an epsilon
+    /// comparison, because the risk this lever carries is a reassociated
+    /// summation and an epsilon would wave exactly that through.
+    #[test]
+    fn parallel_materialization_is_bit_identical_to_serial() {
+        // Wide enough that the batch actually splits across workers: with 12
+        // output columns the chunking is exercised rather than falling into the
+        // `pending.len() < 2` caller-side arm.
+        let a = frame("a", 40, 9, 0.25);
+        let b = frame("b", 9, 12, -0.5);
+
+        let first = dot_values(&a, &b);
+        let second = dot_values(&a, &b);
+
+        assert_eq!(first.len(), 12, "one vector per output column");
+        assert_eq!(
+            first, second,
+            "repeated dot must be bit-identical to itself"
+        );
+        for column in &first {
+            assert_eq!(column.len(), 40, "one value per input row");
+            assert!(
+                column.iter().all(|v| v.is_finite()),
+                "fixture must not produce NaN/inf, or the comparison proves nothing"
+            );
+        }
+    }
+
+    /// The batch pass must be correct at the boundaries it special-cases: one
+    /// column takes the caller-side arm (no scope), and a wide frame takes the
+    /// chunked arm. Both must equal a hand-computed reference.
+    #[test]
+    fn single_and_many_column_results_match_a_hand_computed_reference() {
+        for cols in [1_usize, 2, 17] {
+            let a = frame("a", 6, 4, 0.75);
+            let b = frame("b", 4, cols, 0.125);
+            let got = dot_values(&a, &b);
+            assert_eq!(got.len(), cols, "expected {cols} output columns");
+
+            // Reference: out[j][i] = sum_l a[i][l] * b[l][j], accumulated in the
+            // same j = 0..k order the kernel uses.
+            let a_cols: Vec<Vec<f64>> = a
+                .column_names()
+                .iter()
+                .map(|n| a.column(n).unwrap().as_f64_slice().unwrap().to_vec())
+                .collect();
+            let b_cols: Vec<Vec<f64>> = b
+                .column_names()
+                .iter()
+                .map(|n| b.column(n).unwrap().as_f64_slice().unwrap().to_vec())
+                .collect();
+
+            for (j, out_col) in got.iter().enumerate() {
+                for (i, &value) in out_col.iter().enumerate() {
+                    let mut expected = 0.0_f64;
+                    for (l, a_col) in a_cols.iter().enumerate() {
+                        expected += a_col[i] * b_cols[j][l];
+                    }
+                    assert_eq!(
+                        value, expected,
+                        "cell ({i},{j}) with {cols} output columns"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A zero-column right operand must not spawn anything or panic — the
+    /// `pending` list is empty and the batch pass has to be a no-op.
+    #[test]
+    fn an_empty_result_is_a_no_op() {
+        let a = frame("a", 5, 3, 1.0);
+        let b = frame("b", 3, 0, 1.0);
+        let out = a.dot(&b).expect("dot with no output columns");
+        assert_eq!(out.column_names().len(), 0);
     }
 }

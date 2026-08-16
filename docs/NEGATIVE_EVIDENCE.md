@@ -22932,3 +22932,58 @@ field is now known to err in BOTH directions — over-reporting for a cold
 persistent pool, under-reporting for scoped threads.
 
 **Artifacts:** `artifacts/bench/mu_{floor,ceil,trunc}_1M_thinkstation1_2026-08-16_run{1,2}.json`
+
+---
+
+## 2026-08-16 cod-pandas — df.dot column-parallel materialization MEASURED: 0.136x → 0.475x, STILL A LOSS (br-frankenpandas-1hjgz)
+
+The column-parallel dot materialization (`materialize_dot_columns_parallel`,
+one `thread::scope` across the `n` output columns, called from `DataFrame::dot`)
+was written but had never been built or measured — it was not in any measured
+ELF (`strings fp-bench | grep FP_DOT_SERIAL` → 0 on the previous binary).
+Rebuilt LOCALLY (`RCH_CARGO_WRAPPER_BYPASS=1`, no `[RCH]` line) and run against
+live pandas 2.2.3 in the SAME invocation.
+
+```
+workload            linalg / df_dot @ 1M / float64
+paired ratio        0.475x  (pandas/FP — FP is SLOWER)  CI95 [0.44989, 0.60696]
+per-round ratios    0.7123 0.4531 0.5239 0.4738 0.4747 0.3518 0.6070 0.4499 0.5885
+FP     p50          34034.86us   cv 4.18%    threads 8 (peak 10)
+pandas p50          17439.12us   cv 30.32%   threads 64
+A/A null FP         1.001944  CI [0.972384, 1.019183]   PASS
+A/A null pandas     0.988573  CI [0.806317, 1.161890]   PASS (median only — see below)
+design              balanced-square ABBAABBA v1, 9 rounds, 4 slots/arm/round
+fp-bench ELF        sha256 cc70daba079012391e536df993acd221bff181d43ef1eceb45ffa9c45a9920ee
+FP runtime ISA      scalar,sse2,avx2,fma,bmi2,vaes   (avx512f ABSENT on this host)
+host                thinkstation1, AMD Ryzen Threadripper PRO 5975WX 32C/64T, powersave
+git_sha at build    5c4ed2b130a9c9ebc12b5ef358ac45b3581e3741 (+ this lever uncommitted in-tree)
+incumbent           pandas 2.2.3 / pyarrow 24.0.0 / python3.13
+```
+
+**VERDICT: the lever works and is NOT enough.** 0.136x → 0.475x is a 3.5x
+self-speedup, and a self-speedup is MAINTENANCE, not a win. `df.dot` remains a
+LOSS vs pandas by more than 2x. The observed thread count moved 1 → 8 exactly as
+the design predicted, so the diagnosis ("competitive per-thread throughput
+running on one core") was right; what it under-predicted is the ceiling. FP now
+uses 8 threads against pandas' 64. The `.min(8)` worker cap in
+`materialize_dot_columns_with_mode` is the next obvious constraint, but the
+honest reading is that 8→64 threads alone does not close a 2.1x gap on a kernel
+whose competitor is also using AVX-512-class BLAS; the remaining distance is a
+kernel question, not only a scheduling one.
+
+**⚠ THE INCUMBENT ARM IS NOISY AND THIS ROW SHOULD NOT BE QUOTED TIGHTLY.**
+pandas' cv is 30.32% and its A/A null CI spans [0.806, 1.162] — a ±19% band.
+The null MEDIAN (0.9886) is inside the 2% gate and the harness marked all three
+clauses decidable, so the row stands, but the effect CI itself
+[0.44989, 0.60696] is correspondingly wide. Anyone re-running `df_dot` should
+widen rounds before treating 0.475x as a precise number; the safe claim is
+"still worse than pandas by roughly 2x", not "0.475".
+
+**Method note carried forward:** `FP_DOT_SERIAL` is cached in a process-lifetime
+`OnceLock`, so it CANNOT flip arms inside one test binary — the first arm to run
+wins for the whole process. `materialize_dot_columns_with_mode(values, serial)`
+takes the choice as an argument so one process can run both arms honestly. The
+pre-existing bit-identity test compared parallel to parallel (both `a.dot(&b)`
+calls take the same arm) and would have passed against a uniformly reassociated
+kernel; it is now backed by a real serial-vs-parallel comparison plus a negative
+test proving the fixture operands do not sum exactly in any order.

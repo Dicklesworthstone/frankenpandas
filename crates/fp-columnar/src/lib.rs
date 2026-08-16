@@ -4075,6 +4075,114 @@ impl ScalarValues {
         None
     }
 
+    /// Has this column a dot product that has not been computed yet?
+    ///
+    /// br-frankenpandas-1hjgz. Used to skip columns that are either not dot
+    /// results at all or already materialized, so a batch pass never spawns
+    /// threads for work that does not exist.
+    fn is_unmaterialized_dot(&self) -> bool {
+        matches!(self, Self::LazyAllValidFloat64Dot { data, .. } if data.get().is_none())
+    }
+
+    /// Force the pending dot columns in `values` in ONE scope, parallel ACROSS
+    /// columns.
+    ///
+    /// br-frankenpandas-1hjgz. `df.dot` is FrankenPandas' worst measured
+    /// vs-pandas ratio that is not ISA-blocked — 0.136x at 1M
+    /// (FP 209ms vs pandas 28ms, A/A nulls 0.9807/0.9883, both decidable) — and
+    /// the ledger entry locates the cause precisely: a 1000-cube GEMM is 2
+    /// GFLOP, so FP runs ~9.6 GFLOP/s on ONE thread against pandas' ~71
+    /// GFLOP/s multithreaded. Per-thread throughput is already competitive
+    /// (`materialize_float64_dot`'s AXPY order auto-vectorizes to FMA); the
+    /// kernel is simply running on one core, because each output column hides
+    /// behind its own `OnceLock` and the consumer reads them one at a time.
+    ///
+    /// ⚠ THE PARALLELISM IS ACROSS COLUMNS, NEVER INSIDE ONE. Row-blocking
+    /// inside `materialize_float64_dot` is the natural-looking fix and is
+    /// arithmetically worse: at `dim = 1000` a column is only 1000 rows, so it
+    /// would spawn a scope PER output column — 1000 spawn batches at ~397us/8
+    /// threads (the parallel-per-call-overhead ledger row) is ~400ms of pure
+    /// spawn against a 209ms total. One scope for the whole result is the only
+    /// shape that pays.
+    ///
+    /// BIT-IDENTICAL BY CONSTRUCTION, which is the reason to prefer this over a
+    /// new kernel: nothing about the arithmetic moves. Each column still runs
+    /// the same `materialize_float64_dot` accumulating `j = 0..k` in the same
+    /// order into the same `OnceLock`. Only WHICH THREAD calls it changes, and
+    /// `OnceLock::get_or_init` already guarantees exactly-once initialization
+    /// under concurrent callers, so a racing reader observes the same bytes.
+    pub fn materialize_dot_columns_parallel(values: &[&Self]) {
+        Self::materialize_dot_columns_with_mode(values, Self::dot_materialization_is_serial());
+    }
+
+    /// As [`Self::materialize_dot_columns_parallel`], but with the serial/parallel
+    /// choice passed IN rather than read from the environment.
+    ///
+    /// br-frankenpandas-1hjgz. This split exists because `FP_DOT_SERIAL` is read
+    /// through a process-lifetime `OnceLock` (deliberately — a `var()` on every
+    /// `df.dot` would be its own measurable cost). That cache makes the toggle
+    /// unusable from a test: the first arm to run wins for the whole process, so
+    /// a test that sets the variable and calls again silently re-measures the
+    /// SAME arm and passes no matter what the other arm does. Taking the mode as
+    /// an argument is what lets one process exercise both arms honestly — which
+    /// is also exactly the interleaved in-process A/B the ledger's method note
+    /// requires for this lever.
+    pub fn materialize_dot_columns_with_mode(values: &[&Self], serial: bool) {
+        let pending: Vec<&Self> = values
+            .iter()
+            .copied()
+            .filter(|v| v.is_unmaterialized_dot())
+            .collect();
+        // One column has nothing to overlap, and the caller-side call avoids a
+        // scope entirely. Serial mode routes here too.
+        if pending.len() < 2 || serial {
+            for value in pending {
+                let _ = value.dot_float64_data();
+            }
+            return;
+        }
+
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(8)
+            .min(pending.len());
+        if workers <= 1 {
+            for value in pending {
+                let _ = value.dot_float64_data();
+            }
+            return;
+        }
+
+        let chunk = pending.len().div_ceil(workers);
+        std::thread::scope(|scope| {
+            for group in pending.chunks(chunk) {
+                scope.spawn(move || {
+                    for value in group {
+                        let _ = value.dot_float64_data();
+                    }
+                });
+            }
+        });
+    }
+
+    /// Runtime escape hatch for the column-parallel dot materialization above.
+    ///
+    /// br-frankenpandas-1hjgz. The ledger's method note for this lever is
+    /// explicit: the A/B must be parallel-vs-serial INTERLEAVED in one process,
+    /// because separate builds and standalone microbenches have lied about
+    /// exactly this class of question before (the 2026-07-03 retraction). A
+    /// runtime toggle is what makes that interleave possible from a single ELF,
+    /// so both arms share a binary, a host and a thermal state.
+    ///
+    /// Read once and cached: this sits on the path of every `df.dot`, and a
+    /// `var()` per call would be its own measurable cost.
+    fn dot_materialization_is_serial() -> bool {
+        static SERIAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SERIAL.get_or_init(|| {
+            std::env::var("FP_DOT_SERIAL").is_ok_and(|v| v != "0" && !v.is_empty())
+        })
+    }
+
     fn pairwise_stat_float64_data(&self) -> Option<&[f64]> {
         if let Self::LazyAllValidFloat64PairwiseStatMatrixColumn {
             plan, col, data, ..
@@ -10470,6 +10578,29 @@ impl Column {
             }
             _ => None,
         }
+    }
+
+    /// Force every pending `df.dot` output column in `columns` in ONE scope,
+    /// parallel across columns.
+    ///
+    /// br-frankenpandas-1hjgz. See
+    /// [`ScalarValues::materialize_dot_columns_parallel`] for why the
+    /// parallelism is across columns rather than inside one, and why this is
+    /// bit-identical rather than a new kernel. Columns that are not dot results,
+    /// or whose result is already computed, are skipped — so calling this on an
+    /// arbitrary frame costs one pass over the column list and nothing else.
+    pub fn materialize_dot_columns_parallel(columns: &[&Self]) {
+        let values: Vec<&ScalarValues> = columns.iter().map(|column| &column.values).collect();
+        ScalarValues::materialize_dot_columns_parallel(&values);
+    }
+
+    /// As [`Self::materialize_dot_columns_parallel`], but with the serial/parallel
+    /// choice passed IN. See
+    /// [`ScalarValues::materialize_dot_columns_with_mode`] for why the
+    /// environment toggle cannot serve a test.
+    pub fn materialize_dot_columns_with_mode(columns: &[&Self], serial: bool) {
+        let values: Vec<&ScalarValues> = columns.iter().map(|column| &column.values).collect();
+        ScalarValues::materialize_dot_columns_with_mode(&values, serial);
     }
 
     pub fn as_f64_slice(&self) -> Option<&[f64]> {
@@ -44857,6 +44988,102 @@ mod tests {
             let a = Column::from_values(vec![Scalar::Utf8("x".into())]).expect("a");
             let b = Column::from_values(vec![Scalar::Float64(1.0)]).expect("b");
             assert!(a.dot(&b).is_err());
+        }
+
+        /// Build `n` pending lazy dot output columns over a shared A panel.
+        ///
+        /// br-frankenpandas-1hjgz. Deterministic, irrational-ish operands on
+        /// purpose: with values like 1.0/2.0 an f64 sum is exact and reassociation
+        /// is INVISIBLE, so a test built on round numbers would pass against a
+        /// kernel that reorders the accumulation. These do not sum exactly.
+        fn pending_dot_columns(rows: usize, k: usize, n: usize) -> Vec<Column> {
+            let a_views: Vec<(std::sync::Arc<[f64]>, usize)> = (0..k)
+                .map(|j| {
+                    let data: std::sync::Arc<[f64]> = (0..rows)
+                        .map(|i| 0.1 + (i as f64) * 0.7 + (j as f64) * 0.3)
+                        .collect();
+                    (data, 0)
+                })
+                .collect();
+            let panel = crate::Float64DotAPanel::new(a_views, rows);
+            (0..n)
+                .map(|c| {
+                    let b: std::sync::Arc<[f64]> = (0..k)
+                        .map(|l| 0.9 - (l as f64) * 0.11 + (c as f64) * 0.037)
+                        .collect();
+                    Column::from_f64_all_valid_dot_product_shared(&panel, b, rows)
+                })
+                .collect()
+        }
+
+        /// THE REAL SERIAL-VS-PARALLEL COMPARISON.
+        ///
+        /// br-frankenpandas-1hjgz. The batch pass's own bit-identity test runs
+        /// `a.dot(&b)` twice and compares the two, but BOTH calls take the
+        /// parallel arm — the serial arm is never executed, so a kernel that
+        /// reassociated every column's summation the same wrong way each time
+        /// would pass it. That is a tautological test, and it is the one test
+        /// this lever most needs to be non-tautological, because reassociated
+        /// summation is precisely the risk the lever carries.
+        ///
+        /// The environment toggle cannot fix it — `FP_DOT_SERIAL` is cached in a
+        /// process-lifetime `OnceLock`, so whichever arm runs first wins for the
+        /// whole test binary. Hence `materialize_dot_columns_with_mode`, which
+        /// takes the choice as an argument and lets ONE process run BOTH arms.
+        #[test]
+        fn dot_batch_parallel_arm_is_bit_identical_to_the_serial_arm() {
+            // 12 output columns so the parallel arm actually chunks across
+            // workers instead of falling into the `pending.len() < 2` shortcut.
+            let serial_cols = pending_dot_columns(40, 9, 12);
+            let parallel_cols = pending_dot_columns(40, 9, 12);
+
+            let serial_refs: Vec<&Column> = serial_cols.iter().collect();
+            let parallel_refs: Vec<&Column> = parallel_cols.iter().collect();
+            Column::materialize_dot_columns_with_mode(&serial_refs, true);
+            Column::materialize_dot_columns_with_mode(&parallel_refs, false);
+
+            for (c, (serial, parallel)) in serial_cols.iter().zip(parallel_cols.iter()).enumerate()
+            {
+                let serial = serial.as_f64_slice().expect("serial arm materialized");
+                let parallel = parallel.as_f64_slice().expect("parallel arm materialized");
+                // Bit-for-bit, deliberately not an epsilon: an epsilon comparison
+                // would wave through exactly the reassociation this guards.
+                assert_eq!(
+                    serial.to_vec(),
+                    parallel.to_vec(),
+                    "output column {c} differs between the serial and parallel arms"
+                );
+            }
+        }
+
+        /// NEGATIVE CASE: the fixture must be able to SEE a reassociated sum.
+        ///
+        /// br-frankenpandas-1hjgz. A bit-identity assertion is only worth the
+        /// line it occupies if the operands make reordering observable. This
+        /// proves the operands chosen above are such operands — summing one
+        /// column's terms in reverse yields a DIFFERENT f64 — so if the
+        /// comparison test ever passes, it passed for a real reason.
+        #[test]
+        fn the_dot_fixture_operands_make_reassociation_visible() {
+            let k = 9_usize;
+            let terms: Vec<f64> = (0..k)
+                .map(|l| (0.1 + 3.0 * 0.7 + (l as f64) * 0.3) * (0.9 - (l as f64) * 0.11))
+                .collect();
+
+            let mut forward = 0.0_f64;
+            for &t in &terms {
+                forward += t;
+            }
+            let mut reverse = 0.0_f64;
+            for &t in terms.iter().rev() {
+                reverse += t;
+            }
+
+            assert_ne!(
+                forward, reverse,
+                "fixture operands sum exactly in any order, so the bit-identity \
+                 test above could not detect a reassociated kernel"
+            );
         }
 
         #[test]
