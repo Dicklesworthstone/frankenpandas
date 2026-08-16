@@ -26110,3 +26110,59 @@ frequency spread is the cause, `=1` should stabilise the null for that reason
 rather than for the spawn reason — and the two hypotheses become separable only
 if MHz is recorded on both arms. **Do not run it without the frequency
 instrumentation.**
+
+---
+
+## br-frankenpandas-h67zz — ⚠️ CORRECTING MY OWN AUDIT: I built a frequency mechanism on ONE instantaneous snapshot, and a second snapshot contradicts it
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** self-correction,
+one tick after the audit it corrects. No measurement window — `uptime` 1-min
+17.34 against 5-min 35.09, falling but not settled.
+
+**WHAT I CLAIMED LAST TICK.** That this host's cores span **2.70x at one
+instant** (1429–3856 MHz), that a single downclocked core therefore drags FP's
+8-thread arm while leaving pandas' 1-thread arm untouched, and — the part I
+stated most confidently — that **"on powersave a quiet window is a DOWNCLOCKED
+window"**, which would explain why low-load windows never certified better.
+
+**A SECOND READ CONTRADICTS IT.** Same host, same command, taken just now:
+
+| | loadavg | min | median | max | spread | cores < 2000 MHz |
+|---|---|---|---|---|---|---|
+| last tick | 68.0 | 1429 | 3813 | 3856 | **2.70x** | ≥1 |
+| now | 17.3 | **3172** | 3965 | 3993 | **1.26x** | **0** |
+
+**At the LOWER load every core is FASTER and the spread is far tighter.** That is
+the opposite of the direction I asserted. My 1429 MHz reading was almost
+certainly an idle core parked low at that instant — and an idle core is not
+evidence about the cores running a benchmark, because work is what clocks them
+up.
+
+**SO I OVER-READ A NOISY INSTANTANEOUS QUANTITY, on the strength of one sample,
+into a causal mechanism** — the same error I have criticised twice in this file
+(two points defining a line; a mechanism read off a single comparison). The
+correction is that the direction and magnitude are **unestablished**, and my own
+two snapshots disagree with each other. Independent readings from the fleet
+disagree too (3729 MHz at loadavg 68 and 2584 MHz at loadavg 22 measured
+elsewhere, i.e. quiet-is-slower; mine says quiet-is-faster). Two single snapshots
+in opposite directions is not a phenomenon, it is noise with a story attached.
+
+**WHAT SURVIVES, and it is the useful part:**
+
+1. **Frequency is an uncontrolled variable in all 13 of my banked rows, and that
+   remains true.** Zero of them record MHz. That defect is real regardless of
+   which direction the effect runs.
+2. **The instrument fix stands and is unaffected** —
+   `/data/projects/.scratch/fp_measure_template_with_mhz.sh` records min/median/
+   max/spread at run start and end.
+3. **What does NOT survive is my claim that frequency EXPLAINS the null
+   failures.** I have no per-arm frequency data at all, and the whole-host
+   snapshots I do have point both ways. That hypothesis is now exactly as
+   unproven as the `thread::scope` one it was competing with — I have two
+   unestablished explanations, not one established one.
+
+**THE MEASUREMENT THAT WOULD SETTLE IT is per-arm, not per-host:** sample the
+frequency of the cores actually executing each arm, during the timed region,
+rather than a whole-machine snapshot before and after. Nothing I have banked does
+that, and until something does, "frequency error" should be treated as a
+suspicion with an instrument attached, not as a finding.
