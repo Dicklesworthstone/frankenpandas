@@ -25515,3 +25515,111 @@ workspace-manifest decision recorded in br-frankenpandas-oxv4u. What this entry
 adds is the counted basis for that decision — 3.26x fewer instructions,
 bit-identical output — and the counted refutation of any further "remove waste
 from the parallel path" lever on this kernel: **there is 0.27% of it.**
+
+---
+
+## br-frankenpandas-u5cg4 — per-group fixed cost MEASURED at ~4,300 instructions/group: real, but only ~15% at the bead's fixture, so candidate (3) is insufficient too — ALL FOUR candidates now eliminated
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** counted. NO
+certification attempted — I sampled `uptime` three times and got 1-min 13.32
+against 5-min 24.26, a **45.1% spread still decaying** (16.85 → 14.24 → 13.32),
+which fails the closeness criterion.
+
+**THE DESIGN IS WHAT MAKES THIS ANSWERABLE.** `ROWS` held constant at 200,000;
+only the GROUP COUNT varies, so the total per-row rolling work is identical
+across settings by construction and any change is attributable to grouping.
+Release binary `fp_frame-0f1e18ea8175608b`, `perf stat -e instructions`, slopes
+across 10 and 20 reps so process/harness/fixture overhead cancels.
+
+**Counted mechanism:** at a constant 200,000 rows the call retires **63,291,829**
+instructions with 20 groups and **149,693,143** with 20,000 groups — the same
+per-row work costing **2.37x** more — giving a marginal per-group cost of
+**~4,324 instructions per group**.
+
+| groups | rows/group | instructions/call | vs 20 groups |
+|---|---|---|---|
+| 20 | 10,000 | 63,291,829 | 1.00x |
+| 200 | 1,000 | 64,973,259 | 1.03x |
+| 2,000 | 100 | 74,287,058 | 1.17x |
+| 20,000 | 10 | 149,693,143 | **2.37x** |
+
+**CANDIDATE (3) IS CONFIRMED AS A REAL COST AND REJECTED AS THE EXPLANATION.**
+Per-group fixed cost unambiguously exists and is worth knowing — at 20,000 groups
+it is 57% of the call, which matters for high-cardinality groupby generally. But
+**at the bead's own fixture of 2,000 groups it is only 11.0M of 74.3M
+instructions, ~15%**. Parallelising the other 85% should still have produced a
+visible speedup, and the July A/B saw none (12.20ms serial vs 12.29ms parallel).
+15% cannot explain 0.9x.
+
+### ALL FOUR FILED CANDIDATES ARE NOW ELIMINATED
+
+| # | candidate | verdict | evidence |
+|---|---|---|---|
+| 1 | memory bandwidth | **REFUTED** | IPC 2.742 — compute-bound, not stalled |
+| 2 | per-call spawn cost | **insufficient** | ~397us/8thr on a 12ms call ≈ 3% |
+| 3 | group-size skew | **insufficient** | real, but ~15% at the fixture |
+| 4 | the parallel arm never ran | **UNTESTABLE** | the arm and its toggle no longer exist |
+
+**So the July no-op has no surviving explanation, and I am saying that plainly
+rather than picking the least-refuted option.** The candidate I would now weight
+highest is (4) — that the original measurement did not compare what it claimed to
+— precisely because it is the one the others' elimination leaves standing, and
+because the harness's thread-count field cannot see `thread::scope` workers
+(banked under h67zz), so a serial-vs-serial comparison would have looked exactly
+like that result. **It is also the one candidate that cannot be checked without
+re-implementing the arm.**
+
+**RECOMMENDATION: do not spend further measurement here.** Three eliminations
+cost four probes and no certification, and the remaining question is answerable
+only by rewriting reverted code to re-run a July experiment whose conclusion was
+already "no gain". The per-group cost above is the durable result and belongs to
+high-cardinality groupby work, not to this bead.
+
+**Probe:** `instr_group_size_skew_u5cg4`, `FP_U5CG4_GROUPS`-driven, in
+`crates/fp-frame/src/lib.rs`. Gate: `cargo test -p fp-frame --lib` 3306 passed /
+0 failed / 31 ignored, EXIT=0.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-mti15) — the `df.dot` worker-count optimum MOVES WITH AMBIENT LOAD (48 under load ~20, 63 when quiet), so tuning the cap is not a code lever — REJECT
+
+Chasing the last unexplained factor in the `@1M` counters: 93% of process cycles
+sit in `materialize_float64_dot` (perf record, symbol level), so the consumer
+side is not the cost and the GEMM really is the job. But the timed phase runs at
+only ~20 effective CPUs while spawning 63 workers, so I swept the cap under
+interleaved passes to see whether the shipped `available_parallelism` choice is
+wrong. `uptime` at the start: **16.84 1-min, 22.26 5-min**; at the end 21.54 /
+23.03. p50 ms, same ELF `4a89472f…`:
+
+| pass | w8 | w16 | w32 | w48 | w63 (shipped) |
+|---|---:|---:|---:|---:|---:|
+| 1 | 32.593 | 21.801 | 21.373 | **16.505** | 20.579 |
+| 2 | 32.496 | 21.524 | 21.557 | **17.227** | 20.493 |
+
+**48 workers beat the shipped 63 by ~20%, reproducibly, in both passes.** That
+looks like a free lever. It is not, and the reason matters more than the number:
+**an earlier sweep of the same knob on a quieter host was MONOTONE** — 16 workers
+23.7 ms, 32 workers 21.1 ms, 64 workers 20.1 ms, with 64 the best. Same code,
+same shape, opposite conclusion. The optimum is a function of how many cores the
+OTHER tenants are using, not of the workload.
+
+**Counted mechanism:** the instruction count does not move with the cap — serial
+and 63-worker arms retire 179.16 G and 179.64 G, 0.27% apart (entry above), so
+nothing about the work changes when the cap does. What changes is how many
+threads get a physical core to themselves on a 32-core/64-thread box that is
+already ~20 threads busy. Under contention, 48 leaves headroom the box actually
+needs; on a quiet box, 63 uses cores that are genuinely free.
+
+**Decision: REJECT worker-cap tuning as a lever, and do NOT make the cap
+load-adaptive.** Reading `/proc/loadavg` from inside the kernel would make
+FrankenPandas' runtime a function of ambient host state, which would in turn make
+every A/B in this campaign non-reproducible — the measurement method depends on
+two runs of the same binary being comparable. A 20% win that costs determinism is
+not a win. The shipped rule stays `min(available, cap, pending, work/2e6)`:
+optimal when the host is quiet, within ~20% when it is not.
+
+**Consequence for reading any `df_dot` row, including my own.** Two runs of ONE
+binary at the same shape can differ by 20% purely through the ambient thread
+count, before the incumbent's dispersion is even considered. That is a second,
+independent mechanism pushing the same way as br-frankenpandas-h67zz's load
+findings and my own `@1M` retraction: rows taken at different loads are not
+comparable, and `df_dot @1M` in particular has now produced 16.5, 17.2, 20.5,
+20.6, 20.9, 21.4 and 21.6 ms from a single ELF within one hour.

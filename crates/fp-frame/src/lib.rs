@@ -193437,6 +193437,61 @@ mod sgb_rolling_build_groups_share_lyaqi {
         );
     }
 
+    /// Group count for the skew probe, default the bead's 2000.
+    ///
+    /// br-frankenpandas-u5cg4. ROWS is held CONSTANT while this varies, so the
+    /// per-ROW work is fixed and any change in the instruction count is
+    /// attributable to the number of GROUPS.
+    fn skew_groups() -> i64 {
+        std::env::var("FP_U5CG4_GROUPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_000)
+    }
+
+    /// INSTRUCTION-COUNT probe for GROUP-SIZE SKEW (br-frankenpandas-u5cg4).
+    ///
+    /// The open question on that bead is why group-parallelising a kernel whose
+    /// per-group work is 79-90% of the call bought nothing. Bandwidth is refuted
+    /// (IPC 2.74, compute-bound) and the parallel arm no longer exists to
+    /// re-measure, which leaves per-group FIXED COST as the leading candidate:
+    /// the bead's fixture is 2000 groups over 200k rows, i.e. only ~100 rows
+    /// each, small enough that setup per group could swamp the rolling itself.
+    ///
+    /// THE DESIGN IS WHAT MAKES THIS ANSWERABLE. `ROWS` is held constant and
+    /// only the GROUP COUNT varies, so the total per-row rolling work is
+    /// identical across settings by construction. If instructions per call fall
+    /// sharply as groups decrease, the cost is per-GROUP and skew is confirmed;
+    /// if they stay flat, the cost is per-ROW and candidate (3) is refuted too.
+    ///
+    /// Counted, not timed: instruction counts are load-insensitive, so this is
+    /// measurable on a contended host where a timing row would be refused.
+    #[test]
+    #[ignore = "instruction-count probe: perf stat cargo test -- --ignored --exact"]
+    fn instr_group_size_skew_u5cg4() {
+        let groups = skew_groups();
+        assert!(groups > 0 && (groups as usize) <= ROWS, "groups must divide ROWS sensibly");
+        let index = Index::new((0..ROWS).map(|r| IndexLabel::Int64(r as i64)).collect());
+        let values: Vec<i64> = (0..ROWS).map(|r| (r as i64 * 7) % 1_000).collect();
+        let keys: Vec<i64> = (0..ROWS).map(|r| (r as i64) % groups).collect();
+        let values =
+            Series::new("v", index.clone(), Column::from_i64_values(values)).expect("value series");
+        let keys = Series::new("k", index, Column::from_i64_values(keys)).expect("key series");
+
+        let reps = instr_reps();
+        let mut sink = 0usize;
+        for _ in 0..reps {
+            let gb = values.groupby(&keys).expect("groupby");
+            let out = gb.rolling(WINDOW).mean().expect("rolling mean");
+            sink = sink.wrapping_add(out.len());
+        }
+        assert_eq!(
+            sink,
+            reps * ROWS,
+            "row count is invariant across group settings — only the grouping changes"
+        );
+    }
+
     /// INSTRUCTION-COUNT probe, the WHOLE grouped-rolling call.
     ///
     /// br-frankenpandas-lyaqi. Same fixture, same rep count, same sink
