@@ -153,7 +153,10 @@ jobs:
         # (growing) doctests across frankenpandas / fp-index / fp-columnar
         # stay exercised on every PR and don't rot into broken docs.rs
         # builds at release time.
-        run: cargo test --doc --workspace
+        # br-frankenpandas-n35k2: --doc is one target PER CRATE, so without
+        # --no-fail-fast a single crate's broken doctest hides every later
+        # crate's. Same target-ordering defect as the conformance job below.
+        run: cargo test --doc --workspace --no-fail-fast
 
   eager-frame:
     # br-frankenpandas-it6kj: the default build uses lazy transpose storage,
@@ -183,8 +186,11 @@ jobs:
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
 
-      - name: Eager fp-frame tests
-        run: cargo test -p fp-frame --lib --no-default-features
+      - name: Eager fp-frame tests (--no-fail-fast)
+        # br-frankenpandas-n35k2: one target today, but the flag costs nothing
+        # and this is the un-CI'd cfg (br-frankenpandas-it6kj) where a partial
+        # result is most likely to be misread as a pass.
+        run: cargo test -p fp-frame --lib --no-default-features --no-fail-fast
 
   conformance:
     runs-on: ubuntu-latest
@@ -263,11 +269,29 @@ jobs:
         continue-on-error: true
         run: ./scripts/check_fixture_freshness.sh
 
-      - name: Conformance tests
-        run: cargo test -p fp-conformance -- --nocapture
+      - name: Conformance tests (--no-fail-fast)
+        # br-frankenpandas-n35k2: WITHOUT --no-fail-fast this stops at the first
+        # failing TARGET, and fp-conformance has several. The lib target has
+        # been red for the whole campaign (FP-P2D-056), and
+        # tests/proptest_properties.rs runs after it — so 419 property tests
+        # never executed here. They became visible only when the lib happened to
+        # go green, and the moment cargo reached the binary it found two real
+        # failures (a Null-condition divergence in fp-frame's where/mask typed
+        # fast path, fixed at 293a74e58). A genuine correctness defect stayed
+        # invisible for the entire campaign purely because of target ordering.
+        #
+        # This is the SAME defect as the `continue-on-error` note above, one
+        # level down: there a failing STEP masked the suite, here a failing
+        # TARGET masks the later targets. Both hide reds, and the fix in both
+        # cases makes the gate strictly stricter rather than looser.
+        run: cargo test -p fp-conformance --no-fail-fast -- --nocapture
 
       - name: Performance regression gate
-        run: cargo test -p fp-conformance --test perf_baselines -- --nocapture --ignored --skip perf_run_all_baselines
+        # br-frankenpandas-n35k2: --test names ONE target, so target ordering
+        # cannot hide anything here — but --no-fail-fast still makes the run
+        # report EVERY failing baseline instead of stopping at the first, which
+        # is what a regression gate is for.
+        run: cargo test -p fp-conformance --test perf_baselines --no-fail-fast -- --nocapture --ignored --skip perf_run_all_baselines
 
   gates:
     runs-on: ubuntu-latest

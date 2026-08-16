@@ -223,7 +223,10 @@ sys.stdout.write(json.dumps({
 fn dtype_to_pandas_jsonl_name(dtype: DType) -> &'static str {
     match dtype {
         DType::Bool | DType::BoolNullable => "bool",
-        DType::Float64 => "float64",
+        // Both float flavours report the numpy spelling here on purpose: this
+        // is the pandas JSONL *name* used by the IO round trip, and the
+        // nullable lane's payload is the same f64. (br-frankenpandas-qkqfb)
+        DType::Float64 | DType::Float64Nullable => "float64",
         DType::Int64 | DType::Int64Nullable => "int64",
         DType::Utf8 | DType::Categorical | DType::Sparse | DType::Timedelta64 => "object",
         DType::Datetime64 => "datetime64[ns]",
