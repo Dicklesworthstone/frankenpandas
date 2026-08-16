@@ -25991,6 +25991,18 @@ impl Column {
     /// Bit-identical to the shared arm by construction: same `f`, same order,
     /// same all-valid mask, and `all_finite` is a hint the constructor may only
     /// use to skip a rescan.
+    ///
+    /// STAYS SERIAL, MEASURED — do not "fix" this by parallelising it.
+    /// br-frankenpandas-o57rj, one ELF (2dd3234b), interleaved, checksums
+    /// identical at every setting, `floor` p50: at 10M serial **10.68ms** against
+    /// 17.87-19.30ms for 2-63 workers; at 1M serial **0.74ms** against
+    /// 1.35-2.34ms. Every worker count LOSES, by 1.7-3.1x.
+    ///
+    /// The cause is this function's own `collect`: it allocates without
+    /// pre-zeroing, while any parallel arm needs `vec![0.0; n]` up front to hand
+    /// out `chunks_mut` in safe Rust — 80 MB of `alloc_zeroed` at 10M. That
+    /// memset costs more than the parallelism buys, which is also the number
+    /// br-frankenpandas-284ul's write-once hypothesis was missing.
     fn typed_float_witness_free_unary<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
         let data = self.as_f64_slice()?;
         let witness = self.f64_finite_witness();

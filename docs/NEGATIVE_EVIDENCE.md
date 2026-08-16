@@ -26438,3 +26438,66 @@ found by the bit test before it ever compiled here**. Every whole-binary bench
 checksum above is identical between arms, at both sizes.
 
 **Artifacts:** `artifacts/bench/bench_2026-08-16T22-1[45]-*.json`, `…T22-1[678]-*.json`.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-o57rj) — REJECTED: parallelising the witness-free `floor` arm. Every worker count from 2 to 63 LOSES, by 1.7-3.1x, because a safe-Rust parallel arm must pre-zero 80 MB that `collect` never touches
+
+**Lever:** the arm landed in `5dd1ddd29` is serial. At 10M it is DRAM-bound and
+`peak_process_threads` is 2, so the obvious next move is to split it across
+workers — and it would have taken `floor @10M` from 1.071x past the gate's
+≈1.28x decidability margin, turning a measured crossing into a certified one.
+
+**Hypothesis:** a witness-free parallel map into one CONTIGUOUS buffer beats the
+serial arm at 10M, where spawn cost is ~4% of a 9ms job rather than the ~60% it
+was at the 600us shape.
+
+**Measured — ONE ELF (`2dd3234b`), both arms selected in-process via the existing
+`FP_ELEMENTWISE_*` policy knobs, interleaved, order reversed on alternate rounds,
+`floor` p50 / checksum identical (`e700f53534db5c6d`) at every setting:**
+
+| arm | `@1M` p50 | `@10M` p50 | `@10M` cv | A/A null |
+|---|---|---|---|---|
+| **serial** | **743.5us** | **10678.5us** | 6.87% | 1.0048 |
+| par w2 | 1763.5us | 19297.9us | 4.73% | 1.0014 |
+| par w4 | 2049.5us | 19014.1us | 4.30% | 1.0053 |
+| par w8 | 1353.7us | 18210.3us | 4.72% | 0.9918 |
+| par w16 | 1562.9us | 18362.8us | 3.42% | 0.9982 |
+| par w32 | 1770.7us | **17866.8us** | 3.37% | 1.0030 |
+| par w63 | 2338.2us | 18662.8us | 3.19% | 0.9951 |
+
+Observed loadavg 29.74 (1M block) / 25.51 (10M block); observed CPU MHz 3565→3218
+and 4081→4065. **The best parallel setting is 1.67x SLOWER than serial at 10M and
+1.82x slower at 1M. There is no crossover — the ordering is the same at both sizes
+and at every cap.**
+
+**A/A null control (same invocation):** the serial arm's in-binary null
+median ratio is 1.0048 at 10M and 0.9980 at 1M; across the six parallel caps
+the null medians span 0.9918-1.0053. Every arm's null sits inside the 2%
+limit, so the 1.67x-1.82x parallel deficit is the arms differing, not the
+instrument drifting.
+
+**Counted mechanism:** the parallel arm performs one extra 80 MB `alloc_zeroed`
+pass at 10M (10485760 f64 pre-zeroed, then all 10485760 overwritten) that the
+serial `collect` never issues; the resulting page-faults over 83886080 bytes are
+the required work the parallel arm failed to amortise.
+
+**WHY, AND IT IS NOT SPAWN COST.** The serial arm's `collect` allocates WITHOUT
+pre-zeroing. A parallel arm cannot: handing workers `chunks_mut` in safe Rust
+requires the buffer to exist first, i.e. `vec![0.0; n]`, which is 80 MB of
+`alloc_zeroed` at 10M — an entire extra pass over more bytes than the map itself
+touches. Parallelism has to beat a memset it created, and it cannot. Note the
+parallel arms have *better* cv (3.2-4.7% vs 6.9%): they are stably slower.
+
+**THIS IS ALSO THE MISSING NUMBER FOR br-frankenpandas-284ul.** That bead's
+write-once toggle exists because "whether `vec![0.0; n]` costs a memset or nothing
+depends on allocator state this code does not control", and it was left OFF
+pending a measurement. Here is one, from the opposite direction: the pre-zeroing
+is worth ~8ms at 10M — it is the single largest term in the parallel arm, larger
+than the map. It is not free.
+
+**Not tried, and the only remaining way through:** a chunked (non-contiguous)
+producer avoids the memset entirely, and `par_map_slice_f64_to_owned_chunks`
+already exists. It is REFUSED here on shape, not on speed: a chunked column makes
+the next consumer that wants a slice pay `materialize_float64_chunks`, the
+~5.7ms/1M concat its own doc comment records. `floor` would win its benchmark by
+moving the cost into whatever runs next. Reverted; the serial arm stands, with the
+numbers written into its doc comment so this is not re-attempted.
