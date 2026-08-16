@@ -19575,24 +19575,70 @@ mod tests {
         assert!(df.columns()["b"].values()[1].is_missing());
     }
 
-    /// ...while an overlong row under the default `on_bad_lines=Error` still
-    /// errors, now from FrankenPandas' own check rather than the csv crate's
-    /// two-directional UnequalLengths.
+    /// ...and a UNIFORMLY overlong file is not malformed either — the excess
+    /// leading field becomes the INDEX. It is the RAGGED file that errors.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    ///   'a,b\n1,2,3\n'          -> index [1]     a [2]    b [3]
+    ///   'a,b\n1,2,3\n4,5,6\n'   -> index [1,4]   a [2,5]  b [3,6]
+    ///   'a,b\n1,2\n3,4,5\n'     -> ParserError: Expected 2 fields in line 3, saw 3
+    /// ```
+    ///
+    /// and the first of those SUCCEEDS under every `on_bad_lines` setting —
+    /// error, warn and skip all return that same frame, because an evenly
+    /// overlong file is never a bad line to begin with.
+    ///
+    /// This assertion previously required `IoError::CsvFieldCount` for the
+    /// uniform case. br-frankenpandas-azv2h implemented the index promotion at
+    /// 90b48d995 and closed on a SCOPED gate ("focused remote regression, fp-io
+    /// check"), so a whole-crate `cargo test -p fp-io` never ran and this
+    /// sibling was left RED on main. Its neighbour above,
+    /// `csv_with_options_short_row_pads_not_errors`, was updated at the time;
+    /// this one was missed. (br-frankenpandas-t612p)
+    ///
+    /// BOTH ARMS ARE LOAD-BEARING. Keep only the success arm and an
+    /// implementation that merely stops erroring — dropping the extra field and
+    /// returning a default `RangeIndex` — passes. Keep only the error arm and
+    /// the refuted contract comes straight back.
+    ///
+    /// NOT ASSERTED, measured but not implemented: with TWO extra fields per row
+    /// pandas builds a 2-LEVEL index (`'a,b\n1,2,3,4\n'` -> index `[(1, 2)]`,
+    /// a `[3]`, b `[4]`). azv2h implemented the uniform ONE-extra case only, so
+    /// that is a known boundary rather than a guarded behaviour.
     #[test]
-    fn csv_with_options_overlong_row_errors() {
+    fn csv_with_options_uniform_overlong_row_promotes_index_t612p() {
         let opts = CsvReadOptions::default();
-        let err = read_csv_with_options("a,b\n1,2,3\n", &opts)
-            .expect_err("overlong row should still error");
+
+        let df = read_csv_with_options("a,b\n1,2,3\n", &opts)
+            .expect("a uniformly overlong row promotes its extra field to the index");
+        assert_eq!(
+            df.columns()["a"].values(),
+            &[Scalar::Int64(2)],
+            "the SECOND field is column a"
+        );
+        assert_eq!(df.columns()["b"].values(), &[Scalar::Int64(3)]);
+        assert_eq!(
+            df.index().labels(),
+            &[IndexLabel::Int64(1)],
+            "the excess leading field must land in the INDEX, not be dropped"
+        );
+
+        // A RAGGED file — one conforming row and one overlong — is still an
+        // error, which is what keeps this from being "stop checking".
+        let ragged = read_csv_with_options("a,b\n1,2\n3,4,5\n", &opts)
+            .expect_err("a ragged file is still malformed");
         assert!(
             matches!(
-                &err,
+                &ragged,
                 IoError::CsvFieldCount {
-                    line: 2,
+                    line: 3,
                     expected: 2,
                     found: 3
                 }
             ),
-            "got {err:?}"
+            "got {ragged:?}"
         );
     }
 
