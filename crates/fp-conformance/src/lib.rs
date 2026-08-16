@@ -17683,11 +17683,89 @@ fn encode_groupby_composite_key(values: &[Scalar]) -> Result<String, String> {
     Ok(components.join("|"))
 }
 
+/// The dtype a fixture payload DECLARES, mirroring the oracle's chooser.
+///
+/// `pandas_oracle.py::series_dtype_for_payload_values` maps a payload whose
+/// non-null kinds are exactly `{int64}` and which carries a null to the NULLABLE
+/// `Int64`, and `{bool}` + null to `boolean`. The harness had no equivalent: it
+/// went straight to `Column::from_values`, whose `infer_dtype` SKIPS nulls and
+/// yields plain `DType::Int64`. So for the same payload the oracle built
+/// `Int64Dtype()` while FrankenPandas built `dtype('int64')` — the two sides
+/// were handed DIFFERENT columns, which is how FP-P2D-056 merged an asof key
+/// that pandas rejects as `incompatible merge keys`.
+///
+/// FrankenPandas models the distinction already — `DType::Int64Nullable` and
+/// `DType::BoolNullable`, whose `name()` is literally `"Int64"` and
+/// `"boolean"` — and `fp-join` already implements the rejection
+/// (br-frankenpandas-sopel, 870a1003c). Nothing was CHOOSING the nullable
+/// dtype. This is the harness-input class of defect, the same shape as
+/// br-frankenpandas-nv5ct and br-frankenpandas-i9mgp: no amount of re-banking
+/// the EXPECTED side can fix it, and the failure points at the wrong crate.
+///
+/// Returning `None` means "let inference decide", so every payload shape other
+/// than these two is untouched. (br-frankenpandas-vprpg)
+fn declared_payload_dtype(values: &[Scalar]) -> Option<DType> {
+    let mut has_null = false;
+    let mut kinds = BTreeSet::new();
+    for value in values {
+        if value.is_missing() {
+            has_null = true;
+        } else {
+            kinds.insert(value.dtype());
+        }
+    }
+    // No null means no nullable-extension question to answer: an all-valid
+    // int64 payload is plain `int64` in pandas too.
+    if !has_null {
+        return None;
+    }
+    match kinds.iter().copied().collect::<Vec<_>>().as_slice() {
+        [DType::Int64] => Some(DType::Int64Nullable),
+        [DType::Bool] => Some(DType::BoolNullable),
+        _ => None,
+    }
+}
+
+fn column_from_fixture_values(values: Vec<Scalar>) -> Result<Column, String> {
+    match declared_payload_dtype(&values) {
+        Some(dtype) => Column::new(dtype, values).map_err(|err| err.to_string()),
+        None => Column::from_values(values).map_err(|err| err.to_string()),
+    }
+}
+
+/// `DataFrame::from_dict_with_index`, but routing each lane through the payload
+/// dtype chooser instead of `Column::from_values`.
+///
+/// The frame path matters more than the Series path here: `merge_asof` takes
+/// FRAMES, so wiring the chooser into `build_series` alone would have left
+/// FP-P2D-056 exactly as red as before.
+fn dataframe_from_fixture_columns(
+    columns: Vec<(String, Vec<Scalar>)>,
+    index_labels: Vec<IndexLabel>,
+) -> Result<DataFrame, String> {
+    let n = index_labels.len();
+    let mut store = BTreeMap::new();
+    let mut order = Vec::with_capacity(columns.len());
+    for (name, values) in columns {
+        if values.len() != n {
+            return Err(format!(
+                "column '{name}' has {} values but the index has {n}",
+                values.len()
+            ));
+        }
+        order.push(name.clone());
+        store.insert(name, column_from_fixture_values(values)?);
+    }
+    DataFrame::new_with_column_order(Index::new(index_labels), store, order)
+        .map_err(|err| err.to_string())
+}
+
 fn build_series(series: &FixtureSeries) -> Result<Series, String> {
-    Series::from_values(
+    let column = column_from_fixture_values(series.values.clone())?;
+    Series::new(
         series.name.clone(),
-        series.index.clone(),
-        series.values.clone(),
+        Index::new(series.index.clone()),
+        column,
     )
     .map_err(|err| err.to_string())
 }
@@ -17940,11 +18018,10 @@ fn build_dataframe(frame_spec: &FixtureDataFrame) -> Result<DataFrame, String> {
                     .ok_or_else(|| format!("materialized frame is missing column '{name}'"))?
                     .values()
                     .to_vec();
-                Ok((name.as_str(), values))
+                Ok((name.clone(), values))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let frame = DataFrame::from_dict_with_index(rebuilt_columns, row_index)
-            .map_err(|err| err.to_string())?;
+        let frame = dataframe_from_fixture_columns(rebuilt_columns, row_index)?;
         return attach_fixture_row_multiindex(frame, frame_spec.row_multiindex.as_ref());
     }
 
@@ -17955,13 +18032,12 @@ fn build_dataframe(frame_spec: &FixtureDataFrame) -> Result<DataFrame, String> {
                 .columns
                 .get(name)
                 .cloned()
-                .map(|values| (name.as_str(), values))
+                .map(|values| (name.clone(), values))
                 .ok_or_else(|| format!("frame is missing column '{name}'"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, String>>()?;
 
-    let frame = DataFrame::from_dict_with_index(columns, frame_spec.index.clone())
-        .map_err(|err| err.to_string())?;
+    let frame = dataframe_from_fixture_columns(columns, frame_spec.index.clone())?;
     attach_fixture_row_multiindex(frame, frame_spec.row_multiindex.as_ref())
 }
 
