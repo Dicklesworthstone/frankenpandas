@@ -55797,3 +55797,66 @@ mod ab_utf8_ss_sorter_ccfp {
         );
     }
 }
+
+/// br-frankenpandas-284ul: does the elementwise parallel arm actually RUN at 1M,
+/// and what does the worker cap cost in instructions?
+///
+/// That bead's two open questions — "PAR_MIN may be too LOW for this path at this
+/// size" and "the worker cap may be too LOW" — both presuppose that the parallel
+/// arm executes at 1M. Nothing on file establishes that. It is exactly the
+/// assumption that made br-frankenpandas-u5cg4's candidate (4) untestable: the
+/// harness's `thread_count_actually_used` cannot see `thread::scope` workers
+/// (banked under h67zz), so a serial-vs-serial comparison is indistinguishable
+/// from a parallel one that did not pay.
+///
+/// This probe settles it with a COUNT rather than a clock. `Column::sqrt` routes
+/// through `par_map_slice_f64_with_witness`, whose cap and threshold come from
+/// `FP_ELEMENTWISE_MAX_WORKERS` / `FP_ELEMENTWISE_PAR_MIN`. Running it at
+/// `MAX_WORKERS=1` and `MAX_WORKERS=8` and counting instructions distinguishes
+/// three cases that wall clock conflates:
+///
+/// * counts differ  → the two settings execute different code, so the parallel
+///   arm is real and reachable at this size;
+/// * counts identical → the setting is not reaching the kernel at all, and every
+///   timing A/B built on it has been comparing an arm with itself;
+/// * counts differ hugely → the split itself is doing work disproportionate to
+///   the map, which is the spawn-overhead hypothesis in countable form.
+///
+/// Instruction counts are load-insensitive, so this is measurable on a contended
+/// host where a timing row would be refused — which is the whole reason it exists.
+#[cfg(test)]
+mod elementwise_worker_cap_counts_284ul {
+    use super::Column;
+
+    const ROWS: usize = 1_000_000;
+
+    fn reps() -> usize {
+        std::env::var("FP_284UL_REPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10)
+    }
+
+    /// All-valid, all-finite, no NaN — so `sqrt` takes the typed all-valid arm
+    /// rather than falling to a Scalar path, and the witness stays clean.
+    fn input() -> Column {
+        Column::from_f64_values((0..ROWS).map(|i| (i as f64) + 1.0).collect())
+    }
+
+    #[test]
+    #[ignore = "instruction-count probe: perf stat cargo test -- --ignored --exact"]
+    fn instr_sqrt_1m_under_current_policy_284ul() {
+        let column = input();
+        let n = reps();
+        let mut sink = 0usize;
+        for _ in 0..n {
+            let out = column.sqrt().expect("sqrt");
+            sink = sink.wrapping_add(out.len());
+        }
+        assert_eq!(
+            sink,
+            n * ROWS,
+            "sink pins the output length and stops the loop being optimised away"
+        );
+    }
+}
