@@ -2,6 +2,14 @@
 
 > Every intentional divergence from pandas behavior is documented here.
 > Format: DISC-NNN, status (ACCEPTED/INVESTIGATING/WILL-FIX), affected tests.
+>
+> **DISC numbers must be UNIQUE — check before you claim one.** On 2026-08-16 three
+> IDs were each defined twice (DISC-018, DISC-019, DISC-020), so a citation could
+> resolve to the wrong entry depending on which heading a reader hit first, and one
+> real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
+> number on whichever entry the existing in-tree citations actually meant. The next
+> free number is DISC-025. To see every ID in use:
+> `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
 
@@ -188,7 +196,11 @@
 - **Tests affected:** none (fp's error path is covered by existing RangeIndex tests; no descending slice_locs/searchsorted parity test is asserted).
 - **Review date:** 2026-07-23
 
-### DISC-018: `oracle_attestation` — what a provenance stamp on an EXPECTED-ERROR fixture claims
+### DISC-022: `oracle_attestation` — what a provenance stamp on an EXPECTED-ERROR fixture claims
+> **Renumbered 2026-08-16 (CalmMink).** This entry was a SECOND `DISC-018`, colliding
+> with "Timedelta/Timestamp arithmetic overflow surfaces as NaT" above. All 13
+> in-tree citations of `DISC-018` mean the overflow entry, so that one kept the
+> number and this one moved. No citation anywhere referred to this entry.
 - **Reference:** `fixture_provenance.oracle_script_sha256` normally asserts *"running this oracle script on this input reproduced these expected VALUES"*. An expected-error fixture pins no values, so the same stamp cannot mean the same thing there.
 - **Our impl:** error fixtures whose refusal came from pandas now carry an explicit `fixture_provenance.oracle_attestation: "error_agreement"`, meaning only *"running this oracle script on this input made PANDAS raise too"*. **Absence of the key keeps the strong value-reproduction reading**, so nothing about the other 977 stamps changed. The message text is deliberately NOT part of the claim: `expected_error_contains` pins FrankenPandas's wording (checked by the Rust harness) while the oracle surfaces pandas' own English, and the two were never meant to match.
 - **Impact:** 49 of the 85 expected-error fixtures qualify. The other **36 are deliberately left unstamped and still count as red**: 31 were refused by the oracle *adapter's own argument validation* (e.g. `dataframe_concat concat_axis must be 0 or 1, got 2`) and 5 escaped as `unexpected`, so **pandas was never invoked** and there is no agreement to attest — the claim would be true and vacuous. The split is structural, from `pandas_oracle.oracle_error_origin` (an `OracleError` raised `from exc` wrapped an engine call; a bare one is adapter validation), never a substring match on the message. The 31 adapter refusals are better read as oracle coverage gaps.
@@ -196,7 +208,17 @@
 - **Tests affected:** `oracle/tests/test_error_origin.py` (7 cases: origin classification, fail-closed default, provenance on the error path); `oracle/tests/test_regenerate_fixtures.py` (superset faithful / dropped-extras refused / changed-extra refused / stale-sha refused / undeclared-key refused / attestation required / text insertion).
 - **Review date:** 2026-08-08
 
-### DISC-019: the oracle builds NULLABLE dtypes for int+null / bool+null payloads, unlike pandas' own constructor
+### DISC-023: the oracle builds NULLABLE dtypes for int+null / bool+null payloads, unlike pandas' own constructor
+> **Renumbered 2026-08-16 (CalmMink).** This entry was a SECOND `DISC-019`, colliding
+> with "Datetime64 mean/median/quantile are exact" above. Three of the four in-tree
+> citations of `DISC-019` mean the Datetime64 entry, so that one kept the number.
+>
+> ⚠️ **ONE CITATION STILL POINTS HERE BY THE OLD NUMBER:**
+> `crates/fp-frame/src/lib.rs:52880` reads "is a NULLABLE Int64 (that is how the
+> payload is constructed — see DISC-019)" and means THIS entry, not the Datetime64
+> one. It should read `DISC-023`. I could not make that edit: `fp-frame/src/lib.rs`
+> is exclusively reserved by another agent, and the repo was under a build freeze.
+> Whoever holds that file next should fix the reference.
 - **Reference:** pandas 2.2.3 infers `pd.Series([1, None, 3])` as **float64** (values `[1.0, nan, 3.0]`) and `pd.Series([True, None])` as **object**. Nullable `Int64` / `boolean` are reached only by asking for them explicitly.
 - **Our impl:** `pandas_oracle.series_dtype_for_payload_values` returns `"Int64"` for an all-int payload containing a null, and `"boolean"` for an all-bool payload containing a null — so the oracle constructs a column pandas' own constructor would never build from the same data.
 - **Impact:** ACCEPTED, and it is **load-bearing rather than a defect**, which is the opposite of how it reads. The fixture format tags **every value** with its own `kind`; a float64 column would rewrite each `{"kind":"int64"}` into `{"kind":"float64"}` on the way out, so the nullable dtype is what preserves the payload's kinds across the round trip. Measured 2026-08-08 over the whole corpus, switching both arms to pandas' inference: `agree` 977 → 947 (−30), `moved, unattributed` 151 → 181 (+30), and the `KIND int64->float64` move class 57 → 86 (+29). The change makes the corpus strictly worse and **grows the very class it was expected to shrink**.
@@ -205,7 +227,12 @@
 - **Tests affected:** none changed. The negative result is recorded in `series_dtype_for_payload_values`'s own docstring so the next reader does not repeat the experiment.
 - **Review date:** 2026-08-08
 
-### DISC-020: `str.index` / `str.rindex` report a missing position where pandas raises — and therefore do NOT take the float64 promotion
+### DISC-024: `str.index` / `str.rindex` report a missing position where pandas raises — and therefore do NOT take the float64 promotion
+> **Renumbered 2026-08-16 (CalmMink).** This entry was a SECOND `DISC-020`, colliding
+> with "STRICT mode deliberately reproduces pandas' silent timedelta int64 wrap"
+> above. Both in-tree citations of `DISC-020` name `mul_scalar_with_policy` and
+> `nancumsum_with_policy`, which is the timedelta entry, so that one kept the
+> number. No citation referred to this entry.
 - **Reference:** every OTHER int-returning `.str` accessor follows a three-way result-dtype rule, measured on live pandas 2.2.3 over `pd.Series([...], dtype=object)`: no gaps → `int64`; a `None`/`nan`/non-string element → **`float64`** with the gap as `nan`; a `NaT` → **object**, ints unpromoted and the `NaT` preserved, because float64 cannot hold a NaT. `pd.Series.str.index(sub)` does not participate: it **raises `ValueError: substring not found`** rather than returning anything for an absent needle.
 - **Our impl:** `StringAccessor::index_of` / `rindex_of` return a missing value at an absent needle instead of raising — an FP-defined nullable-int contract for an operation pandas has no total equivalent of. Because they are the only int-returning accessors that can invent a gap from *present* input, applying the promotion rule to them would make a found-position `float64` purely because some other row's needle was absent. They therefore keep `Int64` at every found position with only the gaps `NaN`. The oracle already models exactly this (`pandas_oracle._index_of_result` builds an OBJECT series of ints-and-NaN and says so in its docstring); this entry records the same contract on the FrankenPandas side so the two cannot drift apart silently.
 - **Impact:** two accessors, `str.index` / `str.rindex`. Their sibling `str.find` / `str.rfind` are unaffected — pandas defines those totally (`-1` when absent), they never invent a gap, and they do take the promotion rule. The other ten int-returning accessors (`len`, `find`, `rfind`, `find_with_bounds`, `rfind_with_bounds`, `encode`, `count`, `count_literal`, `count_matches`, `split_count`) are on the pandas rule via `StringAccessor::apply_str_int_scalar`.
