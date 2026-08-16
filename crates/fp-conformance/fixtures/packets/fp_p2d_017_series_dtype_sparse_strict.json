@@ -25,5 +25,5 @@
   },
   "constructor_dtype": "int64",
   "fill_value": { "kind": "int64", "value": 0 },
-  "expected_dtype": "Sparse"
+  "expected_dtype": "Sparse[int64, 0]"
 }

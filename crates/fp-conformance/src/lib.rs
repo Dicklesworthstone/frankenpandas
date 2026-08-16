@@ -17805,7 +17805,26 @@ fn build_series_with_optional_categorical(
 
 fn build_series_for_dtype_check(fixture: &PacketFixture) -> Result<Series, String> {
     let left = require_left_series(fixture)?;
-    if fixture.expected_dtype.as_deref() == Some("Sparse") {
+    // ⚠ THIS BRANCH IS STEERED BY THE EXPECTED OUTPUT, WHICH IS BACKWARDS
+    // (br-frankenpandas-3gxc6). It used to test `== Some("Sparse")` exactly, so
+    // the fixture's EXPECTATION decided how its INPUT was built: repinning
+    // `expected_dtype` to the pandas-correct `Sparse[int64, 0]` silently
+    // stopped the harness building a sparse Series at all, and the case then
+    // reported `actual=int64` — a failure that looked like an FP regression and
+    // was really the harness constructing a different input.
+    //
+    // Widened to accept the parameterized name so the pin can be correct. The
+    // CIRCULARITY IS NOT FIXED and should not be mistaken for fixed: this still
+    // reads an expectation to choose an input, so a sparse case can only ever
+    // assert a name beginning "Sparse". The real fix is to key the branch off an
+    // INPUT declaration (`fill_value` / `constructor_dtype`), which is a wider
+    // harness change and needs its own bead — a fixture asserting that a sparse
+    // payload does NOT report a sparse dtype is currently unwritable.
+    if fixture
+        .expected_dtype
+        .as_deref()
+        .is_some_and(|dtype| dtype == "Sparse" || dtype.starts_with("Sparse["))
+    {
         let dtype_spec = fixture
             .constructor_dtype
             .as_deref()
