@@ -3089,10 +3089,14 @@ def _balanced_square_aggregate(
 def host_state_snapshot() -> dict[str, Any]:
     """Loadavg and observed CPU MHz at this instant.
 
-    br-frankenpandas-633fb. THIS HOST RUNS THE POWERSAVE GOVERNOR and its cores
-    swing 1429-4292 MHz, so a quiet window is also a DOWNCLOCKED window: waiting
-    for low load trades contention noise for frequency error, and neither the row
-    nor the ledger could previously tell them apart. `perf stat` on one df_dot
+    br-frankenpandas-633fb. THIS HOST RUNS THE POWERSAVE GOVERNOR, so a quiet
+    window is also a DOWNCLOCKED window: waiting for low load trades contention
+    noise for frequency error, and neither the row nor the ledger could
+    previously tell them apart. Read from this host's own sysfs rather than
+    quoted: `scaling_min_freq` 1429 MHz, `scaling_max_freq` 4562 MHz,
+    `cpuinfo_min_freq` 412 MHz. (An earlier "1429-4292 MHz" figure circulating in
+    the fleet was retracted by its author; the floor matched, the ceiling did
+    not. Record the observed value per row and do not quote a range.) `perf stat` on one df_dot
     invocation already showed the same binary running its serial arm at 4.104 GHz
     and its 63-worker arm at 3.099 GHz — a 32% clock difference INSIDE one job,
     invisible in every row banked before today.
@@ -3162,15 +3166,26 @@ def summarize_host_state(samples: list[tuple[str, dict[str, Any]]]) -> dict[str,
             "min": round(min(loads), 2),
             "max": round(max(loads), 2),
         }
-    per_arm: dict[str, float] = {}
+    # ⚠ TWO DIFFERENT QUANTITIES, and conflating them cost me a wrong reading.
+    # The MEDIAN over every CPU in the affinity measures the BOX's clock state;
+    # for a 1-thread arm it is dominated by the 63 idle cores that have already
+    # downclocked, so it reports LOW for an arm whose own core is at full boost.
+    # Measured: a forced-serial FrankenPandas arm read 3246.1 MHz median against
+    # a 64-thread pandas arm's 3972.9 — the exact opposite of what the arms' own
+    # cores were doing. The MAX is the busy-core proxy and is what determines an
+    # arm's execution speed, so the same-window flag is computed from it.
+    busy: dict[str, float] = {}
+    host: dict[str, float] = {}
     for arm in ("frankenpandas", "pandas"):
-        values = [s["cpu_mhz"]["median"] for tag, s in samples if tag == arm and s.get("cpu_mhz")]
-        if values:
-            per_arm[arm] = round(float(np.median(values)), 1)
-    if per_arm:
-        summary["median_cpu_mhz_by_arm"] = per_arm
-    if len(per_arm) == 2:
-        low, high = sorted(per_arm.values())
+        rows = [s["cpu_mhz"] for tag, s in samples if tag == arm and s.get("cpu_mhz")]
+        if rows:
+            busy[arm] = round(float(np.median([r["max"] for r in rows])), 1)
+            host[arm] = round(float(np.median([r["median"] for r in rows])), 1)
+    if busy:
+        summary["busy_core_mhz_by_arm"] = busy
+        summary["host_median_mhz_after_arm"] = host
+    if len(busy) == 2:
+        low, high = sorted(busy.values())
         summary["arms_saw_same_clock"] = bool(high <= low * 1.05)
         summary["arm_clock_ratio"] = round(high / low, 4) if low else None
     every = [s["cpu_mhz"]["median"] for _, s in samples if s.get("cpu_mhz")]
@@ -3205,9 +3220,6 @@ def run_balanced_square_cell(
         pandas_round: list[TimingResult] = []
         fp_round: list[TimingResult] = []
         for slot_index, arm in enumerate(BALANCED_SQUARE):
-            host_state_samples.append(
-                ("pandas" if arm == "A" else "frankenpandas", host_state_snapshot())
-            )
             if arm == "A":
                 result, _ = run_pandas_workload(
                     category,
@@ -3231,6 +3243,15 @@ def run_balanced_square_cell(
                 )
                 fp_slots.append(result)
                 fp_round.append(result)
+            # AFTER the slot, tagged with the arm that just ran. Sampling BEFORE
+            # it (as this did until br-frankenpandas-633fb's own audit) reads the
+            # clock state left by the PREVIOUS slot, which in ABBAABBA is usually
+            # the OTHER arm — so every per-arm median was attributed to its
+            # neighbour. Still outside every timed region: the timing happens
+            # inside the engine subprocess.
+            host_state_samples.append(
+                ("pandas" if arm == "A" else "frankenpandas", host_state_snapshot())
+            )
         if any(not result.is_valid for result in (*pandas_round, *fp_round)):
             # Match the legacy harness's behavior for a missing/invalid FP
             # executable: emit an INCOMPLETE row rather than treating an
@@ -3466,8 +3487,25 @@ def _host_state_self_test() -> None:
         raise RuntimeError("a 32% inter-arm clock split must not read as one window")
     if round(skewed["arm_clock_ratio"], 3) != 1.324:
         raise RuntimeError(f"clock ratio mis-computed: {skewed['arm_clock_ratio']}")
-    if skewed["median_cpu_mhz_by_arm"] != {"frankenpandas": 3099.0, "pandas": 4104.0}:
-        raise RuntimeError("per-arm medians must be reported separately")
+    if skewed["busy_core_mhz_by_arm"] != {"frankenpandas": 3099.0, "pandas": 4104.0}:
+        raise RuntimeError("per-arm busy-core clocks must be reported separately")
+
+    # NEGATIVE CASE: the flag must follow the BUSY CORE, not the box median. A
+    # 1-thread arm at full boost sits beside idle, downclocked neighbours; if the
+    # summary keyed on the median it would call this pair mismatched when their
+    # busy cores agree, which is the reading that misled me on a live row.
+    idle_skew = summarize_host_state([
+        ("frankenpandas", {"loadavg": [1.0, 1, 1],
+                           "cpu_mhz": {"min": 1429.0, "median": 1500.0, "max": 4000.0,
+                                       "cpus_sampled": 64}}),
+        ("pandas", {"loadavg": [1.0, 1, 1],
+                    "cpu_mhz": {"min": 3800.0, "median": 3950.0, "max": 4000.0,
+                                "cpus_sampled": 64}}),
+    ])
+    if not idle_skew["arms_saw_same_clock"]:
+        raise RuntimeError("equal busy-core clocks must read as one window")
+    if idle_skew["host_median_mhz_after_arm"] != {"frankenpandas": 1500.0, "pandas": 3950.0}:
+        raise RuntimeError("the box-median must still be recorded, separately labelled")
 
     # Arms inside 5% are one window.
     tight = summarize_host_state(
