@@ -23175,3 +23175,57 @@ explanation: `release-perf` (thin LTO, codegen-units=1, unstripped, 78415608
 bytes) and plain `release` (24885488 bytes) land within 4% of each other on both
 arms. `release-perf` is the sanctioned measurement profile and should be the one
 quoted; the difference is not what anyone was arguing about.
+
+---
+
+## 2026-08-16 cod-pandas — REFUTED: shrinking the size does NOT rescue a df_dot row; both nulls fail harder at 100k (br-frankenpandas-1hjgz)
+
+The 25-round retraction above closed with three suggested routes to a decidable
+`df_dot` row: (a) a quiet host, (b) short runs repeated across separated times,
+(c) a smaller size whose per-round wall time is too short for drift to accumulate
+inside a round. Route (c) is the cheapest, so it was tried first, on the
+already-built sanctioned-profile ELF, with the environment explicitly cleaned
+(`env -u FP_DOT_SERIAL -u FP_DOT_MAX_WORKERS`, per the leaked-toggle rule):
+
+```
+workload         linalg / df_dot @ 100k / float64   (was 1M)
+verdict          NULL_UNDECIDABLE
+point ratio      5.982x   CI95 [5.05015, 7.22598]   (FP faster at this size)
+FP     p50       1907.23us    cv 58.86%   threads 8
+pandas p50      13651.57us    cv 50.19%   threads 64
+A/A null FP      0.973078  CI [0.372434, 1.031064]   *** FAIL *** (2.7% off unity)
+A/A null pandas  1.025121  CI [0.850813, 1.379399]   *** FAIL *** (2.5% off unity)
+gate clauses     effect_ci_excludes_unity        = true
+                 effect_exceeds_two_x_null_margin = FALSE
+                 null_medians_within_2pct_unity   = FALSE
+ELF              86355328fe14f5e5e527ab60d330a2aa2590d2b9e48edb0c0a5a453675513585
+host             thinkstation1, 32C/64T, powersave, load average 53.59 (1min) on 64 logical
+```
+
+**ROUTE (c) IS REFUTED, AND IT FAILED WORSE THAN THE THING IT WAS MEANT TO FIX.**
+At 1M only the pandas null failed (0.9531). At 100k BOTH nulls fail, and FP's own
+null — clean at every previous size (1.0019, 0.9979, 1.0018) — degrades to 0.9731
+with a CI floor of 0.3724. Shrinking the workload shortens the round, but it
+shrinks the SIGNAL faster than it shrinks the NOISE: FP's arm is now 1.9ms, so a
+single scheduler preemption on a box at load 53.6 is a large fraction of a whole
+measurement. Both cv values roughly doubled (58.9% / 50.2% against 4.18% / 30.3%
+at 1M).
+
+The generalisable form, and the reason this is banked rather than retried: **on a
+contended host, per-round duration is not the free parameter — the ratio of round
+duration to interference duration is.** Making rounds shorter moves that ratio the
+WRONG way once a round is comparable to a scheduling quantum. Route (c) can only
+work on an already-quiet host, where it is also unnecessary. That leaves (a) and
+(b), both of which require the fleet to be doing something other than building.
+
+**Do not read 5.98x as a win.** Every clause but one failed; the number is
+recorded only so the next agent does not re-run this cell expecting it to be
+free. The directional observation — FP ahead of pandas on a 100k dot, behind on a
+1M dot — is consistent with the 1M rows and is worth a hypothesis (the crossover
+is where pandas' 64-thread BLAS starts to pay for its thread startup), but it is
+a hypothesis, not a measurement, until a null passes.
+
+**Method note for whoever holds the next quiet window:** the FP arm at 100k is
+~1.9ms, so the whole 9-round balanced square is seconds. That is exactly the
+shape route (b) wants — cheap enough to repeat many times across separated
+windows. The cell is not useless; it is unusable WHILE THE HOST IS LOADED.
