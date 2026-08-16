@@ -422,6 +422,41 @@ impl SparseDType {
             fill_value,
         })
     }
+
+    /// Render the pandas dtype name, `Sparse[<subtype>, <fill>]`.
+    ///
+    /// br-frankenpandas-3gxc6. [`DType::name`] can only answer `"Sparse"`: it
+    /// is a `const fn` returning `&'static str` and `DType::Sparse` carries no
+    /// payload, so the subtype and fill value — which live here — are lost by
+    /// the time a caller has a bare [`DType`]. pandas never spells the bare
+    /// form; even `pd.Series([1.5, 0.0]).astype("Sparse")` resolves to
+    /// `Sparse[float64, nan]`.
+    ///
+    /// MEASURED, live pandas 2.2.3, `str(dtype)` / `dtype.name`:
+    ///
+    /// ```text
+    ///   SparseDtype("int64",   0)     -> Sparse[int64, 0]
+    ///   SparseDtype("int64",   7)     -> Sparse[int64, 7]
+    ///   SparseDtype("float64", nan)   -> Sparse[float64, nan]
+    ///   SparseDtype("float64", 0.0)   -> Sparse[float64, 0.0]
+    ///   SparseDtype("bool",    False) -> Sparse[bool, False]
+    ///   SparseDtype(object,    nan)   -> Sparse[object, nan]
+    /// ```
+    ///
+    /// The fill is rendered by [`scalar_to_string_for_astype`], which already
+    /// spells every one of those cases the way pandas does in this position:
+    /// `True`/`False` capitalised, integers bare, lowercase `nan`, and the
+    /// trailing `.0` preserved on whole floats. Deliberately reusing it rather
+    /// than writing a second float formatter — a divergence between the two
+    /// would surface as a dtype name that no longer round-trips.
+    #[must_use]
+    pub fn pandas_name(&self) -> String {
+        format!(
+            "Sparse[{}, {}]",
+            self.value_dtype.name(),
+            scalar_to_string_for_astype(self.fill_value.clone())
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -15674,5 +15709,100 @@ mod float64_nullable_qkqfb {
 
         assert_eq!(left, right, "promotion order must not change the result");
         assert_eq!(left, DType::Float64Nullable);
+    }
+}
+
+/// br-frankenpandas-3gxc6: the Sparse dtype NAME is parameterized in pandas.
+///
+/// Every expectation below was read off live pandas 2.2.3 before the code was
+/// written, via `str(dtype)` / `dtype.name` on a `pd.SparseDtype`.
+#[cfg(test)]
+mod sparse_dtype_pandas_name_3gxc6 {
+    use super::{DType, Scalar, SparseDType};
+
+    fn name(value_dtype: DType, fill: Scalar) -> String {
+        SparseDType::new(value_dtype, fill)
+            .expect("sparse descriptor")
+            .pandas_name()
+    }
+
+    /// The row the corpus fixture `fp_p2d_017_series_dtype_sparse_strict`
+    /// exercises. FrankenPandas used to answer the bare `"Sparse"`.
+    #[test]
+    fn int64_fill_zero_is_the_fixture_row() {
+        assert_eq!(name(DType::Int64, Scalar::Int64(0)), "Sparse[int64, 0]");
+    }
+
+    /// A non-default fill must appear, or the name would be a constant wearing
+    /// a parameterized shape.
+    #[test]
+    fn the_fill_value_is_actually_rendered() {
+        assert_eq!(name(DType::Int64, Scalar::Int64(7)), "Sparse[int64, 7]");
+        assert_ne!(
+            name(DType::Int64, Scalar::Int64(0)),
+            name(DType::Int64, Scalar::Int64(7)),
+            "two different fills must not collapse to one name"
+        );
+    }
+
+    /// pandas spells this `nan`, lowercase, not `NaN` and not `None`.
+    #[test]
+    fn float64_nan_fill_is_lowercase_nan() {
+        assert_eq!(
+            name(DType::Float64, Scalar::Float64(f64::NAN)),
+            "Sparse[float64, nan]"
+        );
+    }
+
+    /// pandas keeps the trailing `.0` here. A `{}`-style float format would
+    /// render `0` and silently make this name collide with the int64 one.
+    #[test]
+    fn float64_zero_fill_keeps_its_trailing_point_zero() {
+        assert_eq!(
+            name(DType::Float64, Scalar::Float64(0.0)),
+            "Sparse[float64, 0.0]"
+        );
+        assert_ne!(
+            name(DType::Float64, Scalar::Float64(0.0)),
+            name(DType::Int64, Scalar::Int64(0)),
+            "float64 and int64 zero fills are different dtypes"
+        );
+    }
+
+    /// Python capitalisation, not Rust's `false`.
+    #[test]
+    fn bool_fill_uses_python_capitalisation() {
+        assert_eq!(name(DType::Bool, Scalar::Bool(false)), "Sparse[bool, False]");
+        assert_eq!(name(DType::Bool, Scalar::Bool(true)), "Sparse[bool, True]");
+    }
+
+    /// FP spells its object dtype `object`, which is what pandas prints for a
+    /// `SparseDtype(object, nan)`.
+    #[test]
+    fn utf8_subtype_renders_as_object() {
+        let rendered = name(DType::Utf8, Scalar::Null(crate::NullKind::NaN));
+        assert!(
+            rendered.starts_with("Sparse[object, "),
+            "expected an object subtype, got {rendered}"
+        );
+    }
+
+    /// The bare name is what this bead removed; guard against a regression
+    /// that reintroduces it for any constructible descriptor.
+    #[test]
+    fn no_constructible_descriptor_renders_the_bare_name() {
+        for (dtype, fill) in [
+            (DType::Int64, Scalar::Int64(0)),
+            (DType::Float64, Scalar::Float64(1.5)),
+            (DType::Bool, Scalar::Bool(true)),
+            (DType::Utf8, Scalar::Utf8("x".to_owned())),
+        ] {
+            let rendered = name(dtype, fill);
+            assert_ne!(rendered, "Sparse", "bare name regressed for {dtype:?}");
+            assert!(
+                rendered.starts_with("Sparse[") && rendered.ends_with(']'),
+                "malformed sparse name {rendered}"
+            );
+        }
     }
 }

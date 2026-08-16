@@ -6907,6 +6907,27 @@ impl Series {
         }
     }
 
+    /// Return the pandas dtype NAME of this Series.
+    ///
+    /// br-frankenpandas-3gxc6. This is not `self.dtype().name()`: for a sparse
+    /// Series pandas reports the parameterized `Sparse[int64, 0]`, and
+    /// [`DType::name`] can only answer the bare `"Sparse"` because
+    /// `DType::Sparse` carries no payload. The subtype and fill live in the
+    /// `SparseDType` descriptor this Series is holding, so this is the only
+    /// level that can spell the full name.
+    ///
+    /// Every non-sparse dtype is unchanged and delegates to [`DType::name`].
+    /// Categorical stays `"category"`: pandas parameterizes `CategoricalDtype`
+    /// in its *repr* but `.dtype.name` is plain `"category"`, so there is
+    /// nothing to widen there.
+    #[must_use]
+    pub fn dtype_name(&self) -> String {
+        if let Some(sparse) = self.sparse.as_ref() {
+            return sparse.pandas_name();
+        }
+        self.dtype().name().to_owned()
+    }
+
     /// Plural pandas alias for [`Self::dtype`].
     ///
     /// Matches `pd.Series.dtypes`.
@@ -12739,12 +12760,56 @@ impl Series {
         // br-frankenpandas-s0rt1 established that pandas treats a NaN bound as
         // "no clipping", so it never needs storing and never raises.
         // (br-frankenpandas-3ugrk)
+        //
+        // ⚠ THE TEST IS "DOES THE BOUND GET WRITTEN", NOT "IS THE BOUND AN
+        // INTEGER" (br-frankenpandas-8x4r2). The first version of this guard
+        // refused every non-integral bound outright and refused ±inf as a side
+        // effect of `is_integer_bound` requiring `is_finite()`. Both over-reject.
+        // pandas only raises when the bound is actually STORED into the result,
+        // i.e. when it clips at least one present element. MEASURED, live
+        // pandas 2.2.3, `Series(..., dtype='Int64')`:
+        //
+        //   [1,2,3].clip(upper=2.5)  -> raises   (3 is replaced BY 2.5)
+        //   [1,2]  .clip(upper=2.5)  -> Int64    (nothing exceeds 2.5)
+        //   [1,2,3].clip(lower=1.5)  -> raises   (1 is replaced BY 1.5)
+        //   [1,2,3].clip(lower=0.5)  -> Int64    (nothing is below 0.5)
+        //   [1,2,3].clip(lower=-inf) -> Int64    (never bites)
+        //   [1,2,3].clip(upper=-inf) -> raises   (always bites)
+        //   [1,2,3].clip(upper=+inf) -> Int64    (never bites)
+        //   [1,2,3].clip(lower=+inf) -> raises   (always bites)
+        //
+        // The identical bound 2.5 both raises and does not, decided purely by
+        // the DATA — so no rule phrased over the bound alone can reproduce
+        // pandas, which is exactly the mistake the first version made.
+        // A bound that never fires cannot influence the RESULT DTYPE either,
+        // and that half is true on BOTH lanes — the same probe run against
+        // numpy `int64`:
+        //
+        //   int64 [1,2]  .clip(upper=2.5)  -> int64   [1, 2]        never bites
+        //   int64 [1,2,3].clip(upper=2.5)  -> float64 [1.0,2.0,2.5] bites
+        //   int64 [1,2,3].clip(lower=0.5)  -> int64   [1, 2, 3]     never bites
+        //   int64 [1,2]  .clip(upper=+inf) -> int64   [1, 2]        never bites
+        //
+        // So the lanes differ ONLY in what happens once a non-integral bound
+        // does fire: numpy widens to float64, the extension dtype raises. The
+        // previous `is_integer_bound(lower) && is_integer_bound(upper)` test
+        // demoted an Int64 lane to Float64 for a bound that clips nothing, which
+        // is a divergence on the numpy lane too and predates this bead.
+        let bites = |bound: f64, is_lower: bool| {
+            self.column.values().iter().any(|v| {
+                !v.is_missing()
+                    && v.to_f64()
+                        .is_ok_and(|x| if is_lower { x < bound } else { x > bound })
+            })
+        };
+        // `None` unless the bound is BOTH unstorable as an integer AND actually
+        // replaces a present element. That single predicate drives the raise and
+        // the dtype, so the two can never disagree about whether a bound fired.
+        let firing_lower = lower.filter(|b| !is_integer_bound(Some(*b)) && bites(*b, true));
+        let firing_upper = upper.filter(|b| !is_integer_bound(Some(*b)) && bites(*b, false));
+
         if self.column.dtype() == DType::Int64Nullable {
-            let offending = [lower, upper]
-                .into_iter()
-                .flatten()
-                .find(|b| !is_integer_bound(Some(*b)));
-            if let Some(bound) = offending {
+            if let Some(bound) = firing_lower.or(firing_upper) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "clip: Invalid value '{bound}' for dtype Int64"
                 )));
@@ -12752,8 +12817,8 @@ impl Series {
         }
 
         let preserve_int64 = matches!(self.column.dtype(), DType::Int64 | DType::Int64Nullable)
-            && is_integer_bound(lower)
-            && is_integer_bound(upper);
+            && firing_lower.is_none()
+            && firing_upper.is_none();
 
         let mut out = Vec::with_capacity(self.len());
         for val in self.column.values() {
@@ -193792,6 +193857,139 @@ mod clip_nullable_int64_77x9g {
         assert_eq!(s_out.dtype(), DType::Utf8);
         assert_eq!(s_out.values()[0], Scalar::Utf8("keep".to_owned()));
         assert_eq!(s_out.values()[1], Scalar::Utf8("me".to_owned()));
+    }
+
+    // ---- br-frankenpandas-8x4r2: the 3ugrk guard over-rejected -------------
+    //
+    // The guard as first shipped (428c45963) refused every non-integral bound
+    // and, via `is_integer_bound`'s `is_finite()` requirement, refused ±inf too.
+    // pandas raises only when the bound is actually STORED into the result.
+    // Every expectation below was read off live pandas 2.2.3.
+
+    /// THE DISCRIMINATING PAIR. The same 2.5 bound both raises and does not,
+    /// decided purely by whether any element is above it — so no rule phrased
+    /// over the bound alone can reproduce pandas.
+    #[test]
+    fn a_fractional_bound_that_never_bites_is_accepted_8x4r2() {
+        // [1,2] with upper=2.5: nothing exceeds 2.5, so 2.5 is never stored.
+        let out = nullable_int64_series(vec![Scalar::Int64(1), Scalar::Int64(2)])
+            .clip(None, Some(2.5))
+            .expect("pandas accepts a bound that never bites");
+        assert_eq!(out.column().dtype(), DType::Int64Nullable);
+        assert_eq!(out.values()[0], Scalar::Int64(1));
+        assert_eq!(out.values()[1], Scalar::Int64(2));
+
+        // [1,2,3] with the SAME bound: 3 is replaced BY 2.5, which Int64
+        // cannot hold, so pandas raises.
+        assert!(
+            nullable_int64_series(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3)
+            ])
+            .clip(None, Some(2.5))
+            .is_err(),
+            "a fractional bound that IS stored must still raise"
+        );
+    }
+
+    /// The lower-bound mirror of the pair above.
+    #[test]
+    fn a_fractional_lower_bound_only_raises_when_it_bites_8x4r2() {
+        let vals = || vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
+        // 0.5 is below every element -> never stored -> accepted.
+        let out = nullable_int64_series(vals())
+            .clip(Some(0.5), None)
+            .expect("lower bound below the minimum never bites");
+        assert_eq!(out.column().dtype(), DType::Int64Nullable);
+        // 1.5 replaces the 1 -> stored -> raises.
+        assert!(
+            nullable_int64_series(vals()).clip(Some(1.5), None).is_err(),
+            "a lower bound that replaces an element must raise"
+        );
+    }
+
+    /// ±inf was refused outright by the first version. pandas accepts it on
+    /// whichever side cannot bite, and raises on the side that always does.
+    #[test]
+    fn infinite_bounds_follow_the_same_bites_rule_8x4r2() {
+        let vals = || vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
+
+        // Never bite -> accepted. These two are the regression this bead fixes.
+        assert!(
+            nullable_int64_series(vals())
+                .clip(Some(f64::NEG_INFINITY), None)
+                .is_ok(),
+            "lower=-inf can never clip anything, so pandas accepts it"
+        );
+        assert!(
+            nullable_int64_series(vals())
+                .clip(None, Some(f64::INFINITY))
+                .is_ok(),
+            "upper=+inf can never clip anything, so pandas accepts it"
+        );
+
+        // Always bite -> raise.
+        assert!(
+            nullable_int64_series(vals())
+                .clip(None, Some(f64::NEG_INFINITY))
+                .is_err(),
+            "upper=-inf replaces every element with -inf"
+        );
+        assert!(
+            nullable_int64_series(vals())
+                .clip(Some(f64::INFINITY), None)
+                .is_err(),
+            "lower=+inf replaces every element with +inf"
+        );
+    }
+
+    /// THE NUMPY LANE HAD THE SAME BUG AND IT PREDATES 3ugrk. A bound that
+    /// clips nothing must not change the dtype there either. MEASURED:
+    /// `pd.Series([1,2]).clip(upper=2.5)` -> int64 [1, 2], while the biting
+    /// `pd.Series([1,2,3]).clip(upper=2.5)` -> float64 [1.0, 2.0, 2.5].
+    #[test]
+    fn a_non_biting_bound_does_not_demote_the_numpy_lane_8x4r2() {
+        let numpy = |vals: Vec<i64>| {
+            let n = vals.len();
+            Series::new(
+                "nums",
+                Index::new((0..n as i64).map(Into::into).collect()),
+                Column::new(DType::Int64, vals.into_iter().map(Scalar::Int64).collect())
+                    .expect("int64 column"),
+            )
+            .expect("series")
+        };
+
+        let kept = numpy(vec![1, 2]).clip(None, Some(2.5)).expect("clip");
+        assert_eq!(
+            kept.column().dtype(),
+            DType::Int64,
+            "a bound that clips nothing must not widen the lane"
+        );
+        assert_eq!(kept.values()[1], Scalar::Int64(2));
+
+        // The control: once it bites, numpy DOES widen. This is the behaviour
+        // `fractional_bound_still_promotes_on_numpy_int64_3ugrk` pins, and it
+        // must survive the change above.
+        let widened = numpy(vec![1, 2, 3]).clip(None, Some(2.5)).expect("clip");
+        assert_eq!(widened.column().dtype(), DType::Float64);
+        assert_eq!(widened.values()[2], Scalar::Float64(2.5));
+    }
+
+    /// A missing element is not a value the bound can be stored into, so it
+    /// must not be what triggers the raise.
+    #[test]
+    fn nulls_alone_do_not_make_a_bound_bite_8x4r2() {
+        let out = nullable_int64_series(vec![
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(2),
+        ])
+        .clip(None, Some(2.5))
+        .expect("only the present values decide whether the bound bites");
+        assert_eq!(out.column().dtype(), DType::Int64Nullable);
+        assert!(out.values()[1].is_missing(), "the null must survive");
     }
 }
 
