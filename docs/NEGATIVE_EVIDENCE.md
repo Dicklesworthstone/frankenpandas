@@ -24368,3 +24368,52 @@ refinement is wrong.
 this run, which the screen excludes.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run8_load45_elf_f5748e77.json`
+
+---
+
+## br-frankenpandas-h67zz — n=9 shows the cv screen is ONE-DIRECTIONAL: low cv implies reliable, high cv does NOT imply wrong. And load does not predict cv
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** ninth run, on a
+FOURTH ELF. Weakens a claim I made one entry ago; the useful half survives.
+
+Run 9: `math_unary/floor @1M`, balanced-square ABBAABBA, ONE invocation, load
+**8.58→10.15**, **ratio 0.125x**, FP p50 1659.99us cv **16.96%**, pandas p50
+215.47us cv **26.95%**, max-cv **26.95%**.
+**A/A null control (same invocation):** FP **0.993756** (passes), pandas
+**1.131353** (13.1% off unity, hard fail). REFUSED, no ratio claimed.
+ELF `c7b0830b134f4addfb0b5e61d7d20d15b05304a1e3d5fcf60dede49fd2443d4c`.
+
+**WHAT IT BREAKS.** The previous entry presented the max-cv gap as a *clean
+separation* — tight cluster below 14.5%, scatter above 32%. Run 9 sits at max-cv
+26.95%, ABOVE the gap, and its ratio **0.125x lands squarely inside the
+0.123–0.132 cluster**. So a high-cv run is not reliably *wrong*; this one is as
+close to the reproducible value as any of the four screened-in runs.
+
+**WHAT SURVIVES, and it is the half that matters.** The screen is
+**one-directional**, which is what a variance criterion should be:
+
+- **low max-cv ⇒ informative.** All five runs at max-cv ≤ 14.52% land in
+  0.123–0.132 (7% spread). No counterexample in nine runs.
+- **high max-cv ⇒ UNINFORMATIVE, not biased.** The five runs above the gap give
+  0.072x, 0.076x, 0.109x, 0.125x, 0.165x — they scatter *around* the cluster and
+  can land anywhere including on it. An individual high-cv run tells you nothing
+  either way; it is not evidence the ratio is worse.
+
+That is a weaker and more accurate claim than "clean separation", and I am
+correcting my own wording rather than leaving the stronger version on file. The
+practical rule is unchanged: **screen runs IN on low max-cv; do not screen runs
+OUT as evidence of a different value.**
+
+**SECOND FINDING: LOAD DOES NOT PREDICT CV.** Run 9 ran at load **8.58**, the
+second-lowest of the nine, and still produced a 26.95% pandas cv and a 13.1%
+null failure. Compare run 1 at load 6.41 (max-cv 11.44%, certified). Two runs at
+comparable, low load with very different dispersion. **So the load bracket I
+banked earlier (admissible between 48 and 77) is a poor proxy and cv is the
+direct measurement** — check `/proc/loadavg` to avoid obviously hopeless windows,
+but judge the run by its cv, not by the load it started at.
+
+**`floor @1M` remains ≈0.13x**, n=5 now under the screen (0.123, 0.125*, 0.126,
+0.130, 0.132) — *run 9 is listed for completeness but excluded by the screen; it
+happens to agree.*
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run9_load9_elf_c7b0830b.json`
