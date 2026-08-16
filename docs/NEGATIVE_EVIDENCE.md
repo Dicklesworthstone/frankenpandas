@@ -25016,3 +25016,62 @@ worker-sizing lever, whose self-speedup A/B never involved the incumbent arm.
 
 **Artifacts:** `artifacts/bench/jk9ht_df_dot_1M_thinkstation1_2026-08-16_quietest_run2.json`
 (run 1 is `…_quiet_run1.json`, banked above)
+
+---
+
+## br-frankenpandas-h67zz — the LOWEST-dispersion run of twelve fails its nulls by 5.3% and 7.8%: dispersion does not predict certification, conclusively
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** REFUSED. `uptime`
+read before launching per the standing rule: **load average 11.81**, below the 30
+defer threshold.
+
+```
+workload        math_unary/floor @1M, balanced-square ABBAABBA, ONE invocation
+fp-bench ELF    sha256 ad74e170f97b576a32d17be0832ac2b34f609bdb8c600abfad4dcb476737a673
+harness         sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3 · host thinkstation1, governor powersave, smt on
+LOADAVG         11.14 → 11.59   (1/5/15 start 11.14 26.68 26.36; end 11.59 26.27 26.23)
+```
+
+| arm | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | 1516.65us | **8.96%** | **0.946814** — 5.3% off, FAILS |
+| pandas | 178.19us | 11.37% | **1.077814** — 7.8% off, FAILS |
+
+Point ratio **0.122x**, max-cv **11.37%** — **the lowest max-cv of all twelve
+runs**, edging run 1's 11.44%. REFUSED.
+
+**THIS SETTLES A QUESTION I HAVE BEEN CIRCLING ALL SESSION.** The tightest run of
+the series, on a window that held flat, produced null failures of **5.3% and
+7.8%** against a ±2% band — substantially WORSE than run 11, which had slightly
+higher dispersion (10.65%) and missed by only 2.1% and 2.9%. Ordering the runs by
+dispersion does not order them by null quality even approximately:
+
+| max-cv rank | run | max-cv | worst null miss | certified? |
+|---|---|---|---|---|
+| 1 | 12 | **11.37%** | **7.8%** | no |
+| 2 | 1 | 11.44% | 0.4% | **YES** |
+| 3 | 11 | 10.65%* | 2.9% | no |
+| … | 2 | 34.08% | 0.8% | **YES** |
+
+*(run 11's FP cv 10.65% / pandas 9.50%; ranked by max-cv it is tightest, but the
+point stands either way.)*
+
+**Both certifications in this series came from runs whose null happened to be
+clean — one at max-cv 11.44%, the other at 34.08%.** Dispersion and null quality
+are independent, as the `ceil` inversion first showed; this row makes it
+unambiguous by putting the best dispersion and among the worst nulls in the same
+run. **A cv screen selects runs whose MEDIAN is meaningful. It says nothing about
+whether the gate will accept them, and I should stop treating a tight run as a
+likely certification.**
+
+**THE WINDOW HELD AGAIN** — 11.14 → 11.59, essentially flat. Second hold in six
+attempts (against four collapses), consistent with the corrected statement that
+windows close often but not always.
+
+**THE SCREENED CLUSTER IS NOW n=6** and tightening: **0.120x, 0.122x, 0.123x,
+0.126x, 0.130x, 0.132x** at max-cv 10.65–14.52%. `floor @1M` is best stated as
+**≈0.125x (n=6)**, refining the ≈0.126x from n=5. Six independent samples across
+three ELFs and loads 6→31 now agree within 10%.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run12_load11_elf_ad74e170.json`
