@@ -24785,3 +24785,58 @@ predicts for a high-cv sample. `floor @1M` ≈0.13x is unchanged and remains the
 only math_unary cell with any certified row.
 
 **Artifacts:** `artifacts/bench/ceil_1M_thinkstation1_2026-08-16_quietwindow_load22_elf_4a89472f.json`
+
+---
+
+## br-frankenpandas-h67zz — the BEST-dispersion run of eleven still fails to certify, by 2.1% against a 2% band; and a quiet window CAN hold (correcting my last entry)
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** REFUSED, but on
+the tightest measurement of the whole series. `uptime` read before launching, per
+the standing rule: load 13.56, below the 30 defer threshold, so certification was
+attempted.
+
+```
+workload        math_unary/floor @1M, balanced-square ABBAABBA, ONE invocation
+fp-bench ELF    sha256 4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228
+harness         sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3 · host thinkstation1, governor powersave, smt on
+LOADAVG         12.77 → 12.11   (1/5/15 at start 12.77 20.49 26.00; at end 12.11 20.10 25.81)
+```
+
+| arm | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | 1564.54us | **10.65%** | **1.021120** — 2.1% off, FAILS |
+| pandas | 181.99us | **9.50%** | **1.028585** — 2.9% off, FAILS |
+
+Point ratio **0.120x**. REFUSED; no ratio claimed.
+
+**THIS IS THE TIGHTEST RUN OF ELEVEN AND IT STILL DID NOT CERTIFY.** max-cv
+**10.65%** beats run 1's 11.44%, which is the only certified run in the series.
+Both arms sat under 11% dispersion, the load was stable to within 0.7 across the
+whole invocation, and both nulls still missed — by **2.1%** and **2.9%** against
+a **±2%** band. Nothing about this run was noisy; it was refused by margins of
+one and nine tenths of a percentage point.
+
+**So certification of this cell is not a matter of finding better conditions.**
+These were the best conditions obtained in eleven attempts and the answer was
+still no. One success in eleven, and the successful one (run 1) was not the
+tightest. **A failure to certify here is a property of the gate's interaction
+with a `thread::scope` parallel arm, not a statement about the code** — which is
+the standing instruction's point, now with the strongest supporting case.
+
+**⚠️ CORRECTING MY LAST ENTRY: A QUIET WINDOW CAN HOLD.** I wrote that "on this
+fleet a spotted quiet moment is already gone", on three consecutive closures
+(16.8→28.7, 13→36.1, and one earlier). **This run's window held**: 12.77 → 12.11,
+essentially flat for the duration. So the correct statement is that windows
+close *often and fast*, not always — three closures were enough for me to state
+it as a rule and four samples were not enough to support that. The operational
+advice is unchanged (launch immediately on a low reading, record start and end),
+but the claim was overstated.
+
+**THE SCREENED CLUSTER IS NOW n=5** and this run extends it slightly downward:
+**0.120x, 0.123x, 0.126x, 0.130x, 0.132x** at max-cv 10.65%, 14.52%, 11.95%,
+12.17%, 11.44% — a 10% spread. `floor @1M` is best stated as **≈0.126x
+(n=5, max-cv ≤ 14.5%)**, which supersedes the ≈0.13x I have been quoting from
+n=4.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run11_load13_elf_4a89472f.json`
