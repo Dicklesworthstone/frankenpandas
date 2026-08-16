@@ -26501,3 +26501,43 @@ the next consumer that wants a slice pay `materialize_float64_chunks`, the
 ~5.7ms/1M concat its own doc comment records. `floor` would win its benchmark by
 moving the cost into whatever runs next. Reverted; the serial arm stands, with the
 numbers written into its doc comment so this is not re-attempted.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-03fp5) — hoisting the per-column column-store lookup out of `df.dot`: NO measurable gain — REJECT, and the remaining 1.8-2.0us/column is elsewhere
+
+The committed phase-split probe put 61% of a `dim = 100` `df.dot` in
+per-output-column construction at ~1.9us each, and a profile of that probe named
+`memcmp` (BTreeMap String keys, 1.85%) among its costs. `other.columns[name]`
+resolves `LazyDataFrameColumns::materialized()` and then does a
+`BTreeMap::get` with a String key, ONCE PER OUTPUT COLUMN, so hoisting the store
+and iterating it directly removes n lookups per call.
+
+Implemented with a guard (map order is only interchangeable with `column_order`
+when the two describe the same set, else fall back to the ordered path) and
+measured with the same probe, `uptime` 20.60 1-min / 22.21 5-min:
+
+| | per-output-column fixed | dim=100 call | share |
+|---|---:|---:|---:|
+| before | 1.87us / 2.02us | 0.3244 / 0.3230 ms | 61-67% |
+| after (lookups removed) | **1.78us / 2.04us** | 0.3158 / 0.3221 ms | 60-67% |
+
+**Two runs each, and the after-numbers straddle the before-numbers.** Removing n
+BTreeMap lookups and n `materialized()` calls per invocation changed nothing
+measurable, so the `memcmp` the profile named is real but small — it is not what
+the 1.9us is made of.
+
+**Counted mechanism:** the lookup count per call drops from n to 0 (100 to 0 at
+this shape) and the observable output is unchanged — same columns, same order,
+3311/0 in fp-frame. The cost did not move, so the remaining per-column work is
+the allocations: one `Vec<f64>` output buffer, one `String` clone, the lazy
+`Column` construction with its two `OnceLock`s, and the Arc refcount traffic.
+`_int_malloc` at 1.62% of the probe profile is the surviving suspect.
+
+**Decision: REJECT**; reverted, patch parked at
+`/data/projects/.scratch/03fp5_dot_store_hoist_REJECTED.patch`. This is the sixth
+rejected lever on `df.dot`, but unlike the first five it leaves a NARROWER target
+rather than a dead end: the phase is measured (per-column construction, 61%), the
+lookup is now excluded from it by measurement, and the named next candidate is
+structural — a block-born result that allocates ONE `n x m` buffer and lets each
+output column view a slice, instead of n independent allocations and n lazy
+columns. The `Float64Block` machinery for that already exists behind the
+`block-storage` feature.
