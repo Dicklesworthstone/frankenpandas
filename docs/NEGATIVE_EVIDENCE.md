@@ -23049,3 +23049,69 @@ each time, or (c) a smaller size whose per-round wall time is short enough that
 drift cannot accumulate inside a round. Re-running it longer made the row WORSE,
 not better, which is the opposite of the usual intuition and is the reason this
 entry exists.
+
+---
+
+## br-frankenpandas-1hjgz — `df_dot` re-measured on a LOCALLY BUILT, hash-verified ELF: 0.138x, and the committed 0.475x DOES NOT REPRODUCE here
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** MEASURED,
+NULL_UNDECIDABLE vs pandas. Reporting a discrepancy I cannot resolve from one
+run, not overturning anything.
+
+**Why this row exists:** every earlier `df_dot` row was taken on an rch remote
+build, and rch does not return the linked binary, so those rows named an ELF
+nobody had hashed. This one was built LOCALLY with `RCH_CARGO_WRAPPER_BYPASS=1`,
+the executable path read out of `--message-format=json` rather than guessed, and
+hashed before use. No `[RCH]` line in the build log.
+
+```
+host            thinkstation1  AMD Ryzen Threadripper PRO 5975WX 32C/64T
+                governor powersave, smt_active=1, load 19.59 / 17.59 / 13.40
+git_sha         c23e94f5f28e069b3a93e115ccb8ab2194639300
+fp-bench ELF    sha256 86355328fe14f5e5e527ab60d330a2aa2590d2b9e48edb0c0a5a453675513585
+                78415608 bytes, target/release-perf/fp-bench, profile release-perf
+                built locally, RCH_CARGO_WRAPPER_BYPASS=1, 3m32s
+harness         benches/vs_pandas_harness.py
+                sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3 on numpy/scipy-openblas 0.3.31.dev
+design          balanced-square, 1M rows, ONE invocation
+FP_DOT_SERIAL   UNSET — this is the PARALLEL arm
+```
+
+| workload @1M | ratio | verdict | FP p50 / cv | pandas p50 / cv | FP thr | pd thr |
+|---|---|---|---|---|---|---|
+| `linalg/df_dot` | 0.138x | **NULL_UNDECIDABLE** | 201954.47us / 8.28% | 28544.80us / 62.91% | 1 | 64 |
+
+**A/A null control (same invocation):** FP median ratio **1.001786**, comfortably
+inside ±2%; pandas median ratio **1.076502**, OUTSIDE the band. The gate refuses
+the row on the pandas arm, so **no certified ratio is claimed**. pandas' cv of
+62.91% on a box at load ~19 is the proximate cause.
+
+**⚠️ THE PART THAT MATTERS, and it is an FP-side observation the failed gate does
+NOT invalidate.** FP's own arm is clean — null 1.0018, cv 8.28% — and its p50 is
+**201954us against the 208692us measured before the column-parallel lever
+landed**. That is ~3% apart, i.e. unmoved. The commit at this exact HEAD
+(`c23e94f5f`, "column-parallel df.dot materialization — MEASURED 0.136x ->
+0.475x") claims a ~3.5x improvement. On a locally built, hash-verified ELF of
+that same commit, with `FP_DOT_SERIAL` unset so the parallel path is live, I do
+not see it.
+
+**I am NOT calling that claim wrong.** One NULL_UNDECIDABLE run on a contended
+host is not evidence against a result, my `df_dot` fixture may differ from
+whatever the 0.475x row used, and the lever is verifiably present in the source I
+compiled (`materialize_dot_columns_parallel`, 6 references in fp-columnar, 1 in
+fp-frame). What I have is a reproducible FP-side timing that does not show the
+improvement, and that is worth banking before anyone builds on the 0.475x number.
+
+**WHAT WOULD SETTLE IT, and it is this bead's own method note:** the interleaved
+`FP_DOT_SERIAL=1` vs unset A/B in ONE process on ONE ELF. That controls for host,
+thermal state and binary simultaneously, which two separate vs-pandas invocations
+on a load-19 box cannot. Whoever takes it should run that before either
+defending or retracting the 0.475x row.
+
+**Also worth noting:** `thread_count_actually_used` reads 1 for FP here, but per
+the h67zz entry above that field cannot see `thread::scope` workers that join
+inside the call, so it is not evidence either way about whether the parallel path
+executed. The p50 is the evidence.
+
+**Artifacts:** `artifacts/bench/dot_abba_1M_thinkstation1_2026-08-16_local_elf.json`
