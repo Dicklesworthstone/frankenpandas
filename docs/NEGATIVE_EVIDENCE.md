@@ -24078,3 +24078,179 @@ run 1 value, for the reason banked above: it is the only run whose dispersion
 3 and 4 span 0.072x to 0.165x and are evidence about the host.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run4_load80_elf_4a89472f.json`
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oarkz) — df.dot output-column fusion buys nothing: the A panel is already L3-resident — REJECT
+
+Lever: `materialize_float64_dot` computes ONE output column per call and streams
+the WHOLE A panel to do it (`k · len · 8` = 8 MB at `dim = 1000`), so `n = 1000`
+output columns re-read A 1000 times — 8 GB of loads for a 2 GFLOP job. Fusing G
+columns into one row-blocked (512-row) pass over A divides that by G. Hypothesis:
+`df.dot @1M` is bandwidth bound.
+
+Measured from ONE ELF with `FP_DOT_FUSE_WIDTH` varied in process, fp-bench
+`linalg/df_dot @1M`, p50 of 50 samples per invocation:
+
+| arm | width 1 | width 2 | width 4 | width 8 | direction |
+|---|---:|---:|---:|---:|---|
+| 8 workers | 33.5 ms | 35.2 ms | 33.8 ms | 34.2 ms | flat |
+| serial | 183.1 ms | — | 192.3 ms | 197.6 ms | **monotonically WORSE** |
+| 64 workers | 20.2 ms | 20.8 ms | 19.8 ms | 19.5 ms | flat |
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=1858bb91cf9fd2d376319cc27dee803d449bb3b55d5815e8a14912d524a2c2c2 (78732920 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench
+
+**Counted mechanism:** multiply-adds are UNCHANGED at `n · k · len` = 1e9 and
+heap allocations are UNCHANGED at `n` = 1000 output `Vec<f64>` — fusion moves no
+arithmetic and allocates nothing new, it only reorders the loop nest to remove
+`(G-1)/G` of the A-panel loads. Removing 6 GB of loads at G = 4 changed the
+parallel p50 by 0.9x-1.0x and made the serial arm 1.05x SLOWER, monotonically in
+G across 3 settings. The removed loads were therefore already L3 hits: an 8 MB A
+panel fits this host's L3, so the kernel is FMA-throughput bound and the extra
+row-block loop entries (`k · len/512` instead of `k`) cost more than the traffic
+saved.
+
+**Decision: REJECT** the fused multi-column dot kernel; reverted from the tree,
+patch parked at `/data/projects/.scratch/oarkz_dot_column_fusion_REJECTED.patch`.
+Do not re-queue cache-blocking or panel-fusion on `df.dot` at these shapes.
+**Evidence limit, stated rather than hidden:** these are in-process p50 A/B arms,
+NOT A/A-nulled rows; the load-bearing evidence is the monotone serial regression
+across three widths, not the flat parallel arms. Retry predicate: only if a shape
+appears where the A panel exceeds L3 (`k · len · 8 > L3`), which `dim = 1000`
+does not.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oarkz) — df.dot worker count now follows the WORK, not a flat cap — KEEP
+
+The 8-worker default was inherited unmeasured from br-frankenpandas-1hjgz, whose
+own doc comment asked for this A/B. It is the wrong SHAPE, not the wrong number:
+one worker count cannot serve `dim = 100` and `dim = 1000`, which differ by 1000x
+in work. Curve from ONE ELF with `FP_DOT_MAX_WORKERS` varied in process (p50 ms,
+fp-bench `linalg/df_dot`, work term disabled so the cap binds):
+
+| workers | 1 | 2 | 4 | 8 | 16 | 32 | 48 | 64 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10k (dim 100) | **0.354** | 0.473 | 0.415 | 0.440 | 0.572 | | | 1.470 |
+| 100k (dim 316) | 5.311 | 3.951 | 2.612 | 1.822 | **1.493** | 1.636 | 1.941 | 2.307 |
+| 1M (dim 1000) | | | 60.6 | 35.2 | 23.7 | 21.1 | | **20.1** |
+
+The three optima (1, 16, 64) are `work / 2e6` multiply-adds per worker with
+`work = Σ k · len`: 1e6/2e6 → 1, 3.16e7/2e6 → 15, 1e9/2e6 → 500 clamped to the 64
+available. Shipped: cap defaults to `available_parallelism` and the worker count
+is `min(available, cap, pending, work/2e6)`; `FP_DOT_MAX_WORKERS` and
+`FP_DOT_WORK_PER_WORKER` keep both settable so the A/B stays runnable from one
+binary.
+
+**Campaign result class:** `maintenance-self-speedup`.
+
+Interleaved ABAB from one ELF, arm A = old default (cap 8, work term off), arm B
+= new default, p50 ms per invocation, paired round ratios A/B:
+
+| size | r1 | r2 | r3 | r4 | paired median | rounds favouring B |
+|---|---:|---:|---:|---:|---:|---:|
+| 10k | 1.323 | 1.723 | 1.504 | 1.791 | **1.61x** | 4 / 4 |
+| 100k | 0.925 | 1.039 | 1.210 | 0.912 | 0.98x | 2 / 4 |
+| 1M | 1.597 | 1.449 | 2.057 | 1.501 | **1.55x** | 4 / 4 |
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228 (78709880 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench
+
+**A/A null control (same invocation):** 3 harness invocations of this ELF at 1M,
+21 balanced-square rounds each; FrankenPandas A/A median ratio 0.9938 (the three
+were 0.9910, 0.9999, 0.9938), CI [0.974, 0.999] on the tightest of them — inside
+2% of unity, so the self-speedup above is not null drift.
+
+**Median-CI decision:** median paired effect 1.55x at 1M and 1.61x at 10k; the
+paired-round interval is [1.449, 2.057] at 1M and [1.323, 1.791] at 10k, both
+entirely above unity and clear of the required 2%-of-unity null floor. At 100k
+the paired interval [0.912, 1.210] contains unity, so NO effect is claimed there.
+
+**CV role:** provenance only; CV had no vote.
+
+**Host:** thinkstation1, Threadripper PRO 5975WX, 32C/64T, governor powersave,
+64 logical CPUs in affinity, fleet building throughout (loads in the tens).
+Tests: `dot_worker_count_sizes_to_the_work_not_the_column_count`,
+`pending_dot_work_counts_multiply_adds_not_columns`,
+`dot_batch_output_is_identical_at_every_work_per_worker`; fp-columnar 622/0.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oarkz) — the `df_dot @1M` crossing is NOT banked: four runs, four refusals on pandas' own A/A null — REJECT
+
+With the worker sizing above, `df_dot @1M` measured FASTER than the live
+incumbent in four independent same-invocation runs (balanced-square, 21 rounds,
+harness `6d884360…`, pandas 2.2.3, ELF `4a89472f…`, 63 observed FP threads vs 64):
+ratios **1.19x, 1.22x, 1.19x, 1.22x**, FP p50 19.4–24.6 ms against 23.8–30.3 ms.
+The last run also cleared two of the three gate clauses — effect CI
+[1.152, 1.275] excludes unity AND exceeds twice the null half-width.
+
+**A/A null control (same invocation):** FrankenPandas median ratios 0.9910,
+0.9999, 0.9938 — all inside 2% of unity; pandas median ratios 1.0594, 1.0527,
+0.9403 — all OUTSIDE it. Every run therefore failed the
+`null_medians_within_2pct_unity` clause and returned NULL_UNDECIDABLE.
+
+**Decision: REJECT** as a banked vs-incumbent row. No crossing is published for
+`df_dot @1M`; the number stays a diagnostic until the incumbent arm can hold its
+own A/A null. This is a HOST problem, not a code problem — the fleet was building
+throughout. Retry predicate (br-frankenpandas-jk9ht): re-run the identical ELF,
+harness and pandas artifact on a quiet box and bank only if BOTH A/A medians land
+within 2%. `df_dot @10k` remains a decidable **0.53x** loss even after the 1.61x
+self-speedup, and is now this op's worst ratio (br-frankenpandas-03fp5).
+
+**Artifacts:** `artifacts/bench/oarkz_dot_newdefault_1M_thinkstation1_2026-08-16_run1.json`,
+`artifacts/bench/bench_2026-08-16T17-52-29.516633+00-00.json` (1M),
+`artifacts/bench/bench_2026-08-16T17-56-55.405010+00-00.json` (10k),
+`artifacts/bench/bench_2026-08-16T17-57-05.878286+00-00.json` (100k).
+
+---
+
+## br-frankenpandas-h67zz — ⚠️ CV PREDICTS ACCURACY AND THE NULL-BASED GATE DOES NOT: 6 `floor @1M` runs, and the gate certified the worst one while refusing the three most reproducible
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** five runs of one
+workload. This challenges the ledger's standing `CV role: provenance only; CV had
+no vote` convention, with evidence rather than preference.
+
+All five: `math_unary/floor @1M`, balanced-square ABBAABBA, ONE invocation each,
+harness `6d884360…`, pandas 2.2.3, thinkstation1, FP 8 threads vs pandas 1.
+
+**Sorted by FP cv, not by verdict:**
+
+| run | ELF | load | FP cv | pandas cv | ratio | GATE | A/A FP / pandas |
+|---|---|---|---|---|---|---|---|
+| 1 | `1858bb91…` | 6.41 | **7.44%** | 11.44% | **0.132x** | CERTIFIED | 1.001168 / 1.003951 |
+| 6 | `4a89472f…` | 19.41 | **11.69%** | 12.17% | **0.130x** | refused | 1.038456 / 1.057402 |
+| 5 | `4a89472f…` | 30.84 | **14.34%** | 14.52% | **0.123x** | refused | 0.970818 / 1.020159 |
+| 2 | `4a89472f…` | 37.9→48.1 | 34.08% | 26.3% | 0.072x | **CERTIFIED** | 0.994966 / 1.008250 |
+| 4 | `4a89472f…` | 86.1→76.8 | 25.93% | 45.41% | 0.076x | refused | 1.071929 / 1.071788 |
+| 3 | `4a89472f…` | 88.4→90.1 | 34.52% | 78.5% | 0.165x | refused | 0.915327 / 0.981022 |
+
+**THE THREE LOW-CV RUNS AGREE WITH EACH OTHER TO 7%** — 0.132x, 0.130x, 0.123x at
+cv 7.44%, 11.69%, 14.34% — despite different ELFs, loads spanning 6 to 31, and
+only one of the three being certified. **The three high-cv runs scatter across
+2.3x** (0.072x → 0.165x) at cv 25.93%, 34.08%, 34.52%. cv sorts these six into
+"reproducible" and "noise" cleanly, with no overlap; nothing else does — not
+load, and not the gate's own verdict.
+
+**THE GATE'S VERDICT DOES NOT TRACK ACCURACY, AND THAT IS THE FINDING.** It
+CERTIFIED run 2 — cv 34%, and **1.8x away** from the reproducible value — and
+REFUSED run 5 — cv 14%, and **7% away**. A reader trusting the verdict would take
+0.072x as measured and discard 0.123x as unmeasured, which inverts their actual
+reliability. The three-clause gate is null-based, and an A/A null asks "was this
+engine self-consistent between its own arms", which a uniformly noisy run can
+satisfy while its median is still far off.
+
+**I am not proposing to weaken or replace the gate.** Its clauses do real work and
+the repo has banked reasons for each. The narrow, evidenced claim is that **cv
+carries information the gate discards, and treating it as provenance-only loses
+that information.** On this evidence a row with FP cv in the tens should not be
+quoted as a property of the code even when certified — which is exactly what run
+2 is, and it is currently sitting in this ledger as a certified 0.072x.
+
+**CONSEQUENCE I AM APPLYING TO MY OWN BANKED ROWS.** `floor @1M` = **0.132x**
+stands, now corroborated by an independent run at a different load on a different
+ELF (0.123x, 7% apart). Run 2's certified **0.072x should not be read as floor's
+ratio** despite its verdict; it is a high-dispersion sample. I banked it two
+entries ago quoting the gate, and the gate was not enough.
+
+**Suggested, NOT unilaterally adopted:** an admission clause of the shape "FP cv
+< 20% or the row is provenance-only" would have excluded runs 2, 3 and 4 and kept
+1, 5 and 6 — the three that agree to 7%. That is a change to a shared measurement contract
+and belongs to whoever owns the harness, not to one agent mid-campaign.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run5_load31_elf_4a89472f.json`

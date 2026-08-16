@@ -4163,6 +4163,50 @@ impl ScalarValues {
         matches!(self, Self::LazyAllValidFloat64Dot { data, .. } if data.get().is_none())
     }
 
+    /// The multiply-adds a pending dot column still owes: `k * len`.
+    ///
+    /// br-frankenpandas-oarkz. `pending.len()` alone cannot size a thread pool —
+    /// 100 columns of a `dim = 100` product is 1e6 multiply-adds total, less than
+    /// ONE column of a `dim = 1000` product. Sizing on the actual work is what
+    /// lets one rule serve both. `None` for anything that is not a pending dot
+    /// column, so an already-materialized column contributes nothing.
+    fn pending_dot_work(&self) -> Option<u128> {
+        match self {
+            Self::LazyAllValidFloat64Dot {
+                a_cols, len, data, ..
+            } if data.get().is_none() => Some(a_cols.len() as u128 * *len as u128),
+            _ => None,
+        }
+    }
+
+    /// How many threads a batch of `total_work` multiply-adds should use.
+    ///
+    /// br-frankenpandas-oarkz. Pure so it can be tested without spawning
+    /// anything, and because the interesting failures are all arithmetic:
+    /// a job smaller than one worker's share must come back as 1 (spawning 64
+    /// threads for `dim = 100` measured 1.470ms against 0.354ms serial — a 4.2x
+    /// self-inflicted loss), and a large job must not be held below the cap.
+    ///
+    /// `work_per_worker == 0` means "ignore the work term", leaving the historical
+    /// `min(available, cap, pending)` behaviour available to an A/B arm.
+    /// `cap == 0` means "uncapped" — the same alias the environment knob uses,
+    /// resolved HERE so the two cannot drift apart.
+    fn dot_worker_count(
+        total_work: u128,
+        work_per_worker: u128,
+        available: usize,
+        cap: usize,
+        pending: usize,
+    ) -> usize {
+        let cap = if cap == 0 { available } else { cap };
+        let ceiling = available.min(cap).min(pending).max(1);
+        if work_per_worker == 0 {
+            return ceiling;
+        }
+        let by_work = usize::try_from(total_work / work_per_worker).unwrap_or(usize::MAX);
+        ceiling.min(by_work.max(1))
+    }
+
     /// Force the pending dot columns in `values` in ONE scope, parallel ACROSS
     /// columns.
     ///
@@ -4238,6 +4282,50 @@ impl ScalarValues {
         serial: bool,
         max_workers: usize,
     ) {
+        Self::materialize_dot_columns_with_policy(
+            values,
+            serial,
+            max_workers,
+            Self::dot_materialization_work_per_worker(),
+        );
+    }
+
+    /// As [`Self::materialize_dot_columns_with_workers`], but with the
+    /// work-per-worker threshold passed IN as well.
+    ///
+    /// br-frankenpandas-oarkz. The flat cap was the wrong SHAPE, not the wrong
+    /// number: one worker count cannot serve `dim = 100` and `dim = 1000`, which
+    /// differ by 1000x in work. Measured curve, this host (thinkstation1, 64
+    /// logical, fp-bench `linalg/df_dot`, p50 of 50 samples, one ELF, worker count
+    /// varied only through `FP_DOT_MAX_WORKERS`):
+    ///
+    /// | workers |  1   |  2   |  4   |  8   |  16  |  32  |  48  |  64  |
+    /// |---------|------|------|------|------|------|------|------|------|
+    /// | 10k     | 0.354| 0.473| 0.415| 0.440| 0.572|      |      | 1.470|
+    /// | 100k    | 5.311| 3.951| 2.612| 1.822| 1.493| 1.636| 1.941| 2.307|
+    /// | 1M      |      |      |60.6  |35.2  |23.7  |21.1  |      |20.1  |
+    ///
+    /// (ms). The old flat 8 was the WORST reachable choice at 10k (1.24x slower
+    /// than serial) and left 1.75x on the table at 1M. The optima — 1, 16, 64 —
+    /// sit at almost exactly `work / 2e6` multiply-adds per worker, with
+    /// `work = sum over pending columns of k * len`: 1e6/2e6 -> 1, 3.16e7/2e6 ->
+    /// 16, 1e9/2e6 -> 500 clamped to the 64 available. So the threshold is one
+    /// constant fitted to three sizes rather than a per-size table.
+    ///
+    /// It is a parameter (and `FP_DOT_WORK_PER_WORKER`) for the same reason the
+    /// cap is: this repo has retracted threshold claims before, and the only
+    /// measurement that has held up is an interleaved in-process A/B, which a
+    /// compiled-in constant cannot serve.
+    ///
+    /// Still bit-identical at every setting: the worker count only changes how
+    /// the `pending` columns are grouped across threads, never the arithmetic
+    /// inside any one of them.
+    pub fn materialize_dot_columns_with_policy(
+        values: &[&Self],
+        serial: bool,
+        max_workers: usize,
+        work_per_worker: u128,
+    ) {
         let pending: Vec<&Self> = values
             .iter()
             .copied()
@@ -4253,12 +4341,14 @@ impl ScalarValues {
         }
 
         let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        let cap = if max_workers == 0 {
-            available
-        } else {
-            max_workers
-        };
-        let workers = available.min(cap).min(pending.len());
+        let total_work: u128 = pending.iter().filter_map(|v| v.pending_dot_work()).sum();
+        let workers = Self::dot_worker_count(
+            total_work,
+            work_per_worker,
+            available,
+            max_workers,
+            pending.len(),
+        );
         if workers <= 1 {
             for value in pending {
                 let _ = value.dot_float64_data();
@@ -4279,17 +4369,16 @@ impl ScalarValues {
     }
 
     /// Worker cap for the column-parallel dot materialization, from
-    /// `FP_DOT_MAX_WORKERS`; `0`/unset/unparseable means "keep the historical 8".
+    /// `FP_DOT_MAX_WORKERS`; `0`/unset/unparseable means `available_parallelism`.
     ///
-    /// br-frankenpandas-1hjgz. THE DEFAULT IS DELIBERATELY UNCHANGED AT 8. The 8
-    /// was never measured against an alternative — it predates the batch pass
-    /// ever running — and on a 32C/64T host it leaves `df.dot` at 8 threads while
-    /// the incumbent is observed using 64, so it is a prime suspect. But
-    /// "suspect" is not "measured": changing a default on an argument rather than
-    /// a number is the same move that put three mutually inconsistent `df_dot`
-    /// ratios in the ledger. This knob exists so the interleaved in-process A/B
-    /// can settle it; whichever value that A/B certifies becomes the default, in
-    /// a commit that cites the run.
+    /// br-frankenpandas-oarkz. THE HISTORICAL 8 IS GONE — the A/B its
+    /// br-frankenpandas-1hjgz doc comment asked for has now run (the measured
+    /// curve is tabulated on
+    /// [`Self::materialize_dot_columns_with_policy`]), and 8 lost at every size
+    /// on this host: 1.24x slower than serial at `dim = 100`, and 1.75x off the
+    /// best at `dim = 1000`. The ceiling is now the machine, and the actual
+    /// worker count comes from the WORK (`work / work_per_worker`), which is what
+    /// keeps the small sizes off the thread pool entirely.
     ///
     /// ⚠ AN EXPORTED TOGGLE IS INVISIBLE IN BENCH PROVENANCE. `6df71eae2` banked
     /// a fully provenanced `df_dot` row (host, ELF sha, ISA, governor, thread
@@ -4298,7 +4387,7 @@ impl ScalarValues {
     /// EXCEPT the environment that chose the code path. This second toggle has
     /// the same hazard, so it defaults to the value that needs no explanation,
     /// and any harness invocation not deliberately varying it should pass
-    /// `env -u FP_DOT_MAX_WORKERS -u FP_DOT_SERIAL`.
+    /// `env -u FP_DOT_MAX_WORKERS -u FP_DOT_WORK_PER_WORKER -u FP_DOT_SERIAL`.
     ///
     /// Read once and cached, for the same reason as the serial flag.
     fn dot_materialization_worker_cap() -> usize {
@@ -4307,7 +4396,28 @@ impl ScalarValues {
             std::env::var("FP_DOT_MAX_WORKERS")
                 .ok()
                 .and_then(|v| v.trim().parse::<usize>().ok())
-                .unwrap_or(8)
+                .unwrap_or(0)
+        })
+    }
+
+    /// Multiply-adds one worker must be given before it is worth spawning, from
+    /// `FP_DOT_WORK_PER_WORKER`; unset/unparseable means the measured 2e6, and
+    /// `0` disables the work term (the pre-oarkz "just use the cap" behaviour).
+    ///
+    /// br-frankenpandas-oarkz. See
+    /// [`Self::materialize_dot_columns_with_policy`] for the curve this constant
+    /// is fitted to. Same provenance hazard as the two knobs beside it: an
+    /// exported toggle is invisible in the bench JSON, so a harness invocation not
+    /// deliberately varying it should unset it.
+    ///
+    /// Read once and cached: this sits on the path of every `df.dot`.
+    fn dot_materialization_work_per_worker() -> u128 {
+        static WORK: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+        *WORK.get_or_init(|| {
+            std::env::var("FP_DOT_WORK_PER_WORKER")
+                .ok()
+                .and_then(|v| v.trim().parse::<u128>().ok())
+                .unwrap_or(2_000_000)
         })
     }
 
@@ -11043,6 +11153,31 @@ impl Column {
     ) {
         let values: Vec<&ScalarValues> = columns.iter().map(|column| &column.values).collect();
         ScalarValues::materialize_dot_columns_with_workers(&values, serial, max_workers);
+    }
+
+    /// As [`Self::materialize_dot_columns_with_workers`], but with the
+    /// work-per-worker threshold passed IN. See
+    /// [`ScalarValues::materialize_dot_columns_with_policy`].
+    ///
+    /// br-frankenpandas-oarkz. A test fixture is thousands of times smaller than
+    /// a benchmark frame, so under the shipped threshold every fixture would size
+    /// itself down to one worker — and every "parallel arm" test in this file
+    /// would quietly stop testing the parallel arm. Passing the threshold in is
+    /// what keeps those tests honest, and it is the same in-process A/B hook the
+    /// serial flag and the worker cap already have.
+    pub fn materialize_dot_columns_with_policy(
+        columns: &[&Self],
+        serial: bool,
+        max_workers: usize,
+        work_per_worker: u128,
+    ) {
+        let values: Vec<&ScalarValues> = columns.iter().map(|column| &column.values).collect();
+        ScalarValues::materialize_dot_columns_with_policy(
+            &values,
+            serial,
+            max_workers,
+            work_per_worker,
+        );
     }
 
     pub fn as_f64_slice(&self) -> Option<&[f64]> {
@@ -45529,8 +45664,13 @@ mod tests {
 
             let serial_refs: Vec<&Column> = serial_cols.iter().collect();
             let parallel_refs: Vec<&Column> = parallel_cols.iter().collect();
-            Column::materialize_dot_columns_with_mode(&serial_refs, true);
-            Column::materialize_dot_columns_with_mode(&parallel_refs, false);
+            // br-frankenpandas-oarkz: `work_per_worker = 1`, not the shipped
+            // default. This fixture is 4320 multiply-adds — under the shipped 2e6
+            // it would size itself to ONE worker and the "parallel arm" would
+            // silently be the serial arm, leaving this test comparing a thing to
+            // itself. That is exactly the tautology its own doc comment is about.
+            Column::materialize_dot_columns_with_policy(&serial_refs, true, 0, 1);
+            Column::materialize_dot_columns_with_policy(&parallel_refs, false, 0, 1);
 
             for (c, (serial, parallel)) in serial_cols.iter().zip(parallel_cols.iter()).enumerate()
             {
@@ -45845,7 +45985,7 @@ mod tests {
         fn dot_batch_output_is_identical_at_every_worker_cap() {
             let reference_cols = pending_dot_columns(24, 7, 13);
             let reference_refs: Vec<&Column> = reference_cols.iter().collect();
-            Column::materialize_dot_columns_with_workers(&reference_refs, true, 1);
+            Column::materialize_dot_columns_with_policy(&reference_refs, true, 1, 1);
             let reference: Vec<Vec<f64>> = reference_cols
                 .iter()
                 .map(|c| c.as_f64_slice().expect("serial reference").to_vec())
@@ -45854,10 +45994,15 @@ mod tests {
             // 0 means "no explicit cap" (-> available_parallelism); 64 exceeds
             // the column count so it must clamp to `pending.len()` rather than
             // spawn empty workers.
+            //
+            // br-frankenpandas-oarkz: `work_per_worker = 1` so the cap remains the
+            // binding constraint. Under the shipped 2e6 this 2184-multiply-add
+            // fixture sizes to one worker at EVERY cap, and the loop would prove
+            // nothing about regrouping.
             for cap in [0_usize, 1, 2, 3, 8, 13, 64] {
                 let cols = pending_dot_columns(24, 7, 13);
                 let refs: Vec<&Column> = cols.iter().collect();
-                Column::materialize_dot_columns_with_workers(&refs, false, cap);
+                Column::materialize_dot_columns_with_policy(&refs, false, cap, 1);
                 for (c, (col, expected)) in cols.iter().zip(reference.iter()).enumerate() {
                     assert_eq!(
                         col.as_f64_slice().expect("materialized").to_vec(),
@@ -45866,6 +46011,147 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// The worker count must follow the WORK, not the column count.
+        ///
+        /// br-frankenpandas-oarkz. This is the whole lever, stated as arithmetic:
+        /// the three measured optima on this host (1 worker at `dim = 100`, 16 at
+        /// `dim = 316`, all 64 at `dim = 1000`) have to fall out of one constant.
+        /// The work of a `dim`-cube dot is `dim` columns x `dim` k x `dim` rows.
+        ///
+        /// NEGATIVE CASES, both of which the code this replaced got wrong:
+        ///   * a flat cap ignores the work term, so it answers 8 (or 64) for the
+        ///     `dim = 100` job — measured at 0.440ms / 1.470ms against 0.354ms
+        ///     serial. The assertion of `1` fails any such implementation.
+        ///   * `total_work / work_per_worker` alone answers 0 for a small job,
+        ///     which downstream reads as "spawn nothing" only by accident of the
+        ///     `workers <= 1` guard; the `.max(1)` is asserted directly.
+        #[test]
+        fn dot_worker_count_sizes_to_the_work_not_the_column_count() {
+            let cube = |dim: u128| dim * dim * dim;
+            let per_worker = 2_000_000_u128;
+
+            // dim = 100: 1e6 multiply-adds, less than one worker's share.
+            assert_eq!(
+                ScalarValues::dot_worker_count(cube(100), per_worker, 64, 0, 100),
+                1,
+                "a job smaller than one worker's share must stay serial"
+            );
+            // dim = 316: 3.16e7 -> 15 whole shares, and 16 measured fastest.
+            assert_eq!(
+                ScalarValues::dot_worker_count(cube(316), per_worker, 64, 0, 316),
+                15,
+                "a mid-size job must land near the measured optimum, not the cap"
+            );
+            // dim = 1000: 1e9 -> 500 shares, clamped by the machine.
+            assert_eq!(
+                ScalarValues::dot_worker_count(cube(1000), per_worker, 64, 0, 1000),
+                64,
+                "a large job must reach the machine's parallelism"
+            );
+
+            // An explicit cap still binds under the work term...
+            assert_eq!(
+                ScalarValues::dot_worker_count(cube(1000), per_worker, 64, 8, 1000),
+                8,
+                "an explicit cap must remain a ceiling"
+            );
+            // ...and so does the column count, which is the real upper bound on
+            // useful workers for a column-parallel pass.
+            assert_eq!(
+                ScalarValues::dot_worker_count(cube(1000), per_worker, 64, 0, 3),
+                3,
+                "never spawn more workers than there are columns to give them"
+            );
+            // `work_per_worker = 0` is the A/B arm that disables the work term.
+            assert_eq!(
+                ScalarValues::dot_worker_count(cube(100), 0, 64, 0, 100),
+                64,
+                "a zero threshold must mean 'ignore the work term', not 'no workers'"
+            );
+            // A zero-work batch must still answer a legal worker count.
+            assert_eq!(
+                ScalarValues::dot_worker_count(0, per_worker, 64, 0, 5),
+                1,
+                "an empty-work batch must round up to one worker, never zero"
+            );
+        }
+
+        /// Every work-per-worker threshold must produce the SAME bits.
+        ///
+        /// br-frankenpandas-oarkz. The threshold changes how many threads run and
+        /// therefore `chunk = pending.len().div_ceil(workers)` — which columns
+        /// share a thread. Like the worker cap before it, that regrouping must be
+        /// invisible in the output; 13 columns stays coprime with the resulting
+        /// worker counts so the final chunk is short.
+        #[test]
+        fn dot_batch_output_is_identical_at_every_work_per_worker() {
+            let reference_cols = pending_dot_columns(24, 7, 13);
+            let reference_refs: Vec<&Column> = reference_cols.iter().collect();
+            Column::materialize_dot_columns_with_policy(&reference_refs, true, 1, 1);
+            let reference: Vec<Vec<u64>> = reference_cols
+                .iter()
+                .map(|c| {
+                    c.as_f64_slice()
+                        .expect("serial reference")
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect()
+                })
+                .collect();
+
+            // 0 disables the work term; 1 forces maximum parallelism; 2e6 is the
+            // shipped default, under which this fixture is serial.
+            for work_per_worker in [0_u128, 1, 2, 7, 100, 2_000_000] {
+                let cols = pending_dot_columns(24, 7, 13);
+                let refs: Vec<&Column> = cols.iter().collect();
+                Column::materialize_dot_columns_with_policy(&refs, false, 0, work_per_worker);
+                for (c, (col, expected)) in cols.iter().zip(reference.iter()).enumerate() {
+                    let got: Vec<u64> = col
+                        .as_f64_slice()
+                        .expect("materialized")
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect();
+                    assert_eq!(
+                        got, *expected,
+                        "column {c} differs at work_per_worker {work_per_worker}"
+                    );
+                }
+            }
+        }
+
+        /// The work term must count MULTIPLY-ADDS, not columns.
+        ///
+        /// br-frankenpandas-oarkz. `pending.len()` is the seductive proxy and it
+        /// is wrong by three orders of magnitude in the direction that matters:
+        /// 100 columns of a `dim = 100` product is less total work than ONE column
+        /// of a `dim = 1000` product. A batch of two tall columns must therefore
+        /// out-weigh a batch of many short ones.
+        #[test]
+        fn pending_dot_work_counts_multiply_adds_not_columns() {
+            let many_short = pending_dot_columns(4, 4, 32);
+            let few_tall = pending_dot_columns(400, 40, 2);
+            let sum = |cols: &[Column]| -> u128 {
+                cols.iter()
+                    .filter_map(|c| c.values.pending_dot_work())
+                    .sum()
+            };
+            assert_eq!(sum(&many_short), 32 * 4 * 4);
+            assert_eq!(sum(&few_tall), 2 * 40 * 400);
+            assert!(
+                sum(&few_tall) > sum(&many_short),
+                "two tall columns are more work than thirty-two short ones"
+            );
+
+            // A materialized column owes nothing.
+            let _ = many_short[0].as_f64_slice().expect("materialize one");
+            assert_eq!(
+                many_short[0].values.pending_dot_work(),
+                None,
+                "an already-materialized column must not be counted as pending work"
+            );
         }
 
         /// Every (workers, par_min) policy must produce identical values, identical
