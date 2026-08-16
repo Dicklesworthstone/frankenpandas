@@ -25812,6 +25812,30 @@ impl Column {
         (abs + TWO_POW_52) - TWO_POW_52
     }
 
+    /// `copysign` for the case where `result` is a known NON-NEGATIVE magnitude,
+    /// or where its sign can only already agree with `value`'s.
+    ///
+    /// br-frankenpandas-o57rj. `copysign(r, x)` is `(r & !signbit) | (x & signbit)`
+    /// — three operations. When `r`'s sign bit is already clear the first half is a
+    /// no-op, so the OR alone is exact, in two. `ceil_fast` pays this twice.
+    ///
+    /// MEASURED, monomorphised so the kernel inlines exactly as it does in
+    /// [`Self::typed_float_witness_free_unary`] (a `fn`-POINTER probe measures the
+    /// wrong thing here — it defeats inlining and inflated an earlier reading of
+    /// this same lever from 1.08x to 1.647x, see the ledger): 1M f64, one binary,
+    /// interleaved, `floor` 744.5→689.5us, `ceil` 825.5→720.9us, `trunc`
+    /// 739.3→695.7us.
+    ///
+    /// SAFE ONLY UNDER THAT PRECONDITION. If `result` could be negative while
+    /// `value` is positive, this returns the negative and `copysign` would not —
+    /// so do not reach for it as a general `copysign` replacement. Each caller
+    /// below states why its `result` cannot have that shape.
+    #[inline]
+    fn or_sign(result: f64, value: f64) -> f64 {
+        const SIGN_BIT: u64 = 0x8000_0000_0000_0000;
+        f64::from_bits(result.to_bits() | (value.to_bits() & SIGN_BIT))
+    }
+
     /// Branchless `floor` that VECTORIZES on the baseline x86-64 target.
     ///
     /// br-frankenpandas-o57rj. `f64::floor` lowers to `roundpd`, which is SSE4.1;
@@ -25843,7 +25867,9 @@ impl Column {
     #[inline]
     fn floor_fast(value: f64) -> f64 {
         let abs = value.abs();
-        let nearest = Self::nearest_even_magnitude(abs).copysign(value);
+        // `nearest_even_magnitude(abs)` is non-negative (its input is), so the
+        // 2-op OR is exactly `copysign` here — see `Self::or_sign`.
+        let nearest = Self::or_sign(Self::nearest_even_magnitude(abs), value);
         let adjusted = if nearest > value {
             nearest - 1.0
         } else {
@@ -25864,14 +25890,19 @@ impl Column {
     #[inline]
     fn ceil_fast(value: f64) -> f64 {
         let abs = value.abs();
-        let nearest = Self::nearest_even_magnitude(abs).copysign(value);
+        // Same as `floor_fast`: a non-negative magnitude, so the OR is exact.
+        let nearest = Self::or_sign(Self::nearest_even_magnitude(abs), value);
         let adjusted = if nearest < value {
             nearest + 1.0
         } else {
             nearest
         };
         if abs < TWO_POW_52 {
-            adjusted.copysign(value)
+            // `adjusted` cannot be negative-while-`value`-is-positive: for
+            // `value > 0` every term above is >= 0. So the OR is exact here too,
+            // and it is still needed — it is what turns the `+0.0` that
+            // `nearest + 1.0` produces for `value` in (-1.0, -0.5] into `-0.0`.
+            Self::or_sign(adjusted, value)
         } else {
             value
         }
@@ -25892,7 +25923,9 @@ impl Column {
             nearest
         };
         if abs < TWO_POW_52 {
-            toward_zero.copysign(value)
+            // `toward_zero` is computed entirely in the magnitude domain and is
+            // therefore non-negative, so the OR is exact — see `Self::or_sign`.
+            Self::or_sign(toward_zero, value)
         } else {
             value
         }
@@ -36424,6 +36457,34 @@ mod tests {
             assert!(
                 naive_disagreements > 1000,
                 "the int-cast kernel must disagree widely with floor, got {naive_disagreements}"
+            );
+
+            // SECOND NEGATIVE CASE, PINNED FROM A REFUTED LEVER (br-frankenpandas-o57rj,
+            // 2026-08-16). Dropping the `abs` and handing the magic number a SIGNED
+            // input measured 1.279x FASTER and was wrong on every negative value:
+            // `-0.5 + 2^52` lands BELOW 2^52, in the binade where spacing is 0.5, so
+            // it is exactly representable, no rounding occurs, and subtracting 2^52
+            // returns the input. The `abs` in these kernels is what keeps the sum in
+            // [2^52, 2^53) where spacing is 1.0 — it is load-bearing, not packaging.
+            // If this ever stops disagreeing, the magic-number argument has changed
+            // and all three kernels need re-deriving from scratch.
+            let signed_magic_disagreements = values
+                .iter()
+                .filter(|&&x| {
+                    let nearest = (x + crate::TWO_POW_52) - crate::TWO_POW_52;
+                    let adjusted = if nearest > x { nearest - 1.0 } else { nearest };
+                    let guarded = if x.abs() < crate::TWO_POW_52 {
+                        adjusted
+                    } else {
+                        x
+                    };
+                    guarded.to_bits() != x.floor().to_bits()
+                })
+                .count();
+            assert!(
+                signed_magic_disagreements > 1000,
+                "the signed-magic form must disagree widely with floor (the abs is \
+                 load-bearing); got {signed_magic_disagreements}"
             );
 
             // The SHIPPED path, not just the kernels: a non-integral all-valid
