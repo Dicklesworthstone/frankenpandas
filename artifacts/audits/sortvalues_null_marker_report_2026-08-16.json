@@ -1,0 +1,28 @@
+{
+  "fixtures_examined": 1,
+  "agree_current": 0,
+  "agree_provenance_only": 0,
+  "restampable": 0,
+  "restamped": 0,
+  "restamp_refused": [],
+  "move_classes": {},
+  "roundtrip_classes": {},
+  "provenance_verdicts": {},
+  "moved_unattributed": [],
+  "moved_attributed": [
+    {
+      "fixture": "fp_p2d_043_series_sort_values_numeric_ascending_na_last_strict.json",
+      "divergence": "DISC-011"
+    }
+  ],
+  "unsupported_operation": [],
+  "other_errors": [],
+  "expected_error_agreements": [],
+  "error_agreement_pandas": 0,
+  "error_agreement_stamped": 0,
+  "error_agreement_not_attestable": [],
+  "uncompared_keys": {},
+  "coverage": {
+    "SEMANTIC": 1
+  }
+}

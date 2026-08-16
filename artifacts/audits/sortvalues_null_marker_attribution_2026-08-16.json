@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "br-frankenpandas-6k29f follow-through. ONE fixture, named explicitly.",
+    "",
+    "fp_p2d_043_series_sort_values_numeric_ascending_na_last_strict carries a",
+    "payload with BOTH missing markers: [int64 3, null, int64 1, int64 2, na_n].",
+    "Its banked expectation preserves both spellings in the sorted tail",
+    "(... null, na_n), which is what the oracle produced when op_series_sort_values",
+    "hand-rolled pd.Series(values, index=index) and pandas inferred numpy float64 —",
+    "in a float64 lane a None and a NaN stay distinguishable on the way back out.",
+    "",
+    "op_series_sort_values now routes through fixture_series_from_payload (landed by",
+    "a peer citing br-frankenpandas-6k29f), so the payload's declared dtype applies:",
+    "{int64} + a null selects the NULLABLE Int64, where BOTH missing values are",
+    "pd.NA and both render as 'null'. The fixture's 'na_n' tail is therefore an",
+    "artifact of the builder that was removed, not a property pandas still has.",
+    "",
+    "This is a NULL_MARKER move only — the sorted VALUES and their order are",
+    "unchanged, and na_last placement is unchanged. FrankenPandas is unaffected",
+    "either way because fp_types::semantic_eq treats any two missing values as",
+    "equal (br-frankenpandas-xwxci, 93f77abeb), so this cannot be a way to force a",
+    "red fixture green: the fixture is green now and stays green.",
+    "",
+    "Recorded because a stale expectation that no live oracle produces is exactly",
+    "the residue the freshness differ exists to surface."
+  ],
+  "attributions": {
+    "fp_p2d_043_series_sort_values_numeric_ascending_na_last_strict.json": {
+      "divergence": "DISC-011",
+      "bead": "br-frankenpandas-6k29f",
+      "agent": "CalmMink",
+      "date": "2026-08-16",
+      "moved_key": "expected_series",
+      "class": "NULL_MARKER na_n->null",
+      "evidence": "op_series_sort_values now builds the payload via fixture_series_from_payload; {int64}+null selects nullable Int64, in which both a None and a NaN are pd.NA and render as 'null'"
+    }
+  },
+  "retirements": {}
+}
