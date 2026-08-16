@@ -26722,3 +26722,54 @@ and 1.041860, both against a passing pandas null). The pattern is now exact —
 every op moved off `thread::scope` passes its null, every op still on it fails —
 but neither can take the witness-free arm as-is, because `sqrt(x<0)` and
 `log(x<=0)` genuinely do mint NaN.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-o57rj follow-on) — a `floor` kernel that measured **1.279x FASTER** was WRONG on every negative input; the `abs` it deleted is load-bearing, and only the bit-identity corpus caught it
+
+**The idea, and it is a natural one.** `floor_fast`/`ceil_fast` take `|x|` first and
+then `copysign` the rounded magnitude back. If `(x + 2^52) - 2^52` rounded
+correctly on a SIGNED input, both the `abs` and the `copysign` could go, cutting
+~3 of ~11 SSE2 ops on the family that is my worst measured ratio (`floor`/`ceil @1M`
+≈0.30x).
+
+**It measured exactly as hoped: `floor` p50 2212.9us → 1730.8us, 1.279x, on the
+bench's own distribution, same binary, interleaved ABBA. And it was wrong.**
+
+**Counted mechanism:** the candidate disagreed with `f64::floor` on **375854 of
+3066760** corpus values — every negative input — and with `f64::ceil` on the same
+375854. The required agreement count is 3066760 and it delivered 2690906, failing
+by 375854. `trunc`, the one candidate that kept its `abs`, missed zero.
+
+**WHY, and it is not a coding slip — the premise was false.** Adding 2^52 to a
+NEGATIVE number carries the sum *below* 2^52, into the binade where spacing is 0.5
+rather than 1.0. `-0.5 + 2^52` is therefore **exactly representable**, no rounding
+occurs, and subtracting 2^52 hands back `-0.5` unchanged. The trick only rounds
+when the sum stays in `[2^52, 2^53)`, which is precisely what taking `|x|` first
+guarantees. The `abs` is not incidental packaging around the magic number; it is
+what makes the magic number work.
+
+**And that is why it looked fast.** The wrong kernel returned its input for roughly
+half the data, skipping the compare-and-subtract entirely. A kernel that computes
+less is faster; the timing was real and the thing it timed was not `floor`. **The
+bit-identity corpus is the only reason this is a ledger line instead of a shipped
+regression** — it ran before the timing did, and `floor_ceil_trunc_fast_are_bit_identical_o57rj`
+would have caught it in CI regardless. Second time this corpus has caught a defect
+in this family that value-equality could not (the first was `ceil`'s `+0.0` for
+`-0.0`, 359 mismatches).
+
+**WHAT SURVIVES, MEASURED AND BIT-IDENTICAL, NOT YET LANDED.** Keep the `abs`, but
+note that `copysign(r, x)` where `r` is a known-non-negative magnitude is exactly
+`r | (x & signbit)` — the `r & ~signbit` half is a no-op — so it is 2 ops instead
+of 3, and `ceil` pays it twice. Same probe, same corpus, **0 mismatches across all
+3066760 values** including an exhaustive exponent walk:
+
+| op | shipped p50 | candidate p50 | ratio |
+|---|---|---|---|
+| `floor` | 2387.2us | **1449.5us** | **1.647x** |
+| `ceil` | 2367.7us | **1662.1us** | **1.425x** |
+| `trunc` | 2123.0us | 1939.8us | 1.094x (min ratio 0.999 — noise) |
+
+These are STANDALONE loop timings in a probe binary, NOT an in-repo vs-incumbent
+row, and nothing is claimed against pandas on their strength. `trunc`'s gain is
+inside the noise on the minima and should be treated as unproven. The floor/ceil
+figures exceed what one saved op predicts, which suggests `copysign` is costing
+more than three ops here — worth confirming with `perf stat` before landing.
