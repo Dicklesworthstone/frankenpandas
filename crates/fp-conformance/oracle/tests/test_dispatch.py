@@ -966,3 +966,70 @@ def test_from_records_without_dtype_still_uses_from_records(oracle, pd):
     assert [v["value"] for v in frame["columns"]["k"]] == ["x", "y"]
     assert [v["value"] for v in frame["columns"]["v"]] == [1, 2]
     assert [v["value"] for v in frame["index"]] == [0, 1]
+
+
+def test_dtype_check_ops_report_pandas_own_spelling(oracle, pd):
+    """`column_dtype_check` / `series_dtype_check` report `str(series.dtype)`.
+
+    br-frankenpandas-62d1s. These two operations had NO oracle implementation,
+    so seven corpus fixtures asserted a dtype that pandas was never asked about.
+    They could not be implemented while the harness compared
+    `format!("{:?}", dtype)` — Rust's `Debug` derive — because that yields
+    FrankenPandas internals (`Float64`, `Utf8`, `Categorical`) with no pandas
+    counterpart. The harness now compares `DType::name()`, documented "Matches
+    numpy dtype.name property", so the two vocabularies coincide and this op
+    needs NO translation table. That distinction is the point: a translation
+    would have been the oracle-adapted-to-FP masking pattern.
+    """
+    def dtype_of(payload):
+        return oracle.dispatch(pd, payload)["expected_dtype"]
+
+    def series_payload(values, **extra):
+        return {
+            "operation": "column_dtype_check",
+            "left": {
+                "name": "probe",
+                "index": [{"kind": "int64", "value": i} for i in range(len(values))],
+                "values": values,
+            },
+            **extra,
+        }
+
+    # Plain numpy lanes.
+    assert dtype_of(series_payload([{"kind": "float64", "value": 1.5}])) == "float64"
+    assert dtype_of(series_payload([{"kind": "int64", "value": 1}])) == "int64"
+    assert dtype_of(series_payload([{"kind": "utf8", "value": "x"}])) == "object"
+
+    # int + null is the NULLABLE extension, per series_dtype_for_payload_values.
+    # This is the arm that makes DISC-011 visible rather than masked: FP builds a
+    # plain Int64 there and answers 'int64'.
+    assert (
+        dtype_of(
+            series_payload(
+                [{"kind": "int64", "value": 1}, {"kind": "null", "value": "null"}]
+            )
+        )
+        == "Int64"
+    )
+
+    # CATEGORICAL: values are codes, so a plain Series would report int64 and the
+    # op would answer about the wrong object entirely.
+    categorical = series_payload(
+        [{"kind": "int64", "value": 0}, {"kind": "int64", "value": 1}],
+        categorical_categories=[
+            {"kind": "utf8", "value": "low"},
+            {"kind": "utf8", "value": "high"},
+        ],
+        categorical_ordered=True,
+    )
+    categorical["operation"] = "series_dtype_check"
+    assert dtype_of(categorical) == "category"
+
+    # SPARSE carries its subtype and fill in the dtype string.
+    sparse = series_payload(
+        [{"kind": "int64", "value": 1}, {"kind": "int64", "value": 0}],
+        constructor_dtype="int64",
+        fill_value={"kind": "int64", "value": 0},
+    )
+    sparse["operation"] = "series_dtype_check"
+    assert dtype_of(sparse) == "Sparse[int64, 0]"

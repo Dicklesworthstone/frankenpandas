@@ -998,6 +998,77 @@ def fixture_series_from_payload(pd, payload: dict[str, Any], op_name: str):
     )
 
 
+def build_dtype_check_series(pd, payload: dict[str, Any], op_name: str):
+    """Build the Series a dtype-check fixture describes, honouring its extensions.
+
+    A dtype-check fixture may declare a CATEGORICAL (categorical_categories +
+    categorical_ordered, values are codes) or a SPARSE column (constructor_dtype
+    + fill_value). Those are the two shapes whose whole point is the extension
+    dtype, so building them as a plain Series would make the op report the
+    wrong answer. Everything else routes through fixture_series_from_payload so
+    the payload's declared dtype applies exactly as it does for every other op.
+    (br-frankenpandas-62d1s)
+    """
+    left = payload.get("left")
+    if left is None:
+        raise OracleError(f"{op_name} requires left payload")
+
+    categories_raw = payload.get("categorical_categories")
+    if isinstance(categories_raw, list):
+        ordered = payload.get("categorical_ordered", False)
+        if not isinstance(ordered, bool):
+            raise OracleError(f"{op_name} categorical_ordered must be a boolean")
+        codes: list[int] = []
+        for idx, raw_code in enumerate(left["values"]):
+            code = scalar_from_json(raw_code)
+            if not isinstance(code, int):
+                raise OracleError(f"{op_name} requires int categorical codes at idx={idx}")
+            codes.append(code)
+        categories = [scalar_from_json(item) for item in categories_raw]
+        try:
+            categorical = pd.Categorical.from_codes(
+                codes, categories=categories, ordered=ordered
+            )
+        except Exception as exc:
+            raise OracleError(f"{op_name} categorical build failed: {exc}") from exc
+        index = [label_from_json(item) for item in left["index"]]
+        return pd.Series(categorical, index=index, name=left.get("name", "series"))
+
+    constructor_dtype = payload.get("constructor_dtype")
+    if isinstance(constructor_dtype, str) and payload.get("fill_value") is not None:
+        fill = scalar_from_json(payload["fill_value"])
+        index = [label_from_json(item) for item in left["index"]]
+        values = [scalar_from_json(item) for item in left["values"]]
+        try:
+            sparse = pd.SparseDtype(constructor_dtype, fill)
+            return pd.Series(values, index=index, name=left.get("name", "series"), dtype=sparse)
+        except Exception as exc:
+            raise OracleError(f"{op_name} sparse build failed: {exc}") from exc
+
+    return fixture_series_from_payload(pd, left, op_name)
+
+
+def op_column_dtype_check(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    """Report the dtype pandas gives the fixture's payload.
+
+    `str(series.dtype)` is numpy/pandas' own spelling — int64, float64, object,
+    category, Int64, boolean, Sparse[int64, 0]. FrankenPandas' `DType::name()`
+    is documented "Matches numpy dtype.name property" and produces the same
+    vocabulary, so the two are directly comparable with NO translation table.
+    That is the whole reason this op can exist honestly; an earlier reading of
+    br-frankenpandas-62d1s assumed a pandas -> FP name mapping would be needed
+    and it is not.
+    """
+    series = build_dtype_check_series(pd, payload, "column_dtype_check")
+    return {"expected_dtype": str(series.dtype)}
+
+
+def op_series_dtype_check(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    """Sibling of `op_column_dtype_check`; the fixtures differ only in name."""
+    series = build_dtype_check_series(pd, payload, "series_dtype_check")
+    return {"expected_dtype": str(series.dtype)}
+
+
 def op_series_categorical_from_codes(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -8021,6 +8092,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_at_time(pd, payload)
     if op == "series_between_time":
         return op_series_between_time(pd, payload)
+    if op == "column_dtype_check":
+        return op_column_dtype_check(pd, payload)
+    if op == "series_dtype_check":
+        return op_series_dtype_check(pd, payload)
     if op == "series_filter":
         return op_series_filter(pd, payload)
     if op in {"dataframe_filter", "data_frame_filter"}:
