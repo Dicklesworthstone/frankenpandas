@@ -22349,3 +22349,74 @@ unknown. Decomposed into child beads under vprpg.
 
 **Reproduce:** apply `scratchpad/vprpg_chooser_COMPLETE.patch`, then
 `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-conformance --release`.
+
+---
+
+## br-frankenpandas-3nzz3 — shortening `receive`'s critical section is NOT a contention win; and my own harness disagreed with itself by 2.6x
+
+**Date:** 2026-08-16 · **Agent:** CalmMink · **Verdict:** the concurrency premise
+is REFUTED at this shape. The structural change is kept (it is parity-clean and
+marginally faster per call), but no lock-contention speedup may be claimed.
+
+The lever shipped at 07dcf4f96: `InMemoryTransport::receive` stores
+`Arc<EncodedArtifact>`, copies the `Arc` under the mutex, and deep-clones after
+unlocking. The bead stayed open for months because that is a SPEED claim with no
+number. Harness added at `crates/fp-runtime/examples/transport_receive_ab.rs`;
+the control is the pre-lever shape (deep clone INSIDE the guard), reproduced in
+the harness so the shipped path is measured exactly as it ships.
+
+**All four runs, every one naming its worker and its harness sha.** Both arms
+always in the same invocation on the same worker.
+
+```
+harness    worker       shape        A/A null   1-thread   legacy/shipped
+207b99f8   vmi1152480   400 x 16     0.7966 ✗   1.5588     0.7002x
+207b99f8   vmi1293453   400 x 16     0.9281     0.8264     2.1068x
+237de189   vmi1152480   400 x 16     1.0853     0.8866     1.8485x
+1890d9e6   vmi1293453   2000 x 32    1.0018 ✓   1.0968     1.0986x
+```
+
+**Read the last row only.** It is the sole run whose A/A null is tight, and its
+ratio 1.0986x is INDISTINGUISHABLE FROM ITS OWN SINGLE-THREADED CONTROL,
+1.0968x. The harness's own stated criterion is that the lever must be invisible
+at one thread, because it can only pay off under contention. It is not
+invisible; it is the same size. So the entire measured difference is a per-call
+effect, and the contention benefit this lever exists for is **not detectable at
+8 threads on a 64 KiB payload**.
+
+**Three separate traps fired, and each is reusable.**
+
+1. *Thread spawn inside the timed region.* v1 called `thread::scope` per
+   measurement, putting a variable ~400us spawn+join inside a ~20ms sample. It
+   produced a **0.7966x A/A null** — a 20% spread between two runs of identical
+   code — and inverted the verdict (0.7002x, i.e. "the lever is 1.43x slower").
+   Hoisting the pool behind two barriers moved the same measurement from
+   27ms/19ms to 4.6ms/8.5ms. The spawn cost had been ~80% of the sample.
+2. *A null that measures the position effect it is supposed to cancel.* v1
+   scored the null as first-run vs second-run while scoring the arms through an
+   ABBA square. Those are different estimators, so the null could never certify
+   the design. v2+ runs the null through the IDENTICAL square — four runs of the
+   shipped arm scored in the same slot pattern — which is what took it to 1.0018.
+3. *A stale binary on the worker.* One run reported `harness_sha256 207b99f8`
+   with the OLD shape and design strings while the working tree held a rewritten
+   harness. rch reported a clean build. The self-reported source hash is the
+   only reason this was caught, and it is why the harness hashes its own SOURCE
+   rather than the ELF: a binary hash moves on every dependency rebuild, so it
+   cannot answer "which procedure produced this row".
+
+**Harness disagreement is itself the finding.** 207b99f8 and 1890d9e6 differ by
+**2.6x** (0.7002x vs ... 2.1068x on one worker family) and the same harness
+differs **3.0x across two workers**. Both of the loose-null runs would have been
+publishable-looking numbers. Neither is evidence.
+
+**What is NOT rejected.** The shipped shape stays: parity is asserted before
+timing (identical `artifact_id`, `source_len`, `repair_symbols`, `encoded_bytes`,
+plus preserved capability-denied and missing-artifact error surfaces), and it is
+never slower. It is simply not a concurrency lever at this shape, and the ~1.10x
+per-call edge over a control that does strictly LESS work (no `Arc` clone, no
+`catch_unwind`) is unexplained and should not be leaned on.
+
+**Reproduce:**
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo run --release -p fp-runtime --features asupersync --example transport_receive_ab`
+and CHECK the printed `harness_sha256` against `sha256sum` of the source before
+believing any row.
