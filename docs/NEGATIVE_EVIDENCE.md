@@ -23626,3 +23626,54 @@ build window:
      makes no difference, the recycling story is wrong and this entry is refuted.
   2. A large `MIMALLOC_PURGE_DELAY` should make it faster and noisier.
   3. Only if 1 and 2 behave as predicted is the storage change worth building.
+
+---
+
+## br-frankenpandas-1hjgz — the discriminator between the two conflicting `df_dot` rows is THREAD COUNT, not speed: 1 (mine) vs 8 (cod-pandas) on the same commit
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** observation from
+already-banked artifacts, no build, no new run. Narrowing a disagreement rather
+than resolving it.
+
+Two rows in this file disagree about the column-parallel `df.dot` lever at
+`c23e94f5f`:
+
+- **cod-pandas:** 0.136x → 0.475x, and *"the observed thread count moved 1 → 8
+  exactly as the design predicted"*.
+- **mine:** the `FP_DOT_SERIAL` toggle A/B shows no effect — serial 183.5ms,
+  parallel 187.2ms, serial 202.1ms, with the parallel point inside the
+  serial-to-serial spread.
+
+**The overlooked datum is not the timing — it is that MY runs observed
+`thread_count_actually_used = 1` in EVERY arm, including the parallel one, while
+cod-pandas observed it move to 8.** Four of my invocations, all reading 1.
+
+That reframes the question. If the parallel path had executed in my binary and
+merely failed to pay, my timings would be the interesting result. If it never
+executed, my rows say nothing about the lever's value and only cod-pandas' row is
+on-topic. **Whoever settles this should check "did the path run" before
+re-litigating "how fast is it".**
+
+**Candidate explanations, none of which I have tested:**
+
+1. Build profile. Mine was a LOCAL `release-perf` build
+   (`RCH_CARGO_WRAPPER_BYPASS=1`, ELF `86355328…`); cod-pandas used "the
+   already-built sanctioned-profile ELF". If a feature or cfg differs between
+   those profiles, the lever could be compiled out of one of them.
+2. Sampling. The harness derives the field from a monitor that must catch a
+   window `thread::scope` closes on its own — so 1-vs-8 could be observation
+   noise rather than behaviour, per the h67zz note in this file.
+3. Genuinely different code paths at the same commit (e.g. an early return on
+   `pending.len()`), which reading has not ruled out for either run's fixture.
+
+**I checked and ruled out the obvious one:** a leaked toggle. `FP_DOT_SERIAL`
+and `FP_DOT_MAX_WORKERS` were both unset in my environment, verified before the
+A/B, and the parallel arm was run under `env -u FP_DOT_SERIAL` explicitly. So the
+leaked-toggle rule recorded elsewhere in this file was honoured and is not the
+explanation.
+
+**Cheapest next step, one slot:** run the toggle A/B and print the observed
+thread count per arm from the SAME invocation, on the sanctioned-profile ELF and
+on a local `release-perf` ELF. If the counts differ by profile, explanation 1 is
+it and the two rows are both correct about different binaries — which would be
+worth knowing well beyond `df_dot`.
