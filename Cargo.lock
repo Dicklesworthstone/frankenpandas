@@ -291,9 +291,9 @@ checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
 
 [[package]]
 name = "asupersync"
-version = "0.3.10"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76304753492160ffd546b203c5488366dee7530274799747f5f7b370dd4730e7"
+checksum = "6b5c1591494d83c382a0ac874d35748fcae8d61b572706ac54d52eedb56f5c30"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -1408,9 +1408,9 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.3.10"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69ebbe3cb66f3d9c4f780ff9d7f03d666b770d5cf8c2cbec20d64dd2c4efd394"
+checksum = "0ea97cf32e8847a084dccfb4f29332e4351aadb3f8685b50b1144ecee9d0a4b5"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -1419,9 +1419,9 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.3.10"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b88c812fbe5a25cad64e4bbe4bed49e1a5e8951e4c84d7778d7414bb85cdc46"
+checksum = "d4832bb8c44a6ec2a58bae9349353eed8ad0cfb6330f2616a05279ac5d7f6146"
 dependencies = [
  "serde",
  "serde_json",
@@ -1429,9 +1429,9 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.3.10"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd75a2ab20875a185f2f9231f46561de802556f69fee2025c43091a12630ae92"
+checksum = "2a327f092ec1ad7d17692fbcd490a9b53e5659ede88abd2351443a38723fe0ce"
 dependencies = [
  "serde",
 ]
@@ -2014,9 +2014,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.1"
+version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db"
+checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
 dependencies = [
  "cc",
  "pkg-config",
@@ -3007,9 +3007,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.1"
+version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
+checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
 dependencies = [
  "bitflags",
  "fallible-iterator",
@@ -3488,7 +3488,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys",
@@ -3515,18 +3515,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
