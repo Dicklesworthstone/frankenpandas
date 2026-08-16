@@ -26166,3 +26166,63 @@ frequency of the cores actually executing each arm, during the timed region,
 rather than a whole-machine snapshot before and after. Nothing I have banked does
 that, and until something does, "frequency error" should be treated as a
 suspicion with an instrument attached, not as a finding.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-03fp5, oxv4u) — `df_dot @10k` CERTIFIES twice in one window with per-arm clock provenance: 0.573x baseline, 0.673x with AVX2 — REJECT (both are losses), and the ISA effect is 1.175x on the certified ratio
+
+First rows measured with the per-arm clock instrument (harness `2511e891…`), and
+the first in this ledger that can PROVE both arms shared a window rather than
+asserting it. `uptime` 23.70 1-min against 25.14 5-min — the tightest convergence
+of the session — and the two invocations ran back to back so the ELF comparison
+sits inside one window.
+
+| | baseline `4a89472f…` | +avx2,+fma `76661ac3…` |
+|---|---|---|
+| verdict | **SLOWER 0.573x, CERTIFIED** | **SLOWER 0.673x, CERTIFIED** |
+| effect CI | [0.5604, 0.5766] | [0.6330, 0.6986] |
+| FP min / p50 / cv / threads | 0.2914 / 0.3036 ms / 11.9% / 1 | 0.2373 / **0.2552** ms / 12.2% / 1 |
+| pandas min / p50 / cv / threads | 0.1356 / **0.1747** ms / 8.5% / 3 | 0.1337 / **0.1747** ms / 9.6% / 3 |
+| best-vs-best | 0.4653 | 0.5634 |
+| busy-core MHz, FP / pandas | 4069.4 / 4064.3 | 4053.1 / 4045.5 |
+| arms in one window | **true**, ratio 1.0013 | **true**, ratio 1.0019 |
+| loadavg across the cell | 22.23 -> 26.90 | 26.90 -> 26.60 |
+
+**BOTH ARMS OF BOTH ROWS RAN AT THE SAME CLOCK, AND NOW THAT IS RECORDED RATHER
+THAN HOPED.** The four arms' busy cores sit between 4045.5 and 4069.4 MHz — a
+0.6% spread across the whole pair — so neither the certified ratios nor the
+baseline-versus-AVX2 comparison carries a frequency term. The box median over the
+same samples ranged 2407.6-4221.7 MHz, which is exactly why the busy-core figure
+is the one to key on: the wide number is idle cores, not the arms.
+
+**THE INCUMBENT IS THE CONTROL AND IT HELD EXACTLY.** pandas' p50 is **0.1747 ms
+in both runs** — identical to four significant figures, at 3 threads, with A/A
+nulls 0.999024 and 1.000460. Whatever changed between these two rows, it was not
+the incumbent.
+
+**THE ISA EFFECT, MEASURED THREE WAYS, AGREES WITH ITSELF:**
+certified ratio 0.573 -> 0.673 = **1.175x**; FP p50 0.3036 -> 0.2552 = **1.190x**;
+best-vs-best 0.4653 -> 0.5634 = **1.211x**. And independently, the FP-versus-FP
+minima at `dim = 316` measured **1.175x** earlier today. Four statistics, two
+shapes, one conclusion: `+avx2,+fma` is worth ~1.18-1.21x on this kernel,
+bit-identical.
+
+**A/A null control (same invocation):** baseline row, 21 balanced-square rounds,
+FrankenPandas median ratio 1.002416 and pandas 0.999024; AVX2 row, FrankenPandas
+0.997216 and pandas 1.000460. All four inside the 2%-of-unity limit — the first
+time today that both arms of a `df_dot` row held their nulls, which is what a
+3-thread incumbent buys over a 64-thread one (br-frankenpandas-633fb).
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228 (78709880 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench-sse2
+
+**Decision: REJECT — `df_dot @10k` is a LOSS on both builds**, and this supersedes
+the looser 0.53x and 0.633x rows banked earlier today with rows that carry clock
+provenance. FrankenPandas needs 0.2552 ms with AVX2 against numpy's 0.1747 ms at
+`dim = 100`, where the whole job is 1e6 multiply-adds and the incumbent's dispatch
+overhead is most of its time. The ISA lever narrows the gap by ~18% and does not
+close it; the scheduling axis at this shape is already closed
+(br-frankenpandas-03fp5). Invocations
+`vs-pandas-20260816T211915.484973Z-pid346524` and
+`…T211926.308410Z-pid347196`.
+
+**Artifacts:** `artifacts/bench/03fp5_df_dot_10k_fp-bench-sse2_clockprov_thinkstation1_2026-08-16.json`,
+`artifacts/bench/03fp5_df_dot_10k_fp-bench-avx2fma_clockprov_thinkstation1_2026-08-16.json`
