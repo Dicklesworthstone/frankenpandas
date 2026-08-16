@@ -24840,3 +24840,53 @@ but the claim was overstated.
 n=4.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run11_load13_elf_4a89472f.json`
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-03fp5) — caller-as-worker in the dot batch pass: inert where it was aimed, 0.90x where it was not — REJECT
+
+`df_dot @10k` is this op's worst certified ratio (**0.53x**, shipped ELF
+`4a89472f…`, both A/A nulls clean). The batch pass spawns `workers` threads and
+then blocks the CALLING thread in the scope's join for the whole
+materialization, so one core sits idle. A spawn is expensive at this size —
+0.304 ms on one worker against 0.473 ms on two, and the only difference between
+those two arms is the scope — so freeing a thread looked like a fifth of a
+`dim = 100` job.
+
+**It is inert at `dim = 100`, and the reason is my own shipped rule.** The
+work-proportional worker count gives `100^3 / 2e6 = 0` -> 1 worker at 10k, which
+takes the `workers <= 1` early return. The batch never enters the scope, so the
+code this lever changes DOES NOT RUN at the size it was written for. That is
+visible in the certified row itself: `thread_count_actually_used = 1`.
+
+Interleaved ABAB, two ELFs (`4a89472f…` caller idle, `ad74e170…` caller works),
+p50 ms per invocation, **loadavg 10.97 at the start and 10.67 at the end**:
+
+| size | old | new | old | new | old | new | ratio | rounds favouring new |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10k | 0.2821 | 0.2767 | 0.2798 | 0.2769 | 0.2804 | 0.2766 | 1.01x | 3/3, and the arm is inert |
+| 100k | 1.3673 | 1.3537 | 1.4322 | 1.4189 | 1.3390 | 1.3559 | 1.01x | 2/3 |
+| 1M | 19.2625 | 21.8181 | 19.3319 | 20.3372 | 19.4624 | 21.6572 | **0.90x** | 0/3 |
+
+**Counted mechanism:** the spawn count drops by exactly 1 (from `workers` to
+`workers - 1`) and no arithmetic moves. At 1M that saves one spawn out of 64 and
+costs a STRAGGLER: the caller must issue 63 spawns before it starts its own
+group, so its share finishes last and the join waits on it. 0 of 3 rounds
+favoured the new arm there.
+
+**Decision: REJECT**; reverted, patch parked at
+`/data/projects/.scratch/03fp5_dot_caller_as_worker_REJECTED.patch`. Retry
+predicate: only together with a caller share sized for its late start (the upside
+at 1M is one thread out of 64, ~1.5%), and only if some shape exists where the
+batch pass runs a SMALL number of workers — at 10k the work rule already chose
+serial, so no scheduling lever can reach that row.
+
+**This is the fourth structural rejection on this kernel, and they now agree.**
+Output-column fusion, register blocking, j-tiling and caller-as-worker all failed
+for different mechanical reasons, and `df_dot @10k` remains 0.53x. The one lever
+with a measured positive on that row is ISA width — `+avx2,+fma` took it to
+0.633x, bit-identical, and is blocked on the build-policy question in
+br-frankenpandas-oxv4u rather than on any kernel work.
+
+**A/A null control (same invocation):** none applies — this is an in-process p50
+A/B between two ELFs, not a vs-incumbent row, and no incumbent ratio is claimed
+from it. The certified 0.53x baseline it is measured against carries its own:
+FrankenPandas 0.99730174 and pandas 1.01476528, both inside 2%.
