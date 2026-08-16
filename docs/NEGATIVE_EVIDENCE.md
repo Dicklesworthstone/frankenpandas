@@ -24613,3 +24613,58 @@ moderate load. Across eleven `math_unary` invocations today FP's cv has exceeded
 `thread::scope` instability of the parallel arm.
 
 **Artifacts:** `artifacts/bench/trunc_1M_thinkstation1_2026-08-16_quietwindow_load25_elf_4a89472f.json`
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-jk9ht) — `df_dot @1M` CERTIFIES at 1.187x on a quiet host: FrankenPandas' safe-Rust GEMM beats pandas/OpenBLAS — incumbent-win
+
+The four earlier runs of this row (entry above, br-frankenpandas-oarkz) all
+measured 1.19-1.22x FP-faster and were all refused, every one of them on the SAME
+clause: pandas' own A/A null sat outside +-2% while the fleet was building. The
+retry predicate was "identical ELF, harness and pandas artifact on a quiet box".
+This is that run. Nothing about the code changed — `git` is at `d27ef2e5e` and the
+ELF is byte-identical to the one those four runs used.
+
+| | FrankenPandas | pandas 2.2.3 |
+|---|---:|---:|
+| p50 | **20.1249 ms** | 23.6702 ms |
+| cv | 3.87% | 22.69% |
+| observed threads | 63 | 64 |
+| A/A null median | 0.996436 | 0.980950 |
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228 (78709880 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench
+
+**A/A null control (same invocation):** 21 balanced-square rounds; FrankenPandas
+median ratio 0.996436 CI [0.9785, 1.0209]; pandas median ratio 0.980950 CI
+[0.9193, 1.0284]. BOTH inside the 2%-of-unity limit — the clause that refused all
+four earlier attempts.
+
+**Median-CI decision:** median effect 1.187x; CI [1.02890168, 1.25753884] excludes
+unity, and the claim's log effect 0.17184985 cleared the required threshold
+0.16821134 (twice the worse arm's null half-width). **That margin is 2%, and it is
+the honest headline of this row**: the crossing is real and certified, and it is
+narrow enough that it would not survive a much noisier incumbent arm — which is
+precisely what the four refusals were.
+
+**CV role:** provenance only; CV had no vote.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f invocation_id=vs-pandas-20260816T191436.999500Z-pid1412959 measured_ratio=1.187x
+
+**Host and load, recorded because this row exists BECAUSE of load.** thinkstation1,
+Threadripper PRO 5975WX 32C/64T, governor powersave, 64 CPUs in affinity, harness
+`6d884360…`, git `d27ef2e5e`. **loadavg 21.24 at the start of the invocation and
+57.79 at the end** (1-minute figure; the fleet resumed building mid-run) against
+the 48-90 of the four refused attempts. The h67zz thread in this ledger argues
+load does not cleanly predict dispersion below ~50; this row is consistent with
+that reading — what changed is not that the box was idle but that BOTH arms held
+their own A/A nulls in the same window.
+
+**What this row does and does not claim.** It claims `df.dot @1M` (a 1000-cube
+GEMM, 2 GFLOP) is 1.187x faster in 100% safe Rust than pandas delegating to
+numpy/OpenBLAS, on this host, at this shape, with both nulls clean. It does NOT
+generalise to other shapes: `df_dot @10k` remains a certified **0.633x** LOSS
+(br-frankenpandas-03fp5), and this same kernel still compiles to 2-wide SSE2
+`mulpd` (br-frankenpandas-oxv4u), so the win is a scheduling win, not an ISA one.
+
+**Artifacts:** `artifacts/bench/jk9ht_df_dot_1M_thinkstation1_2026-08-16_quiet_run1.json`
