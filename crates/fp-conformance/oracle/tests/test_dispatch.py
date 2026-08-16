@@ -1299,3 +1299,135 @@ def test_a_non_boolean_left_index_on_a_cross_merge_is_STILL_the_adapter(oracle, 
 
     assert "left_index must be a boolean when provided" in str(exc_info.value)
     assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_ADAPTER
+
+
+# ---------------------------------------------------------------------------
+# br-frankenpandas-6k29f — a hand-rolled `pd.Series(values, index=index)`
+# silently retypes the input, and every downstream answer inherits it.
+#
+# `fixture_series_from_payload` applies the payload's DECLARED dtype
+# (series_dtype_for_payload_values), so an int column carrying a null builds as
+# nullable Int64. The 46 hand-rolled sites skip that and let pandas infer
+# numpy float64 from a bare value list.
+#
+# THE SITES CHANGED HERE WERE CHOSEN BY MEASUREMENT, not by grep. Of the 46
+# sites, only 9 are exercised by a corpus fixture whose declared dtype differs
+# from bare inference at all, and of those only series_sort_values and
+# series_tail actually change their ANSWER — the other seven are pinned below
+# as controls precisely because they must NOT be swept in with them.
+# ---------------------------------------------------------------------------
+
+
+def _int_with_null_payload(values, index):
+    """A payload whose declared dtype (Int64) differs from bare inference."""
+    return {
+        "index": [{"kind": "utf8", "value": i} for i in index],
+        "values": [
+            {"kind": "null", "value": "null"} if v is None
+            else {"kind": "int64", "value": v}
+            for v in values
+        ],
+        "name": "s",
+    }
+
+
+def test_series_tail_keeps_the_declared_int64_dtype_6k29f(oracle, pd):
+    """fp_p2d_044_series_tail_negative_preserves_nulls_hardened.
+
+    tail() is a pure row selection, so the input dtype IS the output dtype. The
+    hand-rolled builder returned float64 3.0 and an `na_n` marker where the
+    corpus declares Int64 3 and a `null`.
+    """
+    payload = {
+        "operation": "series_tail",
+        "left": _int_with_null_payload([1, None, 3, None], ["r1", "r2", "r3", "r4"]),
+        "tail_n": 3,
+    }
+    response = oracle.dispatch(pd, payload)
+    values = response["expected_series"]["values"]
+
+    assert [v["kind"] for v in values] == ["null", "int64", "null"], (
+        "an int64+null payload must stay int64; float64 here means the handler "
+        "is still hand-rolling the Series"
+    )
+    assert values[1]["value"] == 3
+    assert values[0]["value"] == "null", "declared Int64 carries pd.NA, not NaN"
+
+
+def test_series_sort_values_keeps_the_declared_int64_dtype_6k29f(oracle, pd):
+    """fp_p2d_043_series_sort_values_numeric_descending_na_last_hardened."""
+    payload = {
+        "operation": "series_sort_values",
+        "left": _int_with_null_payload([1, 3, None, 2], ["r1", "r2", "r3", "r4"]),
+        "sort_ascending": False,
+    }
+    response = oracle.dispatch(pd, payload)
+    values = response["expected_series"]["values"]
+    index = [i["value"] for i in response["expected_series"]["index"]]
+
+    assert [v["kind"] for v in values] == ["int64", "int64", "int64", "null"]
+    assert [v["value"] for v in values[:3]] == [3, 2, 1]
+    # na_position="last" must survive the dtype change — a nullable Int64 sorts
+    # pd.NA differently from how float64 sorts NaN if the argument is dropped.
+    assert index == ["r2", "r4", "r1", "r3"]
+
+
+def test_series_sort_values_all_valid_int_payload_is_unaffected_6k29f(oracle, pd):
+    """Control: no null means no nullable-extension question, so nothing moves.
+
+    `series_dtype_for_payload_values` returns plain int64 here, so this row
+    reads identically before and after the change. If it did move, the shared
+    builder would be imposing a dtype rather than applying the declared one.
+    """
+    payload = {
+        "operation": "series_sort_values",
+        "left": _int_with_null_payload([3, 1, 2], ["r1", "r2", "r3"]),
+        "sort_ascending": True,
+    }
+    values = oracle.dispatch(pd, payload)["expected_series"]["values"]
+    assert [v["kind"] for v in values] == ["int64", "int64", "int64"]
+    assert [v["value"] for v in values] == [1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["series_isna", "series_notna", "series_isnull", "series_notnull"],
+)
+def test_null_predicate_ops_are_NOT_part_of_this_defect_6k29f(oracle, pd, operation):
+    """THE NEGATIVE CONTROL: these hand-roll too, and must be left alone.
+
+    The bead warns that "the 49 remaining sites are NOT all defects". Measured
+    over the corpus: of the 9 hand-rolled ops a divergent fixture reaches, seven
+    produce a byte-identical answer under either builder, because their output
+    cannot observe the input dtype. isna/notna emit booleans about NULL-NESS,
+    which is the same set of positions whether the column is float64-with-NaN or
+    Int64-with-pd.NA.
+
+    Pinned so that a future bulk sweep of all 46 sites has to argue with a test
+    rather than with a comment.
+    """
+    payload = {
+        "operation": operation,
+        "left": _int_with_null_payload([1, None, 3], ["r1", "r2", "r3"]),
+    }
+    values = oracle.dispatch(pd, payload)["expected_series"]["values"]
+    assert [v["kind"] for v in values] == ["bool", "bool", "bool"]
+    truthy = [v["value"] for v in values]
+    if operation in ("series_isna", "series_isnull"):
+        assert truthy == [False, True, False]
+    else:
+        assert truthy == [True, False, True]
+
+
+def test_series_count_is_NOT_part_of_this_defect_6k29f(oracle, pd):
+    """The bead names count explicitly as a non-defect; measured and pinned.
+
+    count() returns a scalar number of non-missing entries. float64-with-NaN and
+    Int64-with-pd.NA have the same missing positions, so the count is the same.
+    """
+    payload = {
+        "operation": "series_count",
+        "left": _int_with_null_payload([1, None, 3, None], ["r1", "r2", "r3", "r4"]),
+    }
+    response = oracle.dispatch(pd, payload)
+    assert response["expected_scalar"]["value"] == 2

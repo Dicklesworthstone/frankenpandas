@@ -2497,15 +2497,15 @@ def op_series_tail(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if tail_n is None:
         raise OracleError("series_tail requires tail_n payload")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-
     try:
         n = int(tail_n)
     except Exception as exc:  # pragma: no cover - defensive conversion
         raise OracleError(f"series_tail tail_n must be an integer: {exc}") from exc
 
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Shared builder, same reason as series_sort_values above: tail() is a pure
+    # row selection, so whatever dtype the input is built with is the dtype of
+    # the answer. (br-frankenpandas-6k29f)
+    series = fixture_series_from_payload(pd, left, "series_tail")
     out = series.tail(n)
 
     return {
@@ -3277,9 +3277,12 @@ def op_series_sort_values(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("series_sort_values requires left payload")
 
     ascending = payload.get("sort_ascending", True)
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Route through the shared builder so the payload's DECLARED dtype applies.
+    # Hand-rolling `pd.Series(values, index=index)` hands pandas a bare value
+    # list, and an int column carrying a null then infers numpy float64 — so the
+    # sorted output came back as float64 3.0 where the corpus declares Int64 3.
+    # (br-frankenpandas-6k29f)
+    series = fixture_series_from_payload(pd, left, "series_sort_values")
     out = series.sort_values(ascending=bool(ascending), na_position="last")
 
     return {
