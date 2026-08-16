@@ -26049,3 +26049,64 @@ unnoticed.
 action. Do not pre-sample — single-check-and-launch is 3-for-3 on windows holding
 today while ~40s multi-sample checks are 0-for-5, because the check consumes the
 window it verifies.
+
+---
+
+## br-frankenpandas-h67zz — ⚠️ INSTRUMENT AUDIT, AND IT FAILS: none of my 13 banked rows recorded CPU MHz, on a powersave host whose cores span 2.70x AT ONE INSTANT. My `thread::scope` diagnosis has an uncontrolled competing explanation
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** self-audit. No
+measurement taken — `uptime` 1-min 68 and rising. Auditing my own instrument
+before blaming the host, as the fleet's other projects each found cause to.
+
+**THE DEFECT IS MINE.** I recorded `loadavg` on every row for twenty ticks and
+**never once recorded CPU frequency**. Measured just now on this host:
+
+```
+governor          powersave
+cpuinfo range     412,214 – 4,561,833 kHz   (11.1x)
+observed NOW      min 1429 MHz, median 3813, max 3856  across 64 cores
+                  → 2.70x spread AT A SINGLE INSTANT
+MHz in my rows    0 of 13
+```
+
+**WHY THIS IS NOT A COSMETIC OMISSION.** FrankenPandas runs this workload on
+**8 threads**; pandas runs it on **1**. A chunked parallel arm cannot finish
+before its SLOWEST chunk, so the 8-thread arm's timing is set by the slowest of
+eight cores, while the 1-thread arm samples one. With cores simultaneously
+spanning 1429–3856 MHz, **one downclocked core drags the whole FP arm** and
+touches pandas not at all.
+
+**THAT PREDICTS EVERYTHING I ATTRIBUTED TO `thread::scope`:**
+
+| observation | my `thread::scope` story | frequency story |
+|---|---|---|
+| FP's null failed 5-of-7, pandas' rarely | spawn cost varies per call | FP samples 8 cores, pandas 1 — more chance of catching a slow one |
+| both nulls failed by near-identical amounts (1.0719 / 1.0718) | monotone host drift | a **global** frequency ramp moves both arms together |
+| nulls failed in opposite directions (+12.2% / −7.7%) | per-arm turbulence | cores ramping **differently** between the halves |
+| quiet windows did not certify better | — | **on powersave a quiet window is a DOWNCLOCKED one** |
+
+The last row is the one that should have made me suspicious weeks of ticks ago:
+I kept being handed low-load windows, kept expecting them to help, and kept
+recording that they did not. **A downclocked idle machine is a worse measurement
+substrate, not a better one, and I never checked the governor.**
+
+**SO I AM QUALIFYING MY OWN DIAGNOSIS.** I have claimed repeatedly that FP's null
+instability is caused by per-call `thread::scope`. That remains plausible — the
+mechanism is real and banked independently — but **it is not established, because
+frequency was never controlled and explains the same evidence at least as well.**
+Any entry above that treats the `thread::scope` cause as settled should be read
+with this qualification.
+
+**INSTRUMENT FIXED.** The measurement template now records min/median/max/spread
+of `cpu MHz` across all 64 cores at run START and END, alongside loadavg, and is
+published for the fleet at
+`/data/projects/.scratch/fp_measure_template_with_mhz.sh` (parses clean under
+`bash -n`). Every future row I bank will carry frequency provenance.
+
+**THIS ALSO CHANGES THE PREPARED EXPERIMENT** banked one entry above. The
+serial-vs-parallel null test (`FP_ELEMENTWISE_MAX_WORKERS=1` vs `=8`) is now
+*more* valuable, not less: the serial arm samples ONE core like pandas does, so if
+frequency spread is the cause, `=1` should stabilise the null for that reason
+rather than for the spawn reason — and the two hypotheses become separable only
+if MHz is recorded on both arms. **Do not run it without the frequency
+instrumentation.**
