@@ -12808,12 +12808,20 @@ impl Series {
         let firing_lower = lower.filter(|b| !is_integer_bound(Some(*b)) && bites(*b, true));
         let firing_upper = upper.filter(|b| !is_integer_bound(Some(*b)) && bites(*b, false));
 
-        if self.column.dtype() == DType::Int64Nullable {
-            if let Some(bound) = firing_lower.or(firing_upper) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "clip: Invalid value '{bound}' for dtype Int64"
-                )));
-            }
+        // Collapsed per clippy's own suggestion (br-frankenpandas-m5wmo): the
+        // nested form trips `collapsible_if` under `-D warnings`, and because
+        // clippy compiles dependencies first that blocked the lint gate for
+        // every agent in this checkout. The let-chain is edition-2024 syntax and
+        // is already used a few lines below (`preserve_int64 && let Scalar::Int64(x)`),
+        // so it is not a new idiom here. Semantics are unchanged: the dtype is
+        // still checked before the bound is inspected, and `or` still prefers
+        // the lower bound when both fire.
+        if self.column.dtype() == DType::Int64Nullable
+            && let Some(bound) = firing_lower.or(firing_upper)
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "clip: Invalid value '{bound}' for dtype Int64"
+            )));
         }
 
         let preserve_int64 = matches!(self.column.dtype(), DType::Int64 | DType::Int64Nullable)
@@ -42420,6 +42428,16 @@ mod str_worker_pool {
         /// (one worker each) and above it (excess runs caller-side), and a test
         /// that hardcoded a guess would silently stop covering one of those
         /// arms on a machine with a different core count.
+        ///
+        /// `#[cfg(test)]` because that is the literal truth, and it is what
+        /// br-frankenpandas-m5wmo is about: the dispatch path reads the
+        /// `threads` FIELD directly, so this accessor has no non-test caller.
+        /// From b6d6e7574 onward it tripped `method 'threads' is never used`
+        /// under `clippy -D warnings`, and because clippy compiles dependencies
+        /// first that blocked the lint gate for EVERY agent in this checkout,
+        /// not just fp-frame's. `#[allow(dead_code)]` would silence it too, but
+        /// it would equally silence a future accessor that really had gone dead.
+        #[cfg(test)]
         pub fn threads(&self) -> usize {
             self.threads
         }
@@ -42429,6 +42447,10 @@ mod str_worker_pool {
         /// This is the number br-frankenpandas-att6b is about: it should track
         /// the largest chunk count any caller has asked for, not the machine's
         /// core count.
+        ///
+        /// `#[cfg(test)]` for the same reason as `threads` above (m5wmo): no
+        /// non-test caller exists, so it is dead code in a normal build.
+        #[cfg(test)]
         pub fn live_workers(&self) -> usize {
             self.job_txs.iter().filter(|slot| slot.get().is_some()).count()
         }
@@ -52957,7 +52979,7 @@ pub fn concat_series_with_ignore_index(
 ///
 /// ⚠️ THE PROMOTION IS CONDITIONAL ON THE SOURCE HAVING BEEN ALL-VALID, which is
 /// the part the fixtures caught. An int column that ALREADY held a missing value
-/// is a NULLABLE Int64 (that is how the payload is constructed — see DISC-019),
+/// is a NULLABLE Int64 (that is how the payload is constructed — see DISC-023),
 /// and a nullable Int64 can hold the invented gap, so pandas keeps it int64 with
 /// an NA rather than widening. Measured on a single fixture that contains both
 /// cases side by side, `fp_p2d_031_..._outer_preserves_nulls_strict`:

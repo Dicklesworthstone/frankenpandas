@@ -885,9 +885,38 @@ impl Int64Chunk {
     }
 }
 
+/// Backing buffer for one [`Float64Chunk`].
+///
+/// br-frankenpandas-284ul. `Shared` is the historical form. `Owned` exists
+/// because `Arc::from(Vec<f64>)` is a fresh allocation plus a memcpy — the same
+/// trap this file already documents at :2068/:2086 and works around for i64 by
+/// keeping `Arc<Vec<i64>>` — so a worker that builds its chunk with `collect()`
+/// could not hand it over without paying an 8 MB copy at the wrap. `Arc<Vec<f64>>`
+/// takes that buffer by POINTER MOVE, exactly as
+/// `lazy_all_valid_float64_owned_with_finite` (:2744) already does for the
+/// single-buffer case.
+///
+/// This is the prerequisite for the write-once elementwise path: without it, a
+/// chunked producer trades a zeroing pass for a copying pass and measures WORSE
+/// than the `vec![0.0; n]`-then-overwrite it replaces.
+#[derive(Clone)]
+enum Float64ChunkBuffer {
+    Shared(Arc<[f64]>),
+    Owned(Arc<Vec<f64>>),
+}
+
+impl Float64ChunkBuffer {
+    fn as_slice(&self) -> &[f64] {
+        match self {
+            Self::Shared(data) => data,
+            Self::Owned(data) => data.as_slice(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Float64Chunk {
-    data: Arc<[f64]>,
+    data: Float64ChunkBuffer,
     start: usize,
     len: usize,
 }
@@ -895,11 +924,30 @@ struct Float64Chunk {
 impl Float64Chunk {
     fn new(data: Arc<[f64]>, start: usize, len: usize) -> Self {
         debug_assert!(start.checked_add(len).is_some_and(|end| end <= data.len()));
-        Self { data, start, len }
+        Self {
+            data: Float64ChunkBuffer::Shared(data),
+            start,
+            len,
+        }
+    }
+
+    /// Take an already-built `Vec<f64>` as a chunk WITHOUT copying it.
+    ///
+    /// br-frankenpandas-284ul. The whole point of the variant — see
+    /// [`Float64ChunkBuffer`]. If this ever starts copying, the write-once lever
+    /// it exists to enable silently becomes a regression, which is why the
+    /// pointer identity is pinned by a test rather than left to review.
+    fn owned(data: Arc<Vec<f64>>, start: usize, len: usize) -> Self {
+        debug_assert!(start.checked_add(len).is_some_and(|end| end <= data.len()));
+        Self {
+            data: Float64ChunkBuffer::Owned(data),
+            start,
+            len,
+        }
     }
 
     fn as_slice(&self) -> &[f64] {
-        &self.data[self.start..self.start + self.len]
+        &self.data.as_slice()[self.start..self.start + self.len]
     }
 }
 
@@ -4128,6 +4176,37 @@ impl ScalarValues {
     /// is also exactly the interleaved in-process A/B the ledger's method note
     /// requires for this lever.
     pub fn materialize_dot_columns_with_mode(values: &[&Self], serial: bool) {
+        Self::materialize_dot_columns_with_workers(
+            values,
+            serial,
+            Self::dot_materialization_worker_cap(),
+        );
+    }
+
+    /// As [`Self::materialize_dot_columns_with_mode`], but with the worker cap
+    /// passed IN as well.
+    ///
+    /// br-frankenpandas-1hjgz. The cap was a hard `.min(8)`, which on this
+    /// 32C/64T host meant `df.dot` ran 8 threads against pandas' observed 64 —
+    /// the next constraint after the 1 -> 8 move the batch pass already bought.
+    /// It is a parameter rather than a constant for the same reason the
+    /// serial/parallel choice is: an interleaved in-process A/B is the only
+    /// measurement of this that has ever held up, and a compiled-in constant
+    /// cannot be A/B'd inside one binary.
+    ///
+    /// `cap == 0` is treated as "no explicit cap" and falls back to
+    /// `available_parallelism`, so a caller cannot accidentally disable the
+    /// parallel path by passing a falsy value.
+    ///
+    /// Still bit-identical at every cap: the worker count only changes how the
+    /// `pending` columns are grouped, never the arithmetic inside any one of
+    /// them, and each column's `OnceLock` still runs the same
+    /// `materialize_float64_dot` accumulating `j = 0..k` in the same order.
+    pub fn materialize_dot_columns_with_workers(
+        values: &[&Self],
+        serial: bool,
+        max_workers: usize,
+    ) {
         let pending: Vec<&Self> = values
             .iter()
             .copied()
@@ -4142,10 +4221,13 @@ impl ScalarValues {
             return;
         }
 
-        let workers = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .min(8)
-            .min(pending.len());
+        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let cap = if max_workers == 0 {
+            available
+        } else {
+            max_workers
+        };
+        let workers = available.min(cap).min(pending.len());
         if workers <= 1 {
             for value in pending {
                 let _ = value.dot_float64_data();
@@ -4163,6 +4245,39 @@ impl ScalarValues {
                 });
             }
         });
+    }
+
+    /// Worker cap for the column-parallel dot materialization, from
+    /// `FP_DOT_MAX_WORKERS`; `0`/unset/unparseable means "keep the historical 8".
+    ///
+    /// br-frankenpandas-1hjgz. THE DEFAULT IS DELIBERATELY UNCHANGED AT 8. The 8
+    /// was never measured against an alternative — it predates the batch pass
+    /// ever running — and on a 32C/64T host it leaves `df.dot` at 8 threads while
+    /// the incumbent is observed using 64, so it is a prime suspect. But
+    /// "suspect" is not "measured": changing a default on an argument rather than
+    /// a number is the same move that put three mutually inconsistent `df_dot`
+    /// ratios in the ledger. This knob exists so the interleaved in-process A/B
+    /// can settle it; whichever value that A/B certifies becomes the default, in
+    /// a commit that cites the run.
+    ///
+    /// ⚠ AN EXPORTED TOGGLE IS INVISIBLE IN BENCH PROVENANCE. `6df71eae2` banked
+    /// a fully provenanced `df_dot` row (host, ELF sha, ISA, governor, thread
+    /// counts) that was measuring the SERIAL arm, because `FP_DOT_SERIAL` had
+    /// leaked into the shell — the bench JSON records everything about the run
+    /// EXCEPT the environment that chose the code path. This second toggle has
+    /// the same hazard, so it defaults to the value that needs no explanation,
+    /// and any harness invocation not deliberately varying it should pass
+    /// `env -u FP_DOT_MAX_WORKERS -u FP_DOT_SERIAL`.
+    ///
+    /// Read once and cached, for the same reason as the serial flag.
+    fn dot_materialization_worker_cap() -> usize {
+        static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *CAP.get_or_init(|| {
+            std::env::var("FP_DOT_MAX_WORKERS")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(8)
+        })
     }
 
     /// Runtime escape hatch for the column-parallel dot materialization above.
@@ -7874,25 +7989,113 @@ fn map_block_with_witness<T: Copy, F: Fn(T) -> f64>(
 /// words and no two workers touch the same `u64`. With `64 | chunk`, the value,
 /// word, and input chunk iterators all yield `ceil(n / chunk)` items, so the
 /// zips drop no work.
+/// Historical defaults for the unary witness map. Unchanged on purpose — see
+/// [`elementwise_witness_policy`].
+const ELEMENTWISE_WITNESS_DEFAULT_WORKERS: usize = 8;
+const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
+
+/// Worker cap and parallel threshold for the UNARY witness map, from
+/// `FP_ELEMENTWISE_MAX_WORKERS` / `FP_ELEMENTWISE_PAR_MIN`.
+///
+/// br-frankenpandas-h67zz. `sqrt @1M` is the worst banked vs-incumbent ratio
+/// outside `df.dot` (0.805x; fp p50 1338.84us vs pandas 1078.18us, deficit
+/// 260.66us, `thread_count_actually_used: 8`) and the ledger currently files it
+/// as "NOT source-addressable — it is the AVX2 gap". Two source-side questions
+/// are open underneath that verdict, and they pull in OPPOSITE directions:
+///
+///   * `PAR_MIN` may be too LOW here. 1M is barely above the 200_000 threshold,
+///     and `thread::scope` spawn is ~397us/8thr against a 1338us total. The
+///     interleaved A/B that retracted this hypothesis measured
+///     `apply_f64_slices_nan_tracked` — BINARY, 3 buffers, at 2M-16M — not this
+///     UNARY 2-buffer path at 1M. That entry states the limit itself, so at this
+///     size the question is untested, not refuted.
+///   * The worker cap may be too LOW. `.min(8)` on a 32C/64T host, for a
+///     bandwidth-bound map, may simply not reach memory-level saturation. The
+///     same hardcoded 8 appears 12 times across fp-columnar and fp-frame and has
+///     never been measured against an alternative anywhere.
+///
+/// Because those point opposite ways, neither can be settled by reasoning or by
+/// separate builds; it needs both knobs varied in ONE process, which is what this
+/// exists for. DEFAULTS ARE DELIBERATELY UNCHANGED: this ships the instrument,
+/// not a behavior change. Whichever settings the A/B certifies become the
+/// defaults, in a commit that cites the run.
+///
+/// ⚠ An exported toggle is invisible in bench provenance — see
+/// `ScalarValues::dot_materialization_worker_cap` and the `6df71eae2` row, where
+/// a leaked `FP_DOT_SERIAL` produced a fully provenanced ratio for the wrong arm.
+/// Harness invocations not deliberately varying these should pass
+/// `env -u FP_ELEMENTWISE_MAX_WORKERS -u FP_ELEMENTWISE_PAR_MIN`.
+///
+/// Read once and cached: this sits on every elementwise float map.
+fn elementwise_witness_policy() -> (usize, usize) {
+    static POLICY: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+    *POLICY.get_or_init(|| {
+        let workers = std::env::var("FP_ELEMENTWISE_MAX_WORKERS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(ELEMENTWISE_WITNESS_DEFAULT_WORKERS);
+        let par_min = std::env::var("FP_ELEMENTWISE_PAR_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN);
+        (workers, par_min)
+    })
+}
+
 fn par_map_slice_f64_with_witness<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
     input: &[T],
     f: F,
 ) -> (Vec<f64>, Vec<u64>, bool, bool) {
-    const PAR_MIN: usize = 200_000;
+    let (max_workers, par_min) = elementwise_witness_policy();
+    par_map_slice_f64_with_witness_with_policy(input, f, max_workers, par_min)
+}
+
+/// As [`par_map_slice_f64_with_witness`], but with the worker cap and parallel
+/// threshold passed IN rather than read from the environment.
+///
+/// br-frankenpandas-h67zz. `max_workers == 0` means "no explicit cap" and falls
+/// back to `available_parallelism`, so a caller cannot silently disable the
+/// parallel path by passing a falsy value. `par_min` is the input length at or
+/// above which the parallel arm is taken.
+///
+/// Bit-identical at every setting: `map_block_with_witness` is the only thing
+/// that computes values or witness words, each output element is written exactly
+/// once by exactly one worker, and the per-block `(all_valid, all_finite)` flags
+/// are combined with `all()`, which is associative and commutative over bools.
+/// Only the block BOUNDARIES move. The chunk is rounded up to a multiple of 64 so
+/// a validity word is never split across two workers.
+fn par_map_slice_f64_with_witness_with_policy<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
+    input: &[T],
+    f: F,
+    max_workers: usize,
+    par_min: usize,
+) -> (Vec<f64>, Vec<u64>, bool, bool) {
     let n = input.len();
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0_u64; n.div_ceil(64)];
-    let workers = std::thread::available_parallelism()
+    let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .min(8);
+        .unwrap_or(1);
+    let cap = if max_workers == 0 {
+        available
+    } else {
+        max_workers
+    };
+    let workers = available.min(cap);
 
-    if workers <= 1 || n < PAR_MIN {
+    if workers <= 1 || n < par_min {
         let (all_valid, all_finite) = map_block_with_witness(&mut out, &mut words, input, &f);
         return (out, words, all_valid, all_finite);
     }
 
-    let chunk = n.div_ceil(workers).div_ceil(64) * 64;
+    // `.max(1)` keeps `chunk` at least 64. With `par_min` a parameter rather
+    // than the old `const PAR_MIN: usize = 200_000`, a caller may now reach this
+    // line with a SHORT input — including `n == 0`, where the unguarded form
+    // computes `chunk == 0` and then divides by zero in `chunk / 64` and panics
+    // in `n.div_ceil(chunk)`. The const made that unreachable; the parameter does
+    // not. A validity word covers 64 values, so 64 is also the smallest chunk
+    // that never splits a word across two workers.
+    let chunk = n.div_ceil(workers).div_ceil(64).max(1) * 64;
     let mut flags = vec![(true, true); n.div_ceil(chunk)];
     std::thread::scope(|scope| {
         for (((out_c, words_c), in_c), flag) in out
@@ -10065,6 +10268,40 @@ impl Column {
         }
     }
 
+    /// As [`Self::from_f64_all_valid_chunks`], but taking each chunk's buffer by
+    /// pointer move instead of by copy.
+    ///
+    /// br-frankenpandas-284ul. `from_f64_all_valid_chunks` takes `Arc<[f64]>`,
+    /// and a producer holding a freshly `collect()`ed `Vec<f64>` can only reach
+    /// that type through `Arc::from(Vec)`, which allocates and memcpys. For the
+    /// 8 MB-per-call elementwise path that copy is the entire saving the
+    /// write-once form was supposed to buy, so this constructor is what makes the
+    /// lever arithmetic work out rather than cancel.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_f64_all_valid_owned_chunks(
+        chunks: Vec<(Arc<Vec<f64>>, usize, usize)>,
+        len: usize,
+    ) -> Self {
+        debug_assert_eq!(
+            chunks
+                .iter()
+                .map(|(_, _, chunk_len)| *chunk_len)
+                .sum::<usize>(),
+            len
+        );
+        let chunks: Vec<Float64Chunk> = chunks
+            .into_iter()
+            .map(|(data, start, chunk_len)| Float64Chunk::owned(data, start, chunk_len))
+            .collect();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_chunks(Arc::from(chunks), len),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     /// Build an all-valid Float64 column whose values are the dot product of
     /// all-valid finite input columns with one finite right-hand column.
     ///
@@ -10601,6 +10838,17 @@ impl Column {
     pub fn materialize_dot_columns_with_mode(columns: &[&Self], serial: bool) {
         let values: Vec<&ScalarValues> = columns.iter().map(|column| &column.values).collect();
         ScalarValues::materialize_dot_columns_with_mode(&values, serial);
+    }
+
+    /// As [`Self::materialize_dot_columns_with_mode`], but with the worker cap
+    /// passed IN. See [`ScalarValues::materialize_dot_columns_with_workers`].
+    pub fn materialize_dot_columns_with_workers(
+        columns: &[&Self],
+        serial: bool,
+        max_workers: usize,
+    ) {
+        let values: Vec<&ScalarValues> = columns.iter().map(|column| &column.values).collect();
+        ScalarValues::materialize_dot_columns_with_workers(&values, serial, max_workers);
     }
 
     pub fn as_f64_slice(&self) -> Option<&[f64]> {
@@ -45084,6 +45332,245 @@ mod tests {
                 "fixture operands sum exactly in any order, so the bit-identity \
                  test above could not detect a reassociated kernel"
             );
+        }
+
+        /// Owned and shared chunk backings must be observationally identical.
+        ///
+        /// br-frankenpandas-284ul. The `Owned` variant exists only to skip a copy;
+        /// it must change nothing a reader can see. Same values, same length, same
+        /// offset handling for a chunk that does not start at 0.
+        #[test]
+        fn owned_and_shared_chunk_backings_read_identically() {
+            let values: Vec<f64> = (0..300_usize).map(|i| 0.5 + i as f64 * 0.25).collect();
+
+            let shared = Column::from_f64_all_valid_chunks(
+                vec![
+                    (std::sync::Arc::from(values[..128].to_vec()), 0, 128),
+                    (std::sync::Arc::from(values[128..].to_vec()), 0, 172),
+                ],
+                300,
+            );
+            let owned = Column::from_f64_all_valid_owned_chunks(
+                vec![
+                    (std::sync::Arc::new(values[..128].to_vec()), 0, 128),
+                    (std::sync::Arc::new(values[128..].to_vec()), 0, 172),
+                ],
+                300,
+            );
+
+            let shared_values = shared.as_f64_slice().expect("shared chunks are typed f64");
+            let owned_values = owned.as_f64_slice().expect("owned chunks are typed f64");
+            assert_eq!(shared_values.to_vec(), values, "shared backing must round-trip");
+            assert_eq!(owned_values.to_vec(), values, "owned backing must round-trip");
+            assert_eq!(
+                shared_values.to_vec(),
+                owned_values.to_vec(),
+                "the two backings must be indistinguishable to a reader"
+            );
+
+            // A non-zero `start` must be honoured the same way by both.
+            let offset_owned =
+                Column::from_f64_all_valid_owned_chunks(vec![(std::sync::Arc::new(values.clone()), 100, 50)], 50);
+            assert_eq!(
+                offset_owned.as_f64_slice().expect("offset owned").to_vec(),
+                values[100..150].to_vec(),
+                "start offset must select the same window as the shared form"
+            );
+        }
+
+        /// NEGATIVE CASE: `Float64Chunk::owned` must NOT copy the buffer.
+        ///
+        /// br-frankenpandas-284ul. This is the whole reason the variant exists, and
+        /// it is invisible to every value-comparing test: an implementation that
+        /// wrapped the `Vec` as `Arc::from(vec.as_slice())` would produce byte-identical
+        /// output and pass every other assertion here while silently reintroducing the
+        /// 8 MB memcpy the lever exists to remove — turning a win into a regression
+        /// that would then be banked as "write-once does not pay". Pointer identity is
+        /// therefore asserted directly: the column's slice must live at the SAME address
+        /// as the buffer handed in.
+        #[test]
+        fn an_owned_chunk_is_a_pointer_move_not_a_copy() {
+            let buffer = std::sync::Arc::new((0..256_usize).map(|i| i as f64).collect::<Vec<f64>>());
+            let source_ptr = buffer.as_ptr();
+            let strong_before = std::sync::Arc::strong_count(&buffer);
+
+            // Assert against the CHUNK, not against a column's `as_f64_slice()`:
+            // `LazyAllValidFloat64Chunks` materializes through a
+            // `OnceLock<Vec<f64>>` that concatenates every chunk, so a column-level
+            // pointer comparison would fail even on a correct pointer-move
+            // implementation and would be testing the wrong thing.
+            let chunk = crate::Float64Chunk::owned(std::sync::Arc::clone(&buffer), 0, 256);
+
+            assert!(
+                std::sync::Arc::strong_count(&buffer) > strong_before,
+                "the chunk must hold a SHARED handle to the caller's buffer, not its own copy"
+            );
+            assert_eq!(
+                chunk.as_slice().as_ptr(),
+                source_ptr,
+                "the chunk's values must live at the caller's address — a different \
+                 address means the buffer was copied and the lever is a regression"
+            );
+
+            // The offset form must also borrow rather than copy. Take the expected
+            // address by SAFE indexing (`&buffer[64] as *const f64`) — no pointer
+            // arithmetic, so `#![forbid(unsafe_code)]` stays intact.
+            let offset = crate::Float64Chunk::owned(std::sync::Arc::clone(&buffer), 64, 32);
+            assert_eq!(
+                offset.as_slice().as_ptr(),
+                std::ptr::from_ref(&buffer[64]),
+                "an offset chunk must point INTO the caller's buffer, not at a copy"
+            );
+            assert_eq!(offset.as_slice(), &buffer[64..96]);
+        }
+
+        /// Every worker cap must produce the SAME bits, including the caps that
+        /// change how columns are grouped into chunks.
+        ///
+        /// br-frankenpandas-1hjgz. Raising the cap from a hard `.min(8)` to
+        /// `available_parallelism` changes `chunk = pending.len().div_ceil(workers)`
+        /// and therefore which columns share a thread. That regrouping must be
+        /// invisible in the output — it is the whole safety claim of the lever —
+        /// and 13 pending columns is deliberately coprime with most of these caps
+        /// so `div_ceil` leaves a short final chunk rather than dividing evenly.
+        #[test]
+        fn dot_batch_output_is_identical_at_every_worker_cap() {
+            let reference_cols = pending_dot_columns(24, 7, 13);
+            let reference_refs: Vec<&Column> = reference_cols.iter().collect();
+            Column::materialize_dot_columns_with_workers(&reference_refs, true, 1);
+            let reference: Vec<Vec<f64>> = reference_cols
+                .iter()
+                .map(|c| c.as_f64_slice().expect("serial reference").to_vec())
+                .collect();
+
+            // 0 means "no explicit cap" (-> available_parallelism); 64 exceeds
+            // the column count so it must clamp to `pending.len()` rather than
+            // spawn empty workers.
+            for cap in [0_usize, 1, 2, 3, 8, 13, 64] {
+                let cols = pending_dot_columns(24, 7, 13);
+                let refs: Vec<&Column> = cols.iter().collect();
+                Column::materialize_dot_columns_with_workers(&refs, false, cap);
+                for (c, (col, expected)) in cols.iter().zip(reference.iter()).enumerate() {
+                    assert_eq!(
+                        col.as_f64_slice().expect("materialized").to_vec(),
+                        *expected,
+                        "column {c} differs at worker cap {cap}"
+                    );
+                }
+            }
+        }
+
+        /// Every (workers, par_min) policy must produce identical values, identical
+        /// witness words, and identical `all_valid` / `all_finite` flags.
+        ///
+        /// br-frankenpandas-h67zz. The policy knobs exist to let one process A/B
+        /// the `sqrt @1M` 0.805x loss (spawn-overhead vs worker-cap, which point
+        /// opposite ways). That A/B is only meaningful if every setting computes
+        /// the SAME answer, so this pins it across settings that change how blocks
+        /// are cut — including caps far above and below the block count.
+        ///
+        /// The fixture deliberately contains NaN and infinities: `all_valid` and
+        /// `all_finite` are per-block flags combined with `all()`, so a fixture of
+        /// ordinary finite numbers would leave both flags trivially true and prove
+        /// nothing about the combination.
+        #[test]
+        fn elementwise_witness_is_identical_across_worker_and_par_min_policies() {
+            // 4096 crosses several 64-value validity words; the NaN/inf are placed
+            // at indices that land in different words and different chunks.
+            let input: Vec<f64> = (0..4096_usize)
+                .map(|i| match i {
+                    77 => f64::NAN,
+                    1500 => f64::INFINITY,
+                    3999 => f64::NEG_INFINITY,
+                    _ => 0.25 + (i as f64) * 0.5,
+                })
+                .collect();
+            let square_root = |x: f64| x.sqrt();
+
+            let (ref_out, ref_words, ref_valid, ref_finite) =
+                crate::par_map_slice_f64_with_witness_with_policy(&input, square_root, 1, 1);
+
+            for workers in [0_usize, 1, 2, 3, 8, 64, 1024] {
+                for par_min in [0_usize, 1, 64, 1000, 4096, 200_000] {
+                    let (out, words, valid, finite) =
+                        crate::par_map_slice_f64_with_witness_with_policy(
+                            &input,
+                            square_root,
+                            workers,
+                            par_min,
+                        );
+                    assert_eq!(
+                        out.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                        ref_out.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                        "values differ at workers={workers} par_min={par_min}"
+                    );
+                    assert_eq!(
+                        words, ref_words,
+                        "witness words differ at workers={workers} par_min={par_min}"
+                    );
+                    assert_eq!(
+                        (valid, finite),
+                        (ref_valid, ref_finite),
+                        "flags differ at workers={workers} par_min={par_min}"
+                    );
+                }
+            }
+        }
+
+        /// NEGATIVE CASE: a short input under an aggressive `par_min` must not panic.
+        ///
+        /// br-frankenpandas-h67zz. `PAR_MIN` used to be `const 200_000`, which made
+        /// the parallel arm unreachable for tiny inputs. As a PARAMETER it is
+        /// reachable, and the unguarded chunk computation yields `chunk == 0` at
+        /// `n == 0` — a divide-by-zero in `chunk / 64` and a panic in
+        /// `n.div_ceil(chunk)`. Lengths 0 and 1 are the two that the old constant
+        /// could never deliver here, so they are exactly what a naive
+        /// parameterization breaks on.
+        #[test]
+        fn a_short_input_under_an_aggressive_par_min_does_not_panic() {
+            for len in [0_usize, 1, 2, 63, 64, 65] {
+                let input: Vec<f64> = (0..len).map(|i| 1.0 + i as f64).collect();
+                let (out, words, valid, finite) =
+                    crate::par_map_slice_f64_with_witness_with_policy(
+                        &input,
+                        |x: f64| x.sqrt(),
+                        0,
+                        0,
+                    );
+                assert_eq!(out.len(), len, "one output per input at len={len}");
+                assert_eq!(
+                    words.len(),
+                    len.div_ceil(64),
+                    "one validity word per 64 values at len={len}"
+                );
+                assert!(valid, "no missing inputs at len={len}");
+                assert!(finite, "no non-finite outputs at len={len}");
+            }
+        }
+
+        /// NEGATIVE CASE: a cap of 0 must mean "uncapped", never "no workers".
+        ///
+        /// br-frankenpandas-1hjgz. The obvious wrong implementation is
+        /// `available.min(max_workers)`, which at `max_workers = 0` yields 0
+        /// workers, falls through the `workers <= 1` guard and quietly runs
+        /// SERIAL forever — a performance regression that no correctness test
+        /// would ever catch, because the output stays perfectly right. This
+        /// asserts the values are still produced under a 0 cap; the guard against
+        /// the silent-serial reading is that 0 is documented and tested as an
+        /// alias for `available_parallelism`, not as a worker count.
+        #[test]
+        fn a_zero_worker_cap_means_uncapped_not_serial() {
+            let cols = pending_dot_columns(12, 5, 9);
+            let refs: Vec<&Column> = cols.iter().collect();
+            Column::materialize_dot_columns_with_workers(&refs, false, 0);
+            for (c, col) in cols.iter().enumerate() {
+                let values = col.as_f64_slice().expect("materialized under a 0 cap");
+                assert_eq!(values.len(), 12, "column {c} has one value per row");
+                assert!(
+                    values.iter().all(|v| v.is_finite()),
+                    "column {c} must be finite"
+                );
+            }
         }
 
         #[test]
