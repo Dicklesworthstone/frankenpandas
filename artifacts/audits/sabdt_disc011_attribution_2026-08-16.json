@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "br-frankenpandas-sabdt. ONE fixture, named explicitly, because bulk",
+    "regeneration is forbidden and this pin is load-bearing evidence.",
+    "",
+    "fp_p2d_017_column_dtype_check_int_only_hardened pins expected_dtype",
+    "'int64' for the payload [int64 1, null, int64 3]. MEASURED, live pandas",
+    "2.2.3: NO construction of that payload yields 'int64'. The oracle's own",
+    "chooser (series_dtype_for_payload_values maps {int64}+null -> 'Int64')",
+    "gives the NULLABLE extension 'Int64'; plain inference gives 'float64'.",
+    "The pinned value is reachable from neither, so it is stale rather than a",
+    "decision anyone made.",
+    "",
+    "This re-bank makes the corpus assert MORE of the extension behaviour, not",
+    "less. It is the opposite of the forbidden regenerate-to-float64 move that",
+    "DISC-011 warns against, and the opposite of regenerating to force green:",
+    "the fixture is green TODAY only because the harness builds a plain",
+    "DType::Int64 whose name() coincidentally matches the stale pin, and it",
+    "goes RED the moment the br-frankenpandas-vprpg payload-dtype chooser",
+    "lands. Re-banking it is a precondition for that chooser, not a way to",
+    "avoid its consequences.",
+    "",
+    "The assertion was UNVERIFIABLE until br-frankenpandas-62d1s (7ebf937c1)",
+    "implemented the oracle's column_dtype_check op — before that the oracle",
+    "could not run the operation at all, which is how a pin nothing produced",
+    "survived in the corpus."
+  ],
+  "attributions": {
+    "fp_p2d_017_column_dtype_check_int_only_hardened.json": {
+      "divergence": "DISC-011",
+      "bead": "br-frankenpandas-sabdt",
+      "agent": "CalmMink",
+      "date": "2026-08-16",
+      "moved_key": "expected_dtype",
+      "from": "int64",
+      "to": "Int64",
+      "evidence": "live pandas 2.2.3: pd.Series([1, None, 3], dtype='Int64').dtype -> Int64; pd.Series([1, None, 3]).dtype -> float64; neither is int64"
+    }
+  },
+  "retirements": {}
+}
