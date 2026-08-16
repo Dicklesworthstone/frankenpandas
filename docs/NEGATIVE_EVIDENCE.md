@@ -25075,3 +25075,76 @@ windows close often but not always.
 three ELFs and loads 6→31 now agree within 10%.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run12_load11_elf_ad74e170.json`
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oarkz) — the `df_dot @100k` win SURVIVES the same replication that killed the 1M row: 4.513x refused only on the incumbent's null, best-vs-best 4.955 — corroboration, not a new claim
+
+Having retracted my own `@1M` crossing an hour ago, I applied the identical test
+to my largest surviving claim rather than leaving it unexamined. Same ELF
+`4a89472f…`, same harness `6d884360…`, same pandas artifact `c10b13e6…`, 31 rounds
+(run 1 used 21). `uptime` read **11.78** immediately before launch; the fleet then
+spiked hard mid-run, **loadavg 15.80 at the start and 101.66 at the end** — three
+times oversubscribed on a 32-core box, the worst conditions any row in this ledger
+has been measured under.
+
+| run | load (start -> end) | FP min / p50 / max / cv | pandas min / p50 / max / cv | gated | effect CI | best-vs-best |
+|---|---|---|---|---:|---|---:|
+| 1 | 12.15 -> 54.85 | 1.4941 / 1.6568 / 1.9031 / 4.7% | 6.1058 / 12.1824 / 18.0418 / 22.1% | **7.255x** CERTIFIED | [6.948, 8.126] | 4.087 |
+| 2 | 15.80 -> 101.66 | 2.2142 / 3.6700 / 6.3856 / 24.4% | 10.9708 / 16.5231 / 34.3262 / 24.5% | 4.513x refused | [3.660, 5.274] | **4.955** |
+
+**THIS IS WHAT A ROBUST ROW LOOKS LIKE, AND IT IS NOT WHAT THE 1M ROW LOOKED
+LIKE.** Run 2 passed TWO of the three clauses — its effect CI [3.660, 5.274]
+excludes unity and exceeds twice the null margin (claim log-effect 1.5071 against
+a required 0.1679, cleared by 9x). It was refused on ONE clause only: pandas' A/A
+median 1.032826, 3.3% off unity, under a load of 101. Compare the retracted 1M
+replication, whose effect CI was [0.851, 1.154] — straddling unity — and whose
+best-vs-best said 0.509. The two failures are not the same kind of failure: one
+row lost its claim, this one lost only its certificate.
+
+**Best-vs-best AGREED with the gate here, which is the point of computing it.**
+4.087 in run 1 and **4.955** in run 2 — the fastest FP sample beats the fastest
+pandas sample by 4-5x at this shape in both runs, at loads 12 and 101. That is the
+statistic that exposed the 1M row as noise; applied here it confirms rather than
+contradicts. **`df_dot @100k = 7.255x` stands as banked.**
+
+**I am also refining my own mechanism claim from the retraction entry, because
+this run bounds it.** I wrote that FP's synchronization-free column parallelism
+"holds cv 3.9-5.7% while the incumbent swings 22-29%". True over loads 6-58. At
+load 101 FP's cv is **24.4%** and its p50 degrades 2.2x (1.6568 -> 3.6700 ms), so
+the graceful-degradation property is real but BOUNDED: it survives oversubscription
+by ~2x and not by ~3x. The incumbent degraded less in relative terms at this shape
+(12.18 -> 16.52 ms, 1.36x), which is the opposite of the 1M behaviour and worth
+noting rather than smoothing over — at `dim = 316` FP uses 15 threads and pandas
+64, so a 3x-oversubscribed box has proportionally more to take from the arm that
+was already getting a full core each.
+
+**A/A null control (same invocation):** run 2, 31 balanced-square rounds:
+FrankenPandas median ratio 0.991539 — inside the 2%-of-unity limit even at load
+101; pandas median ratio 1.032826 — outside it, which is the whole reason this
+run is not a second certificate. Run 1's nulls were 1.005086 and 1.013059, both
+inside.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228 (78709880 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench-sse2
+
+**Campaign result class:** `incumbent-win`.
+
+The class describes the claim this entry corroborates — run 1's certified
+7.255x — not run 2, which is refused and banks nothing.
+
+**Median-CI decision:** median effect 7.255x in the certified run, CI
+[6.94768938, 8.12566767], claim log-effect 1.98164024 over the required
+0.29636797. Run 2's median effect 4.513x, CI [3.6604, 5.2736], claim log-effect
+1.5071 over the required 0.1679 — both intervals sit far above unity, which is
+what makes this shape's win robust rather than boundary-dependent.
+
+**CV role:** provenance only; CV had no vote.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f invocation_id=vs-pandas-20260816T192240.347788Z-pid1777824 measured_ratio=7.255x
+
+**No new claim is banked from this run** — it is refused and it stays refused. Its
+value is that the `@100k` win has now been measured twice, on one ELF, at loads
+differing by 8x, agreeing on both the gated median (7.255x, 4.513x) and the
+best-vs-best (4.087, 4.955), with FP's own A/A null clean in both. Invocation
+`vs-pandas-20260816T195031.918655Z-pid2678892`, git `1f0416555`.
+
+**Artifacts:** `artifacts/bench/oarkz_df_dot_100k_thinkstation1_2026-08-16_replication_run2.json`
