@@ -110445,6 +110445,66 @@ mod tests {
         let rfind = s.str().rfind("a").unwrap();
         assert_eq!(rfind.column().dtype(), DType::Float64);
         assert_eq!(rfind.column().values()[1], Scalar::Null(NullKind::NaN));
+
+        // `str.encode` BELONGS IN THIS TEST, not with the object-output
+        // accessors, and br-frankenpandas-q0ktc filed it in the wrong group.
+        // That bead measured pandas' `s.str.encode('utf-8')`, which yields
+        // BYTES and preserves a supplied None. FrankenPandas' `encode` is a
+        // different operation: it returns each element's UTF-8 BYTE LENGTH
+        // through `apply_str_int` — the very helper `len` and `rfind` above
+        // use — so lufpu's rule puts it on the int/float side, where the
+        // missing is NaN and the column promotes to Float64.
+        let encoded = s.str().encode("utf-8").unwrap();
+        assert_eq!(encoded.column().dtype(), DType::Float64);
+        assert_eq!(encoded.column().values()[1], Scalar::Null(NullKind::NaN));
+        assert_eq!(encoded.column().values()[0], Scalar::Float64(7.0));
+    }
+
+    /// `str.findall` carries BOTH nywa8 rules in one object-output column, and
+    /// br-frankenpandas-q0ktc read that as a defect when it is the rule.
+    ///
+    /// FrankenPandas' `findall` joins each element's matches with `sep`; an
+    /// EMPTY match list has no string to produce, so the missing there is
+    /// INVENTED by the accessor (Rule 1 -> NaN). A None that was in the INPUT
+    /// is data an object column can store, so it survives (Rule 2 -> None).
+    /// The two land in the same column, which is what made the oracle's output
+    /// look "internally inconsistent" on that bead — it is not; it is correct.
+    ///
+    /// MEASURED against the corpus payload of
+    /// fp_p2d_288_series_str_findall_null_hardened, pattern `[a-z]+`:
+    ///   "hello world" -> "hello,world"   matched
+    ///   None          -> None            SUPPLIED, preserved  (Rule 2)
+    ///   "123"         -> NaN             no match, INVENTED   (Rule 1)
+    ///   ""            -> NaN             no match, INVENTED   (Rule 1)
+    #[test]
+    fn str_findall_invents_nan_for_no_match_but_keeps_a_supplied_none_q0ktc() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("123".into()),
+                Scalar::Utf8(String::new()),
+            ],
+        )
+        .unwrap();
+
+        let out = s.str().findall("[a-z]+", ",").unwrap();
+        assert_eq!(out.values()[0], Scalar::Utf8("hello,world".to_owned()));
+        assert_eq!(
+            out.values()[1],
+            Scalar::Null(NullKind::Null),
+            "the input's own None is DATA in an object column and must survive"
+        );
+        for idx in [2, 3] {
+            assert_eq!(
+                out.values()[idx],
+                Scalar::Null(NullKind::NaN),
+                "no match at {idx} is a gap findall INVENTS, so it is NaN, not \
+                 the generic Null marker"
+            );
+        }
     }
 
     #[test]
