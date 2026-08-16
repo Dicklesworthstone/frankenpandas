@@ -25834,3 +25834,64 @@ run still poisons it, and the start/end loadavg on every banked row remains the
 right record. What it retracts is the idea that you can establish stability
 *before* committing to a run on this fleet. You cannot: the observation is not
 free.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oxv4u) — I WAS WRONG ABOUT "THE FLEET WOKE UP": the mid-run load spikes are my own measurement, and what predicts certification is the INCUMBENT'S THREAD COUNT, not ambient load — REJECT the quiet-window strategy for 64-thread shapes
+
+`uptime` read **13.75 / 16.07 / 20.99** — converged and low, the best-conditioned
+window of the session. The AVX2 `@100k` certification attempt was refused anyway
+(8.893x, pandas A/A null **1.1518**, 15% off unity), and loadavg went 13.45 ->
+58.31 in the 80 seconds the run took. That is the fifth consecutive attempt with
+the identical signature, which finally made me suspect the cause was me.
+
+**CONTROL EXPERIMENT.** Same harness, same host, but `df_dot @10k`, where the FP
+arm uses 1 worker and the pandas arm 2 threads, launched deliberately at an
+ambient loadavg of **42.45**:
+
+| run | arms' threads | ambient load before -> after | pandas A/A null | pandas cv | verdict |
+|---|---|---|---:|---:|---|
+| `@100k` AVX2 | FP 15, pandas 64 | 13.45 -> **58.31** | 1.1518 | 30.0% | refused |
+| `@10k` control | FP 1, pandas 2 | 42.45 -> **37.79** | **1.0039** | 10.4% | **SLOWER 0.552, CERTIFIED** |
+
+The low-thread run did not raise the load at all — it FELL, by ordinary decay —
+and it certified cleanly at an ambient load three times higher than the window
+the other run failed in. **The spike scales with the arms' thread counts, so the
+"fleet woke up mid-run" narrative in my entries earlier today was wrong. A
+64-thread OpenBLAS arm plus FrankenPandas' workers is 80-127 runnable threads on
+a 32-core box; that IS the spike.** I am correcting my own attributions rather
+than leaving them to be read as fleet behaviour.
+
+**THE REAL PREDICTOR, over all 31 `df_dot` rows measured on this host today:**
+
+| incumbent arm | rows | certified | mean pandas A/A null deviation | mean pandas cv |
+|---|---:|---:|---:|---:|
+| pandas <= 4 threads (`dim = 100`) | 5 | **3 (60%)** | **0.0106** | **10.5%** |
+| pandas >= 32 threads (`dim >= 316`) | 26 | 6 (23%) | 0.0436 | 32.9% |
+
+**Counted mechanism:** the incumbent's null deviation is 4.1x larger and its cv
+3.1x larger when its own arm runs 64 threads on 32 cores. A 64-thread GEMM's two
+A/A arms interfere with each other's turbo state, cache and scheduling — the
+instability is INTERNAL to the incumbent's threading, and no choice of window
+removes it. Ambient load, by contrast, did not stop a 2-thread pandas arm
+certifying at loadavg 42.
+
+**Decision: REJECT the quiet-window strategy for the `dim >= 316` shapes.**
+Waiting for a converged window is not merely inefficient there, it cannot work:
+five attempts, three of them in genuinely converged windows, all refused on the
+same clause for a reason internal to the incumbent. The AVX2 `@100k` row is not
+banked. What stands from it is FrankenPandas-side only — FP min 1.2154 ms, p50
+1.3670, cv 5.3%, A/A null 0.998844 at 15 workers, against the baseline ELF's 1.3964
+min in the same shape, i.e. the 1.175x ISA effect already banked.
+
+**A/A null control (same invocation):** AVX2 `@100k`, 21 rounds, FrankenPandas
+median ratio 0.998844 (inside 2%) and pandas 1.151800 (outside, by 15%); `@10k`
+control, 21 rounds, FrankenPandas 1.002787 and pandas 1.003903, BOTH inside.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=76661ac389c685da64e582aecd53aacb398c3dbe3557c6fd724847f2d6561e9f (78866952 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench-avx2fma
+
+**What would actually make those shapes certifiable is a harness-contract
+question, not an agent's call** — pinning the incumbent's thread count
+(`OMP_NUM_THREADS`) would stabilise its null but changes what "pandas" means in
+every banked row. Filed as br-frankenpandas-633fb with this evidence. Until then,
+`dim >= 316` rows should be read through the best-vs-best diagnostic, which is
+what the minima were added for.
