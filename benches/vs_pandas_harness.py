@@ -3117,7 +3117,22 @@ def cpu_mask_spec(cpus: list[int]) -> str:
 
 
 def parse_cpu_spec(spec: str) -> list[int]:
-    """Inverse of `cpu_mask_spec`, for --pin-cpus."""
+    """Inverse of `cpu_mask_spec`, for --pin-cpus.
+
+    Also accepts the literal `one-per-core`, which resolves to the lowest logical
+    CPU of each physical core. br-frankenpandas-633fb: the DEFAULT mask on this
+    host folds SMT — 64 logical over 32 physical, `one_thread_per_core: false` —
+    so an arm can be placed on a sibling of a core the other arm is using. A
+    caller who wants that impossible needs a portable way to ask for it, and
+    hand-writing `0-31` is exactly the non-portable assumption that put both of
+    frankenfs' arms on one core.
+    """
+    if spec.strip() == "one-per-core":
+        topo = cpu_topology()
+        first: dict[int, int] = {}
+        for cpu in sorted(topo):
+            first.setdefault(topo[cpu], cpu)
+        return sorted(first.values())
     cpus: set[int] = set()
     for chunk in spec.split(","):
         chunk = chunk.strip()
@@ -3164,7 +3179,159 @@ def arm_core_placement() -> dict[str, Any]:
         "cpus": len(mask),
         "mask_source": ARM_CPU_MASK_SOURCE,
         "same_cores_ensured_by": mechanism,
+        "mask_composition": mask_composition(mask),
     }
+
+
+def cpu_topology() -> dict[int, int]:
+    """cpu -> physical core_id. Empty when the kernel does not expose topology."""
+    mapping: dict[int, int] = {}
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return mapping
+    for cpu in cpus:
+        try:
+            with open(
+                f"/sys/devices/system/cpu/cpu{cpu}/topology/core_id", encoding="utf-8"
+            ) as handle:
+                mapping[cpu] = int(handle.read().strip())
+        except (OSError, ValueError):
+            continue
+    return mapping
+
+
+def mask_composition(mask: list[int]) -> dict[str, Any]:
+    """How many PHYSICAL cores a logical CPU mask actually buys.
+
+    br-frankenpandas-633fb. frankenfs found both its arms sharing ONE physical
+    core. The trap is that CPU numbering is not portable: on this host siblings
+    are `n` and `n+32`, so `0-7` is eight distinct cores — but on a host numbered
+    `0,1 = one core` the same spec is four cores with both arms fighting over each
+    one's execution units. A mask must therefore be reported by its PHYSICAL
+    composition, never by its logical width.
+    """
+    topo = cpu_topology()
+    if not topo:
+        return {"logical": len(mask), "physical_cores": None, "topology_available": False}
+    cores: dict[int, list[int]] = {}
+    for cpu in mask:
+        core = topo.get(cpu)
+        if core is not None:
+            cores.setdefault(core, []).append(cpu)
+    folded = {core: cpus for core, cpus in cores.items() if len(cpus) > 1}
+    return {
+        "logical": len(mask),
+        "physical_cores": len(cores),
+        "smt_folded_cores": len(folded),
+        "smt_sibling_pairs": sorted(sorted(v) for v in folded.values())[:8],
+        "one_thread_per_core": not folded,
+        "topology_available": True,
+    }
+
+
+def self_thread_cpus() -> list[int]:
+    """CPUs this process's own threads last ran on, from /proc/self/task/*/stat.
+
+    br-frankenpandas-633fb. Exact for the pandas arm, which runs INSIDE this
+    process. The /proc/stat delta method cannot be exact on a shared box — it
+    reports the busiest CPUs during a slot, which may belong to another tenant,
+    and a --pin-cpus 0-31 run proved it by attributing cpus 51 and 39 to arms that
+    could not possibly have run there.
+    """
+    cpus: list[int] = []
+    try:
+        for entry in os.listdir("/proc/self/task"):
+            try:
+                with open(f"/proc/self/task/{entry}/stat", encoding="utf-8") as handle:
+                    fields = handle.read().rsplit(") ", 1)[-1].split()
+                cpus.append(int(fields[36]))
+            except (OSError, ValueError, IndexError):
+                continue
+    except OSError:
+        return []
+    return sorted(set(cpus))
+
+
+def cpu_busy_snapshot() -> dict[int, int]:
+    """Per-CPU busy jiffies from /proc/stat (user+nice+system+irq+softirq+steal)."""
+    busy: dict[int, int] = {}
+    try:
+        with open("/proc/stat", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.startswith("cpu") or line.startswith("cpu "):
+                    continue
+                parts = line.split()
+                try:
+                    cpu = int(parts[0][3:])
+                except ValueError:
+                    continue
+                fields = [int(v) for v in parts[1:9]]
+                # user, nice, system, [idle], [iowait], irq, softirq, steal
+                busy[cpu] = fields[0] + fields[1] + fields[2] + sum(fields[5:8])
+    except (OSError, ValueError, IndexError):
+        return {}
+    return busy
+
+
+def summarize_arm_cpus(
+    busy_by_arm: dict[str, dict[int, int]],
+    threads_by_arm: dict[str, int] | None,
+) -> dict[str, Any]:
+    """Which CPUs each arm actually ran on, and whether the arms collided.
+
+    br-frankenpandas-633fb. Attribution is by /proc/stat busy-jiffy delta across
+    each arm's slots, so it reports the CPUs MOST ACTIVE while that arm ran. On a
+    shared host those deltas include other tenants — this is an attribution, not a
+    thread census — but it is enough to answer the two questions that matter: did
+    the arms run on the same physical cores, and did either arm land on both SMT
+    siblings of one core while the other sat elsewhere.
+    """
+    topo = cpu_topology()
+    mask = set(arm_cpu_mask())
+    out: dict[str, Any] = {
+        "attribution": (
+            "busiest CPUs WITHIN THE ARM MASK by /proc/stat delta across the arm's "
+            "slots; a proxy on a shared host, exact only for arms whose mask "
+            "excludes other tenants"
+        ),
+        "confined_to_mask": cpu_mask_spec(sorted(mask)),
+    }
+    picked: dict[str, list[int]] = {}
+    for arm, deltas in busy_by_arm.items():
+        if not deltas:
+            continue
+        k = max(1, int((threads_by_arm or {}).get(arm, 1)))
+        # An arm cannot have run outside the mask it was confined to; without this
+        # the busiest CPU on the box wins even when it belongs to another tenant.
+        in_mask = {cpu: d for cpu, d in deltas.items() if not mask or cpu in mask}
+        ranked = sorted(in_mask.items(), key=lambda kv: kv[1], reverse=True)
+        top = [cpu for cpu, delta in ranked[:k] if delta > 0]
+        picked[arm] = top
+        cores = sorted({topo[cpu] for cpu in top if cpu in topo})
+        out[arm] = {
+            "threads": k,
+            "cpus": top[:16],
+            "physical_cores": len(cores) if topo else None,
+            "cores": cores[:16] if topo else None,
+        }
+    exact = self_thread_cpus()
+    if exact:
+        # NOT "the pandas arm's cpus": these are every thread of the harness
+        # process, timing code and interpreter included. Named for what it is.
+        out["harness_process_thread_cpus"] = [c for c in exact if not mask or c in mask][:16]
+    if len(picked) == 2 and topo:
+        (arm_a, cpus_a), (arm_b, cpus_b) = picked.items()
+        cores_a = {topo[c] for c in cpus_a if c in topo}
+        cores_b = {topo[c] for c in cpus_b if c in topo}
+        shared_cores = sorted(cores_a & cores_b)
+        out["arms_shared_physical_cores"] = shared_cores[:16]
+        out["arms_shared_any_core"] = bool(shared_cores)
+        out["arms_shared_logical_cpus"] = sorted(set(cpus_a) & set(cpus_b))[:16]
+        out["arms_on_smt_siblings"] = bool(
+            shared_cores and not (set(cpus_a) & set(cpus_b))
+        )
+    return out
 
 
 def host_state_snapshot() -> dict[str, Any]:
@@ -3328,10 +3495,12 @@ def run_balanced_square_cell(
     rounds_artifact = []
     # br-frankenpandas-633fb: sampled BETWEEN slots, never inside a timed region.
     host_state_samples: list[tuple[str, dict[str, Any]]] = []
+    busy_by_arm: dict[str, dict[int, int]] = {"frankenpandas": {}, "pandas": {}}
     for round_index in range(rounds):
         pandas_round: list[TimingResult] = []
         fp_round: list[TimingResult] = []
         for slot_index, arm in enumerate(BALANCED_SQUARE):
+            busy_before = cpu_busy_snapshot()
             if arm == "A":
                 result, _ = run_pandas_workload(
                     category,
@@ -3355,6 +3524,13 @@ def run_balanced_square_cell(
                 )
                 fp_slots.append(result)
                 fp_round.append(result)
+            # Which CPUs were busiest while THIS arm ran, accumulated per arm.
+            arm_name = "pandas" if arm == "A" else "frankenpandas"
+            busy_after = cpu_busy_snapshot()
+            for cpu, after in busy_after.items():
+                delta = after - busy_before.get(cpu, after)
+                if delta > 0:
+                    busy_by_arm[arm_name][cpu] = busy_by_arm[arm_name].get(cpu, 0) + delta
             # AFTER the slot, tagged with the arm that just ran. Sampling BEFORE
             # it (as this did until br-frankenpandas-633fb's own audit) reads the
             # clock state left by the PREVIOUS slot, which in ABBAABBA is usually
@@ -3419,7 +3595,8 @@ def run_balanced_square_cell(
             "host_state": summarize_host_state(
                 host_state_samples + [("final", host_state_snapshot())],
                 observed_threads,
-            ),
+            )
+            | {"arm_cpu_attribution": summarize_arm_cpus(busy_by_arm, observed_threads)},
         },
     )
 
@@ -3629,6 +3806,73 @@ def _host_state_self_test() -> None:
         raise RuntimeError("equal busy-core clocks must read as one window")
     if idle_skew["host_median_mhz_after_arm"] != {"frankenpandas": 1500.0, "pandas": 3950.0}:
         raise RuntimeError("the box-median must still be recorded, separately labelled")
+
+    # SMT TRAP: a logical mask says nothing about physical cores, and the
+    # numbering is not portable. frankenfs found BOTH arms on one physical core.
+    topo = cpu_topology()
+    if topo:
+        composition = mask_composition(sorted(topo)[:8])
+        if composition["physical_cores"] is None or composition["physical_cores"] < 1:
+            raise RuntimeError("a mask must report its physical-core count")
+        if composition["logical"] != 8:
+            raise RuntimeError("mask composition must report the logical width too")
+        # This host numbers siblings n and n+32, so 0-7 is eight distinct cores.
+        # Assert the FOLDED case is detected rather than the host's happy accident.
+        siblings = [cpu for cpu, core in topo.items() if core == topo[sorted(topo)[0]]]
+        if len(siblings) > 1:
+            folded = mask_composition(sorted(siblings))
+            if folded["one_thread_per_core"]:
+                raise RuntimeError("a mask of two SMT siblings is NOT one thread per core")
+            if folded["physical_cores"] != 1 or folded["smt_folded_cores"] != 1:
+                raise RuntimeError(f"sibling folding mis-detected: {folded}")
+
+    # one-per-core must resolve to EXACTLY one logical CPU per physical core.
+    if topo:
+        opc = parse_cpu_spec("one-per-core")
+        composition = mask_composition(opc)
+        if not composition["one_thread_per_core"]:
+            raise RuntimeError("one-per-core must not fold SMT siblings")
+        if composition["physical_cores"] != len(opc):
+            raise RuntimeError("one-per-core must yield one CPU per physical core")
+        if composition["physical_cores"] != len(set(topo.values())):
+            raise RuntimeError("one-per-core must cover every physical core once")
+
+    # ARM CPU ATTRIBUTION: the two arms colliding on one core must be visible.
+    collided = summarize_arm_cpus(
+        {"frankenpandas": {0: 900, 1: 5}, "pandas": {0: 850, 2: 4}},
+        {"frankenpandas": 1, "pandas": 1},
+    )
+    if collided["frankenpandas"]["cpus"] != [0] or collided["pandas"]["cpus"] != [0]:
+        raise RuntimeError("attribution must pick the busiest CPU per arm")
+    if topo and not collided["arms_shared_any_core"]:
+        raise RuntimeError("two arms on cpu0 must be reported as sharing a core")
+    if collided["arms_shared_logical_cpus"] != [0]:
+        raise RuntimeError("the shared logical CPU must be named")
+
+    # NEGATIVE CASE from a real failure: a busy CPU OUTSIDE the mask must never
+    # be attributed to an arm. A --pin-cpus 0-31 run reported cpus 51 and 39 —
+    # other tenants — before this constraint existed.
+    global ARM_CPU_MASK
+    saved_mask = ARM_CPU_MASK
+    try:
+        ARM_CPU_MASK = [0, 1, 2, 3]
+        outside = summarize_arm_cpus(
+            {"frankenpandas": {51: 99999, 2: 10}, "pandas": {39: 99999, 3: 10}},
+            {"frankenpandas": 1, "pandas": 1},
+        )
+        if outside["frankenpandas"]["cpus"] != [2] or outside["pandas"]["cpus"] != [3]:
+            raise RuntimeError("attribution must stay inside the arm mask")
+        if outside["confined_to_mask"] != "0-3":
+            raise RuntimeError("the row must record the mask attribution was confined to")
+    finally:
+        ARM_CPU_MASK = saved_mask
+
+    apart = summarize_arm_cpus(
+        {"frankenpandas": {0: 900}, "pandas": {5: 900}},
+        {"frankenpandas": 1, "pandas": 1},
+    )
+    if topo and apart["arms_shared_any_core"]:
+        raise RuntimeError("arms on different cores must not read as sharing")
 
     # CORE PLACEMENT: the row must SAY how both arms were kept comparable.
     placement = summarize_host_state([])["arm_core_placement"]
