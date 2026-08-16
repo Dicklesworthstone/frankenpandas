@@ -3446,15 +3446,51 @@ proptest! {
 // Property: DType coercion invariants (frankenpandas-x2n)
 // ---------------------------------------------------------------------------
 
+/// Every `DType` FrankenPandas has. Kept exhaustive by
+/// `arb_dtype_covers_every_dtype_nv8az`, which will not COMPILE if a variant is
+/// added without being listed here. (br-frankenpandas-nv8az)
+const ALL_DTYPES: [fp_types::DType; 14] = [
+    fp_types::DType::Null,
+    fp_types::DType::Bool,
+    fp_types::DType::BoolNullable,
+    fp_types::DType::Int64,
+    fp_types::DType::Int64Nullable,
+    fp_types::DType::Float64,
+    fp_types::DType::Float64Nullable,
+    fp_types::DType::Utf8,
+    fp_types::DType::Categorical,
+    fp_types::DType::Timedelta64,
+    fp_types::DType::Datetime64,
+    fp_types::DType::Period,
+    fp_types::DType::Interval,
+    fp_types::DType::Sparse,
+];
+
 /// Generate an arbitrary DType.
+///
+/// THIS USED TO EMIT 5 OF 14, and every property fed by it was therefore blind
+/// to exactly the half of the lattice under active change — `BoolNullable`,
+/// `Int64Nullable`, `Float64Nullable`, plus `Categorical`, `Timedelta64`,
+/// `Datetime64`, `Period`, `Interval` and `Sparse`.
+///
+/// That is not a theoretical gap. br-frankenpandas-qkqfb had to flip
+/// `common_dtype(Int64Nullable, Float64)` and `common_dtype(BoolNullable,
+/// Float64)` as ONE atomic change, because flipping either alone breaks
+/// associativity:
+///
+/// ```text
+///   (BoolNullable v Int64) v Float64 = Int64Nullable v Float64 = Float64Nullable
+///   BoolNullable v (Int64  v Float64) = BoolNullable  v Float64 = Float64
+/// ```
+///
+/// `prop_common_dtype_transitive` IS nominally that property. It would have run
+/// its 500 cases and passed, because it could never draw either operand. The
+/// break was caught only by `fp_types`' own exhaustive
+/// `common_dtype_lattice_axioms_be314`. A property test that cannot fail is a
+/// gate that reports the absence of work as the success of work.
+/// (br-frankenpandas-nv8az)
 fn arb_dtype() -> impl Strategy<Value = fp_types::DType> {
-    prop_oneof![
-        Just(fp_types::DType::Null),
-        Just(fp_types::DType::Bool),
-        Just(fp_types::DType::Int64),
-        Just(fp_types::DType::Float64),
-        Just(fp_types::DType::Utf8),
-    ]
+    proptest::sample::select(&ALL_DTYPES[..])
 }
 
 proptest! {
@@ -12318,6 +12354,124 @@ proptest! {
                     seen_missing = true;
                 }
             }
+        }
+    }
+}
+
+/// br-frankenpandas-nv8az: keep `ALL_DTYPES` — and therefore `arb_dtype()` —
+/// exhaustive over `fp_types::DType`.
+///
+/// The generator it feeds emitted 5 of 14 variants for long enough that
+/// `prop_common_dtype_transitive` sat green through an atomic two-arm lattice
+/// change it was nominally the guard for. The failure mode is silence: adding a
+/// `DType` does not break anything here, it just quietly narrows every property
+/// in this file. So the guard is a MATCH, not a count — `dtype_variant_name`
+/// names every variant, and adding one to the enum makes this file stop
+/// COMPILING until `ALL_DTYPES` is extended too.
+// Deliberately NOT `#[cfg(test)]`: this is already an integration-test target,
+// and a `cfg` that turned out not to be set would make the guard disappear
+// silently — which is the same class of failure it exists to prevent.
+mod dtype_generator_exhaustiveness_nv8az {
+    use fp_types::DType;
+
+    use super::ALL_DTYPES;
+
+    /// Non-exhaustive matches are a hard error, so a new `DType` variant breaks
+    /// the build here rather than silently shrinking the property surface.
+    fn dtype_variant_name(dtype: DType) -> &'static str {
+        match dtype {
+            DType::Null => "Null",
+            DType::Bool => "Bool",
+            DType::BoolNullable => "BoolNullable",
+            DType::Int64 => "Int64",
+            DType::Int64Nullable => "Int64Nullable",
+            DType::Float64 => "Float64",
+            DType::Float64Nullable => "Float64Nullable",
+            DType::Utf8 => "Utf8",
+            DType::Categorical => "Categorical",
+            DType::Timedelta64 => "Timedelta64",
+            DType::Datetime64 => "Datetime64",
+            DType::Period => "Period",
+            DType::Interval => "Interval",
+            DType::Sparse => "Sparse",
+        }
+    }
+
+    #[test]
+    fn all_dtypes_has_no_duplicates_and_names_every_variant() {
+        let mut seen: Vec<&'static str> =
+            ALL_DTYPES.iter().copied().map(dtype_variant_name).collect();
+        let total = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            total,
+            "ALL_DTYPES lists a dtype twice, which would silently bias the generator"
+        );
+        // A count assertion alone would be satisfied by listing one variant
+        // fourteen times; the dedup above is what makes this meaningful, and
+        // the match above is what makes it exhaustive.
+        assert_eq!(total, 14, "ALL_DTYPES must carry every DType variant");
+    }
+
+    /// The list being right proves nothing if the STRATEGY does not read it.
+    ///
+    /// This drives `arb_dtype()` directly and asserts every variant is actually
+    /// drawn, which is the only form of this test that could have caught the
+    /// original bug: `ALL_DTYPES` did not exist then, and the old generator
+    /// hard-coded its five `Just(..)` arms inline. Anyone who rewrites
+    /// `arb_dtype()` to something narrower while leaving `ALL_DTYPES` intact
+    /// fails HERE rather than silently narrowing every property in the file.
+    #[test]
+    fn arb_dtype_actually_draws_every_variant() {
+        use proptest::{
+            strategy::{Strategy, ValueTree},
+            test_runner::TestRunner,
+        };
+
+        let mut runner = TestRunner::deterministic();
+        let strategy = super::arb_dtype();
+        let mut drawn: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+        // 2000 draws over 14 uniform variants: the chance of missing any one is
+        // 14 * (13/14)^2000, which is far below one in a billion, so a miss here
+        // means the generator genuinely cannot produce it.
+        for _ in 0..2000 {
+            let tree = strategy
+                .new_tree(&mut runner)
+                .expect("arb_dtype must produce a value");
+            drawn.insert(dtype_variant_name(tree.current()));
+        }
+        let expected: std::collections::BTreeSet<&'static str> =
+            ALL_DTYPES.iter().copied().map(dtype_variant_name).collect();
+        let missing: Vec<_> = expected.difference(&drawn).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "arb_dtype() never drew {missing:?} in 2000 attempts — every property \
+             fed by it is blind to those dtypes"
+        );
+        assert_eq!(drawn.len(), 14);
+    }
+
+    /// The nullable extension dtypes are the specific ones whose absence
+    /// br-frankenpandas-nv8az was filed about, so name them explicitly: a future
+    /// edit that trims the list back to the numpy-flavoured five must fail here
+    /// with a message that says why, not merely with a count mismatch.
+    #[test]
+    fn the_nullable_extension_dtypes_are_generated() {
+        for required in [
+            DType::BoolNullable,
+            DType::Int64Nullable,
+            DType::Float64Nullable,
+        ] {
+            assert!(
+                ALL_DTYPES.contains(&required),
+                "{} must be generated — the nullable half of the lattice is exactly \
+                 what DISC-011 and br-frankenpandas-vprpg are changing, and a \
+                 generator that cannot draw it makes every dtype property here \
+                 unfalsifiable",
+                dtype_variant_name(required)
+            );
         }
     }
 }
