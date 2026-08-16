@@ -24417,3 +24417,54 @@ but judge the run by its cv, not by the load it started at.
 happens to agree.*
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run9_load9_elf_c7b0830b.json`
+
+---
+
+## br-frankenpandas-h67zz — n=10 RETRACTS my own load-admission bracket: below load ~50, load does not predict dispersion at all
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** tenth run.
+Retracting guidance I banked earlier today, on the strength of the run that
+contradicts it hardest.
+
+Run 10: `math_unary/floor @1M`, balanced-square ABBAABBA, ONE invocation, load
+**17.63→20.17**, ratio 0.083x, FP p50 2243.23us cv **40.33%**, pandas p50 232.5us
+cv 21.49%, max-cv **40.33%**.
+**A/A null control (same invocation):** FP **1.268375** — **26.8% off unity, the
+worst null failure in ten runs** — and pandas **1.104750**, 10.5% off. REFUSED.
+ELF `4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228`.
+
+**WHAT THIS RETRACTS.** I banked an entry titled *"the load admission boundary
+for a `floor @1M` row is between 48 and 77, measured"*, on four runs. With ten,
+the pairing of load against dispersion shows no usable relationship below ~50:
+
+| load | max-cv | | load | max-cv |
+|---|---|---|---|---|
+| 6.41 | 11.44% | | 31.91 | 12.00% |
+| 8.58 | 26.95% | | 45.14 | 31.97% |
+| **17.63** | **40.33%** | | 37.9→48.1 | 34.08% |
+| 19.41 | 12.17% | | 86.1→76.8 | 45.41% |
+| 30.84 | 14.52% | | 88.4→90.1 | 78.50% |
+
+**Load 17.63 produced 40.33% dispersion; load 31.91 produced 12.00%.** Loads 6.41
+and 8.58 differ by two points and produced 11.44% and 26.95%. Only above ~77 does
+high load reliably wreck a run. **So "wait for load below X" is not a usable
+admission rule in the 6–48 range, and the 48–77 bracket I banked should be read
+as: above ~77 is hopeless, below that load tells you almost nothing.** The
+earlier entry stands as a record of what four samples suggested and is superseded
+by this one.
+
+**The direct measurement is cv, and it is only available AFTER the run.** That is
+an uncomfortable but honest conclusion: you cannot reliably pick a good window in
+advance on this fleet, you can only recognise a good run afterwards. The
+practical consequence is to expect a low yield — 4 informative runs out of 10 —
+rather than to keep hunting for the right moment to start.
+
+**FP's null failed at 26.8% at a modest load**, which is the sharpest instance of
+the `thread::scope` instability already banked: the parallel arm's self-comparison
+can collapse at any load, so a certified `floor` row is partly a matter of luck
+regardless of when it is launched.
+
+**`floor @1M` remains ≈0.13x** (n=4 screened-in: 0.123, 0.126, 0.130, 0.132).
+Run 10 is excluded by the cv screen and does not move it.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run10_load18_elf_4a89472f.json`
