@@ -23918,3 +23918,58 @@ before claiming an ELF represents a commit** — on a shared checkout that is no
 the default state.
 
 **Artifacts:** `artifacts/bench/trunc_1M_thinkstation1_2026-08-16_local_elf_4a89472f.json`
+
+---
+
+## br-frankenpandas-h67zz — ⚠️ A PASSING A/A NULL DOES NOT MAKE A CROSS-ENGINE RATIO LOAD-INDEPENDENT: `floor` @1M certifies at 0.132x AND at 0.072x, and the difference is host load
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** two CERTIFIED
+runs that disagree by 1.8x. Banking the method finding, which is worth more than
+either number.
+
+Both runs are `math_unary/floor @1M`, balanced-square ABBAABBA, ONE invocation
+each, same harness (`6d884360…`), same incumbent (pandas 2.2.3), same host
+(thinkstation1, governor powersave, smt on). **Both cleared the three-clause
+gate with both A/A nulls inside ±2%.**
+
+| run | ELF sha256 | load | FP p50 / cv | pandas p50 / cv | FP thr | pd thr | ratio | A/A FP / pandas |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `1858bb91…` | 6.41 | 1343.79us / 7.44% | 176.58us / 11.44% | 8 | 1 | **0.132x** | 1.001168 / 1.003951 |
+| 2 | `4a89472f…` | 37.91 → 48.11 | 3931.14us / 34.08% | 237.54us / 26.3% | 8 | 1 | **0.072x** | 0.994966 / 1.008250 |
+
+**THE ARMS DO NOT DEGRADE EQUALLY UNDER CONTENTION, AND THAT IS THE WHOLE
+POINT.** From run 1 to run 2, FrankenPandas slowed **2.93x** (1343.79 → 3931.14)
+while pandas slowed **1.35x** (176.58 → 237.54). FP runs this workload on **8
+threads**; pandas runs it on **1**. A loaded box takes cores away from the
+parallel arm and barely touches the serial one, so the CROSS-ENGINE ratio moves
+with load even though neither arm is misbehaving.
+
+**The A/A null cannot detect this and did not.** Both nulls passed in both runs,
+because an A/A null compares an engine to ITSELF inside the same contended
+window — it certifies that the arm is self-consistent, not that the comparison
+between two differently-threaded engines is load-invariant. **A green null is
+necessary and not sufficient for a vs-incumbent row whenever
+`fp_threads != pandas_threads`.** This repo already has a banked lesson that
+worker identity dominates A/B ratios with green nulls; this is the same failure
+in the load dimension rather than the host dimension.
+
+**CONSEQUENCE FOR MY OWN BANKING CONVENTION, which I am correcting rather than
+applying.** My convention is "two runs, quote the WORST". Applied naively here it
+would publish **0.072x** as `floor`'s vs-pandas ratio — importing a host-load
+artifact into a headline about the code. That is wrong. For an asymmetrically
+threaded pair, the defensible statement is the LOW-CONTENTION run (**0.132x**,
+FP cv 7.44%), with the ratio understood as load-conditional; run 2 is evidence
+about the fleet, not about `floor`.
+
+**WHAT SHOULD CHANGE.** Any row in this corpus where `fp_threads` and
+`pandas_threads` differ should carry its `/proc/loadavg` at run time, and rows
+compared against each other should be at comparable load. Several of today's
+math_unary and df_dot rows were taken at loads between 6 and 65 and are being
+read as if they were interchangeable. They are not.
+
+**Neither run is retracted** — both are correctly measured and correctly
+certified. What is retracted is the idea that a certified ratio for an
+asymmetrically threaded pair is a property of the code alone.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run2_load48_elf_4a89472f.json`
+(run 1 is `…_local_elf_1858bb91.json`, banked above)
