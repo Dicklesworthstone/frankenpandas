@@ -25781,18 +25781,18 @@ impl Column {
         // the `f64::round_ties_even()` intrinsic REGRESSED round(2) 3.4→11.9ms —
         // without `+sse4.1` the intrinsic lowers to a libm `roundeven` CALL per
         // element (no `roundpd`), un-vectorizable. Keep the magic trick.
-        const TWO_POW_52: f64 = 4_503_599_627_370_496.0;
+        //
+        // BRANCHLESS SIGN RESTORE (br-frankenpandas-o57rj). This used to nest a
+        // second branch — `if value.is_sign_negative() { -rounded }` — inside the
+        // magnitude test. `copysign` is a bit operation LLVM vectorizes, the
+        // nested `if` was not: the same `round(2)` map over 1M f64, one binary,
+        // interleaved, measured p50 766.5us branchy vs **635.7us** branchless,
+        // **1.21x**, with ZERO bit-differences over the live buffer and an edge
+        // corpus (±0.0, ±NaN, ±inf, ±2^52, subnormals, MIN/MAX). The remaining
+        // `if` is a select on a value both arms already hold.
         let abs = value.abs();
-        if abs < TWO_POW_52 {
-            let rounded = (abs + TWO_POW_52) - TWO_POW_52;
-            if value.is_sign_negative() {
-                -rounded
-            } else {
-                rounded
-            }
-        } else {
-            value
-        }
+        let rounded = Self::nearest_even_magnitude(abs).copysign(value);
+        if abs < TWO_POW_52 { rounded } else { value }
     }
 
     #[inline]
@@ -27280,10 +27280,28 @@ impl Column {
             // is bit-identical; from_f64_values_owned's NaN scan routes any stray
             // NaN to the identical Arc path.
             if factor.is_finite() && factor != 0.0 {
-                return Ok(Self::from_f64_values_owned(
+                // WITNESS-FREE CONSTRUCTOR (br-frankenpandas-o57rj).
+                // `from_f64_values_owned` re-reads the whole output asking
+                // `is_nan()` of every element, purely to decide whether to route
+                // to the nullable constructor. On this branch that scan can only
+                // ever answer "no": the input is an all-valid slice (NaN-free),
+                // `factor` is finite and non-zero, `x * factor` is therefore
+                // finite or ±inf but never NaN, the magic round returns its input
+                // for anything ≥ 2^52 including ±inf, and dividing ±inf or a
+                // finite by a finite non-zero cannot make a NaN either. So the
+                // scan is a guaranteed-false pass over 8 MB — MEASURED at 505.1us
+                // per 1M against a 1226us call, i.e. ~40% of `round(2)`.
+                //
+                // `None` for the finiteness witness, not `Some(true)`: `x*factor`
+                // CAN overflow a finite input to ±inf (|x| > 1.8e306 at
+                // decimals=2), so finiteness is genuinely unknown here. That is
+                // exactly what `from_f64_values_owned` also left unset, so this
+                // loses no information — it only skips the scan.
+                return Ok(Self::from_f64_all_valid_with_finite_opt(
                     data.iter()
                         .map(|&x| Self::round_scaled_ties_even_fast(x, factor))
                         .collect(),
+                    None,
                 ));
             }
             return Ok(Self::from_f64_values_owned(
@@ -36446,6 +36464,116 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// br-frankenpandas-o57rj. `Column::round`'s typed branch now skips the
+        /// constructor's `is_nan()` scan, so the claim that scan was making —
+        /// "a finite non-zero `factor` over an all-valid input cannot produce a
+        /// NaN" — has to be a test rather than a comment. If it is ever false the
+        /// column silently reports a NaN slot as VALID.
+        ///
+        /// Also pins the branchless `round_ties_even_fast` rewrite to bit-identity
+        /// against the branchy form it replaced, since `round` carries goldens.
+        #[test]
+        fn round_typed_branch_never_mints_nan_and_stays_bit_identical_o57rj() {
+            fn branchy_reference(value: f64) -> f64 {
+                // The exact shape shipped before the copysign rewrite.
+                let abs = value.abs();
+                if abs < crate::TWO_POW_52 {
+                    let rounded = (abs + crate::TWO_POW_52) - crate::TWO_POW_52;
+                    if value.is_sign_negative() {
+                        -rounded
+                    } else {
+                        rounded
+                    }
+                } else {
+                    value
+                }
+            }
+
+            let mut values: Vec<f64> = vec![
+                0.0,
+                -0.0,
+                0.5,
+                -0.5,
+                1.5,
+                -1.5,
+                2.5,
+                -2.5,
+                0.125,
+                -0.125,
+                1.005,
+                -1.005,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                // Overflows `x * 100.0` to +/-inf: the case that forces the
+                // finiteness witness to stay `None`.
+                f64::MAX,
+                f64::MIN,
+                1.8e306,
+                -1.8e306,
+                5e-324,
+                -5e-324,
+                crate::TWO_POW_52,
+                -crate::TWO_POW_52,
+            ];
+            let mut state: u64 = 0x51ed_2701_c0ff_ee01;
+            for _ in 0..50_000 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let unit = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                let sign = if state & 1 == 0 { 1.0 } else { -1.0 };
+                values.push(sign * unit * 1e6);
+            }
+
+            for &x in &values {
+                assert_eq!(
+                    Column::round_ties_even_fast(x).to_bits(),
+                    branchy_reference(x).to_bits(),
+                    "round_ties_even_fast drifted from the branchy form at {x:e}"
+                );
+            }
+
+            // decimals >= 0 and < 0 both land on the witness-free branch
+            // (factor finite and non-zero); decimals extreme enough to make factor
+            // 0 or inf must NOT, and is checked below.
+            for decimals in [0_i32, 1, 2, 6, -1, -3] {
+                let column = Column::from_f64_values(values.clone());
+                let rounded = column.round(decimals).expect("round");
+                assert_eq!(rounded.len(), values.len());
+                assert!(
+                    rounded.validity().all(),
+                    "round(decimals={decimals}) produced an invalid slot — the \
+                     skipped is_nan scan was load-bearing after all"
+                );
+                let got = rounded
+                    .as_f64_slice()
+                    .expect("all-valid output must stay a contiguous typed slice");
+                let factor = 10f64.powi(decimals);
+                for (i, (&g, &x)) in got.iter().zip(values.iter()).enumerate() {
+                    assert!(
+                        !g.is_nan(),
+                        "round(decimals={decimals}) minted a NaN at {i} from {x:e}"
+                    );
+                    let expected = branchy_reference(x * factor) / factor;
+                    assert_eq!(
+                        g.to_bits(),
+                        expected.to_bits(),
+                        "round(decimals={decimals}) at {i}: input {x:e}"
+                    );
+                }
+            }
+
+            // The degenerate factors still route to the NaN-deriving
+            // constructor, because there `inf * 0.0` and `0.0 / 0.0` DO make
+            // NaN and the slot must come back missing, exactly as before.
+            let degenerate = Column::from_f64_values(vec![f64::INFINITY, 1.0, -1.0]);
+            let underflowed = degenerate.round(-400).expect("round");
+            assert!(
+                !underflowed.validity().get(0),
+                "inf rounded with a zero factor must stay missing"
+            );
         }
 
         #[test]
