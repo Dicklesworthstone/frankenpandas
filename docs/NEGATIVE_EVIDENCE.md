@@ -22810,3 +22810,65 @@ same one-`OnceLock`-per-column shape.
 INTERLEAVED in one process with a runtime toggle, per the 2026-07-03 retraction
 in this ledger — separate builds and standalone microbenches have lied about
 exactly this class of question before.
+
+---
+
+## 2026-08-16 cod-pandas — arrow-backed STRING category re-measured POST-BYPASS (br-frankenpandas-uza04)
+
+**Why these rows exist:** every prior string ratio was closed on an `rch` remote
+build, and rch does not return the linked binary — so those rows were landed but
+UNMEASURED. These three were rebuilt LOCALLY (`export RCH_CARGO_WRAPPER_BYPASS=1`
+then `env -u CARGO_TARGET_DIR cargo build --release -p fp-bench
+--message-format=json`, 1m25s, no `[RCH]` line, executable path read from the
+build JSON rather than guessed) and re-run against live pandas 2.2.3 in the SAME
+invocation.
+
+Common provenance for all three rows:
+
+```
+host              thinkstation1   AMD Ryzen Threadripper PRO 5975WX  32C/64T
+governor          powersave, frequency_boost=1, smt_active=1, numa_nodes=1
+git_sha           599001515
+fp-bench ELF      sha256 9e2b2fb5335b9c10610dcc3bf981b70ec38a58739ea4a68ef13eb2e1a8f5b829
+                  24873432 bytes, target/release/fp-bench, profile release-perf
+FP runtime ISA    scalar,sse2,avx2,fma,bmi2,vaes   (self-reported in-process)
+host ISA          sse2,avx,avx2,fma,bmi1,bmi2,aes,vaes   (avx512f ABSENT)
+incumbent         pandas 2.2.3  sha256 c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+                  pyarrow 24.0.0  sha256 cc070ad58b3c3e9e5e2a79b07883ddc705a74d11e30883688ee78425a33f3114
+                  python3.13 ELF sha256 efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e
+design            balanced-square ABBAABBA v1, 9 rounds, 4 slots/arm/round,
+                  one workload per invocation (the mode REFUSES multi-workload runs)
+```
+
+| workload @1M | paired ratio (pandas/FP) | CI95 | FP p50 / cv | pandas p50 / cv | FP thr | pd thr | A/A null FP | A/A null pandas |
+|---|---|---|---|---|---|---|---|---|
+| `str_sort_arrow`         | **1.456x FASTER** | [1.44341, 1.48693] | 27639.30us / 1.53% | 40050.97us / 3.47% | 10 (peak 12) | 1 | 0.995199 [0.980818, 1.012561] PASS | 1.004181 [0.990155, 1.010832] PASS |
+| `str_value_counts_arrow` | **1.357x FASTER** | [1.30761, 1.40312] |  9350.44us / 1.72% | 12794.58us / 5.26% | 1 | 1 | 1.000973 [0.985838, 1.015515] PASS | 1.001051 [0.996320, 1.072026] PASS |
+| `str_groupby_sum_arrow`  | **2.869x FASTER** | [2.84373, 2.93106] |  6099.84us / 3.07% | 17446.56us / 3.93% | 1 | 1 | 1.007251 [0.979174, 1.015036] PASS | 0.996779 [0.986876, 1.012613] PASS |
+
+All three decidable under the corrected three-clause median-bootstrap gate
+(effect CI excludes unity, effect exceeds 2x the null margin, both null medians
+within 2% of unity).
+
+**NEGATIVE / CAUTIONARY notes — the point of banking these:**
+
+1. **`str_sort_arrow` was a WIN, not a gap.** It was selected as the *suspected
+   worst* arrow-backed string workload and it is not a gap at all (1.456x
+   FASTER). Do not spend a lever here. The whole arrow-string lane is ahead of
+   pandas; the worst measured gap in this repo remains `df.dot` (0.136x,
+   single-core-bound, see the linalg section above), NOT strings. Guessing which
+   workload is worst without measuring cost one invocation — measure first.
+
+2. **The `str_value_counts_arrow` pandas A/A null is the loosest of the six**:
+   median 1.001051 but CI upper bound **1.072026**, i.e. a 7% incumbent drift
+   sits inside the interval. The median clears the 2% gate and the harness marked
+   it decidable, so the row stands, but this null is the weakest link of the
+   three and a future re-run of this workload should widen rounds before treating
+   1.357x as tight.
+
+3. **`thread_count_actually_used` is 1 for FP on two of the three rows** while
+   `str_sort_arrow` reads 10. Per the standing caveat, this field lies BOTH ways
+   and cannot distinguish "inert" from "invisible" — the 1s here are not evidence
+   that value_counts/groupby_sum are serial, only that nothing was observed.
+   Whoever attacks those must confirm threading style before reading it as
+   headroom.
