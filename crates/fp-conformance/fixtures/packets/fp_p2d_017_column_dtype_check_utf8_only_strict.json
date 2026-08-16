@@ -11,13 +11,25 @@
   "left": {
     "name": "utf",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "alpha" },
-      { "kind": "utf8", "value": "beta" }
+      {
+        "kind": "utf8",
+        "value": "alpha"
+      },
+      {
+        "kind": "utf8",
+        "value": "beta"
+      }
     ]
   },
-  "expected_dtype": "Utf8"
+  "expected_dtype": "object"
 }

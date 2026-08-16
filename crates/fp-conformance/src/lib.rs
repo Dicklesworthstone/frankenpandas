@@ -9830,7 +9830,13 @@ fn run_fixture_operation(
         FixtureOperation::ColumnDtypeCheck => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual_dtype = format!("{:?}", series.column().dtype());
+            // pandas SPELLING, not Rust `Debug`. `DType::name()` is documented
+            // "Matches numpy dtype.name property" and yields int64/float64/
+            // object/category/Int64/boolean; `{:?}` yields FrankenPandas
+            // internals (Float64/Utf8/Categorical) that no oracle can produce,
+            // which is why these fixtures were unverifiable.
+            // (br-frankenpandas-62d1s)
+            let actual_dtype = series.column().dtype().name().to_owned();
             let expected = match expected {
                 ResolvedExpected::Dtype(dtype) => dtype,
                 _ => return Err("expected_dtype is required for column_dtype_check".to_owned()),
@@ -9844,7 +9850,8 @@ fn run_fixture_operation(
         }
         FixtureOperation::SeriesDtypeCheck => {
             let series = build_series_for_dtype_check(fixture)?;
-            let actual_dtype = format!("{:?}", series.dtype());
+            // See ColumnDtypeCheck above (br-frankenpandas-62d1s).
+            let actual_dtype = series.dtype().name().to_owned();
             let expected = match expected {
                 ResolvedExpected::Dtype(dtype) => dtype,
                 _ => return Err("expected_dtype is required for series_dtype_check".to_owned()),
@@ -19042,7 +19049,13 @@ fn execute_and_compare_differential(
         FixtureOperation::ColumnDtypeCheck => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual_dtype = format!("{:?}", series.column().dtype());
+            // pandas SPELLING, not Rust `Debug`. `DType::name()` is documented
+            // "Matches numpy dtype.name property" and yields int64/float64/
+            // object/category/Int64/boolean; `{:?}` yields FrankenPandas
+            // internals (Float64/Utf8/Categorical) that no oracle can produce,
+            // which is why these fixtures were unverifiable.
+            // (br-frankenpandas-62d1s)
+            let actual_dtype = series.column().dtype().name().to_owned();
             let expected = match expected {
                 ResolvedExpected::Dtype(dtype) => dtype,
                 _ => return Err("expected_dtype required for column_dtype_check".to_owned()),
@@ -19051,7 +19064,8 @@ fn execute_and_compare_differential(
         }
         FixtureOperation::SeriesDtypeCheck => {
             let series = build_series_for_dtype_check(fixture)?;
-            let actual_dtype = format!("{:?}", series.dtype());
+            // See ColumnDtypeCheck above (br-frankenpandas-62d1s).
+            let actual_dtype = series.dtype().name().to_owned();
             let expected = match expected {
                 ResolvedExpected::Dtype(dtype) => dtype,
                 _ => return Err("expected_dtype required for series_dtype_check".to_owned()),

@@ -11,15 +11,33 @@
   "left": {
     "name": "counts",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 },
-      { "kind": "int64", "value": 30 }
+      {
+        "kind": "int64",
+        "value": 10
+      },
+      {
+        "kind": "int64",
+        "value": 20
+      },
+      {
+        "kind": "int64",
+        "value": 30
+      }
     ]
   },
-  "expected_dtype": "Int64"
+  "expected_dtype": "int64"
 }

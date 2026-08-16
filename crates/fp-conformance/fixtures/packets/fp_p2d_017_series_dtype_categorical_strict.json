@@ -11,22 +11,52 @@
   "left": {
     "name": "rating",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": -1 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": -1
+      }
     ]
   },
   "categorical_categories": [
-    { "kind": "utf8", "value": "low" },
-    { "kind": "utf8", "value": "high" }
+    {
+      "kind": "utf8",
+      "value": "low"
+    },
+    {
+      "kind": "utf8",
+      "value": "high"
+    }
   ],
   "categorical_ordered": true,
-  "expected_dtype": "Categorical"
+  "expected_dtype": "category"
 }
