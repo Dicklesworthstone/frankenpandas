@@ -24890,3 +24890,60 @@ br-frankenpandas-oxv4u rather than on any kernel work.
 A/B between two ELFs, not a vs-incumbent row, and no incumbent ratio is claimed
 from it. The certified 0.53x baseline it is measured against carries its own:
 FrankenPandas 0.99730174 and pandas 1.01476528, both inside 2%.
+
+---
+
+## br-frankenpandas-h67zz — `trunc` is 0-for-4: launched at the quietest load of the session (6.12) and the window collapsed DURING the run
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** REFUSED. Spent
+the session's quietest window on the hardest target — `trunc` had never certified
+in three prior attempts, against `floor` 2-of-11 and `ceil` 0-of-2. `uptime` read
+before launching: **load average 6.51**, below the 30 defer threshold.
+
+```
+workload        math_unary/trunc @1M, balanced-square ABBAABBA, ONE invocation
+fp-bench ELF    sha256 ad74e170f97b576a32d17be0832ac2b34f609bdb8c600abfad4dcb476737a673
+                (FIFTH distinct binary of this series)
+harness         sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3 · host thinkstation1, governor powersave, smt on
+LOADAVG         6.12 → 23.30   (1/5/15 start 6.12 10.97 19.20; end 23.30 14.67 20.29)
+```
+
+| arm | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | 2250.44us | **36.31%** | **1.121556** — 12.2% HIGH, fails |
+| pandas | 243.69us | 20.87% | **0.923015** — 7.7% LOW, fails |
+
+Point ratio (0.099). REFUSED; no ratio claimed. max-cv 36.31% also excludes it
+under the cv screen.
+
+**ELF COMPARABILITY VERIFIED, not assumed.** Fifth binary in this series, so I
+re-checked: across `669d45cbc..HEAD` there are **ZERO** diff lines in
+`crates/fp-columnar/src/lib.rs` matching `par_map_slice_f64_with_witness`,
+`typed_float_unary`, `elementwise_witness_policy`, `FP_ELEMENTWISE` or `PAR_MIN`.
+The intervening commits are the `oarkz` dot-worker work and the `284ul`
+write-once stack. `trunc` executes unchanged code and this run is comparable to
+the earlier three.
+
+**THE WINDOW COLLAPSED DURING THE RUN, FROM THE QUIETEST START AVAILABLE.** Load
+began at **6.12** — the lowest of the session, and essentially identical to run
+1's 6.41, the only clean certification — and ended at **23.30**, nearly a 4x rise
+inside a single invocation. Combined with the run 11 window that held flat, the
+accurate statement is: **a low starting load neither guarantees nor precludes a
+quiet run, and the outcome is not knowable in advance.** This is the fourth
+window closure in five attempts, against one hold.
+
+**THE TWO NULLS FAILED IN OPPOSITE DIRECTIONS** — FP **+12.2%**, pandas
+**−7.7%**. Per the signature banked earlier, opposed failures are per-arm
+turbulence rather than monotone host drift (which shows as both arms failing by
+nearly the same amount, as in the earlier 1.0719/1.0718 case). Consistent with
+the load spike hitting the two engines differently while they interleaved.
+
+**RUNNING TALLY FOR `math_unary` TODAY: 2 certifications in 18 invocations** —
+`floor` 2-of-12 (runs 1 and 2), `ceil` 0-of-2, `trunc` 0-of-4. The one cell that
+has certified did so twice, and one of those two is the 0.072x outlier the cv
+screen rejects. **`trunc` remains unmeasured under the screen after four
+attempts**, and its four point estimates — 0.144, 0.123, 0.099, and an earlier
+~0.10 — span 45%, which is what high-cv sampling looks like.
+
+**Artifacts:** `artifacts/bench/trunc_1M_thinkstation1_2026-08-16_hardest_load6_elf_ad74e170.json`
