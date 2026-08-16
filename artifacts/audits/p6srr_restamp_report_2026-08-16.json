@@ -1,13 +1,12 @@
 {
   "fixtures_examined": 1259,
   "agree_current": 0,
-  "agree_provenance_only": 1144,
-  "restampable": 1144,
-  "restamped": 1144,
+  "agree_provenance_only": 1147,
+  "restampable": 1147,
+  "restamped": 1147,
   "restamp_refused": [],
   "move_classes": {
     "KIND int64->float64": 1,
-    "VALUE": 1,
     "ERROR expected-but-succeeded": 1
   },
   "roundtrip_classes": {},
@@ -23,19 +22,6 @@
         "KIND int64->float64"
       ],
       "example": ".values[0].kind: 'int64' vs 'float64'",
-      "roundtrip_implicated": [],
-      "provenance": ""
-    },
-    {
-      "fixture": "fp_p2d_017_series_dtype_sparse_strict.json",
-      "keys": [
-        "expected_dtype"
-      ],
-      "why": "",
-      "classes": [
-        "VALUE"
-      ],
-      "example": ".: 'Sparse' vs 'Sparse[int64, 0]'",
       "roundtrip_implicated": [],
       "provenance": ""
     },
@@ -144,14 +130,6 @@
     {
       "fixture": "fp_p2d_162_dataframe_quantile_skips_nonnumeric_strict.json",
       "error": "oracle error: dataframe_quantile failed: numpy boolean subtract, the `-` operator, is not supported, use the bitwise_xor, the `^` operator, or the logical_xor function instead."
-    },
-    {
-      "fixture": "fp_p2d_174_series_str_startswith_empty_pattern_strict.json",
-      "error": "oracle error: series_str_startswith requires non-empty regex_pattern"
-    },
-    {
-      "fixture": "fp_p2d_175_series_str_endswith_empty_pattern_strict.json",
-      "error": "oracle error: series_str_endswith requires non-empty regex_pattern"
     },
     {
       "fixture": "fp_p2d_421_series_dt_to_pydatetime_warn_false_naive_strict.json",
@@ -660,7 +638,7 @@
   ],
   "uncompared_keys": {},
   "coverage": {
-    "SEMANTIC": 1131,
+    "SEMANTIC": 1133,
     "STRUCTURAL": 16
   }
 }

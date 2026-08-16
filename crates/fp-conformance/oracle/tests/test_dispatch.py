@@ -1488,3 +1488,56 @@ def test_timedelta_total_seconds_still_computes_for_real_timedeltas_f9xlz(oracle
     assert values[0]["value"] == 86400.0
     assert values[1]["kind"] == "null"
     assert values[2]["value"] == 5400.0
+
+
+def test_startswith_endswith_accept_an_empty_and_whitespace_pattern(oracle, pd):
+    """br-frankenpandas-9rop8: the oracle REFUSED input live pandas accepts.
+
+    `required_string_payload` rejects `""` and `.strip()`s what it returns. That
+    is right for a regex and wrong for a literal prefix/suffix, and it went wrong
+    two ways at once:
+
+      * `""` is a valid prefix — every string starts with it. MEASURED, live
+        pandas 2.2.3 on `['abc','bcd',None]`, `.str.startswith('')` is
+        `[True, True, None]`. The oracle refused to ask, so
+        `fp_p2d_174`/`fp_p2d_175_series_str_(starts|ends)with_empty_pattern_strict`
+        pinned answers nothing had verified — while the fixtures themselves
+        already expected all-True, i.e. FrankenPandas was right the whole time.
+      * stripping MUTATES the pattern. `startswith(" ")` asks about a leading
+        space; stripped it becomes `startswith("")`, a different question — and
+        it did not even get that far, because the stripped value is empty and was
+        then refused as such.
+    """
+    def payload(op, pattern):
+        return {
+            "operation": op,
+            "left": {
+                "name": "text",
+                "index": [
+                    {"kind": "int64", "value": 0},
+                    {"kind": "int64", "value": 1},
+                ],
+                "values": [
+                    {"kind": "utf8", "value": "abc"},
+                    {"kind": "utf8", "value": " lead"},
+                ],
+            },
+            "regex_pattern": pattern,
+        }
+
+    def values_of(op, pattern):
+        out = oracle.dispatch(pd, payload(op, pattern))
+        return [v["value"] for v in out["expected_series"]["values"]]
+
+    # An empty prefix/suffix matches everything, and must no longer raise.
+    assert values_of("series_str_startswith", "") == [True, True]
+    assert values_of("series_str_endswith", "") == [True, True]
+
+    # Whitespace is significant and must survive verbatim: " lead" starts with
+    # " " and "abc" does not. Stripping would have collapsed this to the
+    # empty-pattern case above and answered [True, True].
+    assert values_of("series_str_startswith", " ") == [False, True]
+
+    # A non-string is still refused — the guard was narrowed, not removed.
+    with pytest.raises(Exception):
+        oracle.dispatch(pd, payload("series_str_startswith", 5))

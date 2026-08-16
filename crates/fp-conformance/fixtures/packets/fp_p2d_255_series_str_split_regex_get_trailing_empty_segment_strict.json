@@ -5,8 +5,8 @@
   "operation": "series_str_split_regex_get",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "31c08766052d5a224b26442c7ec96c29e06057505e6d16a8fe5fad8167cacde2",
-    "generated_at": "2026-08-16T11:25:57Z"
+    "oracle_script_sha256": "d455675edc3f4dc82abc03396d37259250ae98ca7bf21979597942f97f4b8aee",
+    "generated_at": "2026-08-16T12:01:11Z"
   },
   "regex_pattern": "[,;]",
   "str_split_n": 2,

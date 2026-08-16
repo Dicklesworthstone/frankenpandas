@@ -1,0 +1,23 @@
+{
+  "fixtures_examined": 2,
+  "agree_current": 0,
+  "agree_provenance_only": 2,
+  "restampable": 2,
+  "restamped": 2,
+  "restamp_refused": [],
+  "move_classes": {},
+  "roundtrip_classes": {},
+  "provenance_verdicts": {},
+  "moved_unattributed": [],
+  "moved_attributed": [],
+  "unsupported_operation": [],
+  "other_errors": [],
+  "expected_error_agreements": [],
+  "error_agreement_pandas": 0,
+  "error_agreement_stamped": 0,
+  "error_agreement_not_attestable": [],
+  "uncompared_keys": {},
+  "coverage": {
+    "SEMANTIC": 2
+  }
+}

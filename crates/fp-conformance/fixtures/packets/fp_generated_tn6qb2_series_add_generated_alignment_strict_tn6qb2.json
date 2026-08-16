@@ -5,8 +5,8 @@
   "operation": "series_add",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "31c08766052d5a224b26442c7ec96c29e06057505e6d16a8fe5fad8167cacde2",
-    "generated_at": "2026-08-16T11:24:42Z",
+    "oracle_script_sha256": "d455675edc3f4dc82abc03396d37259250ae98ca7bf21979597942f97f4b8aee",
+    "generated_at": "2026-08-16T11:59:54Z",
     "generation_command": "/data/tmp/frankenpandas-whiteotter-tn6qb2-build/debug/fp-conformance-cli --allow-system-pandas-fallback --generate-fixture-pilot series_add --generated-packet-id FP-GEN-TN6QB2-001 --generated-case-id series_add_generated_alignment_strict_tn6qb2 --generated-fixture-path crates/fp-conformance/fixtures/packets/fp_generated_tn6qb2_series_add_generated_alignment_strict_tn6qb2.json --generator-artifact-dir artifacts/conformance/fixture-generator-tn6qb2-FP-GEN-TN6QB2-001 --intentional-divergence-note none",
     "input_matrix": [
       "operation=series_add",

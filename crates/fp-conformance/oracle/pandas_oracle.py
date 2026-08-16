@@ -3734,6 +3734,34 @@ def required_string_payload(payload: dict[str, Any], key: str, op_name: str) -> 
     return value.strip()
 
 
+def required_literal_string_payload(
+    payload: dict[str, Any], key: str, op_name: str
+) -> str:
+    """A string payload taken EXACTLY as given: empty allowed, never stripped.
+
+    `required_string_payload` refuses `""` and `.strip()`s what it returns. For a
+    regex or a required needle that is reasonable. For a LITERAL prefix/suffix it
+    is wrong twice over, and both ways silently change the question pandas is
+    asked:
+
+      * `""` is a valid prefix — every string starts with it. MEASURED, live
+        pandas 2.2.3: `pd.Series(['abc','bcd',None]).str.startswith('')` returns
+        `[True, True, None]`. The oracle refused to ask, so
+        fp_p2d_174/175_series_str_(starts|ends)with_empty_pattern_strict pinned
+        answers nothing had verified.
+      * stripping mutates the pattern. `startswith(" ")` asks about a leading
+        SPACE; stripped it becomes `startswith("")`, which is a different
+        question with a different answer — and under the old helper it did not
+        even get that far, because the stripped value is empty and was refused.
+
+    (br-frankenpandas-9rop8)
+    """
+    value = payload.get(key)
+    if not isinstance(value, str):
+        raise OracleError(f"{op_name} requires a string {key}")
+    return value
+
+
 def optional_float_payload(payload: dict[str, Any], key: str, op_name: str) -> float | None:
     value = payload.get(key)
     if value is None:
@@ -4712,7 +4740,9 @@ def op_series_str_contains(pd, payload: dict[str, Any]) -> dict[str, Any]:
 def op_series_str_startswith(pd, payload: dict[str, Any]) -> dict[str, Any]:
     op_name = "series_str_startswith"
     series = _series_for_str_op(pd, payload, op_name)
-    pat = required_string_payload(payload, "regex_pattern", op_name)
+    # LITERAL: startswith takes a prefix, not a regex. "" is valid (every string
+    # starts with it) and whitespace is significant. (br-frankenpandas-9rop8)
+    pat = required_literal_string_payload(payload, "regex_pattern", op_name)
     try:
         out = series.str.startswith(pat)
     except Exception as exc:
@@ -4723,7 +4753,9 @@ def op_series_str_startswith(pd, payload: dict[str, Any]) -> dict[str, Any]:
 def op_series_str_endswith(pd, payload: dict[str, Any]) -> dict[str, Any]:
     op_name = "series_str_endswith"
     series = _series_for_str_op(pd, payload, op_name)
-    pat = required_string_payload(payload, "regex_pattern", op_name)
+    # LITERAL: endswith takes a suffix, not a regex. Same reasoning as
+    # startswith above. (br-frankenpandas-9rop8)
+    pat = required_literal_string_payload(payload, "regex_pattern", op_name)
     try:
         out = series.str.endswith(pat)
     except Exception as exc:
