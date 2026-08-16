@@ -26672,3 +26672,53 @@ pins the branchless kernel bit-for-bit against the branchy form it replaced over
 where `factor` underflows to 0 and `inf * 0.0` really does make a NaN — still route
 to the NaN-deriving constructor and still come back missing. Without that last
 case the optimisation would silently mark a NaN slot VALID.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-o57rj closed, br-frankenpandas-4kig1 filed) — confirmation on a binary built from the COMMITTED tree, and where the residual `@1M` gap actually lives
+
+Every number in the three entries above was taken on binaries built from a
+working tree that this shared checkout does not guarantee is what landed. This
+row re-runs the family on `HEAD 2243aec2b`, ELF `7f3029199c1ca8fc`, so the
+published state is measured, not inferred.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=7f3029199c1ca8fcad0dd0e1b1a17d3a9d3aa0e5cca9c1efc9b0e9f9bd8d7b45 (78736648 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+| workload | ratio | 95% CI | best-vs-best | FP p50 | pandas p50 | verdict |
+|---|---|---|---|---|---|---|
+| `floor @1M` | 0.299x | 0.282–0.320 | 0.2857 | 631.87us | 184.43us | **SLOWER, both nulls pass** |
+| `ceil @1M` | 0.297x | 0.266–0.318 | 0.2602 | 746.87us | 219.34us | NULL_UNDECIDABLE (pandas null fails) |
+| `trunc @1M` | 0.327x | 0.297–0.367 | 0.2886 | 632.60us | 213.82us | **SLOWER, both nulls pass** |
+| `round2 @1M` | 0.955x | 0.917–1.022 | 0.9385 | 642.75us | 597.01us | NULL_UNDECIDABLE, both nulls pass |
+
+Observed loadavg 24.63 → 20.18 across the four rows; observed CPU MHz per arm
+recorded in each artifact. **`floor` and `trunc @1M` are now CERTIFIED rows —
+both A/A nulls passing — which the old ≈0.127x cluster never managed in thirteen
+attempts.** The new figure is not merely better, it is gated.
+
+**THE RESIDUAL `@1M` GAP IS THE ISA, AND HERE IS WHY THAT IS NOW A CONCLUSION
+RATHER THAN A SHRUG.** FP's `floor @1M` is 631.87us. A bare SSE2 kernel loop over
+the same 1M f64, timed standalone in its own binary, is 616us. **The op is fully
+accounted for: there is no overhead left to remove.** pandas reaches 184us because
+numpy runtime-dispatches a 4-wide `vroundpd` while this build emits ~6 two-wide
+SSE2 operations per element. That 3.4x is the instruction-width difference and
+nothing else, and br-frankenpandas-cu22b (`+sse4.1`) is its only route — still
+blocked on a workspace policy decision that is not an agent's to make.
+
+**AND THE GAP IS SIZE-DEPENDENT, WHICH THE LEDGER HAS NOT SAID BEFORE.** At 10M
+the same op is DRAM-bound and FP WINS (1.071–1.177x) with no ISA change at all; at
+1M it is L3-resident and compute-bound, which is exactly where instruction width
+decides it. Any future `math_unary` row should say which regime it is in — the two
+sizes are measuring different bottlenecks, and quoting one as "the" ratio for this
+family is how ≈0.127x came to stand for an op that wins at 10M.
+
+**Counted mechanism:** the SSE2 kernel issues about 6 two-wide operations per
+element where a `vroundpd` build issues 1 four-wide, so FP retires roughly 12x the
+vector operations per 4 elements; against pandas' 184us the required per-element
+budget is ~0.18ns and the measured SSE2 loop delivers ~0.62ns, missing it by 3.4x.
+
+**Filed br-frankenpandas-4kig1** for the two ops left on the shared arm: `sqrt @1M`
+0.832x and `log @1M` 1.893x, the ONLY two whose FP A/A null still fails (0.913921
+and 1.041860, both against a passing pandas null). The pattern is now exact —
+every op moved off `thread::scope` passes its null, every op still on it fails —
+but neither can take the witness-free arm as-is, because `sqrt(x<0)` and
+`log(x<=0)` genuinely do mint NaN.
