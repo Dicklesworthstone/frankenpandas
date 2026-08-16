@@ -22872,3 +22872,63 @@ within 2% of unity).
    that value_counts/groupby_sum are serial, only that nothing was observed.
    Whoever attacks those must confirm threading style before reading it as
    headroom.
+
+---
+
+## br-frankenpandas-h67zz — `floor`/`ceil` @1M are CERTIFIED LOSSES at ~0.099x on the DEFAULT build; `trunc` is the same effect with an unlucky gate
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** MEASURED and
+banked either way. No lever attempted — the deficit is the libm-lowering gap this
+bead already owns, which is a build-policy decision and not a source lever.
+
+**Why this row exists:** these are the worst vs-incumbent ratios in my corpus and
+they had artifacts (`4e1bac34c`) but no ledger line. Banking the losses, not just
+the wins.
+
+**Provenance, identical for all six runs:**
+
+```
+host            thinkstation1  AMD Ryzen Threadripper PRO 5975WX 32C/64T
+                governor powersave, load 8.4 / 8.6 / 14.1 at start
+fp-bench ELF    sha256 a307856618b1fe1b03750fbed492849f3090f7da33a488427a0beb413672d462
+                release-perf, DEFAULT build — NO +sse4.1, post-xv9qf
+harness         benches/vs_pandas_harness.py
+                sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3
+design          balanced-square, 1M rows, one workload per invocation, two runs each
+```
+
+| workload @1M | run1 | run2 | WORST | both decidable | FP p50 | pandas p50 |
+|---|---|---|---|---|---|---|
+| `math_unary/floor` | 0.100x | 0.099x | **0.099x** | YES | 1832.79us | 172.91us |
+| `math_unary/ceil`  | 0.107x | 0.098x | **0.098x** | YES | 1667.13us | 174.78us |
+| `math_unary/trunc` | 0.109x | 0.100x | ~0.10x | NO (0 of 2) | 1766.16us | 174.05us |
+
+**A/A null control (same invocation):** median ratios per arm, FP / pandas, run1 then run2 —
+floor 0.998208/0.994818 then 0.993514/0.991616, both runs inside ±2% and DECIDABLE;
+ceil 1.003720/1.000803 then 1.000990/0.988832, both runs inside ±2% and DECIDABLE;
+trunc 0.993840/**0.954438** then **1.064015**/1.004716, one arm outside the band in each
+run and in opposite directions, so the gate REFUSED both and no certified number is
+claimed for trunc.
+
+**Mechanism, already established and not re-litigated here:** without SSE4.1 the
+compiler cannot emit `roundsd`/`roundpd`, so LLVM lowers `f64::floor/ceil/trunc`
+to per-element libm calls. FP is ~10x slower on all three. That is a build-flag
+question owned by this bead, not something source routing reaches —
+br-frankenpandas-xv9qf already moved these ops off the serial helper onto the
+parallel one (`373fe94c5`) and the ratio is unchanged, which is consistent with a
+codegen floor rather than a scheduling one.
+
+**⚠️ DO NOT READ `thread_count_actually_used` FROM THESE ARTIFACTS AS A FACT.**
+All six runs record `1`, on a path xv9qf explicitly routed to a parallel helper
+whose `PAR_MIN` is 200_000. That is not evidence the routing is inert:
+`par_map_vec_f64` uses `std::thread::scope` (`fp-columnar/src/lib.rs:7613`), so
+its workers join inside the call, leaving no entry in the harness's "after"
+per-thread tick map, while the spawn-count arm needs a sampling monitor to catch
+a window that closes on its own. A scope-parallel kernel can legitimately report
+1. Distinguishing "inert" from "invisible" needs a direct instrument and I did
+not run one; both readings remain live. Taken with br-frankenpandas-att6b, that
+field is now known to err in BOTH directions — over-reporting for a cold
+persistent pool, under-reporting for scoped threads.
+
+**Artifacts:** `artifacts/bench/mu_{floor,ceil,trunc}_1M_thinkstation1_2026-08-16_run{1,2}.json`
