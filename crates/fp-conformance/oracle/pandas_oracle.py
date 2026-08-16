@@ -6809,6 +6809,49 @@ def op_dataframe_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_series_to_arrow_round_trip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    """Series -> Arrow -> Series, preserving values, index and dtype.
+
+    This operation had NO oracle handler, so
+    fp_p2d_427_series_to_arrow_nullable_int_roundtrip_strict asserted a
+    round-trip pandas was never asked to perform. (br-frankenpandas-nvnvr)
+
+    THE PATH MATTERS AND IS NOT ARBITRARY. MEASURED, live pandas 2.2.3 +
+    pyarrow 24.0.0, on `Series([10, <NA>, 30], index=['r0','r1','r2'],
+    dtype='Int64')`:
+
+        pa.Array.from_pandas(s).to_pandas()        -> [10.0, nan, 30.0]  float64
+        pa.Table.from_pandas(s.to_frame())         -> [10, <NA>, 30]     Int64
+            .to_pandas()['vals']                      index preserved
+
+    A bare Arrow ARRAY has no index and carries no pandas metadata, so it cannot
+    express a Series round trip at all — it drops the index and demotes the
+    nullable Int64 to float64. The TABLE path is the only one that round-trips
+    what a Series actually is, so that is what "round trip this Series through
+    Arrow" has to mean.
+    """
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_to_arrow_round_trip requires left payload")
+
+    try:
+        pa = importlib.import_module("pyarrow")
+    except Exception as exc:  # pragma: no cover - environment without pyarrow
+        raise OracleError(
+            f"series_to_arrow_round_trip requires pyarrow: {exc}"
+        ) from exc
+
+    series = fixture_series_from_payload(pd, left, "series_to_arrow_round_trip")
+    name = series.name if series.name is not None else "values"
+    try:
+        table = pa.Table.from_pandas(series.rename(name).to_frame())
+        out = table.to_pandas()[name]
+    except Exception as exc:
+        raise OracleError(f"series_to_arrow_round_trip failed: {exc}") from exc
+
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_compare(pd, payload: dict[str, Any]) -> dict[str, Any]:
     """`DataFrame.compare(other, result_names=...)`.
 
@@ -8666,6 +8709,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_drop_columns(pd, payload)
     if op in {"dataframe_replace", "data_frame_replace"}:
         return op_dataframe_replace(pd, payload)
+    if op in {"series_to_arrow_round_trip", "series_to_arrow"}:
+        return op_series_to_arrow_round_trip(pd, payload)
     if op in {"dataframe_compare", "data_frame_compare"}:
         return op_dataframe_compare(pd, payload)
     if op in {"dataframe_where", "data_frame_where"}:

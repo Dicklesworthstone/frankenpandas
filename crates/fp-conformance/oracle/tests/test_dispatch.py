@@ -1606,3 +1606,51 @@ def test_dataframe_compare_reports_pandas_two_level_column_axis(oracle, pd):
                 "compare_result_names": ["only-one"],
             },
         )
+
+
+def test_series_to_arrow_round_trip_preserves_dtype_index_and_nulls(oracle, pd):
+    """`series_to_arrow_round_trip` had NO oracle handler (br-frankenpandas-nvnvr).
+
+    The PATH is the substance of this handler, not boilerplate. MEASURED, live
+    pandas 2.2.3 + pyarrow 24.0.0 on Series([10, <NA>, 30], index=r0..r2,
+    dtype='Int64'):
+
+        pa.Array.from_pandas(s).to_pandas()   -> [10.0, nan, 30.0]  float64
+        pa.Table.from_pandas(s.to_frame())    -> [10, <NA>, 30]     Int64, index kept
+            .to_pandas()[name]
+
+    A bare Arrow ARRAY has no index and no pandas metadata, so it cannot express
+    a Series round trip: it drops the index and demotes nullable Int64 to
+    float64. Picking the Array path would have quietly redefined the operation
+    into something that always loses information — and the fixture would then
+    have "agreed" with a weaker claim.
+    """
+    out = oracle.dispatch(
+        pd,
+        {
+            "operation": "series_to_arrow_round_trip",
+            "left": {
+                "name": "vals",
+                "index": [
+                    {"kind": "utf8", "value": "r0"},
+                    {"kind": "utf8", "value": "r1"},
+                    {"kind": "utf8", "value": "r2"},
+                ],
+                "values": [
+                    {"kind": "int64", "value": 10},
+                    {"kind": "null", "value": "null"},
+                    {"kind": "int64", "value": 30},
+                ],
+            },
+        },
+    )["expected_series"]
+
+    # The index survives — an Arrow array alone could not have carried it.
+    assert [v["value"] for v in out["index"]] == ["r0", "r1", "r2"]
+
+    # Values keep their INTEGER kind rather than being demoted to float64,
+    # and the gap stays a null rather than becoming NaN.
+    kinds = [v["kind"] for v in out["values"]]
+    assert kinds == ["int64", "null", "int64"], kinds
+    assert out["values"][0]["value"] == 10
+    assert out["values"][2]["value"] == 30
