@@ -12685,6 +12685,36 @@ impl Series {
         //
         // and one-sided, reversed and frame-column bounds all keep Int64 too. FP
         // was returning Float64(2.0) where pandas gives Int64(2).
+        // ⚠ THE NULLABLE LANE REFUSES A BOUND IT CANNOT STORE; THE NUMPY LANE
+        // QUIETLY PROMOTES. Two different answers for the same call shape,
+        // split by dtype. MEASURED, live pandas 2.2.3:
+        //
+        //   pd.Series([1, pd.NA, 10], dtype='Int64').clip(2.5, 7.5)
+        //       -> TypeError: Invalid value '2.5' for dtype Int64
+        //   pd.Series([1, 10]).clip(2.5, 7.5)          # numpy int64
+        //       -> [2.5, 7.5] dtype float64
+        //
+        // The masked integer array has nowhere to put 2.5, so pandas raises
+        // rather than silently widening the extension dtype; numpy int64 has no
+        // such contract and promotes. FrankenPandas returned Float64 for BOTH,
+        // which is right for the numpy lane and wrong for the extension one.
+        //
+        // A NaN bound is NOT affected: `is_integer_bound` admits NaN because
+        // br-frankenpandas-s0rt1 established that pandas treats a NaN bound as
+        // "no clipping", so it never needs storing and never raises.
+        // (br-frankenpandas-3ugrk)
+        if self.column.dtype() == DType::Int64Nullable {
+            let offending = [lower, upper]
+                .into_iter()
+                .flatten()
+                .find(|b| !is_integer_bound(Some(*b)));
+            if let Some(bound) = offending {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "clip: Invalid value '{bound}' for dtype Int64"
+                )));
+            }
+        }
+
         let preserve_int64 = matches!(self.column.dtype(), DType::Int64 | DType::Int64Nullable)
             && is_integer_bound(lower)
             && is_integer_bound(upper);
@@ -42203,7 +42233,30 @@ mod str_worker_pool {
         /// `run` asserts that invariant by falling back to caller-side
         /// execution for any overflow rather than silently queueing behind a
         /// busy worker.
-        job_txs: Vec<Sender<Job>>,
+        /// SPAWNED ON DEMAND, one slot per potential worker.
+        ///
+        /// br-frankenpandas-att6b. The previous version spawned
+        /// `min(available_parallelism, 64)` threads on first use, but the only
+        /// caller (`affix_predicate`) caps its chunk count at
+        /// `n.div_ceil(131_072)` — 8 chunks at 1M rows. On a 64-logical box
+        /// that meant 56 threads existed purely to be scheduled around, and
+        /// every banked row from this path reported `fp_threads=64` when the
+        /// kernel had asked for 8, which is wrong provenance independent of any
+        /// speed effect.
+        ///
+        /// Each slot is a `OnceLock`, so slot i spawns its worker the first
+        /// time a caller actually dispatches job i and never again. A program
+        /// that only ever runs 8-chunk predicates ends up with 8 threads; one
+        /// that runs a 10M-row predicate grows to the 64 it genuinely needs.
+        /// After initialisation the dispatch path is still lock-free — a
+        /// `OnceLock::get_or_init` on an already-set slot is a load, so this
+        /// does not reintroduce the shared-lock handoff that vrjrf removed.
+        ///
+        /// If the OS refuses a thread, the spawn closure (and with it the
+        /// receiver) is dropped, so every `send` on that slot fails and `run`
+        /// executes the job on the caller — the same degradation path the
+        /// explicit `is_err` check used to provide, now for free.
+        job_txs: Vec<OnceLock<Sender<Job>>>,
         threads: usize,
     }
 
@@ -42215,17 +42268,27 @@ mod str_worker_pool {
     }
 
     impl Pool {
-        fn new() -> Self {
-            // Mirrors the per-call cap the scoped-spawn path used, so the
-            // pool can serve any chunking those kernels ask for without
-            // queueing behind itself.
+        /// Allocates the slots but starts NO threads — see `job_txs`. The
+        /// width is the per-call cap the scoped-spawn path used, so the pool
+        /// can still grow to serve any chunking those kernels ask for.
+        pub fn new() -> Self {
             let threads = std::thread::available_parallelism()
                 .map_or(1, std::num::NonZeroUsize::get)
                 .min(64);
-            let mut job_txs = Vec::with_capacity(threads);
-            for id in 0..threads {
+            Self {
+                job_txs: (0..threads).map(|_| OnceLock::new()).collect(),
+                threads,
+            }
+        }
+
+        /// The sender for worker `id`, spawning that worker on first demand.
+        fn worker(&self, id: usize) -> &Sender<Job> {
+            self.job_txs[id].get_or_init(|| {
                 let (job_tx, job_rx) = channel::<Job>();
-                let spawned = std::thread::Builder::new()
+                // A failed spawn drops the closure and with it `job_rx`, so
+                // sends on the returned `job_tx` fail and `run` falls back to
+                // caller-side execution. Nothing to check explicitly.
+                let _ = std::thread::Builder::new()
                     .name(format!("fp-str-{id}"))
                     .spawn(move || {
                         loop {
@@ -42244,22 +42307,12 @@ mod str_worker_pool {
                             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
                         }
                     });
-                if spawned.is_err() {
-                    // The OS refused a thread. Whatever count we reached is
-                    // what the pool has; `run` degrades to running everything
-                    // on the caller when `threads == 0`. `job_tx` for THIS id
-                    // is dropped unsent, so no sender outlives its worker.
-                    return Self {
-                        job_txs,
-                        threads: id,
-                    };
-                }
-                job_txs.push(job_tx);
-            }
-            Self { job_txs, threads }
+                job_tx
+            })
         }
 
-        /// How many workers this pool actually started.
+        /// The pool's WIDTH — how many workers it may grow to, not how many
+        /// exist. See `live_workers` for the latter.
         ///
         /// Exposed so a test can straddle the width in both directions — the
         /// per-worker-channel dispatch behaves differently at `jobs <= threads`
@@ -42268,6 +42321,15 @@ mod str_worker_pool {
         /// arms on a machine with a different core count.
         pub fn threads(&self) -> usize {
             self.threads
+        }
+
+        /// How many worker threads have actually been started so far.
+        ///
+        /// This is the number br-frankenpandas-att6b is about: it should track
+        /// the largest chunk count any caller has asked for, not the machine's
+        /// core count.
+        pub fn live_workers(&self) -> usize {
+            self.job_txs.iter().filter(|slot| slot.get().is_some()).count()
         }
 
         /// Run `jobs` on the pool and return their results **in submission
@@ -42319,13 +42381,14 @@ mod str_worker_pool {
                 // `POOL` static is alive, which the catch_unwind in the worker
                 // loop is designed to prevent — but the recovery costs one
                 // branch and removes a panic from library code.)
-                match self.job_txs.get(offset) {
-                    Some(tx) => {
-                        if let Err(std::sync::mpsc::SendError(job)) = tx.send(boxed) {
-                            job();
-                        }
+                if offset < self.threads {
+                    // `worker` spawns slot `offset` on first demand and is a
+                    // plain load thereafter (br-frankenpandas-att6b).
+                    if let Err(std::sync::mpsc::SendError(job)) = self.worker(offset).send(boxed) {
+                        job();
                     }
-                    None => boxed(),
+                } else {
+                    boxed();
                 }
             }
             drop(result_tx);
@@ -111385,6 +111448,60 @@ mod tests {
                 "pool.run lost or reordered results at count={count} (pool width {width})"
             );
         }
+    }
+
+    /// The pool must grow to DEMAND, not to the core count
+    /// (br-frankenpandas-att6b).
+    ///
+    /// Uses a FRESH `Pool` rather than the process-wide static on purpose: the
+    /// static is shared with every other test in this binary, so a count taken
+    /// against it would depend on test order and would either flake or, worse,
+    /// pass for the wrong reason. A local pool makes the count exact.
+    ///
+    /// The caller runs job 0 itself and dispatches the remaining k-1, so a
+    /// k-job call must leave exactly k-1 workers alive — and a second call at
+    /// the same width must reuse them rather than spawn more, which is the
+    /// half that catches a `get_or_init` that was accidentally re-initialising.
+    #[test]
+    fn str_worker_pool_grows_to_demand_not_core_count_att6b() {
+        let pool = super::str_worker_pool::Pool::new();
+        assert_eq!(pool.live_workers(), 0, "constructing a pool must spawn nothing");
+        assert!(pool.threads() >= 1);
+
+        if pool.threads() < 3 {
+            // A 1-2 core machine cannot exercise growth; the invariant above
+            // is still the meaningful half there.
+            return;
+        }
+
+        let three: Vec<_> = (0..3usize).map(|i| move || i).collect();
+        assert_eq!(pool.run(three), vec![0, 1, 2]);
+        assert_eq!(
+            pool.live_workers(),
+            2,
+            "3 jobs = 1 on the caller + 2 dispatched, so exactly 2 workers"
+        );
+
+        // Same width again: reuse, do not grow.
+        let three: Vec<_> = (0..3usize).map(|i| move || i * 10).collect();
+        assert_eq!(pool.run(three), vec![0, 10, 20]);
+        assert_eq!(pool.live_workers(), 2, "re-running the same width must reuse workers");
+
+        // Wider call grows by exactly the extra slots it needs.
+        let wide = pool.threads().min(5);
+        let jobs: Vec<_> = (0..wide).map(|i| move || i).collect();
+        let want: Vec<usize> = (0..wide).collect();
+        assert_eq!(pool.run(jobs), want);
+        assert_eq!(
+            pool.live_workers(),
+            wide - 1,
+            "a {wide}-job call needs {} workers",
+            wide - 1
+        );
+        assert!(
+            pool.live_workers() < pool.threads() || pool.threads() <= wide,
+            "must not have spawned the full core count for a {wide}-way job"
+        );
     }
 
     /// Differential guard for the byte-level prefix/suffix path
@@ -193374,6 +193491,90 @@ mod clip_nullable_int64_77x9g {
             column,
         )
         .expect("series")
+    }
+
+    /// A FRACTIONAL bound must RAISE on the nullable lane
+    /// (br-frankenpandas-3ugrk).
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    ///   pd.Series([1, pd.NA, 10], dtype='Int64').clip(2.5, 7.5)
+    ///     -> TypeError: Invalid value '2.5' for dtype Int64
+    ///
+    /// The masked integer array cannot store 2.5, so pandas refuses rather
+    /// than widening the extension dtype. Both one-sided forms raise too, and
+    /// the raise must name the offending bound so the message is diagnosable.
+    #[test]
+    fn fractional_bound_raises_on_nullable_int64_3ugrk() {
+        let s = nullable_int64_series(vec![
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(10),
+        ]);
+
+        for (lower, upper, offending) in [
+            (Some(2.5), Some(7.5), "2.5"),
+            (Some(2.5), None, "2.5"),
+            (None, Some(7.5), "7.5"),
+        ] {
+            let err = s
+                .clip(lower, upper)
+                .expect_err("fractional bound on Int64Nullable must raise");
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains(offending),
+                "error must name the offending bound {offending}, got {msg}"
+            );
+        }
+    }
+
+    /// The numpy lane is NOT affected and must keep promoting
+    /// (br-frankenpandas-3ugrk).
+    ///
+    /// MEASURED, same pandas: `pd.Series([1, 10]).clip(2.5, 7.5)` -> float64
+    /// [2.5, 7.5]. This is the control that keeps the raise scoped to the
+    /// extension dtype — a fix that raised for both would "pass" the test
+    /// above while breaking the far commoner path.
+    #[test]
+    fn fractional_bound_still_promotes_on_numpy_int64_3ugrk() {
+        let s = Series::from_values(
+            "nums",
+            vec![0i64.into(), 1i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(10)],
+        )
+        .expect("series");
+        assert_eq!(s.column().dtype(), DType::Int64);
+
+        let out = s.clip(Some(2.5), Some(7.5)).expect("numpy int64 must promote");
+        assert_eq!(out.column().dtype(), DType::Float64);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Float64(2.5), Scalar::Float64(7.5)]
+        );
+    }
+
+    /// An INTEGER-VALUED float bound still works on the nullable lane, and a
+    /// NaN bound still means "no clipping" rather than a raise
+    /// (br-frankenpandas-3ugrk guarding br-frankenpandas-77x9g / -s0rt1).
+    ///
+    /// Without this, the natural over-broad fix — raise whenever a bound is a
+    /// float — would pass the raise test and silently break both.
+    #[test]
+    fn integral_and_nan_bounds_do_not_raise_on_nullable_int64_3ugrk() {
+        let s = nullable_int64_series(vec![
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(10),
+        ]);
+
+        let clipped = s.clip(Some(2.0), Some(8.0)).expect("integral bounds are storable");
+        assert_eq!(clipped.column().dtype(), DType::Int64Nullable);
+        assert_eq!(int64_values(&clipped), vec![Some(2), None, Some(8)]);
+
+        let untouched = s
+            .clip(Some(f64::NAN), Some(f64::NAN))
+            .expect("NaN bounds mean no clipping, not a raise");
+        assert_eq!(untouched.column().dtype(), DType::Int64Nullable);
+        assert_eq!(int64_values(&untouched), vec![Some(1), None, Some(10)]);
     }
 
     fn int64_values(series: &Series) -> Vec<Option<i64>> {
