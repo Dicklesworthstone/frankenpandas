@@ -1541,3 +1541,68 @@ def test_startswith_endswith_accept_an_empty_and_whitespace_pattern(oracle, pd):
     # A non-string is still refused — the guard was narrowed, not removed.
     with pytest.raises(Exception):
         oracle.dispatch(pd, payload("series_str_startswith", 5))
+
+
+def test_dataframe_compare_reports_pandas_two_level_column_axis(oracle, pd):
+    """`DataFrame.compare` had NO oracle handler (br-frankenpandas-nvnvr).
+
+    fp_p2d_418 therefore asserted a result pandas was never asked for — the same
+    unverifiable state br-frankenpandas-62d1s found for the dtype-check ops.
+
+    MEASURED, live pandas 2.2.3, left {'a':[1,2],'b':[3,4]} vs right
+    {'a':[1,9],'b':[3,4]} with result_names=('left','right'):
+
+        index   [1]                       only the differing row survives
+        columns [('a','left'), ('a','right')]   TWO-LEVEL, and 'b' is dropped
+        values  2.0 / 9.0                 float64 — compare promotes, because
+                                          unmatched cells become NaN
+
+    The handler adds NO flattening of its own: `dataframe_to_json` already maps a
+    two-level axis to `'a_left'`/`'a_right'` with `'_'.join` and carries the
+    tuples in `column_multiindex` (br-frankenpandas-nv5ct). Inventing a bespoke
+    flattening here would be the oracle-adapted-to-FP masking pattern.
+    """
+    def frame(a_values):
+        return {
+            "index": [{"kind": "int64", "value": 0}, {"kind": "int64", "value": 1}],
+            "columns": {
+                "a": [{"kind": "int64", "value": v} for v in a_values],
+                "b": [{"kind": "int64", "value": 3}, {"kind": "int64", "value": 4}],
+            },
+            "column_order": ["a", "b"],
+        }
+
+    out = oracle.dispatch(
+        pd,
+        {
+            "operation": "dataframe_compare",
+            "frame": frame([1, 2]),
+            "frame_right": frame([1, 9]),
+            "compare_result_names": ["left", "right"],
+        },
+    )["expected_frame"]
+
+    # Only the differing row, and only the differing column, survive.
+    assert [v["value"] for v in out["index"]] == [1]
+    assert out["column_order"] == ["a_left", "a_right"]
+    assert "b_left" not in out["columns"]
+
+    # pandas PROMOTES to float64 here; the values are 2.0 / 9.0, not 2 / 9.
+    assert [c["kind"] for c in out["columns"]["a_left"]] == ["float64"]
+    assert out["columns"]["a_left"][0]["value"] == 2.0
+    assert out["columns"]["a_right"][0]["value"] == 9.0
+
+    # The flattened keys are a VIEW; the tuples travel losslessly beside them.
+    assert out.get("column_multiindex") is not None
+
+    # result_names is validated, not silently ignored.
+    with pytest.raises(Exception):
+        oracle.dispatch(
+            pd,
+            {
+                "operation": "dataframe_compare",
+                "frame": frame([1, 2]),
+                "frame_right": frame([1, 9]),
+                "compare_result_names": ["only-one"],
+            },
+        )

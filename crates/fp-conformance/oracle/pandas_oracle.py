@@ -6809,6 +6809,53 @@ def op_dataframe_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_compare(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    """`DataFrame.compare(other, result_names=...)`.
+
+    This operation had NO oracle handler, so
+    fp_p2d_418_dataframe_compare_result_names_strict asserted a result pandas was
+    never asked for — the same unverifiable state br-frankenpandas-62d1s found
+    for the dtype-check ops, where implementing the handler turned 7 unchecked
+    fixtures into 5 verified-agreeing and 2 verified-DIVERGENT.
+
+    pandas returns a TWO-LEVEL column axis, `('a','left')` / `('a','right')`.
+    `dataframe_to_json` already flattens that to `'a_left'`/`'a_right'` with
+    `'_'.join` and carries the tuples losslessly in `column_multiindex`
+    (br-frankenpandas-nv5ct), which is the shape FrankenPandas stores — so this
+    handler adds NO translation of its own. That distinction is the point: a
+    bespoke flattening here would be the oracle-adapted-to-FP masking pattern.
+    (br-frankenpandas-nvnvr)
+    """
+    frame_payload = payload.get("frame")
+    other_payload = payload.get("frame_right")
+    if frame_payload is None:
+        raise OracleError("dataframe_compare requires frame payload")
+    if other_payload is None:
+        raise OracleError("dataframe_compare requires frame_right payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    other = dataframe_from_json(pd, other_payload)
+
+    result_names = payload.get("compare_result_names")
+    kwargs: dict[str, Any] = {}
+    if result_names is not None:
+        if (
+            not isinstance(result_names, (list, tuple))
+            or len(result_names) != 2
+            or not all(isinstance(part, str) for part in result_names)
+        ):
+            raise OracleError(
+                "dataframe_compare compare_result_names must be two strings"
+            )
+        kwargs["result_names"] = tuple(result_names)
+
+    try:
+        out = frame.compare(other, **kwargs)
+    except Exception as exc:
+        raise OracleError(f"dataframe_compare failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_where(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     cond_payload = payload.get("frame_right")
@@ -8619,6 +8666,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_drop_columns(pd, payload)
     if op in {"dataframe_replace", "data_frame_replace"}:
         return op_dataframe_replace(pd, payload)
+    if op in {"dataframe_compare", "data_frame_compare"}:
+        return op_dataframe_compare(pd, payload)
     if op in {"dataframe_where", "data_frame_where"}:
         return op_dataframe_where(pd, payload)
     if op in {"dataframe_where_df", "data_frame_where_df"}:

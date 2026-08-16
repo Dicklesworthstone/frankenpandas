@@ -77,12 +77,11 @@ KNOWN_UNREAD = {
     "ipc_stream_input_base64": "replay-only binary IO fixture, not live-derivable",
     "parquet_input_base64": "replay-only binary IO fixture, not live-derivable",
     "requirement_level": "fixture metadata, not an operation argument",
-    # The oracle has NO handler for `dataframe_compare` at all — it answers
-    # "unsupported operation: 'dataframe_compare'" — so this key is unread
-    # because the whole operation is not live-derivable, not because an option
-    # is being dropped. fp_p2d_418 is replay-only. Retiring it (with the reason
-    # recorded) versus implementing the op is a call for 9s0c4.
-    "compare_result_names": "oracle has no dataframe_compare handler; fixture is replay-only",
+    # `compare_result_names` was here because the oracle had NO
+    # `dataframe_compare` handler and answered "unsupported operation", making
+    # fp_p2d_418 replay-only. The handler now exists and READS the key, so the
+    # entry is removed and this tripwire is what caught it — exactly what it is
+    # for. (br-frankenpandas-nvnvr)
 }
 
 

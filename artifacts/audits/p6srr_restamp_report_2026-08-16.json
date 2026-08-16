@@ -6,9 +6,10 @@
   "restamped": 1146,
   "restamp_refused": [],
   "move_classes": {
-    "KIND int64->float64": 1,
+    "KIND int64->float64": 2,
     "VALUE": 3,
     "ERROR expected-but-succeeded": 1,
+    "SHAPE key-added-by-oracle": 1,
     "KIND utf8->null": 2,
     "NULL_MARKER na_n->null": 2
   },
@@ -51,6 +52,20 @@
         "ERROR expected-but-succeeded"
       ],
       "example": "",
+      "roundtrip_implicated": [],
+      "provenance": ""
+    },
+    {
+      "fixture": "fp_p2d_418_dataframe_compare_result_names_strict.json",
+      "keys": [
+        "expected_frame"
+      ],
+      "why": "column 'a_left'[0] mismatch: {'kind': 'int64', 'value': 2} vs {'kind': 'float64', 'value': 2.0}",
+      "classes": [
+        "KIND int64->float64",
+        "SHAPE key-added-by-oracle"
+      ],
+      "example": ".column_multiindex: '<absent>' vs {'tuples': [[{'kind': 'utf8', 'value': 'a'}, {'kind': 'utf8', 'value': 'left'}], [{'kind': 'utf8', 'value': 'a'}, {'kind': 'utf8', 'value': 'right'}]], 'names': [None, None]}",
       "roundtrip_implicated": [],
       "provenance": ""
     },
@@ -118,10 +133,6 @@
     {
       "fixture": "fp_p2d_359_ipc_stream_round_trip_null_hardened.json",
       "error": "oracle error: unsupported operation: 'ipc_stream_round_trip'"
-    },
-    {
-      "fixture": "fp_p2d_418_dataframe_compare_result_names_strict.json",
-      "error": "oracle error: unsupported operation: 'dataframe_compare'"
     },
     {
       "fixture": "fp_p2d_427_series_to_arrow_nullable_int_roundtrip_strict.json",
@@ -676,7 +687,7 @@
   ],
   "uncompared_keys": {},
   "coverage": {
-    "SEMANTIC": 1135,
+    "SEMANTIC": 1136,
     "STRUCTURAL": 16
   }
 }

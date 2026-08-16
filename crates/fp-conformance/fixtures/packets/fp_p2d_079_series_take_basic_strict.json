@@ -5,8 +5,8 @@
   "operation": "series_take",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "934907739178a4fce0065f2bc3a93fb85ffef6aa4a20e660ccd8052382fe480c",
-    "generated_at": "2026-08-16T12:06:59Z"
+    "oracle_script_sha256": "a8d52c0ed7f4174c6c5590adcc02996faf0d6b888c0ff449aa38eba10e39908c",
+    "generated_at": "2026-08-16T12:22:25Z"
   },
   "take_indices": [0, 2, 1],
   "left": {
