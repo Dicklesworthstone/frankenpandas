@@ -24947,3 +24947,72 @@ attempts**, and its four point estimates — 0.144, 0.123, 0.099, and an earlier
 ~0.10 — span 45%, which is what high-cv sampling looks like.
 
 **Artifacts:** `artifacts/bench/trunc_1M_thinkstation1_2026-08-16_hardest_load6_elf_ad74e170.json`
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-jk9ht) — I RETRACT the `df_dot @1M` crossing I banked two hours ago: it does not replicate, and on best-vs-best it is a LOSS — REJECT
+
+I banked **1.187x FASTER** for `df_dot @1M` earlier today, fully certified, and
+flagged that it cleared its threshold by only 2%. At the quietest window of the
+session (uptime read **6.55** immediately before launch) I re-ran it as a
+replication: same ELF `4a89472f…`, same harness `6d884360…`, same pandas artifact
+`c10b13e6…`, 31 rounds instead of 21. **It came back 0.987x, NULL_UNDECIDABLE.**
+
+| run | load (start -> end) | FP min / p50 / max / cv | pandas min / p50 / max / cv | gated ratio |
+|---|---|---|---|---:|
+| 1 (banked) | 21.24 -> 57.79 | 18.63 / **20.12** / 22.89 / 3.9% | 11.55 / **23.67** / 29.79 / 22.7% | **1.187x** CERTIFIED |
+| 2 (this) | 6.12 -> 53.80 | 17.80 / **20.22** / 25.83 / 5.7% | 9.07 / **20.23** / 29.73 / 29.4% | **0.987x** refused |
+
+**FRANKENPANDAS' ARM REPRODUCED. THE INCUMBENT'S DID NOT.** FP's p50 moved 0.5%
+between the two runs (20.12 -> 20.22 ms) at cv 3.9-5.7%, across loads spanning
+6 to 58. pandas' p50 moved 15% (23.67 -> 20.23 ms) at cv 22.7-29.4%, with
+individual samples ranging **9.07 ms to 29.79 ms** — a 3.3x spread within single
+invocations. The crossing I banked was not a property of the code; it was a
+property of where the incumbent's median happened to land that afternoon.
+
+**ON BEST-VS-BEST, `df_dot @1M` IS A LOSS, and that is the number I should have
+led with.** Comparing each arm's fastest observed sample — the statistic least
+polluted by co-scheduling — pandas beats FrankenPandas by **1.6x (run 1: 11.55 vs
+18.63 ms, ratio 0.620)** and **2.0x (run 2: 9.07 vs 17.80 ms, ratio 0.509)**. A
+64-thread OpenBLAS GEMM at its best is roughly twice FP's best on this shape.
+
+**Applying the same test to my other two certified rows, because a correction
+that only checks the row it likes is not a correction:**
+
+| size | gated median ratio | best-vs-best ratio | survives? |
+|---|---:|---:|---|
+| 10k | 0.53x | 0.477x | YES — a loss on both statistics |
+| 100k | **7.255x** | **4.087x** | YES — still a 4x win comparing bests |
+| 1M | 1.187x / 0.987x | 0.620 / 0.509 | **NO — retracted** |
+
+The `@100k` win is robust: even best-against-best it is 4.087x, nowhere near its
+boundary. The `@10k` loss is robust. Only the `@1M` row was living inside the
+incumbent's noise, and it was the one whose margin I had already flagged as 2%.
+
+**MECHANISM, because the dispersion asymmetry is itself a finding.** FP's
+materialization is column-parallel with NO synchronization between workers — 1000
+independent output columns, one `OnceLock` each — so losing a core to another
+tenant costs it one column's worth of time. A blocked BLAS GEMM synchronizes its
+panels, so a stolen core stalls a barrier and the whole factorization waits.
+That is why FP holds cv 3.9-5.7% while the incumbent swings 22-29% on the same
+box in the same seconds. Graceful degradation under contention is a real property
+of the safe-Rust design; it is NOT a win, and reporting it as one is how the
+1.187x row happened.
+
+**A/A null control (same invocation):** run 2, 31 balanced-square rounds:
+FrankenPandas median ratio 0.994391 CI [0.982, 1.0238] — inside 2%; pandas median
+ratio 0.963856 CI [0.8363, 1.0144] — OUTSIDE it, which is why the row is refused
+rather than banked as a 0.987x parity claim. Run 1's nulls were 0.996436 and
+0.980950, both inside.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228 (78709880 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench-sse2
+
+**Decision: REJECT the `df_dot @1M` crossing.** The 1.187x entry above is not
+deleted and was not mis-measured — it passed all three clauses honestly — but it
+must not be read as "FrankenPandas beats pandas at 1M", and I am the one who read
+it that way. The standing claim for this shape is now: **FP is stable at ~20.2 ms
+p50 and loses to the incumbent's best by 1.6-2.0x.** Closing that is
+br-frankenpandas-mti15. Nothing here touches `@100k` (7.255x, robust) or the
+worker-sizing lever, whose self-speedup A/B never involved the incumbent arm.
+
+**Artifacts:** `artifacts/bench/jk9ht_df_dot_1M_thinkstation1_2026-08-16_quietest_run2.json`
+(run 1 is `…_quiet_run1.json`, banked above)
