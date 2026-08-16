@@ -23855,3 +23855,66 @@ its own past, and the honest headline for the corpus is that the worst
 remains correct for the ELF it names.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_local_elf_1858bb91.json`
+
+---
+
+## br-frankenpandas-h67zz — `trunc` @1M REFUSED at load 60+: both A/A nulls fail, no ratio claimed; plus a provenance precision on the floor/ceil rows above
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** MEASUREMENT
+REFUSED by the gate. Banking the refusal rather than the number, and correcting
+a provenance claim I made two entries above.
+
+`trunc @1M` was the last `math_unary` row still described only by the stale ELF
+`a3078566`. Re-ran it ABBA in ONE invocation.
+
+```
+fp-bench ELF    sha256 4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228
+                78709880 bytes, target/release-perf/fp-bench, profile release-perf
+harness         sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3 · design balanced-square ABBAABBA, ONE invocation
+host            thinkstation1, governor powersave, smt on
+load            60.79 -> 65.78 across the run   (the floor row above ran at 6.41)
+```
+
+| | point ratio | verdict | FP p50 / cv | pandas p50 / cv | FP thr |
+|---|---|---|---|---|---|
+| `trunc @1M` | (0.144) | **NULL_UNDECIDABLE** | 1688.87us / **51.13%** | 255.41us / 28.87% | 8 |
+
+**A/A null control (same invocation):** FP **0.944572** (5.5% off unity) and
+pandas **1.027981** (2.8% off) — **BOTH outside ±2%, so both arms are
+untrustworthy and NO ratio is claimed.** The 0.144 above is recorded in
+parentheses as the point estimate the run produced, not as a result. FP's cv of
+51% on a box at load 60+ is the proximate cause; the floor row that certified at
+0.132x ran at load 6.41 with FP cv 7.44%.
+
+**This is the third `math_unary` row today whose verdict was decided by host
+load rather than by the code.** Worth stating as a method point: on this fleet
+the balanced-square design pairs the arms and survives moderate contention, but
+at load ~60 it does not rescue the A/A nulls, and a run launched without checking
+`/proc/loadavg` first is a coin flip. Check the load before spending the
+invocation, not after.
+
+### ⚠️ PROVENANCE PRECISION ON THE `floor` AND `ceil` ROWS ABOVE
+
+Those two entries say their ELF was built from a tree "code-identical to
+`669d45cbc`". That was not strictly verified at build time, and it was not
+strictly true: the working tree carried an UNCOMMITTED peer edit to
+`crates/fp-columnar/src/lib.rs` (+309/-23) which is therefore compiled into ELF
+`1858bb91`, and into `4a89472f` here.
+
+**It does not contaminate those rows, and I checked rather than assumed.** The
+peer edit is a worker-cap / scheduling change confined to the `df.dot` path — 27
+diff lines matching `materialize_dot` / `FP_DOT`, and **ZERO** lines matching the
+elementwise unary path those workloads use (`par_map_slice_f64_with_witness`,
+`typed_float_unary`, `elementwise_witness_policy`, `FP_ELEMENTWISE`). So
+floor/ceil/trunc execute code the edit does not touch, and in particular the
+**1 → 8 thread shift on floor and ceil is NOT explained by that peer's work.**
+
+The correction that stands: those ELFs are not attributable to a commit, only to
+their SHA-256. The rows remain valid and reproducible against the recorded hash;
+the phrase "code-identical to 669d45cbc" should be read as "HEAD plus an
+uncommitted peer edit outside the measured path". **Verify the tree is clean
+before claiming an ELF represents a commit** — on a shared checkout that is not
+the default state.
+
+**Artifacts:** `artifacts/bench/trunc_1M_thinkstation1_2026-08-16_local_elf_4a89472f.json`
