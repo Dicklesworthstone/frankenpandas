@@ -2328,9 +2328,9 @@ def op_series_repeat(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if (repeat_n is None) == (repeat_counts is None):
         raise OracleError("series_repeat requires exactly one of repeat_n or repeat_counts")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Shared builder: repeat() duplicates rows and carries the dtype through.
+    # (br-frankenpandas-6k29f)
+    series = fixture_series_from_payload(pd, left, "series_repeat")
 
     if repeat_n is not None:
         try:
@@ -2492,15 +2492,16 @@ def op_series_head(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if head_n is None:
         raise OracleError("series_head requires head_n payload")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-
     try:
         n = int(head_n)
     except Exception as exc:  # pragma: no cover - defensive conversion
         raise OracleError(f"series_head head_n must be an integer: {exc}") from exc
 
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Shared builder: head() is a pure row selection, so the answer's dtype IS
+    # the input's dtype. Hand-rolling `pd.Series(values, index=index)` drops the
+    # payload's declared dtype and lets pandas infer numpy float64 for an int
+    # lane carrying a null. (br-frankenpandas-6k29f)
+    series = fixture_series_from_payload(pd, left, "series_head")
     out = series.head(n)
 
     return {
@@ -3202,10 +3203,10 @@ def op_series_xs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if xs_key is None:
         raise OracleError("series_xs requires xs_key payload")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
     key = label_from_json(xs_key)
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Shared builder: xs() selects rows and carries the dtype through.
+    # (br-frankenpandas-6k29f)
+    series = fixture_series_from_payload(pd, left, "series_xs")
     try:
         out = series.xs(key)
     except Exception as exc:
@@ -3280,9 +3281,9 @@ def op_series_sort_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("series_sort_index requires left payload")
 
     ascending = payload.get("sort_ascending", True)
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Shared builder: sort_index() reorders rows and carries the dtype through,
+    # the same reason series_sort_values above uses it. (br-frankenpandas-6k29f)
+    series = fixture_series_from_payload(pd, left, "series_sort_index")
     out = series.sort_index(ascending=bool(ascending))
 
     return {
@@ -6954,9 +6955,9 @@ def op_series_nlargest(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if keep not in {"first", "last", "all"}:
         raise OracleError(f"series_nlargest keep must be one of first|last|all, got {keep!r}")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Shared builder: nlargest() selects rows and carries the dtype through.
+    # (br-frankenpandas-6k29f)
+    series = fixture_series_from_payload(pd, left, "series_nlargest")
 
     try:
         out = series.nlargest(n=n, keep=keep)
@@ -6983,9 +6984,9 @@ def op_series_nsmallest(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if keep not in {"first", "last", "all"}:
         raise OracleError(f"series_nsmallest keep must be one of first|last|all, got {keep!r}")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Shared builder: nsmallest() selects rows and carries the dtype through.
+    # (br-frankenpandas-6k29f)
+    series = fixture_series_from_payload(pd, left, "series_nsmallest")
 
     try:
         out = series.nsmallest(n=n, keep=keep)
@@ -7188,9 +7189,11 @@ def op_series_drop_duplicates(pd, payload: dict[str, Any]) -> dict[str, Any]:
                 f"series_drop_duplicates keep must be first|last|none, got {keep!r}"
             )
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Shared builder: drop_duplicates() is a row selection and carries the dtype
+    # through. It is ALSO dtype-sensitive in a second way — numpy float64 turns
+    # a null into NaN, and NaN-vs-NaN duplicate detection is not the same
+    # question as <NA>-vs-<NA>. (br-frankenpandas-6k29f)
+    series = fixture_series_from_payload(pd, left, "series_drop_duplicates")
 
     try:
         out = series.drop_duplicates(keep=keep)
