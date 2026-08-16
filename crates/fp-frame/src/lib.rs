@@ -12673,7 +12673,18 @@ impl Series {
         //
         // This also retires br-frankenpandas-2o29o's `has_nulls` call, which
         // existed ONLY to feed the removed condition. (br-frankenpandas-p5nku)
-        let preserve_int64 = matches!(self.column.dtype(), DType::Int64)
+        // `Int64Nullable` joins the gate (br-frankenpandas-77x9g). The arm above
+        // reasons about the corpus's nullable lane — an `Int64` column CARRYING a
+        // null — but FrankenPandas also has the EXPLICIT extension dtype, and it
+        // was falling straight past this gate into the Float64 branch below.
+        //
+        // MEASURED, live pandas 2.2.3, s = [1, <NA>, 10] dtype Int64, clip(2.0, 8.0):
+        //
+        //   Int64  -> Int64  [2, <NA>, 8]        (bounds are FLOATS, dtype survives)
+        //
+        // and one-sided, reversed and frame-column bounds all keep Int64 too. FP
+        // was returning Float64(2.0) where pandas gives Int64(2).
+        let preserve_int64 = matches!(self.column.dtype(), DType::Int64 | DType::Int64Nullable)
             && is_integer_bound(lower)
             && is_integer_bound(upper);
 
@@ -12715,6 +12726,15 @@ impl Series {
                 clamped = hi;
             }
             out.push(Scalar::Float64(clamped));
+        }
+        // `with_values_preserving_index` INFERS the output dtype, and inference
+        // cannot tell `Int64Nullable` from `Int64` — it sees `Scalar::Int64`s and a
+        // null and yields plain `Int64`. Preserving the extension dtype has to be
+        // explicit, or clip would silently demote the lane it just clipped
+        // correctly. (br-frankenpandas-77x9g)
+        if preserve_int64 && self.column.dtype() == DType::Int64Nullable {
+            let column = Column::new(DType::Int64Nullable, out)?;
+            return Self::new(self.name.clone(), self.index.clone(), column);
         }
         self.with_values_preserving_index(out)
     }
@@ -79077,7 +79097,24 @@ impl DataFrame {
         // delegates Bool columns and passes other non-numeric dtypes through.
         let transformed = self.par_map_columns_min(&self.column_order, par_min_values, |name| {
             let col = &self.columns[name];
-            if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
+            // The NULLABLE extension dtypes belong on the delegating side of this
+            // gate (br-frankenpandas-77x9g). They were landing in the `else`, which
+            // returns the column UNTOUCHED — so every op routed through this helper
+            // was a silent NO-OP on an `Int64Nullable`/`BoolNullable` column, not an
+            // error and not a fallback. That is how `df.clip(-1, 4)` returned its
+            // input `-5` unchanged: the pass-through, not clip, produced the answer.
+            //
+            // This is the shared helper behind ~54 elementwise/scan/math ops, so the
+            // no-op was never clip-specific. `Series` handles these dtypes (clip does
+            // so as of this bead); the gate simply never let them through.
+            if matches!(
+                col.dtype(),
+                DType::Int64
+                    | DType::Float64
+                    | DType::Bool
+                    | DType::Int64Nullable
+                    | DType::BoolNullable
+            ) {
                 let s = self.column_as_series(name)?;
                 Ok(func(&s)?.column().clone())
             } else {
@@ -192900,5 +192937,216 @@ mod overflow_policy_mode_mapping_5e47p {
         assert_eq!(entries[0].operands, Some((i64::MAX, 1)));
 
         overflow_audit::disable();
+    }
+}
+
+/// br-frankenpandas-77x9g: `clip` on the NULLABLE `Int64` extension lane.
+///
+/// Every expectation here was read off live pandas 2.2.3 before the fix, not
+/// derived from FrankenPandas' own behaviour:
+///
+/// ```text
+/// s = pd.Series([1, pd.NA, 10], dtype='Int64')
+///   s.clip(2.0, 8.0)   -> [2, <NA>, 8]   dtype Int64
+///   s.clip(5.0, None)  -> [5, <NA>, 10]  dtype Int64
+///   s.clip(None, 5.0)  -> [1, <NA>, 5]   dtype Int64
+///   s.clip(8.0, 2.0)   -> [2, <NA>, 8]   dtype Int64   (reversed bounds swap)
+///
+/// df = pd.DataFrame({'a': pd.array([-5, pd.NA, 3, 8], dtype='Int64'),
+///                    'b': [-2.5, 0.0, np.nan, 9.0]})
+///   df.clip(-1.0, 4.0) -> a: [-1, <NA>, 3, 4]  Int64
+///                         b: [-1.0, 0.0, NaN, 4.0]  float64
+/// ```
+///
+/// The bounds are FLOATS in every one of those arms and the `Int64` dtype still
+/// survives, which is the property FrankenPandas was getting wrong.
+#[cfg(test)]
+mod clip_nullable_int64_77x9g {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::{DType, NullKind, Scalar};
+
+    use super::{DataFrame, Series};
+
+    fn nullable_int64_series(values: Vec<Scalar>) -> Series {
+        let n = values.len();
+        let column = Column::new(DType::Int64Nullable, values).expect("nullable Int64 column");
+        // Built EXPLICITLY rather than through value inference: inference cannot
+        // produce Int64Nullable (it sees Scalar::Int64 plus a null and yields
+        // plain Int64), so a test that went through `from_values` would silently
+        // exercise the already-working lane and prove nothing.
+        assert_eq!(column.dtype(), DType::Int64Nullable);
+        Series::new(
+            "nums",
+            Index::new((0..n as i64).map(Into::into).collect()),
+            column,
+        )
+        .expect("series")
+    }
+
+    fn int64_values(series: &Series) -> Vec<Option<i64>> {
+        series
+            .column()
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Int64(v) => Some(*v),
+                other => {
+                    assert!(other.is_missing(), "unexpected non-int64 value {other:?}");
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn series_clip_keeps_the_nullable_int64_dtype_and_clamps() {
+        let s = nullable_int64_series(vec![
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(10),
+        ]);
+        let clipped = s.clip(Some(2.0), Some(8.0)).expect("clip");
+        assert_eq!(int64_values(&clipped), vec![Some(2), None, Some(8)]);
+        assert_eq!(
+            clipped.column().dtype(),
+            DType::Int64Nullable,
+            "pandas returns dtype Int64, not float64, for a nullable Int64 input"
+        );
+    }
+
+    #[test]
+    fn series_clip_nullable_int64_honours_one_sided_and_reversed_bounds() {
+        let s = || {
+            nullable_int64_series(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
+            ])
+        };
+        let lower_only = s().clip(Some(5.0), None).expect("clip lower");
+        assert_eq!(int64_values(&lower_only), vec![Some(5), None, Some(10)]);
+        assert_eq!(lower_only.column().dtype(), DType::Int64Nullable);
+
+        let upper_only = s().clip(None, Some(5.0)).expect("clip upper");
+        assert_eq!(int64_values(&upper_only), vec![Some(1), None, Some(5)]);
+        assert_eq!(upper_only.column().dtype(), DType::Int64Nullable);
+
+        // pandas GH 2747: reversed scalar bounds SWAP rather than collapsing to
+        // the upper bound the way numpy would.
+        let reversed = s().clip(Some(8.0), Some(2.0)).expect("clip reversed");
+        assert_eq!(int64_values(&reversed), vec![Some(2), None, Some(8)]);
+        assert_eq!(reversed.column().dtype(), DType::Int64Nullable);
+    }
+
+    #[test]
+    fn a_missing_slot_is_never_clamped_to_a_bound() {
+        // The gap must survive as a gap. Clamping it to the lower bound would
+        // read as a plausible 2 and be invisible in a values-only assertion.
+        let s = nullable_int64_series(vec![
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(4),
+            Scalar::Null(NullKind::NaN),
+        ]);
+        let clipped = s.clip(Some(2.0), Some(8.0)).expect("clip");
+        assert_eq!(int64_values(&clipped), vec![None, Some(4), None]);
+    }
+
+    /// The frame case is a DIFFERENT defect from the Series one, and the more
+    /// dangerous of the two: `apply_per_column_min` gated on
+    /// `Int64 | Float64 | Bool` and returned every other column UNTOUCHED, so
+    /// `df.clip` answered with its own input rather than failing. Fixing
+    /// `Series::clip` alone would have left this green-looking and wrong.
+    #[test]
+    fn dataframe_clip_actually_clips_a_nullable_int64_column() {
+        let a = Column::new(
+            DType::Int64Nullable,
+            vec![
+                Scalar::Int64(-5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+                Scalar::Int64(8),
+            ],
+        )
+        .expect("nullable Int64 column");
+        let b = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(-2.5),
+                Scalar::Float64(0.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(9.0),
+            ],
+        )
+        .expect("float column");
+        let index = Index::new((0..4_i64).map(Into::into).collect());
+        let frame = DataFrame::new_with_column_order(
+            index,
+            std::collections::BTreeMap::from([("a".to_owned(), a), ("b".to_owned(), b)]),
+            vec!["a".to_owned(), "b".to_owned()],
+        )
+        .expect("frame");
+
+        let clipped = frame.clip(Some(-1.0), Some(4.0)).expect("clip");
+        let a_out = clipped.column("a").expect("column a");
+        assert_eq!(
+            a_out
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Int64(x) => Some(*x),
+                    other => {
+                        assert!(other.is_missing());
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+            vec![Some(-1), None, Some(3), Some(4)],
+            "-5 clamps to -1 and 8 clamps to 4; returning the input unchanged is \
+             the pass-through bug this test exists for"
+        );
+        assert_eq!(a_out.dtype(), DType::Int64Nullable);
+
+        // The float sibling column must be unaffected by the gate change.
+        let b_out = clipped.column("b").expect("column b");
+        assert_eq!(b_out.dtype(), DType::Float64);
+        let b_vals = b_out.values();
+        assert_eq!(b_vals[0], Scalar::Float64(-1.0));
+        assert_eq!(b_vals[1], Scalar::Float64(0.0));
+        assert!(b_vals[2].is_missing());
+        assert_eq!(b_vals[3], Scalar::Float64(4.0));
+    }
+
+    /// Guard the gate change itself: widening `apply_per_column_min` must not
+    /// start transforming columns it is supposed to pass through. A Utf8 column
+    /// is still returned as-is by `df.clip`.
+    #[test]
+    fn a_non_numeric_column_is_still_passed_through_untouched() {
+        let a = Column::new(
+            DType::Int64Nullable,
+            vec![Scalar::Int64(-5), Scalar::Int64(8)],
+        )
+        .expect("nullable Int64 column");
+        let s = Column::new(
+            DType::Utf8,
+            vec![
+                Scalar::Utf8("keep".to_owned()),
+                Scalar::Utf8("me".to_owned()),
+            ],
+        )
+        .expect("utf8 column");
+        let index = Index::new((0..2_i64).map(Into::into).collect());
+        let frame = DataFrame::new_with_column_order(
+            index,
+            std::collections::BTreeMap::from([("a".to_owned(), a), ("s".to_owned(), s)]),
+            vec!["a".to_owned(), "s".to_owned()],
+        )
+        .expect("frame");
+
+        let clipped = frame.clip(Some(-1.0), Some(4.0)).expect("clip");
+        let s_out = clipped.column("s").expect("column s");
+        assert_eq!(s_out.dtype(), DType::Utf8);
+        assert_eq!(s_out.values()[0], Scalar::Utf8("keep".to_owned()));
+        assert_eq!(s_out.values()[1], Scalar::Utf8("me".to_owned()));
     }
 }
