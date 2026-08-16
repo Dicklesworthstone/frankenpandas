@@ -193365,6 +193365,79 @@ mod sgb_rolling_build_groups_share_lyaqi {
         samples[samples.len() / 2]
     }
 
+    /// How many iterations the INSTRUCTION-COUNT probes below run.
+    ///
+    /// br-frankenpandas-lyaqi. Read from the environment so ONE compiled test
+    /// binary can be measured at two different rep counts. That is what makes
+    /// the fixed cost cancel: `perf stat` over a whole `cargo test` invocation
+    /// counts process startup, harness setup and fixture construction as well as
+    /// the loop, and those are constant in `reps`. Measuring at N and 2N and
+    /// taking the DIFFERENCE leaves exactly N iterations of the loop body, so
+    /// the per-call instruction count is a slope, not an intercept.
+    fn instr_reps() -> usize {
+        std::env::var("FP_LYAQI_REPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10)
+    }
+
+    /// INSTRUCTION-COUNT probe, `build_groups` ONLY.
+    ///
+    /// br-frankenpandas-lyaqi. The ledger's preflight rejects a negative verdict
+    /// unless it carries an exact numeric A/A marker or a COUNTED MECHANISM, and
+    /// its accepted metrics are instructions / cycles / syscalls / allocations /
+    /// cache-and-branch misses / IPC — **nanoseconds are not on that list**, so
+    /// the two `..._share_of_rolling_mean` timing probes above cannot satisfy it
+    /// no matter how carefully they are run. This pair can.
+    ///
+    /// Deliberately separated from the whole-call probe rather than timing both
+    /// inside one test: `perf stat` attributes counts to a PROCESS, so the two
+    /// loops must not share one.
+    ///
+    /// Counting instructions also has a property wall-clock lacks — it is
+    /// largely insensitive to host contention, so this measurement is admissible
+    /// on a loaded box where a timing row would be refused.
+    #[test]
+    #[ignore = "instruction-count probe: perf stat cargo test -- --ignored --exact"]
+    fn instr_build_groups_only_lyaqi() {
+        let (values, keys) = fixture();
+        let reps = instr_reps();
+        let mut sink = 0usize;
+        for _ in 0..reps {
+            let gb = values.groupby(&keys).expect("groupby");
+            let built = gb.build_groups();
+            sink = sink.wrapping_add(built.2.len());
+        }
+        assert_eq!(
+            sink,
+            reps * GROUPS as usize,
+            "sink prevents the loop being optimised away and pins the group count"
+        );
+    }
+
+    /// INSTRUCTION-COUNT probe, the WHOLE grouped-rolling call.
+    ///
+    /// br-frankenpandas-lyaqi. Same fixture, same rep count, same sink
+    /// discipline as `instr_build_groups_only_lyaqi`, so subtracting the two
+    /// slopes gives `build_groups`' share of the call in instructions.
+    #[test]
+    #[ignore = "instruction-count probe: perf stat cargo test -- --ignored --exact"]
+    fn instr_whole_rolling_mean_lyaqi() {
+        let (values, keys) = fixture();
+        let reps = instr_reps();
+        let mut sink = 0usize;
+        for _ in 0..reps {
+            let gb = values.groupby(&keys).expect("groupby");
+            let out = gb.rolling(WINDOW).mean().expect("rolling mean");
+            sink = sink.wrapping_add(out.len());
+        }
+        assert_eq!(
+            sink,
+            reps * ROWS,
+            "sink prevents the loop being optimised away and pins the output length"
+        );
+    }
+
     #[test]
     #[ignore = "timing probe: run explicitly with --ignored --nocapture"]
     fn build_groups_share_of_rolling_mean() {

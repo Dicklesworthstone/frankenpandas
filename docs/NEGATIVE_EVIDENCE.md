@@ -25273,3 +25273,71 @@ real work and must be stated wherever it is used. `profile-rustflags` is also
 cargo-unstable: adopting it makes the workspace nightly-cargo-only, which this
 repo already is via `rust-toolchain.toml`, but it is a workspace-wide manifest
 change and therefore the user's call, not an agent's. I have not made it.
+
+---
+
+## br-frankenpandas-lyaqi — COUNTED MECHANISM in instructions: `build_groups` is 20.65% of `sgb.rolling(w).mean()`, so the "build_groups floor" premise is REFUTED
+
+**This is NOT a canonical campaign row and does not claim to be one.** It carries
+no timing verdict, no median, no CI and no A/A arm, because it measures an
+instruction COUNT rather than a paired ratio. The preflight is right to require a
+numeric median-CI of a verdict-bearing row; this entry simply is not one, and
+inventing a median to satisfy the marker would have been fabricating evidence.
+It is filed as a mechanism finding against the bead's premise.
+
+**Counted mechanism:** `build_groups` executes **15,321,983** instructions per
+call against **74,195,308** for the whole `sgb.rolling(10).mean()` call — a
+**20.65%** share, measured on the same fixture in the same release binary, so
+`build_groups` is a MINORITY of the work and cannot be the serial floor the bead
+attributes the failed parallelisation to.
+
+**CV role:** not applicable — no timing samples, so no dispersion to report.
+
+**Binary identity:** test binary
+`target/release/deps/fp_frame-0f1e18ea8175608b`, counted under
+`perf stat -e instructions`; the debug-profile control binary was
+`fp_frame-e48ba200500953c3` (sha256 89258892b74e491e88b1019cc439b9a28073e099a5c241b013973979e53d0a02).
+
+**HOW IT WAS MEASURED, and why it is admissible on a loaded host.** `uptime` at
+the time: **load average 42.13 / 55.40 / 43.03** — far too contended for a
+certification, which is why a timing row was not attempted. **Instruction counts
+are largely insensitive to contention**, so this is the measurement that IS
+available in a noisy window.
+
+Two `#[ignore]`d probes were added, deliberately SEPARATED because `perf stat`
+attributes counts to a process:
+`instr_build_groups_only_lyaqi` and `instr_whole_rolling_mean_lyaqi`
+(`crates/fp-frame/src/lib.rs`). Each loops `FP_LYAQI_REPS` times over the bead's
+fixture (200k rows / 2000 groups / window 10, i64) and accumulates a sink the
+test asserts on, so the loop cannot be optimised away.
+
+Each probe was counted at **10 and 20 reps**, and the per-call cost taken as the
+SLOPE:
+
+```
+                       reps=10          reps=20        slope = ΔI/10
+build_groups only     193,110,661      346,330,489     15,321,983
+whole rolling mean    798,717,549    1,540,670,626     74,195,308
+```
+
+The slope cancels process startup, harness setup and fixture construction, which
+are constant in `reps` — the fitted intercepts are 39.9M and 56.8M respectively,
+i.e. real and worth removing. A single-point measurement would have inflated
+`build_groups`' share by counting that overhead twice.
+
+**DEBUG CONTROL:** the same probes on the debug binary give 65,879,390 /
+419,878,227 = **15.69%**. Different absolute counts and a different share, which
+is why the release figure is the one quoted — but both agree on the direction,
+and both agree with the earlier wall-clock probe (10.18% on Int64 keys).
+**Three independent methods, three different numbers, one conclusion:
+`build_groups` is a minority of the call.**
+
+**WHY THIS CLOSES A BLOCKER THAT HAS BEEN OPEN ALL DAY.** `lyaqi`'s revision
+required "an exact numeric A/A or counted-mechanism", and the two in-tree
+`..._share_of_rolling_mean` probes measure NANOSECONDS, which this preflight's
+`COUNTED_METRIC` does not accept — a dead end I hit earlier and recorded. These
+probes measure an accepted metric.
+
+**Full evidence:** `crates/fp-frame/src/lib.rs`
+`mod sgb_rolling_build_groups_share_lyaqi`; gate `cargo test -p fp-frame --lib`
+3306 passed / 0 failed / 30 ignored.
