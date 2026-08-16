@@ -24562,3 +24562,54 @@ small dispatch overhead at `dim = 100`, not kernel structure.
 
 **Artifacts:** `artifacts/bench/03fp5_dot_avx2fma_10k_thinkstation1_2026-08-16.json`,
 `artifacts/bench/03fp5_dot_avx2fma_1M_thinkstation1_2026-08-16.json`.
+
+---
+
+## br-frankenpandas-h67zz — `trunc` @1M is 0-for-3 on admissibility, and the "quiet window" had closed before the run started
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** REFUSED, third
+consecutive refusal for this cell. Chosen as the highest-value target because it
+is the only `math_unary` cell with ZERO screened-in runs — `floor` has 4 of 10
+and `ceil` 1 of 1 — so completing the family was worth more than an eleventh
+`floor` sample.
+
+```
+workload        math_unary/trunc @1M, balanced-square ABBAABBA, ONE invocation
+fp-bench ELF    sha256 4a89472f0924de1e5637dc5ecceee0e95e66e8aa39b3f7bcaac08efa7dfb8228
+harness         sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3 · host thinkstation1, governor powersave, smt on
+LOADAVG         24.88 → 28.73   (1/5/15: 24.88 24.59 26.89 → 28.73 25.43 27.13)
+```
+
+| | point ratio | verdict | FP p50 / cv | pandas p50 / cv | FP thr | pd thr |
+|---|---|---|---|---|---|---|
+| `trunc @1M` | (0.123) | **NULL_UNDECIDABLE** | 2197.03us / **38.37%** | 260.75us / 18.41% | 8 | 1 |
+
+**A/A null control (same invocation):** FP **1.036556** (3.7% off unity, fails),
+pandas **1.077917** (7.8% off, fails). Both outside ±2%; **no ratio is claimed.**
+max-cv 38.37% also excludes it under the cv screen.
+
+**THE WINDOW CLOSED BEFORE THE RUN BEGAN, and that is a measurement about the
+fleet worth recording.** The window was identified at loadavg **16.8**. By the
+time the invocation actually started, the 1-minute average was **24.88**, and it
+finished at **28.73** — a ~70% rise inside the couple of minutes between spotting
+the window and using it. This is a concrete instance of the conclusion banked one
+entry ago: on this fleet you cannot reserve a quiet moment, because the moment
+does not survive the latency between observing it and consuming it. It also means
+pre-run load checks — which I have been doing for several runs — buy less than
+they appear to.
+
+**`trunc` REMAINS UNMEASURED UNDER THE SCREEN AFTER THREE ATTEMPTS** (refused at
+load 60+, refused earlier, refused here at load 25). Its point estimate this time,
+0.123, sits inside `floor`'s screened cluster of 0.123–0.132, which is *suggestive*
+of the family behaving alike — but a high-cv point estimate is uninformative
+individually, exactly as established at n=9, so **it is not evidence that trunc
+equals floor.** Recorded as a hint for whoever gets an admissible run, not as a
+result.
+
+**FP's arm is the noisy one again:** cv 38.37% against pandas' 18.41%, at a
+moderate load. Across eleven `math_unary` invocations today FP's cv has exceeded
+30% five times while pandas' has done so twice — consistent with the banked
+`thread::scope` instability of the parallel arm.
+
+**Artifacts:** `artifacts/bench/trunc_1M_thinkstation1_2026-08-16_quietwindow_load25_elf_4a89472f.json`
