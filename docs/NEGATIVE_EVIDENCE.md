@@ -25949,3 +25949,53 @@ does not buy a clean FP null, and nothing available to me does.
 additions, which is itself evidence the cluster has converged.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run13_load14_elf_ad74e170.json`
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-03fp5) — caller-as-worker retried at TWO workers, where its 63-worker straggler cannot exist: still 0.971x — REJECT, and the scheduling axis at `dim = 100` is now closed
+
+Caller-as-worker was rejected earlier today at 63 workers because the caller must
+issue 62 spawns before starting its own share, so its group finishes last. At two
+workers that mechanism cannot occur — one spawn, then the caller works — and
+`df_dot @10k` is the shape where spawn cost is largest relative to the job
+(0.29 ms total). So it deserved a second, targetedattempt rather than an inherited
+verdict.
+
+Six paired rounds, interleaved, ELF `4a89472f…` (shipped, 1 worker) against
+`ad74e170…` (2 workers, caller participates), `uptime` **70.70 1-min / 44.29
+5-min** — deliberately measured under load because `dim = 100` is a 1-2 thread
+shape:
+
+| round | 1 | 2 | 3 | 4 | 5 | 6 | median |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A shipped, 1 worker | 0.5796 | 0.5907 | 0.5992 | 0.5616 | 0.6135 | 0.5726 | **0.5852** |
+| C 2 workers + caller | 0.5686 | 0.6102 | 0.5872 | 0.5763 | 0.6752 | 0.6339 | 0.5987 |
+
+Paired-round median A/C = **0.971**, and C is faster in only **2 of 6** rounds.
+
+**Counted mechanism:** the arithmetic is unchanged and the only thing that moves
+is the number of `clone` syscalls per materialization — 0 for the shipped serial
+arm, 1 for caller-as-worker at two workers, 2 for plain two workers. An earlier
+round set at the same shape put plain two-worker at 0.80 ms against 0.35 ms
+serial; caller-as-worker recovers most of that penalty, consistent with removing
+exactly 1 of those 2 syscalls, and still does not reach the serial arm. **At `dim = 100` the work is
+1e6 multiply-adds — about 0.29 ms on one core — and no split of it pays for even
+a single thread.**
+
+**Decision: REJECT.** The shipped rule's choice of 1 worker at this shape stands,
+now tested against both 2-worker variants. **The scheduling axis at `dim = 100` is
+closed**: 0 spawns beats 1 spawn beats 2 spawns, monotonically, and the remaining
+gap to the incumbent (0.53x certified) is per-thread instruction throughput, i.e.
+br-frankenpandas-oxv4u.
+
+**Measurement caveat, stated because it bounds what these numbers prove.** A
+control pairing two configurations that take the SAME early return differed by 57%
+in an earlier round set at this load, so single-invocation p50s here carry
+run-to-run noise of that order; only the paired ordering across six rounds is
+load-bearing, and a 3% median difference is inside what I would call decidable on
+a quiet box. The safe reading is "no gain", not "3% worse".
+
+**Also refining my own claim from the previous entry:** low-thread shapes are
+robust for CERTIFICATION (both arms degrade together, nulls stay clean — the 10k
+row certified at ambient load 42), but their ABSOLUTE times are not load-robust at
+all. The same shipped configuration measures 0.29-0.35 ms at load ~13 and
+0.56-0.61 ms at load ~70. Certification stability and timing stability are
+different properties and I conflated them.
