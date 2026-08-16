@@ -3086,6 +3086,104 @@ def _balanced_square_aggregate(
     )
 
 
+def host_state_snapshot() -> dict[str, Any]:
+    """Loadavg and observed CPU MHz at this instant.
+
+    br-frankenpandas-633fb. THIS HOST RUNS THE POWERSAVE GOVERNOR and its cores
+    swing 1429-4292 MHz, so a quiet window is also a DOWNCLOCKED window: waiting
+    for low load trades contention noise for frequency error, and neither the row
+    nor the ledger could previously tell them apart. `perf stat` on one df_dot
+    invocation already showed the same binary running its serial arm at 4.104 GHz
+    and its 63-worker arm at 3.099 GHz — a 32% clock difference INSIDE one job,
+    invisible in every row banked before today.
+
+    Read from `scaling_cur_freq` (kHz) across the CPUs in this process's affinity,
+    falling back to `/proc/cpuinfo`. Sampling happens strictly BETWEEN timed
+    slots, never inside one.
+    """
+    load: list[float] = []
+    try:
+        with open("/proc/loadavg", encoding="utf-8") as handle:
+            load = [float(part) for part in handle.read().split()[:3]]
+    except (OSError, ValueError):
+        load = []
+
+    mhz: list[float] = []
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpus = []
+    for cpu in cpus:
+        path = f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq"
+        try:
+            with open(path, encoding="utf-8") as handle:
+                mhz.append(float(handle.read().strip()) / 1000.0)
+        except (OSError, ValueError):
+            continue
+    if not mhz:
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("cpu MHz"):
+                        mhz.append(float(line.split(":", 1)[1]))
+        except (OSError, ValueError, IndexError):
+            mhz = []
+
+    snapshot: dict[str, Any] = {"loadavg": load}
+    if mhz:
+        snapshot["cpu_mhz"] = {
+            "min": round(min(mhz), 1),
+            "median": round(float(np.median(mhz)), 1),
+            "max": round(max(mhz), 1),
+            "cpus_sampled": len(mhz),
+        }
+    return snapshot
+
+
+def summarize_host_state(samples: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    """Per-arm clock and whole-cell load, plus a clock-skew flag.
+
+    br-frankenpandas-633fb. The campaign's rule is that both arms must sit inside
+    ONE window; this is the evidence for or against that in each row. `arms_saw_
+    same_clock` is false when the two arms' median observed MHz differ by more
+    than 5%, which is the case a balanced square cannot cancel: the interleave
+    protects against drift BETWEEN rounds, not against the two arms systematically
+    provoking different clock states — a 63-thread arm pulls the all-core boost
+    ceiling down while a 2-thread arm does not.
+
+    Diagnostic only; it feeds no clause of the gate.
+    """
+    summary: dict[str, Any] = {"gate_input": False}
+    loads = [s["loadavg"][0] for _, s in samples if s.get("loadavg")]
+    if loads:
+        summary["loadavg_1min"] = {
+            "first": round(loads[0], 2),
+            "last": round(loads[-1], 2),
+            "min": round(min(loads), 2),
+            "max": round(max(loads), 2),
+        }
+    per_arm: dict[str, float] = {}
+    for arm in ("frankenpandas", "pandas"):
+        values = [s["cpu_mhz"]["median"] for tag, s in samples if tag == arm and s.get("cpu_mhz")]
+        if values:
+            per_arm[arm] = round(float(np.median(values)), 1)
+    if per_arm:
+        summary["median_cpu_mhz_by_arm"] = per_arm
+    if len(per_arm) == 2:
+        low, high = sorted(per_arm.values())
+        summary["arms_saw_same_clock"] = bool(high <= low * 1.05)
+        summary["arm_clock_ratio"] = round(high / low, 4) if low else None
+    every = [s["cpu_mhz"]["median"] for _, s in samples if s.get("cpu_mhz")]
+    if every:
+        summary["observed_cpu_mhz"] = {
+            "min": round(min(every), 1),
+            "median": round(float(np.median(every)), 1),
+            "max": round(max(every), 1),
+            "samples": len(every),
+        }
+    return summary
+
+
 def run_balanced_square_cell(
     category: str,
     workload: str,
@@ -3101,10 +3199,15 @@ def run_balanced_square_cell(
     fp_slots: list[TimingResult] = []
     round_ratios: list[float] = []
     rounds_artifact = []
+    # br-frankenpandas-633fb: sampled BETWEEN slots, never inside a timed region.
+    host_state_samples: list[tuple[str, dict[str, Any]]] = []
     for round_index in range(rounds):
         pandas_round: list[TimingResult] = []
         fp_round: list[TimingResult] = []
         for slot_index, arm in enumerate(BALANCED_SQUARE):
+            host_state_samples.append(
+                ("pandas" if arm == "A" else "frankenpandas", host_state_snapshot())
+            )
             if arm == "A":
                 result, _ = run_pandas_workload(
                     category,
@@ -3170,6 +3273,9 @@ def run_balanced_square_cell(
             "round_ratio_pandas_over_frankenpandas": round_ratios,
             "rounds_detail": rounds_artifact,
             "host_wide_quiescence_required": False,
+            "host_state": summarize_host_state(
+                host_state_samples + [("final", host_state_snapshot())]
+            ),
         },
     )
 
@@ -3327,6 +3433,64 @@ def _row_persistence_self_test() -> None:
             "resolve_results_path must depend only on --output and the timestamp; "
             f"got {parameters}"
         )
+
+
+def _host_state_self_test() -> None:
+    """Pin the clock/load instrument, including the skew it exists to catch.
+
+    br-frankenpandas-633fb. The negative case is not invented: `perf stat` on one
+    df_dot invocation measured the same binary at 4.104 GHz serial and 3.099 GHz
+    across 63 workers. A row whose two arms sit at those clocks is not a
+    like-for-like comparison, and before this instrument nothing in the row said
+    so.
+    """
+    live = host_state_snapshot()
+    if len(live.get("loadavg", [])) != 3:
+        raise RuntimeError("host state must carry the three loadavg figures")
+    freq = live.get("cpu_mhz")
+    if freq is not None:
+        if not freq["min"] <= freq["median"] <= freq["max"]:
+            raise RuntimeError("cpu_mhz min/median/max must be ordered")
+        if freq["cpus_sampled"] < 1 or not 100.0 < freq["median"] < 10000.0:
+            raise RuntimeError(f"implausible observed clock: {freq}")
+
+    def sample(arm: str, mhz: float) -> tuple[str, dict[str, Any]]:
+        return (arm, {"loadavg": [1.0, 2.0, 3.0],
+                      "cpu_mhz": {"min": mhz, "median": mhz, "max": mhz, "cpus_sampled": 4}})
+
+    # NEGATIVE CASE: the measured 4.104 / 3.099 GHz split must be flagged.
+    skewed = summarize_host_state(
+        [sample("pandas", 4104.0), sample("frankenpandas", 3099.0)] * 3
+    )
+    if skewed["arms_saw_same_clock"]:
+        raise RuntimeError("a 32% inter-arm clock split must not read as one window")
+    if round(skewed["arm_clock_ratio"], 3) != 1.324:
+        raise RuntimeError(f"clock ratio mis-computed: {skewed['arm_clock_ratio']}")
+    if skewed["median_cpu_mhz_by_arm"] != {"frankenpandas": 3099.0, "pandas": 4104.0}:
+        raise RuntimeError("per-arm medians must be reported separately")
+
+    # Arms inside 5% are one window.
+    tight = summarize_host_state(
+        [sample("pandas", 3000.0), sample("frankenpandas", 3050.0)] * 3
+    )
+    if not tight["arms_saw_same_clock"]:
+        raise RuntimeError("arms within 5% must read as the same window")
+
+    # Load range is reported across the whole cell, not just its ends.
+    ranged = summarize_host_state([
+        ("pandas", {"loadavg": [10.0, 1, 1]}),
+        ("frankenpandas", {"loadavg": [70.0, 1, 1]}),
+        ("final", {"loadavg": [40.0, 1, 1]}),
+    ])
+    if ranged["loadavg_1min"] != {"first": 10.0, "last": 40.0, "min": 10.0, "max": 70.0}:
+        raise RuntimeError(f"loadavg summary must span the cell: {ranged['loadavg_1min']}")
+
+    # Degenerate input must not raise, and nothing here may gate.
+    empty = summarize_host_state([])
+    if empty.get("gate_input") is not False or "arms_saw_same_clock" in empty:
+        raise RuntimeError("empty host state must be inert and non-gating")
+    if skewed["gate_input"] is not False:
+        raise RuntimeError("host state must declare itself a non-gate input")
 
 
 def _best_vs_best_self_test() -> None:
@@ -3987,6 +4151,11 @@ def main():
         help="Exercise the balanced-square paired ratio and A/A null contract",
     )
     parser.add_argument(
+        "--host-state-self-test",
+        action="store_true",
+        help="Exercise the per-arm CPU MHz / loadavg instrument and its clock-skew flag",
+    )
+    parser.add_argument(
         "--best-vs-best-self-test",
         action="store_true",
         help=(
@@ -4050,6 +4219,11 @@ def main():
     if args.best_vs_best_self_test:
         _best_vs_best_self_test()
         print("best_vs_best_self_test=pass")
+        return
+
+    if args.host_state_self_test:
+        _host_state_self_test()
+        print("host_state_self_test=pass")
         return
 
     if args.row_persistence_self_test:
