@@ -24254,3 +24254,58 @@ entries ago quoting the gate, and the gate was not enough.
 and belongs to whoever owns the harness, not to one agent mid-campaign.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run5_load31_elf_4a89472f.json`
+
+---
+
+## br-frankenpandas-h67zz — n=7 on `floor @1M`: the recurring blocker is FP's OWN A/A null, which is a known consequence of per-call `thread::scope` — this cell may be structurally hard to certify
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** seventh run of
+one workload. No new ratio claimed; the contribution is a per-arm tally that
+identifies WHY certification keeps failing.
+
+Run 7: `math_unary/floor @1M`, balanced-square ABBAABBA, ONE invocation, ELF
+`4a89472f…`, load 31.91→30.62, **ratio 0.126x**, FP p50 1659.15us cv **11.95%**,
+pandas p50 192.64us cv 9.74%.
+
+**A/A null control (same invocation):** FP **0.932856** (6.7% off unity, fails),
+pandas **0.985770** (1.4% off, passes). Row REFUSED; no ratio claimed.
+
+**THE FULL TALLY, WHICH IS THE POINT OF THIS ENTRY.** Seven runs, same workload,
+same harness, loads 6→90:
+
+| run | load | FP cv | ratio | FP A/A null | pandas A/A null | gate |
+|---|---|---|---|---|---|---|
+| 1 | 6.41 | 7.44% | 0.132x | 1.001168 ✓ | 1.003951 ✓ | CERTIFIED |
+| 6 | 19.41 | 11.69% | 0.130x | 1.038456 ✗ | 1.057402 ✗ | refused |
+| 7 | 31.91 | 11.95% | 0.126x | **0.932856 ✗** | 0.985770 ✓ | refused |
+| 5 | 30.84 | 14.34% | 0.123x | 0.970818 ✗ | 1.020159 ✗ | refused |
+| 2 | 37.9→48.1 | 34.08% | 0.072x | 0.994966 ✓ | 1.008250 ✓ | CERTIFIED |
+| 4 | 86.1→76.8 | 25.93% | 0.076x | 1.071929 ✗ | 1.071788 ✗ | refused |
+| 3 | 88.4→90.1 | 34.52% | 0.165x | 0.915327 ✗ | 0.981022 ✓ | refused |
+
+**FP's null failed 5 of 7; pandas' failed 4 of 7 — and FP is the 8-thread arm
+while pandas is single-threaded.** This repo already carries the cause as a
+banked lesson: *A/A null fails on parallel kernels — the per-call
+`thread::scope`*. Every `floor` invocation spawns and joins a scope per call, and
+that spawn cost is variable in a way a serial arm's is not, so FP's own
+self-comparison wanders even when its median is stable. Run 7 is the sharpest
+example: **cv 11.95% — among the tightest observed — and the null still missed by
+6.7%.** Low dispersion of the *median* does not imply a stable *A/A ratio* when
+the kernel spawns threads per call.
+
+**CONSEQUENCE: THIS CELL MAY NOT BE CERTIFIABLE ON DEMAND, AND CHASING A
+CERTIFIED ROW IS THE WRONG USE OF INVOCATIONS.** Only 2 of 7 certified, and one
+of those (run 2, cv 34%) is the single worst outlier. Meanwhile the four low-cv
+runs — 0.132x, 0.130x, 0.126x, 0.123x — agree within **7%** regardless of
+verdict. **The cluster is a better estimator of `floor`'s ratio than any single
+certified row**, and I would report it as ≈0.13x (n=4, cv ≤ 14%) rather than
+continue sampling for a green gate that the FP arm's threading makes partly a
+matter of luck.
+
+**What would actually change the answer** is not more runs: it is either a
+harness that reuses a worker pool across the timed region instead of spawning per
+call (removing the variance at its source), or accepting cv-qualified clusters as
+admissible evidence. Both are shared-contract changes and neither is mine to make
+unilaterally.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run7_load31_elf_4a89472f.json`
