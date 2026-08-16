@@ -1743,8 +1743,30 @@ def timedelta_total_seconds_from_payload(pd, payload: dict[str, Any], op_name: s
         and pd.api.types.is_numeric_dtype(series)
         and not pd.api.types.is_timedelta64_dtype(series)
     ):
+        # Gate 1 still fires on exactly the same condition; only the WAY it
+        # refuses changed. It used to raise a hand-copied transcription of
+        # pandas' message, which made the refusal read as `oracle_adapter` --
+        # true, but vacuous, because pandas was never asked, so
+        # fp_p2d_022_series_timedelta_total_seconds_numeric_passthrough_strict
+        # could never be attested. Reaching for `.dt` directly is the faithful
+        # reproduction: it is the expression pandas refuses, and it cannot slip
+        # into to_timedelta's nanosecond reading, which is the trap gate 1
+        # exists to prevent (br-frankenpandas-7btvv).
+        #
+        # MEASURED on this fixture's own payload [60, 3661.5, 86400], which
+        # fixture_series_from_payload builds as float64:
+        #     series.dt.total_seconds()
+        #       -> AttributeError: Can only use .dt accessor with datetimelike
+        #          values
+        # i.e. byte-identical to the message that was hard-coded here.
+        # (br-frankenpandas-f9xlz)
+        try:
+            series.dt.total_seconds()
+        except Exception as exc:  # noqa: BLE001 - re-raised with pandas as __cause__
+            raise OracleError(f"{op_name}: {exc}") from exc
         raise OracleError(
-            f"{op_name}: Can only use .dt accessor with datetimelike values"
+            f"{op_name}: .dt.total_seconds() unexpectedly succeeded on a "
+            f"non-timedelta numeric series of dtype {series.dtype}"
         )
 
     try:

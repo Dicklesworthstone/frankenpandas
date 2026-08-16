@@ -1431,3 +1431,60 @@ def test_series_count_is_NOT_part_of_this_defect_6k29f(oracle, pd):
     }
     response = oracle.dispatch(pd, payload)
     assert response["expected_scalar"]["value"] == 2
+
+
+def test_timedelta_total_seconds_on_a_numeric_series_is_a_pandas_error_f9xlz(oracle, pd):
+    """fp_p2d_022_series_timedelta_total_seconds_numeric_passthrough_strict.
+
+    The adapter refuses a numeric series here on purpose (br-frankenpandas-7btvv:
+    to_timedelta would otherwise read the numbers as NANOSECONDS and manufacture
+    an answer pandas never gives). The refusal is right; it was the ORIGIN that
+    was wrong, because the message was a hand-copied transcription of pandas'
+    and pandas was never actually asked.
+
+    MEASURED, live pandas 2.2.3, on this fixture's own payload:
+        pd.Series([60, 3661.5, 86400]).dt.total_seconds()
+          -> AttributeError: Can only use .dt accessor with datetimelike values
+    """
+    payload = {
+        "operation": "series_timedelta_total_seconds",
+        "left": {
+            "index": [{"kind": "int64", "value": i} for i in range(3)],
+            "values": [
+                {"kind": "int64", "value": 60},
+                {"kind": "float64", "value": 3661.5},
+                {"kind": "int64", "value": 86400},
+            ],
+            "name": "s",
+        },
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert "Can only use .dt accessor with datetimelike values" in str(exc_info.value)
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_timedelta_total_seconds_still_computes_for_real_timedeltas_f9xlz(oracle, pd):
+    """Control: the legitimate path must be untouched.
+
+    Gate 1 fires on the same condition as before; only the way it refuses moved.
+    A timedelta-string column must still round-trip through to_timedelta.
+    """
+    payload = {
+        "operation": "series_timedelta_total_seconds",
+        "left": {
+            "index": [{"kind": "int64", "value": i} for i in range(3)],
+            "values": [
+                {"kind": "utf8", "value": "1 days 00:00:00"},
+                {"kind": "null", "value": "null"},
+                {"kind": "utf8", "value": "0 days 01:30:00"},
+            ],
+            "name": "s",
+        },
+    }
+    values = oracle.dispatch(pd, payload)["expected_series"]["values"]
+    assert values[0]["value"] == 86400.0
+    assert values[1]["kind"] == "null"
+    assert values[2]["value"] == 5400.0
