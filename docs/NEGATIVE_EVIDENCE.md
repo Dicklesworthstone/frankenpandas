@@ -22672,3 +22672,79 @@ elementwise path and is unaffected.
 **Parity is asserted, not assumed:** a companion non-ignored test pins that the
 guard accepts exactly what the scan accepts for typed and nullable Bool masks,
 and that a non-boolean mask is refused by BOTH with a byte-identical error.
+
+---
+
+## br-frankenpandas-cu22b / h67zz — the elementwise-ISA gap is TWO tiers, not one, and my own spawn hypothesis is retracted
+
+**Date:** 2026-08-16 · **Agent:** CalmMink · **Verdict:** the worst banked
+vs-incumbent ratio I own (sqrt 1M, **0.805x**) is NOT source-addressable and NOT
+a parallelism problem. It is the AVX2 gap, and it sits one tier ABOVE the
+build-policy question already filed.
+
+**THE ROW.** Of the banked ratio rows naming both worker and harness, sqrt is the
+one below 1.0: `sqrt 1M float64 0.805x SLOWER`, fp p50 1338.84us / p95 1554.55us
+against pandas p50 1078.18us — deficit **260.66us**, with
+`thread_count_actually_used: 8`. Worker **thinkstation1**, harness
+`b9affde33c6e14a1`, artifact
+`artifacts/bench/cod_fused_witness_sqrt_1m_thinkstation1_20260731.json`.
+
+**I RETRACT THE SPAWN HYPOTHESIS I PUT ON h67zz.** I suggested the residue might
+be `par_map_slice_f64_with_witness`'s `PAR_MIN = 200_000` spawning ~8 threads at
+1M, since `thread::scope` spawn is ~397us/8thr against a 260.66us deficit. Our
+own ledger already refutes that direction — 2026-07-03 BlackThrush,
+"bandwidth-op parallel threshold is NOT too low — DEBUNKED by interleaved A/B",
+which ran a runtime toggle with parallel and serial INTERLEAVED in one process:
+
+```
+ n     parallel   serial     serial/par
+ 2M    1.973ms    2.389ms    1.21x  PARALLEL WINS
+ 4M    4.251ms    4.773ms    1.12x  PARALLEL WINS
+ 8M   12.716ms   37.587ms    2.96x  PARALLEL WINS
+16M   25.547ms   74.120ms    2.90x  PARALLEL WINS
+```
+
+and concluded "raising it would REGRESS 2M-8M", with the residual being "purely
+the AVX gap + parity NaN-scan, NOT parallelism". Honest limit on the transfer:
+that A/B measured `apply_f64_slices_nan_tracked` (BINARY, 3 buffers), not the
+UNARY 2-buffer path sqrt takes. It is strong evidence rather than proof — but it
+points the opposite way to my hypothesis, and a 2-buffer op has less memory
+traffic, so it stays L3-resident longer and is if anything MORE favourable to
+parallelism.
+
+**THE NEW MEASUREMENT THAT SPLITS THE POLICY QUESTION IN TWO.** rch worker
+vmi1167313, balanced-square at 4M, default build → `+sse4.1`:
+
+```
+floor    0.37x -> 1.15x        ceil   0.36x -> 1.17x
+trunc    0.41x -> 1.15x        round2 1.09x -> 1.26x
+sqrt     0.60x -> 0.50x        UNMOVED (both undecidable)
+```
+
+`+sse4.1` supplies a ROUNDING instruction. sqrt needs vector WIDTH — AVX2's
+4-wide `vsqrtpd` — which `+sse4.1` does not provide. So:
+
+* **Tier 1, `+sse4.1`:** closes the rounding family. Certified, worst bound
+  **1.644x vs pandas** on floor @10M (h67zz, c7dc770d8). Bit-identical, no FMA,
+  gate green on fp-columnar 608/0 and fp-frame 3288/0. Blocked only because
+  `.gitignore` marks `/.cargo/` "never canonical", so there is no tracked place
+  to put it (cu22b).
+* **Tier 2, AVX2 / x86-64-v3:** what sqrt and the wider elementwise-bandwidth
+  class actually need. A strictly larger ask — it enables FMA, which perturbs
+  float results and so re-opens the bit-identity gate Tier 1 passes cleanly.
+
+**AND THE STANDING OBJECTION TO TIER 2 WAS MEASURED ON THE WRONG CLASS.** The
+`+fma,+avx2` revert (br-frankenpandas-jawxr) is the reason target-cpu changes are
+treated as settled-negative here. The 2026-07-03 maintainer-fixes entry already
+recorded why that does not transfer: jawxr benchmarked the **compute-bound
+corr/cov/spearman GRAM**, where AVX was neutral — not the bandwidth-bound
+elementwise ops. So Tier 2 has never actually been measured on the class it would
+serve, and "we already rejected AVX2" is not true of this workload.
+
+**NOT LANDED, DELIBERATELY.** Both tiers are build-policy changes affecting every
+crate, every peer and CI. That is a maintainer decision, and the same
+2026-07-03 entry says so outright: "not a unilateral perf-pass change". Filed on
+cu22b rather than flipped.
+
+**No build was taken for this entry** — `/data` at 54G against a 59G floor. It is
+a ledger read, two prior measurements already banked, and one retraction.
