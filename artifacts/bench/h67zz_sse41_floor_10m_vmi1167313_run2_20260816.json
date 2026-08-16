@@ -1,0 +1,1402 @@
+{
+  "schema_version": "v4",
+  "timestamp": "2026-08-16T06:50:07.504679+00:00",
+  "invocation_id": "vs-pandas-20260816T065007.504762Z-pid769237",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.2",
+      "profile": "release-perf",
+      "role": "Subject",
+      "build_worker": "vmi1167313"
+    },
+    "frankenpandas_reference": {
+      "version": "0.1.2",
+      "profile": "release-perf",
+      "role": "Whole-binary default-build control",
+      "build_worker": "vmi1167313"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle",
+      "executable": {
+        "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+        "bytes": 6894448,
+        "path": "/usr/bin/python3.13"
+      },
+      "artifact": {
+        "sha256": "785b20166e380933f679056c972c6d0260c9bd10475b20b4add5651587681633",
+        "bytes": 70670271,
+        "files": 2922,
+        "path": "/opt/fpbench/pylibs/pandas/__init__.py",
+        "scheme": "importlib-metadata-content-tree-v1"
+      },
+      "optional_backends": {
+        "pyarrow": {
+          "version": "24.0.0",
+          "artifact": {
+            "sha256": "0321705ad0ae3c0e70e0952262b49d942fa30b71d0eda37835e1786b4013918d",
+            "bytes": 157862520,
+            "files": 861,
+            "path": "/opt/fpbench/pylibs/pyarrow/__init__.py",
+            "scheme": "importlib-metadata-content-tree-v1"
+          }
+        }
+      }
+    }
+  },
+  "harness_source": {
+    "sha256": "6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546",
+    "bytes": 173043,
+    "path": "/opt/fpbench/src-mu/benches/vs_pandas_harness.py"
+  },
+  "host_fingerprint": {
+    "host_identity": "vmi1167313",
+    "platform_node": "vmi1167313",
+    "architecture": "x86_64",
+    "cpu_model": "AMD EPYC Processor (with IBPB)",
+    "physical_cores": 6,
+    "logical_threads": 6,
+    "threads_per_core": 1,
+    "ram_bytes": 16767397888,
+    "numa_nodes": 1,
+    "kernel": "6.17.0-41-generic",
+    "git_sha": "unavailable",
+    "cpu_governors": [],
+    "smt_active": "0",
+    "frequency_boost": null,
+    "affinity_cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "affinity_logical_cpu_cap": 6,
+    "runtime_detected_isa_features": [
+      "sse2",
+      "avx",
+      "avx2",
+      "fma",
+      "bmi1",
+      "bmi2",
+      "aes"
+    ],
+    "runtime_absent_isa_features": [
+      "vaes",
+      "avx512f"
+    ]
+  },
+  "host_wide_exclusivity": {
+    "required": true,
+    "scope": "all_online_host_cpus",
+    "online_cpu_ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "maximum_busy_fraction": 0.2,
+    "sample_interval_ms": 1000,
+    "readiness_wait": {
+      "maximum_attempts": 20,
+      "retry_interval_ms": 500,
+      "readiness_probes_are_adjudicating": false,
+      "clear_probe_is_followed_by_immediate_checkpoint": true
+    },
+    "observations": [
+      {
+        "phase": "readiness:invocation_preflight:attempt_1",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.009900990099009901,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.009900990099009901,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "readiness_probe",
+        "readiness_attempt": 1
+      },
+      {
+        "phase": "invocation_preflight",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.019801980198019802,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.019801980198019802
+        },
+        "verdict": "clear",
+        "role": "adjudicating_checkpoint",
+        "readiness_attempt": 2,
+        "readiness_phase": "readiness:invocation_preflight:attempt_2"
+      },
+      {
+        "phase": "readiness:post_provenance:attempt_1",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.01,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.0,
+          "cpu4": 0.01,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "readiness_probe",
+        "readiness_attempt": 1
+      },
+      {
+        "phase": "post_provenance",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.0,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "adjudicating_checkpoint",
+        "readiness_attempt": 2,
+        "readiness_phase": "readiness:post_provenance:attempt_2"
+      },
+      {
+        "phase": "readiness:pre_measurement:pandas:math_unary/floor/10M/float64:attempt_1",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.03,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.03,
+          "cpu1": 0.009900990099009901,
+          "cpu2": 0.0,
+          "cpu3": 0.01,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "readiness_probe",
+        "readiness_attempt": 1
+      },
+      {
+        "phase": "pre_measurement:pandas:math_unary/floor/10M/float64",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.01,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.01,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "adjudicating_checkpoint",
+        "readiness_attempt": 2,
+        "readiness_phase": "readiness:pre_measurement:pandas:math_unary/floor/10M/float64:attempt_2"
+      },
+      {
+        "phase": "post_measurement:pandas:math_unary/floor/10M/float64",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.0,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "adjudicating_checkpoint"
+      },
+      {
+        "phase": "readiness:pre_measurement:frankenpandas-reference:math_unary/floor/10M/float64:attempt_1",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.0,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "readiness_probe",
+        "readiness_attempt": 1
+      },
+      {
+        "phase": "pre_measurement:frankenpandas-reference:math_unary/floor/10M/float64",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.01,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.01,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "adjudicating_checkpoint",
+        "readiness_attempt": 2,
+        "readiness_phase": "readiness:pre_measurement:frankenpandas-reference:math_unary/floor/10M/float64:attempt_2"
+      },
+      {
+        "phase": "post_measurement:frankenpandas-reference:math_unary/floor/10M/float64",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.009900990099009901,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.009900990099009901,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.009900990099009901,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "adjudicating_checkpoint"
+      },
+      {
+        "phase": "readiness:pre_measurement:frankenpandas-candidate:math_unary/floor/10M/float64:attempt_1",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.0,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "readiness_probe",
+        "readiness_attempt": 1
+      },
+      {
+        "phase": "pre_measurement:frankenpandas-candidate:math_unary/floor/10M/float64",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.0,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "adjudicating_checkpoint",
+        "readiness_attempt": 2,
+        "readiness_phase": "readiness:pre_measurement:frankenpandas-candidate:math_unary/floor/10M/float64:attempt_2"
+      },
+      {
+        "phase": "post_measurement:frankenpandas-candidate:math_unary/floor/10M/float64",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.009900990099009901,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.009900990099009901
+        },
+        "verdict": "clear",
+        "role": "adjudicating_checkpoint"
+      },
+      {
+        "phase": "invocation_postflight",
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": 1000,
+        "maximum_busy_fraction": 0.2,
+        "expected_cpu_count": 6,
+        "sampled_cpu_count": 6,
+        "missing_cpu_ids": [],
+        "busy_cpu_ids_above_limit": [],
+        "busy_cpu_count_above_limit": 0,
+        "maximum_observed_busy_fraction": 0.0,
+        "sampled_cpu_busy_fraction": {
+          "cpu0": 0.0,
+          "cpu1": 0.0,
+          "cpu2": 0.0,
+          "cpu3": 0.0,
+          "cpu4": 0.0,
+          "cpu5": 0.0
+        },
+        "verdict": "clear",
+        "role": "adjudicating_checkpoint"
+      }
+    ],
+    "valid": true
+  },
+  "parameters": {
+    "sizes": [
+      "10M"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "math_unary"
+    ],
+    "paired_rounds": 25,
+    "measurement_mode": "host-wide-exclusive",
+    "balanced_square": null,
+    "warmup_iterations": 3,
+    "bootstrap_resamples": 10000,
+    "null_ci_confidence": 0.95,
+    "decidability_margin": 2.0,
+    "gate": "corrected_three_clause_median_bootstrap_ci",
+    "null_median_maximum_absolute_deviation": 0.02,
+    "cv_role": "provenance_only",
+    "frankenpandas_binary_requested": "/opt/fpbench/fp-bench-mu-cand",
+    "frankenpandas_reference_binary_requested": "/opt/fpbench/fp-bench-mu-ref",
+    "whole_binary_order_policy": "alternate reference/candidate order by benchmark cell",
+    "host_wide_exclusivity_contract": {
+      "required": true,
+      "scope": "all_online_host_cpus",
+      "maximum_busy_fraction": 0.2,
+      "sample_interval_ms": 1000,
+      "post_setup_settle_ms": 1000,
+      "post_provenance_hash_settle_ms": 5000,
+      "readiness_wait_maximum_attempts": 20,
+      "readiness_wait_retry_ms": 500,
+      "checks": "invocation admission before provenance hashing; post-provenance readiness plus immediate checkpoint; bounded readiness plus immediate checkpoint before each pandas and FrankenPandas arm; immediate post-arm checkpoints; invocation postflight"
+    },
+    "pandas_string_backend_policy": {
+      "unsuffixed_workloads": "object",
+      "explicit_workload_suffixes": {
+        "_object": "object",
+        "_arrow": "string[pyarrow]"
+      }
+    },
+    "workload_allocator_policy": {
+      "astype_str_f64_telemetry_batches": {
+        "frankenpandas_mimalloc_purge_delay_ms": 0
+      }
+    },
+    "shared_invocation_id": "vs-pandas-20260816T065007.504762Z-pid769237",
+    "thread_provenance_contract": {
+      "thread_count_requested": null,
+      "expected_hostname": null,
+      "expected_physical_cores": null,
+      "expected_logical_threads": null,
+      "affinity_or_cpuset_cap": {
+        "logical_cpu_count": 6,
+        "cpu_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    }
+  },
+  "results": [
+    {
+      "workload": "floor",
+      "category": "math_unary",
+      "size": "10M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 9480.39,
+        "p95_us": 12748.51,
+        "p99_us": 14822.24,
+        "mean_us": 9934.04,
+        "stddev_us": 1366.76,
+        "cv_pct": 13.76,
+        "throughput_rows_sec": 1054809427,
+        "checksum": "e700f53534db5c6d",
+        "thread_count_actually_used": 1,
+        "runtime_available_parallelism": 6,
+        "process_threads_before_probe": 1,
+        "peak_process_threads": 2,
+        "runtime_detected_isa_features": [
+          "scalar",
+          "sse2",
+          "avx2",
+          "fma",
+          "bmi2"
+        ],
+        "samples_us": [
+          9104.654,
+          9071.440999999999,
+          9297.621000000001,
+          9494.656,
+          9336.294,
+          9389.191,
+          9490.409,
+          9322.257,
+          9290.779,
+          9429.306,
+          9079.206,
+          9329.129,
+          9092.451,
+          9389.573,
+          14790.988,
+          10673.563,
+          9549.257,
+          9731.194,
+          9464.119999999999,
+          9214.567,
+          9565.107999999998,
+          9608.949,
+          10711.734,
+          11978.522,
+          10460.908,
+          10735.348,
+          10915.1,
+          11087.53,
+          10334.925,
+          9645.688,
+          11892.653,
+          14852.262,
+          8816.569,
+          9706.539,
+          13378.499,
+          8944.666000000001,
+          10801.801,
+          8894.163,
+          9210.070000000002,
+          9777.211,
+          9569.436000000002,
+          10046.51,
+          9548.838,
+          9065.621,
+          9470.362,
+          8782.806,
+          8830.025,
+          8946.651,
+          8703.911,
+          8878.956
+        ],
+        "executable": {
+          "sha256": "2f643dfa2073c7a287839a1b1f13c14ac9ccc44ba198317bca5ce60b5cd9ac0c",
+          "bytes": 24771392,
+          "path": "/opt/fpbench/fp-bench-mu-cand",
+          "build_worker": "vmi1167313"
+        },
+        "null_control": {
+          "rounds": 25,
+          "arm_a_times_us": [
+            9104.654,
+            9297.621000000001,
+            9336.294,
+            9490.409,
+            9290.779,
+            9079.206,
+            9092.451,
+            14790.988,
+            9549.257,
+            9464.119999999999,
+            9565.107999999998,
+            10711.734,
+            10460.908,
+            10915.1,
+            10334.925,
+            11892.653,
+            8816.569,
+            13378.499,
+            10801.801,
+            9210.070000000002,
+            9569.436000000002,
+            9548.838,
+            9470.362,
+            8830.025,
+            8703.911
+          ],
+          "arm_b_times_us": [
+            9071.440999999999,
+            9494.656,
+            9389.191,
+            9322.257,
+            9429.306,
+            9329.129,
+            9389.573,
+            10673.563,
+            9731.194,
+            9214.567,
+            9608.949,
+            11978.522,
+            10735.348,
+            11087.53,
+            9645.688,
+            14852.262,
+            9706.539,
+            8944.666000000001,
+            8894.163,
+            9777.211,
+            10046.51,
+            9065.621,
+            8782.806,
+            8946.651,
+            8878.956
+          ],
+          "ratios": [
+            1.0036612705743224,
+            0.9792478000256144,
+            0.994366181282285,
+            1.0180376919452017,
+            0.985308886995501,
+            0.9732104679868827,
+            0.9683561755151164,
+            1.3857591883797378,
+            0.9813037331287404,
+            1.0270824445684752,
+            0.9954374822886455,
+            0.8942450495979387,
+            0.9744358543383969,
+            0.9844482946156627,
+            1.0714554524259958,
+            0.8007300840774287,
+            0.9083123243001443,
+            1.4956957587907695,
+            1.2144820147775568,
+            0.9419935807869956,
+            0.9525134598980145,
+            1.0533021400298999,
+            1.0782843205235317,
+            0.9869642841773978,
+            0.980285407428531
+          ],
+          "median_ratio": 0.985309,
+          "median_ci_95": [
+            0.974436,
+            1.018038
+          ],
+          "log_half_width": 0.02589659,
+          "two_x_decidable_interval": [
+            0.949525,
+            1.053158
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 16298.45,
+        "p95_us": 25016.94,
+        "p99_us": 30149.21,
+        "mean_us": 17656.45,
+        "stddev_us": 3692.43,
+        "cv_pct": 20.91,
+        "throughput_rows_sec": 613555352,
+        "checksum": "bee61a54516f3eba",
+        "thread_count_actually_used": 1,
+        "runtime_available_parallelism": 6,
+        "process_threads_before_probe": 7,
+        "peak_process_threads": 8,
+        "runtime_detected_isa_features": [
+          "sse2",
+          "avx",
+          "avx2",
+          "fma",
+          "bmi1",
+          "bmi2",
+          "aes"
+        ],
+        "samples_us": [
+          15668.404,
+          17865.799,
+          18988.742,
+          21669.562,
+          20490.937,
+          16170.035,
+          13980.344,
+          15525.289,
+          15648.647,
+          16123.589,
+          15520.801,
+          16291.169,
+          17404.946,
+          25643.161,
+          23918.793,
+          27795.061,
+          15434.691,
+          16810.572,
+          16724.873,
+          18948.256,
+          15114.077,
+          19112.923,
+          15354.753,
+          17107.403,
+          16327.226,
+          16142.614,
+          16305.727,
+          16198.507,
+          16762.283,
+          16189.0,
+          17447.723,
+          15757.299,
+          24251.55,
+          32411.031,
+          18509.133,
+          18347.352,
+          20128.635,
+          21163.455,
+          14941.897,
+          14987.883,
+          17374.768,
+          17719.608,
+          15749.124,
+          15596.682,
+          15090.444,
+          14590.234,
+          14244.484,
+          14508.944,
+          14434.006,
+          14330.253
+        ],
+        "executable": {
+          "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+          "bytes": 6894448,
+          "path": "/usr/bin/python3.13"
+        },
+        "null_control": {
+          "rounds": 25,
+          "arm_a_times_us": [
+            15668.404,
+            18988.742,
+            20490.937,
+            13980.344,
+            15648.647,
+            15520.801,
+            17404.946,
+            23918.793,
+            15434.691,
+            16724.873,
+            15114.077,
+            15354.753,
+            16327.226,
+            16305.727,
+            16762.283,
+            17447.723,
+            24251.55,
+            18509.133,
+            20128.635,
+            14941.897,
+            17374.768,
+            15749.124,
+            15090.444,
+            14244.484,
+            14434.006
+          ],
+          "arm_b_times_us": [
+            17865.799,
+            21669.562,
+            16170.035,
+            15525.289,
+            16123.589,
+            16291.169,
+            25643.161,
+            27795.061,
+            16810.572,
+            18948.256,
+            19112.923,
+            17107.403,
+            16142.614,
+            16198.507,
+            16189.0,
+            15757.299,
+            32411.031,
+            18347.352,
+            21163.455,
+            14987.883,
+            17719.608,
+            15596.682,
+            14590.234,
+            14508.944,
+            14330.253
+          ],
+          "ratios": [
+            0.8770055008454982,
+            0.8762863781003047,
+            1.267216613940539,
+            0.9004884868809848,
+            0.9705436550137814,
+            0.9527125401498198,
+            0.6787363695138833,
+            0.8605411227555859,
+            0.918153826056603,
+            0.8826602828249733,
+            0.790777894098145,
+            0.8975502009276336,
+            1.0114363138460722,
+            1.0066191285406736,
+            1.0354118846130087,
+            1.1072787918792428,
+            0.7482498782590409,
+            1.0088176757060094,
+            0.9511034469560852,
+            0.9969317881651465,
+            0.9805390728733954,
+            1.0097740019319492,
+            1.0342838915400534,
+            0.981772622459636,
+            1.0072401373513782
+          ],
+          "median_ratio": 0.970544,
+          "median_ci_95": [
+            0.89755,
+            1.00724
+          ],
+          "log_half_width": 0.10808623,
+          "two_x_decidable_interval": [
+            0.805596,
+            1.241316
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "ratio": 1.719,
+      "median_ci_gate": {
+        "decidable": false,
+        "effect_median_ratio_ci_95": [
+          1.66451942,
+          1.83231801
+        ],
+        "clauses": {
+          "effect_ci_excludes_unity": true,
+          "effect_exceeds_two_x_null_margin": true,
+          "null_medians_within_2pct_unity": false
+        },
+        "null_median_unity": {
+          "maximum_absolute_deviation": 0.02,
+          "frankenpandas": 0.98530889,
+          "frankenpandas_within_limit": true,
+          "pandas": 0.97054366,
+          "pandas_within_limit": false
+        },
+        "claim_log_effect": 0.54184491,
+        "required_log_effect": 0.21617245,
+        "margin_multiplier": 2.0,
+        "combined_two_x_null_interval": [
+          0.805596,
+          1.241316
+        ],
+        "cv_is_provenance_only": true
+      },
+      "verdict": "NULL_UNDECIDABLE",
+      "host_wide_quiescence": {
+        "pandas": {
+          "pre_measurement": {
+            "phase": "pre_measurement:pandas:math_unary/floor/10M/float64",
+            "scope": "all_online_host_cpus",
+            "sample_interval_ms": 1000,
+            "maximum_busy_fraction": 0.2,
+            "expected_cpu_count": 6,
+            "sampled_cpu_count": 6,
+            "missing_cpu_ids": [],
+            "busy_cpu_ids_above_limit": [],
+            "busy_cpu_count_above_limit": 0,
+            "maximum_observed_busy_fraction": 0.01,
+            "sampled_cpu_busy_fraction": {
+              "cpu0": 0.0,
+              "cpu1": 0.0,
+              "cpu2": 0.01,
+              "cpu3": 0.0,
+              "cpu4": 0.0,
+              "cpu5": 0.0
+            },
+            "verdict": "clear",
+            "role": "adjudicating_checkpoint",
+            "readiness_attempt": 2,
+            "readiness_phase": "readiness:pre_measurement:pandas:math_unary/floor/10M/float64:attempt_2"
+          },
+          "post_measurement": {
+            "phase": "post_measurement:pandas:math_unary/floor/10M/float64",
+            "scope": "all_online_host_cpus",
+            "sample_interval_ms": 1000,
+            "maximum_busy_fraction": 0.2,
+            "expected_cpu_count": 6,
+            "sampled_cpu_count": 6,
+            "missing_cpu_ids": [],
+            "busy_cpu_ids_above_limit": [],
+            "busy_cpu_count_above_limit": 0,
+            "maximum_observed_busy_fraction": 0.0,
+            "sampled_cpu_busy_fraction": {
+              "cpu0": 0.0,
+              "cpu1": 0.0,
+              "cpu2": 0.0,
+              "cpu3": 0.0,
+              "cpu4": 0.0,
+              "cpu5": 0.0
+            },
+            "verdict": "clear",
+            "role": "adjudicating_checkpoint"
+          },
+          "valid": true
+        },
+        "frankenpandas": {
+          "pre_measurement": {
+            "phase": "pre_measurement:frankenpandas-candidate:math_unary/floor/10M/float64",
+            "scope": "all_online_host_cpus",
+            "sample_interval_ms": 1000,
+            "maximum_busy_fraction": 0.2,
+            "expected_cpu_count": 6,
+            "sampled_cpu_count": 6,
+            "missing_cpu_ids": [],
+            "busy_cpu_ids_above_limit": [],
+            "busy_cpu_count_above_limit": 0,
+            "maximum_observed_busy_fraction": 0.0,
+            "sampled_cpu_busy_fraction": {
+              "cpu0": 0.0,
+              "cpu1": 0.0,
+              "cpu2": 0.0,
+              "cpu3": 0.0,
+              "cpu4": 0.0,
+              "cpu5": 0.0
+            },
+            "verdict": "clear",
+            "role": "adjudicating_checkpoint",
+            "readiness_attempt": 2,
+            "readiness_phase": "readiness:pre_measurement:frankenpandas-candidate:math_unary/floor/10M/float64:attempt_2"
+          },
+          "post_measurement": {
+            "phase": "post_measurement:frankenpandas-candidate:math_unary/floor/10M/float64",
+            "scope": "all_online_host_cpus",
+            "sample_interval_ms": 1000,
+            "maximum_busy_fraction": 0.2,
+            "expected_cpu_count": 6,
+            "sampled_cpu_count": 6,
+            "missing_cpu_ids": [],
+            "busy_cpu_ids_above_limit": [],
+            "busy_cpu_count_above_limit": 0,
+            "maximum_observed_busy_fraction": 0.009900990099009901,
+            "sampled_cpu_busy_fraction": {
+              "cpu0": 0.0,
+              "cpu1": 0.0,
+              "cpu2": 0.0,
+              "cpu3": 0.0,
+              "cpu4": 0.0,
+              "cpu5": 0.009900990099009901
+            },
+            "verdict": "clear",
+            "role": "adjudicating_checkpoint"
+          },
+          "valid": true
+        },
+        "valid": true,
+        "reference": {
+          "pre_measurement": {
+            "phase": "pre_measurement:frankenpandas-reference:math_unary/floor/10M/float64",
+            "scope": "all_online_host_cpus",
+            "sample_interval_ms": 1000,
+            "maximum_busy_fraction": 0.2,
+            "expected_cpu_count": 6,
+            "sampled_cpu_count": 6,
+            "missing_cpu_ids": [],
+            "busy_cpu_ids_above_limit": [],
+            "busy_cpu_count_above_limit": 0,
+            "maximum_observed_busy_fraction": 0.01,
+            "sampled_cpu_busy_fraction": {
+              "cpu0": 0.0,
+              "cpu1": 0.0,
+              "cpu2": 0.0,
+              "cpu3": 0.01,
+              "cpu4": 0.0,
+              "cpu5": 0.0
+            },
+            "verdict": "clear",
+            "role": "adjudicating_checkpoint",
+            "readiness_attempt": 2,
+            "readiness_phase": "readiness:pre_measurement:frankenpandas-reference:math_unary/floor/10M/float64:attempt_2"
+          },
+          "post_measurement": {
+            "phase": "post_measurement:frankenpandas-reference:math_unary/floor/10M/float64",
+            "scope": "all_online_host_cpus",
+            "sample_interval_ms": 1000,
+            "maximum_busy_fraction": 0.2,
+            "expected_cpu_count": 6,
+            "sampled_cpu_count": 6,
+            "missing_cpu_ids": [],
+            "busy_cpu_ids_above_limit": [],
+            "busy_cpu_count_above_limit": 0,
+            "maximum_observed_busy_fraction": 0.009900990099009901,
+            "sampled_cpu_busy_fraction": {
+              "cpu0": 0.009900990099009901,
+              "cpu1": 0.0,
+              "cpu2": 0.0,
+              "cpu3": 0.009900990099009901,
+              "cpu4": 0.0,
+              "cpu5": 0.0
+            },
+            "verdict": "clear",
+            "role": "adjudicating_checkpoint"
+          },
+          "valid": true
+        }
+      },
+      "whole_binary_reference": {
+        "frankenpandas": {
+          "p50_us": 33199.48,
+          "p95_us": 43744.45,
+          "p99_us": 55670.79,
+          "mean_us": 34740.1,
+          "stddev_us": 5860.96,
+          "cv_pct": 16.87,
+          "throughput_rows_sec": 301209546,
+          "checksum": "e700f53534db5c6d",
+          "thread_count_actually_used": 1,
+          "runtime_available_parallelism": 6,
+          "process_threads_before_probe": 1,
+          "peak_process_threads": 2,
+          "runtime_detected_isa_features": [
+            "scalar",
+            "sse2",
+            "avx2",
+            "fma",
+            "bmi2"
+          ],
+          "samples_us": [
+            35459.314999999995,
+            34651.426,
+            37490.1,
+            41785.403999999995,
+            42947.891,
+            35953.801,
+            41921.748,
+            58150.421,
+            35661.85999999999,
+            44396.185,
+            34880.511000000006,
+            35189.284,
+            35904.74,
+            33370.08,
+            31070.415,
+            36733.237,
+            32871.586,
+            29984.412,
+            31184.367000000002,
+            30955.763,
+            29868.798,
+            31895.374999999996,
+            29439.232,
+            29446.483999999997,
+            29179.6,
+            29550.777000000002,
+            31151.587000000003,
+            29219.533,
+            36350.687,
+            33059.253,
+            35238.804,
+            53089.957,
+            35740.926,
+            33069.593,
+            33270.244999999995,
+            34997.178,
+            31900.786,
+            36796.914,
+            30029.805,
+            29308.417999999998,
+            29160.314,
+            35876.798,
+            42384.176,
+            31003.693,
+            32431.770999999997,
+            38540.628,
+            32095.596999999998,
+            29074.394,
+            33128.712999999996,
+            30142.274999999998
+          ],
+          "executable": {
+            "sha256": "7f0fce36a6c0d88e3d3c795f63b93522e12a3aae899fc29cb8bf171da02a810b",
+            "bytes": 24776832,
+            "path": "/opt/fpbench/fp-bench-mu-ref",
+            "build_worker": "vmi1167313"
+          },
+          "null_control": {
+            "rounds": 25,
+            "arm_a_times_us": [
+              35459.314999999995,
+              37490.1,
+              42947.891,
+              41921.748,
+              35661.85999999999,
+              34880.511000000006,
+              35904.74,
+              31070.415,
+              32871.586,
+              31184.367000000002,
+              29868.798,
+              29439.232,
+              29179.6,
+              31151.587000000003,
+              36350.687,
+              35238.804,
+              35740.926,
+              33270.244999999995,
+              31900.786,
+              30029.805,
+              29160.314,
+              42384.176,
+              32431.770999999997,
+              32095.596999999998,
+              33128.712999999996
+            ],
+            "arm_b_times_us": [
+              34651.426,
+              41785.403999999995,
+              35953.801,
+              58150.421,
+              44396.185,
+              35189.284,
+              33370.08,
+              36733.237,
+              29984.412,
+              30955.763,
+              31895.374999999996,
+              29446.483999999997,
+              29550.777000000002,
+              29219.533,
+              33059.253,
+              53089.957,
+              33069.593,
+              34997.178,
+              36796.914,
+              29308.417999999998,
+              35876.798,
+              31003.693,
+              38540.628,
+              29074.394,
+              30142.274999999998
+            ],
+            "ratios": [
+              1.0233147403515226,
+              0.8972056366859587,
+              1.1945299191036853,
+              0.7209190798463866,
+              0.8032640642433577,
+              0.9912253684957048,
+              1.0759560660328054,
+              0.8458392871828856,
+              1.096289165183563,
+              1.007384860776974,
+              0.9364617283853851,
+              0.9997537227194936,
+              0.9874393488875097,
+              1.066122001333834,
+              1.099561656762178,
+              0.6637564991811915,
+              1.080779131451663,
+              0.9506550785323318,
+              0.8669418853983245,
+              1.0246136451308974,
+              0.8127903164602369,
+              1.3670686263084852,
+              0.8414956549229037,
+              1.1039128450966165,
+              1.0990780556543924
+            ],
+            "median_ratio": 0.999754,
+            "median_ci_95": [
+              0.897206,
+              1.075956
+            ],
+            "log_half_width": 0.10847019,
+            "two_x_decidable_interval": [
+              0.804978,
+              1.24227
+            ]
+          },
+          "iterations": 50,
+          "valid": true
+        },
+        "ratio_vs_pandas": 0.491,
+        "median_ci_gate_vs_pandas": {
+          "decidable": false,
+          "effect_median_ratio_ci_95": [
+            0.45809,
+            0.52537378
+          ],
+          "clauses": {
+            "effect_ci_excludes_unity": true,
+            "effect_exceeds_two_x_null_margin": true,
+            "null_medians_within_2pct_unity": false
+          },
+          "null_median_unity": {
+            "maximum_absolute_deviation": 0.02,
+            "frankenpandas": 0.99975372,
+            "frankenpandas_within_limit": true,
+            "pandas": 0.97054366,
+            "pandas_within_limit": false
+          },
+          "claim_log_effect": 0.71146429,
+          "required_log_effect": 0.21694039,
+          "margin_multiplier": 2.0,
+          "combined_two_x_null_interval": [
+            0.804978,
+            1.24227
+          ],
+          "cv_is_provenance_only": true
+        },
+        "verdict_vs_pandas": "NULL_UNDECIDABLE",
+        "thread_provenance_vs_pandas": {
+          "host_identity": "vmi1167313",
+          "cpu_model": "AMD EPYC Processor (with IBPB)",
+          "physical_cores": 6,
+          "logical_threads": 6,
+          "thread_count_requested": null,
+          "thread_count_actually_used": {
+            "frankenpandas": 1,
+            "pandas": 1
+          },
+          "runtime_available_parallelism": {
+            "frankenpandas": 6,
+            "pandas": 6
+          },
+          "runtime_detected_isa_features": {
+            "host": [
+              "sse2",
+              "avx",
+              "avx2",
+              "fma",
+              "bmi1",
+              "bmi2",
+              "aes"
+            ],
+            "frankenpandas": [
+              "scalar",
+              "sse2",
+              "avx2",
+              "fma",
+              "bmi2"
+            ],
+            "pandas": [
+              "sse2",
+              "avx",
+              "avx2",
+              "fma",
+              "bmi1",
+              "bmi2",
+              "aes"
+            ]
+          },
+          "affinity_or_cpuset_cap": {
+            "logical_cpu_count": 6,
+            "cpu_ids": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5
+            ]
+          },
+          "contract_errors": [],
+          "valid": true
+        }
+      },
+      "candidate_vs_reference": {
+        "ratio": 3.50191234,
+        "ratio_definition": "reference_p50 / candidate_p50",
+        "median_ci_gate": {
+          "decidable": true,
+          "effect_median_ratio_ci_95": [
+            3.35826976,
+            3.74187364
+          ],
+          "clauses": {
+            "effect_ci_excludes_unity": true,
+            "effect_exceeds_two_x_null_margin": true,
+            "null_medians_within_2pct_unity": true
+          },
+          "null_median_unity": {
+            "maximum_absolute_deviation": 0.02,
+            "candidate": 0.98530889,
+            "candidate_within_limit": true,
+            "reference": 0.99975372,
+            "reference_within_limit": true
+          },
+          "claim_log_effect": 1.2533092,
+          "required_log_effect": 0.21694039,
+          "margin_multiplier": 2.0,
+          "combined_two_x_null_interval": [
+            0.804978,
+            1.24227
+          ],
+          "cv_is_provenance_only": true
+        },
+        "verdict": "CANDIDATE_FASTER"
+      },
+      "whole_binary_execution_order": [
+        "reference",
+        "candidate"
+      ],
+      "thread_provenance": {
+        "host_identity": "vmi1167313",
+        "cpu_model": "AMD EPYC Processor (with IBPB)",
+        "physical_cores": 6,
+        "logical_threads": 6,
+        "thread_count_requested": null,
+        "thread_count_actually_used": {
+          "frankenpandas": 1,
+          "pandas": 1
+        },
+        "runtime_available_parallelism": {
+          "frankenpandas": 6,
+          "pandas": 6
+        },
+        "runtime_detected_isa_features": {
+          "host": [
+            "sse2",
+            "avx",
+            "avx2",
+            "fma",
+            "bmi1",
+            "bmi2",
+            "aes"
+          ],
+          "frankenpandas": [
+            "scalar",
+            "sse2",
+            "avx2",
+            "fma",
+            "bmi2"
+          ],
+          "pandas": [
+            "sse2",
+            "avx",
+            "avx2",
+            "fma",
+            "bmi1",
+            "bmi2",
+            "aes"
+          ]
+        },
+        "affinity_or_cpuset_cap": {
+          "logical_cpu_count": 6,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        },
+        "contract_errors": [],
+        "valid": true
+      },
+      "invocation_id": "vs-pandas-20260816T065007.504762Z-pid769237"
+    }
+  ],
+  "summary": {
+    "total_workloads": 1,
+    "contract_valid_workloads": 1,
+    "decidable_workloads": 0,
+    "null_undecidable_workloads": 1,
+    "category_scores": {},
+    "weighted_score": 1.3,
+    "claim_validated": false
+  },
+  "invocation_rejection": null
+}

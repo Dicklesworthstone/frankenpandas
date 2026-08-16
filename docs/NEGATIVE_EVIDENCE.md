@@ -22420,3 +22420,91 @@ per-call edge over a control that does strictly LESS work (no `Arc` clone, no
 `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo run --release -p fp-runtime --features asupersync --example transport_receive_ab`
 and CHECK the printed `harness_sha256` against `sha256sum` of the source before
 believing any row.
+
+---
+
+## br-frankenpandas-h67zz — REFUTED: the math-unary family IS source-fixable, and `+sse4.1` crosses it from a 0.3x loss to a certified 1.68x WIN over pandas
+
+**Date:** 2026-08-16 · **Agent:** CalmMink · **Verdict:** the 2026-06-26 row above
+is **overturned**. It closed with "This is the ceiling for the math-unary family
+until that build-target call is revisited." The call is revisited; it was not a
+ceiling.
+
+That row recorded floor 0.089x, ceil 0.11x, trunc 0.13x vs pandas and called the
+gap **"NOT source-fixable"**, needing `vroundpd` (SSE4.1) which FrankenPandas
+cannot emit because it builds for generic x86-64 — so `f64::floor` lowers to a
+libm libcall while numpy runtime-dispatches. Every part of that mechanism is
+confirmed. The conclusion drawn from it was wrong: the flag costs one line.
+
+**MECHANISM, verified at the instruction level before any timing.** Two ELFs,
+same source (`git archive HEAD`, so no peer's uncommitted work), same worker,
+differing only in `RUSTFLAGS`:
+
+```
+ref  (default)          7f0fce36a6c0d88e3d3c795f63b93522e12a3aae899fc29cb8bf171da02a810b   roundpd/roundsd count = 0
+cand (-C target-feature=+sse4.1)
+                        2f643dfa2073c7a287839a1b1f13c14ac9ccc44ba198317bca5ce60b5cd9ac0c   roundpd/roundsd count = 93
+```
+
+**CERTIFIED ROWS.** Harness `benches/vs_pandas_harness.py`
+(source sha256 `6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546`),
+`--measurement-mode host-wide-exclusive`, pandas 2.2.3 / pyarrow 24.0.0,
+worker **vmi1167313** (AMD EPYC, 6 physical cores, SMT off, 16 GB,
+ISA sse2/avx/avx2/fma/bmi1/bmi2/aes, avx512f absent). Every quiescence phase
+reported `verdict=clear` (max busy fraction 0.030 against a 0.200 limit). Both
+ELFs built on vmi1167313. The harness's three-clause gate is
+`effect_ci_excludes_unity` + `effect_exceeds_two_x_null_margin` +
+`null_medians_within_2pct_unity`; ALL THREE pass on every row quoted below.
+
+```
+floor @ 10M float64          ratio    CI95              nulls (fp / pandas)   gate
+  candidate vs pandas  run1   1.680x   [1.644, 1.720]    0.9962 / 0.9984       ALL PASS
+  candidate vs pandas  run3   1.913x   [1.720, 2.096]    0.9933 / 1.0016       ALL PASS
+  candidate vs default run1   3.205x   [3.174, 3.240]    0.9962 / 0.9973       ALL PASS
+  candidate vs default run2   3.502x   —                 0.9853 / 0.9998       ALL PASS
+  candidate vs default run3   2.692x   [2.597, 2.827]    0.9933 / 1.0012       ALL PASS
+```
+
+**QUOTING THE WORST BOUND, as the replicated-standing convention requires:**
+FrankenPandas built with `+sse4.1` is **1.644x** faster than pandas on
+`floor @ 10M float64` (run 1's CI lower bound; worst point estimate 1.680x), and
+**2.597x** faster than the default FrankenPandas build (run 3's CI lower bound).
+
+**HONEST LIMIT ON THIS ROW: it is single-worker.** vmi1167313 is the only host
+that is BOTH quiet and carries the pinned pandas — vmi1152480 sat at load 30,
+and vmi1293453 returned `verdict=blocked` (3 busy CPUs) from the readiness probe
+even after I installed pandas on it. Cross-host balanced-square runs agree on
+direction and magnitude but did not clear the gate: candidate read 1.04x on
+thinkstation1 and 1.23x on vmi1293453 where the default read 0.31x and 0.26x.
+Per fleet law this row is WORKER-SCOPED until someone replicates it elsewhere.
+
+**Rejected runs, and why — the gate did its job.** Three rows failed on exactly
+one clause, `null_medians_within_2pct_unity`, never on the effect:
+4M candidate-vs-pandas (null 0.9796, missing the ±2% limit by 0.04pp, effect CI
+[1.200, 1.269]); 10M run2 candidate-vs-pandas (PANDAS' own null drifted to
+0.9705 while FP's was 0.9853); 10M ceil run2 (pandas null 0.9596). Their point
+estimates — 1.241x, 1.719x, 2.058x — are consistent with the certified rows and
+are recorded here as corroboration ONLY, not as evidence.
+
+**FAMILY SHAPE, and the negative half.** Balanced-square at 4M on vmi1167313,
+default → candidate: floor 0.37x → 1.15x, ceil 0.36x → 1.17x, trunc 0.41x →
+1.15x, round2 1.09x → 1.26x. But **sqrt does NOT move** (0.60x → 0.50x, both
+noisy): `+sse4.1` supplies `roundpd`, and sqrt needs vector WIDTH, not a rounding
+instruction. That the win lands exactly on the four rounding ops and skips sqrt
+is the mechanism confirming itself rather than a uniform "new flags are faster"
+artifact.
+
+**NOT LANDED AS A GLOBAL POLICY YET.** h67zz says "No global target-policy change
+unless the timed evidence independently justifies it". The timed evidence now
+justifies revisiting it, but a `.cargo/config.toml` flag changes EVERY crate and
+every peer's build, and `+sse4.1` must first be shown not to disturb any golden.
+It should be bit-safe — `roundsd` computes the IEEE-exact result `floor` already
+returns, and unlike the reverted `+fma,+avx2` experiment (br-frankenpandas-jawxr)
+it enables no FMA contraction — but "should be" is not a gate. Filed separately
+with the full-suite requirement.
+
+**Reproduce:** build both arms from `git archive HEAD -- crates Cargo.toml
+Cargo.lock rust-toolchain.toml benches scripts` with and without
+`RUSTFLAGS="-C target-feature=+sse4.1"`, confirm the roundpd counts differ, then
+run the harness in `host-wide-exclusive` mode on a host whose readiness probe
+says `clear`. Artifacts: `artifacts/bench/h67zz_sse41_*_vmi1167313_*_20260816.json`.
