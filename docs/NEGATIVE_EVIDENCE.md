@@ -23796,3 +23796,62 @@ the slot-timing contract is the only reason this did not become a row. Unset
 `frankenpandas: ['error']` as "the FP arm did not execute", not as a slow result.
 
 **Artifacts:** `artifacts/bench/ceil_1M_thinkstation1_2026-08-16_local_elf_1858bb91.json`
+
+---
+
+## br-frankenpandas-h67zz — `floor` @1M is a CERTIFIED LOSS at 0.132x on a locally built hash-verified ELF, superseding the 0.099x row; FP itself is ~27% faster and now uses 8 threads
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** MEASURED,
+DECIDABLE, both A/A nulls inside the band. This is the certified row the ceil
+re-run could not produce.
+
+`floor @1M` was my lowest banked vs-incumbent number (0.099x) and, like `ceil`,
+that row was taken on ELF `a3078566` and is stale as a description of today's
+code. Re-ran it ABBA in ONE invocation.
+
+```
+host            thinkstation1  AMD Ryzen Threadripper PRO 5975WX 32C/64T
+                governor powersave, smt on, load 6.41 -> 8.07 across the run
+git_sha         6b426aa1b  (code-identical to 669d45cbc, the commit the ELF was
+                built from — the intervening commit touched only docs/artifacts/beads)
+fp-bench ELF    sha256 1858bb91cf9fd2d376319cc27dee803d449bb3b55d5815e8a14912d524a2c2c2
+                78732920 bytes, target/release-perf/fp-bench, profile release-perf
+                built locally, RCH_CARGO_WRAPPER_BYPASS=1, exe path read from
+                --message-format=json, no [RCH] line in the build log
+harness         benches/vs_pandas_harness.py
+                sha256 6d884360e4df0590d9880f5a47872852556f092f0bcc4134a565611cf1498546
+incumbent       pandas 2.2.3
+design          balanced-square ABBAABBA, math_unary/floor @1M, ONE invocation
+                run under `env -u CARGO_TARGET_DIR` so the harness resolves the
+                LOCAL binary, not the shared cargo-target
+```
+
+| | ratio | verdict | FP p50 / cv | pandas p50 / cv | FP thr | pd thr |
+|---|---|---|---|---|---|---|
+| **this run**, ELF `1858bb91` | **0.132x** | **SLOWER, DECIDABLE** | 1343.79us / 7.44% | 176.58us / 11.44% | **8** | 1 |
+| 2026-08-16 earlier, ELF `a3078566` | 0.099x | SLOWER, decidable | 1832.79us | 172.91us | **1** | — |
+
+**A/A null control (same invocation):** FP **1.001168**, pandas **1.003951** —
+**both inside ±2%**, so the gate accepts the row and **0.132x is certified**.
+
+**TWO CERTIFIED ROWS, SO THE FP-SIDE IMPROVEMENT IS REAL AND NOT A GATE
+ARTEFACT.** Both the old and new rows cleared the same three-clause gate, and
+FP's p50 fell **1832.79us → 1343.79us, ~27%**, with
+`thread_count_actually_used` going **1 → 8**. The same shift appeared on `ceil`
+in the entry above (1667 → 1378us, 1 → 8 threads), so it is the family moving,
+not one workload. `br-frankenpandas-xv9qf` routed floor/ceil/trunc onto the
+parallel helper and this is consistent with that finally taking effect on this
+build — **I have not bisected it and do not attribute it here.**
+
+**IT IS A SELF-SPEEDUP, WHICH IS MAINTENANCE, NOT A WIN.** The vs-incumbent
+verdict is unchanged in kind: FP is still ~7.6x slower than pandas on this
+workload, and the mechanism is the one already established — the default build
+cannot emit `roundsd`/`roundpd`, so this is the ISA/policy question recorded in
+the cross-reference entry above, not a scheduling one. What moved is FP against
+its own past, and the honest headline for the corpus is that the worst
+`math_unary` ratio is now **0.132x, certified**, not 0.099x.
+
+**Supersedes** the `floor 0.099x` row for describing current code; that row
+remains correct for the ELF it names.
+
+**Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_local_elf_1858bb91.json`
