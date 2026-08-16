@@ -22987,3 +22987,65 @@ pre-existing bit-identity test compared parallel to parallel (both `a.dot(&b)`
 calls take the same arm) and would have passed against a uniformly reassociated
 kernel; it is now backed by a real serial-vs-parallel comparison plus a negative
 test proving the fixture operands do not sum exactly in any order.
+
+---
+
+## 2026-08-16 cod-pandas — ⚠ RETRACTION OF PRECISION: df_dot @1M is NULL_UNDECIDABLE at 25 rounds (br-frankenpandas-1hjgz)
+
+The entry immediately above banked `df_dot @ 1M = 0.475x` from a 9-round
+balanced square and flagged the incumbent arm as noisy (pandas cv 30.32%, its
+A/A null CI spanning [0.806, 1.162]) with the caveat "widen rounds before
+treating 0.475 as precise". Widened to 25 rounds on the SAME already-built ELF,
+no rebuild:
+
+```
+workload            linalg / df_dot @ 1M / float64
+verdict             NULL_UNDECIDABLE                    (9-round run said FASTER-side decidable)
+point ratio         0.743x    CI95 [0.65306, 0.78548]   (9-round run said 0.475x [0.44989, 0.60696])
+rounds              25 (was 9), balanced-square ABBAABBA v1, same invocation, pandas 2.2.3 live
+FP     p50          35637.35us   cv 23.91%   threads 8 (peak 10)
+pandas p50          26739.00us   cv 57.50%   threads 64
+A/A null FP         0.997928  CI [0.991674, 1.009883]   PASS  (within 2% of unity)
+A/A null pandas     0.953097  CI [0.746589, 1.142133]   *** FAIL *** (4.7% off unity, gate is 2%)
+gate clauses        effect_ci_excludes_unity        = true
+                    effect_exceeds_two_x_null_margin = FALSE
+                    null_medians_within_2pct_unity   = FALSE
+fp-bench ELF        sha256 cc70daba079012391e536df993acd221bff181d43ef1eceb45ffa9c45a9920ee
+host                thinkstation1, AMD Ryzen Threadripper PRO 5975WX 32C/64T, powersave
+```
+
+**THE 0.475x FIGURE IS WITHDRAWN AS A NUMBER.** A failed A/A null invalidates the
+row — that is the standing law, and it applies to a loss exactly as it applies to
+a win. The 9-round run's pandas null (0.9886) passed the 2% gate by luck; at 25
+rounds the same arm on the same binary lands at 0.9531 and fails it. Nothing
+about FrankenPandas changed between the two runs — same ELF sha256, same host —
+so what moved is the MEASUREMENT, not the code.
+
+**The per-round ratios show the mechanism: monotone drift, not scatter.**
+
+```
+0.836 0.720 0.743 0.794 0.864 0.870 1.041 0.820 0.702 0.785 0.759 0.757 0.764
+0.449 0.471 0.643 0.653 0.799 0.762 0.528 0.738 0.705 0.337 0.423 0.369
+```
+
+The first half sits around 0.75-0.87 and the last third collapses toward
+0.34-0.47. A balanced square cancels a CONSTANT bias between arms; it does not
+cancel a trend that develops DURING the run, and 25 rounds of a 64-thread GEMM
+against an 8-thread one is long enough on a shared 32-core host for thermal or
+foreign-load drift to become the dominant term. pandas cv 57.5% and FP cv 23.9%
+(against 4.18% for FP in the 9-round run) say both arms degraded, the
+64-thread arm far more.
+
+**What survives:** the DIRECTION only. Every one of the 25 rounds except one
+(round 7, 1.041) puts FP behind pandas, and the FP A/A null passes cleanly in
+both runs, so "df.dot is still a loss vs pandas after the column-parallel lever"
+is safe. The magnitude is not: 9 rounds said 0.475x, 25 rounds said 0.743x, and
+neither is trustworthy while the incumbent's own null is this unstable.
+
+**Consequence for the campaign — do not re-measure df_dot @1M on a loaded host.**
+Before this workload can carry a number again it needs either (a) a quiet host,
+or (b) short runs repeated across widely separated times with the null checked
+each time, or (c) a smaller size whose per-round wall time is short enough that
+drift cannot accumulate inside a round. Re-running it longer made the row WORSE,
+not better, which is the opposite of the usual intuition and is the reason this
+entry exists.
