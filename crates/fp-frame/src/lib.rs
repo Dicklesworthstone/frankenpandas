@@ -42174,7 +42174,36 @@ mod str_worker_pool {
     type Job = Box<dyn FnOnce() + Send + 'static>;
 
     pub struct Pool {
-        job_tx: Sender<Job>,
+        /// ONE SENDER PER WORKER, not one shared queue.
+        ///
+        /// br-frankenpandas-vrjrf, second slice. The first version handed every
+        /// worker a clone of `Arc<Mutex<Receiver<Job>>>` and had the worker do:
+        ///
+        /// ```ignore
+        /// let job = {
+        ///     let Ok(rx) = job_rx.lock() else { return };
+        ///     rx.recv()          // <-- BLOCKS with the guard still alive
+        /// };
+        /// ```
+        ///
+        /// Its comment said "hold the receiver lock only long enough to take
+        /// one job", but `rx.recv()` is evaluated INSIDE the block that owns
+        /// the guard, so the lock was held for the whole blocking wait. Exactly
+        /// one worker could ever be parked in `recv`; the other N-1 were parked
+        /// on `lock()`. Dispatching k jobs therefore cost k SEQUENTIAL
+        /// lock/wake/release handoffs instead of k independent wakeups, and the
+        /// length of that chain depends on scheduler timing — which is spread,
+        /// and spread is what the null control measures.
+        ///
+        /// Per-worker channels remove the shared lock entirely: `run` sends job
+        /// i straight to worker i, so the wakeups are independent. This is
+        /// sound without queueing because callers never submit more jobs than
+        /// the pool has threads — `affix_predicate` caps its chunk count at
+        /// `min(available_parallelism, 64)`, the same bound used here — and
+        /// `run` asserts that invariant by falling back to caller-side
+        /// execution for any overflow rather than silently queueing behind a
+        /// busy worker.
+        job_txs: Vec<Sender<Job>>,
         threads: usize,
     }
 
@@ -42193,24 +42222,18 @@ mod str_worker_pool {
             let threads = std::thread::available_parallelism()
                 .map_or(1, std::num::NonZeroUsize::get)
                 .min(64);
-            let (job_tx, job_rx) = channel::<Job>();
-            let job_rx = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
+            let mut job_txs = Vec::with_capacity(threads);
             for id in 0..threads {
-                let job_rx = std::sync::Arc::clone(&job_rx);
+                let (job_tx, job_rx) = channel::<Job>();
                 let spawned = std::thread::Builder::new()
                     .name(format!("fp-str-{id}"))
                     .spawn(move || {
                         loop {
-                            // Hold the receiver lock only long enough to take
-                            // one job; running under it would serialise the
-                            // pool. A poisoned lock means a previous holder
-                            // panicked WHILE dequeuing, which the catch_unwind
-                            // below makes unreachable — treat it as terminal
-                            // for this worker rather than propagating.
-                            let job = {
-                                let Ok(rx) = job_rx.lock() else { return };
-                                rx.recv()
-                            };
+                            // The worker OWNS its receiver, so there is no lock
+                            // to hold and no other worker to block. Parking in
+                            // `recv` here costs nothing to anyone else — the
+                            // defect this replaces is described on `job_txs`.
+                            let job = job_rx.recv();
                             // `Err` means every Sender is gone, i.e. the pool
                             // itself was dropped: exit cleanly.
                             let Ok(job) = job else { return };
@@ -42224,14 +42247,27 @@ mod str_worker_pool {
                 if spawned.is_err() {
                     // The OS refused a thread. Whatever count we reached is
                     // what the pool has; `run` degrades to running everything
-                    // on the caller when `threads == 0`.
+                    // on the caller when `threads == 0`. `job_tx` for THIS id
+                    // is dropped unsent, so no sender outlives its worker.
                     return Self {
-                        job_tx,
+                        job_txs,
                         threads: id,
                     };
                 }
+                job_txs.push(job_tx);
             }
-            Self { job_tx, threads }
+            Self { job_txs, threads }
+        }
+
+        /// How many workers this pool actually started.
+        ///
+        /// Exposed so a test can straddle the width in both directions — the
+        /// per-worker-channel dispatch behaves differently at `jobs <= threads`
+        /// (one worker each) and above it (excess runs caller-side), and a test
+        /// that hardcoded a guess would silently stop covering one of those
+        /// arms on a machine with a different core count.
+        pub fn threads(&self) -> usize {
+            self.threads
         }
 
         /// Run `jobs` on the pool and return their results **in submission
@@ -42263,6 +42299,18 @@ mod str_worker_pool {
                     // unwound; dropping the value is correct then.
                     let _ = result_tx.send((index, value));
                 });
+                // Job i goes to worker i — one dedicated channel each, so the
+                // wakeups are independent instead of chained through a shared
+                // lock (see `job_txs`).
+                //
+                // `offset` indexes the post-`remove(0)` list, so worker 0 is
+                // deliberately left for the caller's own thread, which runs
+                // `first` below. Callers never exceed the pool width (see
+                // `job_txs`), but if one ever did, `get` yields `None` and the
+                // job runs caller-side rather than queueing behind a worker
+                // that is already busy — the overflow degrades to serial, it
+                // does not silently serialise a subset.
+                //
                 // If every worker has exited there is nobody to run this, and
                 // blocking on its result below would hang. `SendError` hands
                 // the job back, so run it here instead of failing: the pool
@@ -42271,8 +42319,13 @@ mod str_worker_pool {
                 // `POOL` static is alive, which the catch_unwind in the worker
                 // loop is designed to prevent — but the recovery costs one
                 // branch and removes a panic from library code.)
-                if let Err(std::sync::mpsc::SendError(job)) = self.job_tx.send(boxed) {
-                    job();
+                match self.job_txs.get(offset) {
+                    Some(tx) => {
+                        if let Err(std::sync::mpsc::SendError(job)) = tx.send(boxed) {
+                            job();
+                        }
+                    }
+                    None => boxed(),
                 }
             }
             drop(result_tx);
@@ -111303,6 +111356,35 @@ mod tests {
                 });
             }
         });
+    }
+
+    /// `run` must preserve SUBMISSION ORDER and lose nothing, including when
+    /// there are more jobs than pool threads (br-frankenpandas-vrjrf).
+    ///
+    /// This covers the branch the per-worker-channel dispatch introduced. The
+    /// shared-queue version could not overflow — any worker took any job — but
+    /// routing job i to worker i can, so `run` falls back to caller-side
+    /// execution for the excess instead of queueing it behind a busy worker.
+    /// The old shape would silently serialise part of the batch there; this
+    /// asserts the results are still complete and still in order.
+    ///
+    /// Jobs return their own index, so a mis-routed or dropped part shows up as
+    /// a wrong value or a length mismatch rather than as a timing artefact. The
+    /// counts deliberately straddle the pool width in both directions.
+    #[test]
+    fn str_worker_pool_run_preserves_order_past_pool_width_vrjrf() {
+        let pool = super::str_worker_pool::pool();
+        let width = pool.threads();
+
+        for count in [1usize, 2, width.max(1), width + 1, width * 2 + 3] {
+            let jobs: Vec<_> = (0..count).map(|i| move || i * 7 + 1).collect();
+            let got = pool.run(jobs);
+            let want: Vec<usize> = (0..count).map(|i| i * 7 + 1).collect();
+            assert_eq!(
+                got, want,
+                "pool.run lost or reordered results at count={count} (pool width {width})"
+            );
+        }
     }
 
     /// Differential guard for the byte-level prefix/suffix path
