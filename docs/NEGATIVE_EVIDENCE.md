@@ -25212,3 +25212,64 @@ campaign discovering points 1–3 the hard way. The recommendation should be rea
 as withdrawn wherever it appears above.
 
 **No loadavg row is banked with this entry because no measurement was taken.**
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oxv4u) — three of four ways to give the dot kernel AVX2 without unsafe are impossible; the fourth works and has a trap that would make it silently inert — REJECT (A, B, C), MECHANISM FOUND (E)
+
+`materialize_float64_dot` compiles to 2-wide SSE2 `mulpd` with zero `%ymm`, and a
+`+avx2,+fma` build of identical source is 1.19-1.24x and bit-identical (entry
+above). The open question was whether a TARGETED mechanism exists that does not
+put the whole surface on a wider baseline, given `fp-columnar` is
+`#![forbid(unsafe_code)]`. Settled here by compiling, not by argument. These are
+compile-time facts, so host load is irrelevant to them; `uptime` read 41.32 when
+the work started and no timing is claimed from this entry.
+
+| variant | mechanism | result |
+|---|---|---|
+| A | `#[target_feature(enable="avx2,fma")]` on a safe fn + `is_x86_feature_detected!` guard | **error[E0133]**: "call to function with `#[target_feature]` is unsafe and requires unsafe block" |
+| B | narrow `#[allow(unsafe_code)]` on just that module | **error[E0453]**: "allow(unsafe_code) incompatible with previous forbid: overruled by previous forbid" |
+| C | `std::simd` portable SIMD (100% safe) on a baseline build | compiles; emits **0 `%ymm`, 0 `vmulpd`, 6 `mulpd`, 24 `addpd`** — 4-wide vectors lower to 2x SSE2, no ISA gain |
+| E | `cargo-features = ["profile-rustflags"]` + `[profile.release.package.<crate>] rustflags` | **WORKS** |
+
+**Counted mechanism:** variant E isolates the instructions exactly. In a two-crate
+probe with the flag on `hot` only: `hot` emits **27 `%ymm` references and 5
+`vmulpd`, 0 `mulpd`**; `cold`, which calls it, emits **0 `%ymm` and 2 `mulpd`** —
+unchanged from baseline. Neither crate contains the `unsafe` keyword, both keep
+`#![forbid(unsafe_code)]`, and it builds with zero errors and zero warnings. No
+`#[target_feature]` attribute exists anywhere, so there is no unsafe call site:
+the callee is an ordinary safe fn that merely happens to have been COMPILED with
+wider features.
+
+**⚠ THE TRAP, MEASURED, BECAUSE IT WOULD MAKE THE LEVER LAND AND DO NOTHING.**
+The per-package flag applies to the crate that CODEGENS the function, not the one
+that declares it. Same probe, three entry-point shapes called from the baseline
+crate:
+
+| entry point | where it codegens | result in the caller's object |
+|---|---|---|
+| `#[inline(never)]`, non-generic | the AVX2 crate | 27 `%ymm` — **kept** |
+| `#[inline]` | the CALLER's crate | 0 `%ymm`, 2 `mulpd` — **ISA silently lost** |
+| generic `<T>` | the CALLER's crate | 0 `%ymm`, 2 `mulpd` — **ISA silently lost** |
+
+A generic or `#[inline]` kernel would produce a green build, correct values, and
+baseline instructions — a landed lever doing nothing, invisible without
+disassembly. So any implementation of E MUST assert on the object code (a `%ymm`
+count in the hot crate) and not merely on values or timings.
+
+**Decision: REJECT A, B and C as mechanisms.** A and B are refused by the
+compiler outright; C is safe and compiles but buys zero instructions on a
+baseline target, so it cannot close an ISA gap by itself. **E is viable and is
+what br-frankenpandas-oxv4u should implement**: extract the dot kernel into its
+own crate, flag only that crate, expose non-generic `#[inline(never)]` entry
+points, and enter them only behind `is_x86_feature_detected!` in the baseline
+caller.
+
+**RESIDUAL RISK OF E, STATED PLAINLY.** The compiler does not verify the guard.
+Entering the AVX2 crate on a pre-AVX2 CPU is a SIGILL, and the type system will
+not stop it — the safety is by construction (one guarded entry point) rather than
+by types, even though no `unsafe` keyword appears. LLVM will not inline an
+AVX2-compiled callee into a baseline caller (feature-subset rule), so the guard
+cannot be optimized away, but the discipline of a single entry point is doing
+real work and must be stated wherever it is used. `profile-rustflags` is also
+cargo-unstable: adopting it makes the workspace nightly-cargo-only, which this
+repo already is via `rust-toolchain.toml`, but it is a workspace-wide manifest
+change and therefore the user's call, not an agent's. I have not made it.
