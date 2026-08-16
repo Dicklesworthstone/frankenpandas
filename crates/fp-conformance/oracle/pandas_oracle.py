@@ -20,6 +20,7 @@ import os
 import re
 import struct
 import sys
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -1441,9 +1442,26 @@ def op_series_dt_to_pydatetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     series = fixture_series_from_payload(pd, left, "series_dt_to_pydatetime")
     try:
-        out = pd.to_datetime(series, errors="coerce").dt.to_pydatetime(
-            warn=True if warn is None else warn
-        )
+        # pandas 2.2.3 REMOVED the `warn` parameter: the signature is
+        # `to_pydatetime() -> np.ndarray` and passing it raises
+        # "DatetimeProperties.to_pydatetime() got an unexpected keyword argument
+        # 'warn'". This handler still passed it, so it raised on EVERY call and
+        # both fp_p2d_421 fixtures were unverifiable — they pin values, not an
+        # error, so FrankenPandas was never the problem.
+        #
+        # The payload's `dt_warn` therefore has no pandas counterpart in 2.2.3;
+        # it is validated above (so a malformed payload is still rejected) and
+        # then deliberately not forwarded. What the fixtures pin is the VALUES,
+        # which the warning never affected.
+        #
+        # The call itself emits a FutureWarning — to_pydatetime is deprecated for
+        # Series — which is suppressed here so it cannot pollute the adapter's
+        # stdout contract. Suppressing it does NOT hide a behaviour change: if
+        # pandas removes the method the call raises and this handler reports it.
+        # (br-frankenpandas-9rop8)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            out = pd.to_datetime(series, errors="coerce").dt.to_pydatetime()
     except Exception as exc:
         raise OracleError(f"series_dt_to_pydatetime failed: {exc}") from exc
 

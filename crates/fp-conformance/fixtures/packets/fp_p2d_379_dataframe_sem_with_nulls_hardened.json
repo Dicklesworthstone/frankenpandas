@@ -5,8 +5,8 @@
   "operation": "dataframe_sem",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "d455675edc3f4dc82abc03396d37259250ae98ca7bf21979597942f97f4b8aee",
-    "generated_at": "2026-08-16T12:01:22Z"
+    "oracle_script_sha256": "934907739178a4fce0065f2bc3a93fb85ffef6aa4a20e660ccd8052382fe480c",
+    "generated_at": "2026-08-16T12:07:47Z"
   },
   "frame": {
     "index": [
