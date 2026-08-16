@@ -8434,6 +8434,68 @@ pub fn series_from_arrow_array(
 }
 
 /// Build an Arrow RecordBatch from a DataFrame.
+/// Arrow field-metadata key carrying FrankenPandas' own dtype when Arrow's type
+/// system cannot express it.
+///
+/// Arrow has ONE `Int64` and ONE `Boolean`; nullability is a validity bitmap on
+/// the array, not a distinct type. FrankenPandas has two of each — `Int64` /
+/// `Int64Nullable` and `Bool` / `BoolNullable` — mirroring pandas' `int64` vs
+/// `Int64Dtype()` and `bool` vs `BooleanDtype()`, which pandas ALSO treats as
+/// different dtypes with different behaviour (`pd.merge` refuses `Int64` against
+/// `int64` as incompatible merge keys, per br-frankenpandas-sopel).
+///
+/// So the round trip has to carry the distinction out of band or lose it, and
+/// losing it is exactly the defect: `ipc_stream_round_trip_null_hardened`
+/// reported `actual=false expected=true` because an `Int64Nullable` column came
+/// back tagged `Int64`. (br-frankenpandas-13q8k)
+const FP_DTYPE_METADATA_KEY: &str = "frankenpandas.dtype";
+
+/// The metadata tag for a dtype Arrow cannot represent, or `None` when Arrow's
+/// own type is already a faithful carrier.
+///
+/// Deliberately narrow: only the two dtypes that collide with another dtype
+/// under `dtype_to_arrow` get a tag. Every other column writes exactly the bytes
+/// and schema it wrote before this change, so no existing reader — including
+/// non-FrankenPandas ones — sees anything new.
+fn nullable_extension_tag(dtype: DType) -> Option<&'static str> {
+    match dtype {
+        DType::Int64Nullable => Some("Int64Nullable"),
+        DType::BoolNullable => Some("BoolNullable"),
+        _ => None,
+    }
+}
+
+/// Restore a column's declared dtype from the field metadata written above.
+///
+/// Absent or unrecognized metadata means "trust Arrow", which is what every
+/// stream written before this change (and every stream written by anything that
+/// is not FrankenPandas) contains — so those keep decoding exactly as they did.
+fn retag_from_field_metadata(col: Column, field: &Field) -> Column {
+    let Some(tag) = field.metadata().get(FP_DTYPE_METADATA_KEY) else {
+        return col;
+    };
+    let declared = match tag.as_str() {
+        "Int64Nullable" => DType::Int64Nullable,
+        "BoolNullable" => DType::BoolNullable,
+        _ => return col,
+    };
+    if col.dtype() == declared {
+        return col;
+    }
+    // `promote_to_nullable` keeps the typed backing (`data`), which the
+    // read_parquet typed fast path above depends on; it only applies when the
+    // column actually has nulls. A declared-nullable column that happens to be
+    // all-valid still has to be retagged, and `with_dtype` is the only route --
+    // it drops the typed backing, which is why it is NOT used for the common
+    // has-nulls case.
+    let promoted = col.promote_to_nullable();
+    if promoted.dtype() == declared {
+        promoted
+    } else {
+        promoted.with_dtype(declared)
+    }
+}
+
 fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> {
     let materialized = if frame.row_multiindex().is_some() {
         Some(materialize_synthetic_row_multiindex_columns(frame)?)
@@ -8451,7 +8513,14 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
             .column(name)
             .ok_or_else(|| IoError::Parquet(format!("missing column: {name}")))?;
         let dt = col.dtype();
-        fields.push(Field::new(name.as_str(), dtype_to_arrow(dt), true));
+        let mut field = Field::new(name.as_str(), dtype_to_arrow(dt), true);
+        if let Some(tag) = nullable_extension_tag(dt) {
+            field = field.with_metadata(std::collections::HashMap::from([(
+                FP_DTYPE_METADATA_KEY.to_owned(),
+                tag.to_owned(),
+            )]));
+        }
+        fields.push(field);
         let arr = column_to_arrow_array(col)?;
         arrays.push(arr);
     }
@@ -8486,6 +8555,7 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
                 Column::new(dtype, values)?
             }
         };
+        let col = retag_from_field_metadata(col, field);
         columns.insert(name.clone(), col);
         col_order.push(name);
     }
@@ -24810,6 +24880,188 @@ mod tests {
             frame2.column("names").unwrap().values()[1],
             Scalar::Utf8("bob".into())
         );
+    }
+
+    /// br-frankenpandas-13q8k: `Int64Nullable` / `BoolNullable` must survive the
+    /// Arrow IPC round trip, and plain `Int64` / `Bool` must NOT be promoted.
+    ///
+    /// Arrow has one `Int64` and one `Boolean` — nullability is a validity
+    /// bitmap, not a type — so `dtype_to_arrow` maps both FrankenPandas dtypes
+    /// onto the same Arrow type and the reader had no way to tell them apart.
+    /// `ipc_stream_round_trip_null_hardened` caught it as `actual=false
+    /// expected=true` once the payload-dtype chooser started building the
+    /// nullable flavour (br-frankenpandas-vprpg).
+    ///
+    /// The distinction is load-bearing, not cosmetic: it mirrors pandas' `int64`
+    /// vs `Int64Dtype()`, which pandas itself treats as incompatible merge keys
+    /// (br-frankenpandas-sopel).
+    #[test]
+    fn ipc_stream_roundtrip_preserves_declared_nullable_dtypes_13q8k() {
+        use fp_types::{DType, NullKind};
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "nullable_ints".to_string(),
+            Column::new(
+                DType::Int64Nullable,
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(30),
+                ],
+            )
+            .unwrap(),
+        );
+        columns.insert(
+            "nullable_bools".to_string(),
+            Column::new(
+                DType::BoolNullable,
+                vec![
+                    Scalar::Bool(true),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Bool(false),
+                ],
+            )
+            .unwrap(),
+        );
+        // THE NEGATIVE CONTROL, and the reason this cannot be implemented as
+        // "an int column with nulls reads back nullable": this column HAS a
+        // null and is still plain Int64. A nulls-based heuristic promotes it
+        // and fails here. Only the declared dtype may decide.
+        columns.insert(
+            "plain_ints_with_a_null".to_string(),
+            Column::new(
+                DType::Int64,
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            )
+            .unwrap(),
+        );
+        // The mirror control: declared nullable, but ALL VALID. A
+        // promote-to-nullable-only implementation cannot retag this one,
+        // because promotion is gated on the column actually having nulls.
+        columns.insert(
+            "nullable_ints_all_valid".to_string(),
+            Column::new(
+                DType::Int64Nullable,
+                vec![Scalar::Int64(7), Scalar::Int64(8), Scalar::Int64(9)],
+            )
+            .unwrap(),
+        );
+
+        let order = vec![
+            "nullable_ints".to_string(),
+            "nullable_bools".to_string(),
+            "plain_ints_with_a_null".to_string(),
+            "nullable_ints_all_valid".to_string(),
+        ];
+        let frame =
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, 3),
+                columns,
+                order,
+            )
+            .unwrap();
+
+        let bytes = super::write_ipc_stream_bytes(&frame).expect("write ipc stream");
+        let back = super::read_ipc_stream_bytes(&bytes).expect("read ipc stream");
+
+        assert_eq!(
+            back.column("nullable_ints").unwrap().dtype(),
+            DType::Int64Nullable,
+            "a declared Int64Nullable column must not decay to Int64"
+        );
+        assert_eq!(
+            back.column("nullable_bools").unwrap().dtype(),
+            DType::BoolNullable
+        );
+        assert_eq!(
+            back.column("plain_ints_with_a_null").unwrap().dtype(),
+            DType::Int64,
+            "a plain Int64 column must stay Int64 even though it carries a null"
+        );
+        assert_eq!(
+            back.column("nullable_ints_all_valid").unwrap().dtype(),
+            DType::Int64Nullable,
+            "declared-nullable is a dtype, not an observation about the values"
+        );
+
+        // The values still have to survive, in both flavours.
+        let ints = back.column("nullable_ints").unwrap();
+        assert_eq!(ints.values()[0], Scalar::Int64(10));
+        assert!(ints.values()[1].is_missing());
+        assert_eq!(ints.values()[2], Scalar::Int64(30));
+        let bools = back.column("nullable_bools").unwrap();
+        assert_eq!(bools.values()[0], Scalar::Bool(true));
+        assert!(bools.values()[1].is_missing());
+        assert_eq!(bools.values()[2], Scalar::Bool(false));
+        let plain = back.column("plain_ints_with_a_null").unwrap();
+        assert_eq!(plain.values()[0], Scalar::Int64(1));
+        assert!(plain.values()[1].is_missing());
+    }
+
+    /// The conformance fixture's own shape, end to end: this is what
+    /// `ipc_stream_round_trip_null_hardened` executes, and it compares the frame
+    /// against itself after the round trip rather than checking dtypes by hand.
+    #[test]
+    fn ipc_stream_roundtrip_of_a_nullable_int_frame_is_semantically_identical_13q8k() {
+        use fp_types::{DType, NullKind};
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "ints".to_string(),
+            Column::new(
+                DType::Int64Nullable,
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(30),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )
+            .unwrap(),
+        );
+        columns.insert(
+            "floats".to_string(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(2.5),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(4.5),
+                ],
+            )
+            .unwrap(),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 4),
+            columns,
+            vec!["ints".to_string(), "floats".to_string()],
+        )
+        .unwrap();
+
+        let bytes = super::write_ipc_stream_bytes(&frame).expect("write ipc stream");
+        let back = super::read_ipc_stream_bytes(&bytes).expect("read ipc stream");
+
+        assert_eq!(back.column_names(), frame.column_names());
+        for name in frame.column_names() {
+            let before = frame.column(name).unwrap();
+            let after = back.column(name).unwrap();
+            assert_eq!(after.dtype(), before.dtype(), "dtype drifted for {name}");
+            assert_eq!(after.len(), before.len());
+            for i in 0..before.len() {
+                let (b, a) = (&before.values()[i], &after.values()[i]);
+                if b.is_missing() {
+                    assert!(a.is_missing(), "{name}[{i}] lost its missing marker");
+                } else {
+                    assert_eq!(a, b, "{name}[{i}] changed value");
+                }
+            }
+        }
     }
 
     #[test]
