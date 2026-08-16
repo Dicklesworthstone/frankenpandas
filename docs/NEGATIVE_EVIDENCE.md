@@ -23677,3 +23677,60 @@ thread count per arm from the SAME invocation, on the sanctioned-profile ELF and
 on a local `release-perf` ELF. If the counts differ by profile, explanation 1 is
 it and the two rows are both correct about different binaries — which would be
 worth knowing well beyond `df_dot`.
+
+---
+
+## 2026-08-16 cod-pandas — REJECTED: the write-once elementwise path is 1.0207x SLOWER. The memset was never the cost; the PURGE is (br-frankenpandas-284ul)
+
+Lever: remove the `vec![0.0_f64; n]` pre-zeroing from the unary elementwise path
+by having each worker BUILD its buffer (`Vec::with_capacity` + `extend`) and hand
+it over as an `Arc<Vec<f64>>` chunk — no zeroing, no concatenation. Hypothesis
+(banked 773b7a9e4 / 7ebcb54e7): at n = 1M the 8 MB output is written twice, once
+as `alloc_zeroed` over a recycled mimalloc block and once by the map, and the
+banked sqrt deficit of 260.66us is the same order as that extra 8 MB of stores.
+
+**MEASURED, interleaved in ONE process on ONE ELF, 50 samples per arm, sqrt @1M:**
+
+```
+baseline (shared buffer)      p50  1940.57us
+write-once                    p50  1980.78us      write-once/baseline = 1.0207x  SLOWER
+baseline,   MIMALLOC_PURGE_DELAY=0   p50 3476.95us
+write-once, MIMALLOC_PURGE_DELAY=0   p50 3515.74us
+ELF  1b296dfbfe740f2b104f2cf6fad05ee33960a845c1b9012ba9d6e11a237ed2d7 (release-perf)
+host thinkstation1, 32C/64T, powersave, load average 66.84
+```
+
+**REJECTED. The lever does not pay — it costs 2.07%.** Removing the memset made
+the arm SLOWER, so the pre-zeroing was not the binding cost. Most likely the
+`with_capacity`+`extend` producer does not lower as well as the slice-zip it
+replaces (the shared form's `for (o, &x) in out_b.iter_mut().zip(in_b.iter())` is
+the shape the file's own comments say was chosen to vectorize), and the chunked
+column adds a small per-read cost. Either way the direction is measured, not
+argued. The code stays in-tree behind `FP_ELEMENTWISE_WRITE_ONCE`, DEFAULT OFF,
+which is what the default being off was for.
+
+**BUT THE MECHANISM PREDICTION WAS RIGHT, AND IT IS THE REAL FINDING.**
+7ebcb54e7 predicted `MIMALLOC_PURGE_DELAY=0` would make the arm SLOWER because it
+forces re-mmap and full fault cost instead of recycling a warm block. It does —
+**1.79x slower, 1940.57us → 3476.95us, on BOTH arms.** So allocator state
+dominates this path by nearly 2x, an order of magnitude more than the 2% the
+zeroing question was worth. The sibling projects' "allocator at 10-16x" signal
+lands here after all; it just lands on PAGE SUPPLY, not on zeroing.
+
+**Consequences, and they redirect the whole lane:**
+1. Stop attacking the memset. It is measured at ~2% and the wrong sign.
+2. The 8 MB output buffer being allocated and freed EVERY CALL is the real target.
+   A reusable output arena would keep mimalloc from ever reaching its purge path.
+   That is a bigger change than this one and it now has a measured 1.79x headroom
+   bound to justify it — the honest ceiling for any allocation-side lever here.
+3. Nobody should run this workload without pinning `MIMALLOC_PURGE_DELAY`. A 1.79x
+   swing from an unpinned environment variable is larger than most levers in this
+   ledger, and the bench JSON does not record it.
+
+**vs-pandas row from the same session, for the record and NOT as a certified
+number:** sqrt @1M ratio 0.953x, CI [0.92179, 0.98508], **NULL_UNDECIDABLE** —
+FP A/A null 0.960553 (4% off unity, gate is 2%), pandas null 1.00102, FP cv
+13.29% against pandas 2.05%, load average 66.84 on 64 logical CPUs. Same failure
+as every df_dot attempt: the fleet resumed building the moment the freeze lifted.
+The 0.805x this lane started from is not refreshed by this run and is not
+replaced by 0.953x.
