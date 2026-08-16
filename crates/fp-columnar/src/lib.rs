@@ -25844,7 +25844,11 @@ impl Column {
     fn floor_fast(value: f64) -> f64 {
         let abs = value.abs();
         let nearest = Self::nearest_even_magnitude(abs).copysign(value);
-        let adjusted = if nearest > value { nearest - 1.0 } else { nearest };
+        let adjusted = if nearest > value {
+            nearest - 1.0
+        } else {
+            nearest
+        };
         if abs < TWO_POW_52 { adjusted } else { value }
     }
 
@@ -25861,7 +25865,11 @@ impl Column {
     fn ceil_fast(value: f64) -> f64 {
         let abs = value.abs();
         let nearest = Self::nearest_even_magnitude(abs).copysign(value);
-        let adjusted = if nearest < value { nearest + 1.0 } else { nearest };
+        let adjusted = if nearest < value {
+            nearest + 1.0
+        } else {
+            nearest
+        };
         if abs < TWO_POW_52 {
             adjusted.copysign(value)
         } else {
@@ -25878,7 +25886,11 @@ impl Column {
     fn trunc_fast(value: f64) -> f64 {
         let abs = value.abs();
         let nearest = Self::nearest_even_magnitude(abs);
-        let toward_zero = if nearest > abs { nearest - 1.0 } else { nearest };
+        let toward_zero = if nearest > abs {
+            nearest - 1.0
+        } else {
+            nearest
+        };
         if abs < TWO_POW_52 {
             toward_zero.copysign(value)
         } else {
@@ -25956,8 +25968,43 @@ impl Column {
         })))
     }
 
+    /// All-valid `f64` → a witness-FREE single pass, exactly as [`Self::abs`]
+    /// does, for the three ops whose output witness is provably the input's.
+    ///
+    /// br-frankenpandas-o57rj. The shared elementwise arm
+    /// ([`Self::typed_float_unary_nullable_owned_par`]) is built for maps that
+    /// MINT NaN — `sqrt` and `ln` of a negative — so it pre-zeroes an 8 MB output
+    /// buffer, allocates a validity word per 64 elements, and asks `is_nan()` /
+    /// `is_finite()` of every result. `floor`/`ceil`/`trunc` cannot use any of it:
+    ///
+    ///   * `as_f64_slice` is all-valid and therefore NaN-free, and these three
+    ///     never turn a non-NaN into a NaN, so the output validity mask is
+    ///     provably all-valid — nothing to compute or store.
+    ///   * they map finite → finite and `±inf` → `±inf`, so the output's
+    ///     finiteness witness is EXACTLY the input's cached one — free, no scan.
+    ///
+    /// MEASURED, and the reason this exists: with the SSE2 kernel in place, a
+    /// bare 1M-element `floor` loop is ~0.62ms while the shared arm's whole call
+    /// is ~1.3-1.4ms. The kernel had stopped being the cost; the witness and the
+    /// pre-zeroing were.
+    ///
+    /// Bit-identical to the shared arm by construction: same `f`, same order,
+    /// same all-valid mask, and `all_finite` is a hint the constructor may only
+    /// use to skip a rescan.
+    fn typed_float_witness_free_unary<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
+        let data = self.as_f64_slice()?;
+        let witness = self.f64_finite_witness();
+        let out: Vec<f64> = data.iter().map(|&x| f(x)).collect();
+        Some(Self::from_f64_all_valid_with_finite_opt(out, witness))
+    }
+
     pub fn floor(&self) -> Result<Self, ColumnError> {
         if let Some(out) = self.typed_float_integral_identity() {
+            return Ok(out);
+        }
+        // All-valid f64: no validity words, no pre-zeroed buffer, no per-element
+        // NaN test — the witness is provably the input's. br-frankenpandas-o57rj.
+        if let Some(out) = self.typed_float_witness_free_unary(Self::floor_fast) {
             return Ok(out);
         }
         // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
@@ -25996,6 +26043,10 @@ impl Column {
         // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
         // for why this family was the only one left serial and why that is now
         // the wrong default. (br-frankenpandas-xv9qf)
+        // All-valid f64: witness-free single pass — see `Column::floor`.
+        if let Some(out) = self.typed_float_witness_free_unary(Self::ceil_fast) {
+            return Ok(out);
+        }
         // `Self::ceil_fast`, not `f64::ceil` — see `Column::floor`.
         if let Some(out) = self.typed_float_unary_nullable_owned_par(Self::ceil_fast) {
             return Ok(out);
@@ -26028,6 +26079,10 @@ impl Column {
         // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
         // for why this family was the only one left serial and why that is now
         // the wrong default. (br-frankenpandas-xv9qf)
+        // All-valid f64: witness-free single pass — see `Column::floor`.
+        if let Some(out) = self.typed_float_witness_free_unary(Self::trunc_fast) {
+            return Ok(out);
+        }
         // `Self::trunc_fast`, not `f64::trunc` — see `Column::floor`.
         if let Some(out) = self.typed_float_unary_nullable_owned_par(Self::trunc_fast) {
             return Ok(out);
@@ -36353,9 +36408,21 @@ mod tests {
                 .collect();
             let column = Column::from_f64_values(finite.clone());
             for (name, out, oracle) in [
-                ("floor", column.floor().expect("floor"), f64::floor as fn(f64) -> f64),
-                ("ceil", column.ceil().expect("ceil"), f64::ceil as fn(f64) -> f64),
-                ("trunc", column.trunc().expect("trunc"), f64::trunc as fn(f64) -> f64),
+                (
+                    "floor",
+                    column.floor().expect("floor"),
+                    f64::floor as fn(f64) -> f64,
+                ),
+                (
+                    "ceil",
+                    column.ceil().expect("ceil"),
+                    f64::ceil as fn(f64) -> f64,
+                ),
+                (
+                    "trunc",
+                    column.trunc().expect("trunc"),
+                    f64::trunc as fn(f64) -> f64,
+                ),
             ] {
                 let got = out.as_f64_slice().expect("all-valid f64 output");
                 assert_eq!(got.len(), finite.len(), "{name} length drift");

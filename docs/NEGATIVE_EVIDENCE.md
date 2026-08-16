@@ -26343,3 +26343,98 @@ a workload whose threads are numerous enough to spread across a folded mask, and
 nothing about anyone else's host. What it does say is that for the shape where I
 CAN measure it, placement is below my noise floor — so my banked `df_dot` rows do
 not need re-basing on placement grounds.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-o57rj) — `floor`/`ceil`/`trunc` CROSS the incumbent at 10M (0.580x → 1.071x on one host, one window): the libm libcall was only a third of it, the witness and the pre-zeroing were the rest
+
+**Two levers, both bit-identical, landed separately.** The op family the ledger
+had filed as "NOT source-fixable — it is the AVX2 gap" is source-fixable, and
+neither lever needs `+sse4.1` (br-frankenpandas-cu22b stays blocked and is no
+longer the only route).
+
+**LEVER 1 — the kernel (`27fa6dac5`).** `f64::floor/ceil/trunc` lower to `roundpd`,
+which is SSE4.1; on the baseline target LLVM emits a libm CALL per element that no
+amount of parallelism vectorizes. Replaced with the branchless magic-number form
+this repo ALREADY ships for `round_ties_even_fast`: `(|x|+2^52)-2^52` then one
+compare-and-nudge, packed SSE2 throughout, `|x| >= 2^52` / NaN / ±inf return the
+input untouched. Standalone loop, 1M f64, one binary, interleaved: libm p50
+1552.3us → fast p50 638.3us, **2.43x**, 0 bit-differences over the live buffer.
+
+**IN THE SHIPPED OP IT WAS WORTH ALMOST NOTHING: 1.046x p50 at 1M.** ABBA, two
+ELFs (2bc24a50 vs bb47c733), load 19.46, CPU MHz 3833/3558, in-binary A/A null
+0.9986, checksums IDENTICAL. A 2.4x kernel bought 4.6% because the kernel had
+stopped being the cost.
+
+**LEVER 2 — the witness and the buffer (this commit).** The shared elementwise arm
+is built for maps that MINT NaN (`sqrt`, `ln` of a negative): it pre-zeroes an 8 MB
+output, allocates a validity word per 64 elements, and asks `is_nan()`/`is_finite()`
+of every result. `floor`/`ceil`/`trunc` need none of it — `as_f64_slice` is
+all-valid so the output mask is provably all-valid, and they map finite→finite and
+±inf→±inf so the output's finiteness witness IS the input's cached one. `Column::abs`
+already had this arm; these three never got it. ABBA, cand vs cand2, load 15.4:
+
+| op @1M | kernel-only p50 | + witness-free p50 | self | checksums |
+|---|---|---|---|---|
+| floor | 1537.9us | **632.5us** | **2.431x** | IDENTICAL |
+| ceil | 1519.3us | **708.4us** | **2.145x** | IDENTICAL |
+| trunc | 1331.6us | **611.0us** | **2.179x** | IDENTICAL |
+
+**VS THE LIVE INCUMBENT, BEFORE AND AFTER, SAME HOST, SAME WINDOW, SAME HARNESS.**
+Sanctioned harness, balanced-square ABBAABBA, one invocation per row, pandas 2.2.3
+artifact `c10b13e6`, host thinkstation1, governor powersave, ELF sha reported from
+inside the process. Baseline ELF `2bc24a50`, candidate `62c9a184`.
+
+| workload | baseline ratio | verdict | candidate ratio | 95% CI | best-vs-best | verdict |
+|---|---|---|---|---|---|---|
+| `floor @10M` | **0.580x** | SLOWER (both nulls pass) | **1.071x** | 1.036–1.168 | 1.170 | NULL_UNDECIDABLE |
+| `ceil @10M` | 0.666x | NULL_UNDECIDABLE | **1.132x** | 1.128–1.144 | 1.201 | NULL_UNDECIDABLE (both nulls PASS) |
+| `trunc @10M` | **0.658x** | SLOWER (both nulls pass) | **1.177x** | 1.083–1.212 | 1.240 | NULL_UNDECIDABLE (both nulls PASS) |
+| `floor @1M` | ≈0.127x (n=7 cluster) | — | **0.317x** | 0.305–0.361 | 0.295 | NULL_UNDECIDABLE |
+| `ceil @1M` | — | — | 0.279x | 0.258–0.296 | 0.242 | NULL_UNDECIDABLE |
+| `trunc @1M` | — | — | 0.336x | 0.296–0.487 | 0.287 | NULL_UNDECIDABLE |
+
+FP p50 at 10M: floor 16615→9102us, ceil 15736→9604us, trunc 15688→9103us. The
+baseline `floor`/`trunc @10M` rows are FULLY GATED `SLOWER` verdicts with both A/A
+nulls passing, so the before-number is not a soft one.
+
+**WHAT DOES NOT CERTIFY, AND WHY — SAY IT PLAINLY.** No candidate row is decidable.
+For `ceil`/`trunc @10M` BOTH A/A nulls pass and the effect CI excludes unity; they
+fail only the third clause, which requires the effect to clear twice the null
+margin (≈1.28x). A 1.13–1.18x win cannot certify under this gate, full stop. So
+these are measured crossings, not certified ones, and I am not banking them as
+certified.
+
+**THE GATE BLOCKER FLIPPED FROM FP TO THE INCUMBENT, AND THAT IS THE REAL FINDING.**
+Across thirteen prior `floor @1M` runs FP's A/A null was the blocker and pandas'
+was clean, five times at low dispersion, and the ledger read that as "certification
+here is limited by FP's threading". It was: the shared arm's per-call
+`thread::scope` was the instability. The witness-free arm is SERIAL (`peak_process_threads`
+2 vs pandas' 66) and in six candidate rows FP's null passed SIX times
+(1.0056, 0.9922, 1.0011, 1.0301✗ at 10M floor, 0.9906, 1.0153) while pandas' failed
+in every 1M row (1.0215, 0.9558, 1.0756) — its 180us arm is too short to settle.
+FP's cv fell to 5.98–7.88% at 1M. **The prepared experiment in br-frankenpandas-h67zz
+— "does disabling the parallel arm stabilise FP's A/A null?" — is answered YES, and
+it did not cost speed; it bought 2.1–2.4x.**
+
+**NEGATIVE RESULT INSIDE THE POSITIVE ONE.** Parallelism on this op was never worth
+its overhead. Interleaved worker-cap sweep, candidate ELF, load 19.27, CPU MHz
+2808→2515, `floor @1M` p50: w1 1417.9 · w2 1920.0 · w4 1320.7 · w8 1266.2 · w16
+1647.0. Eight workers bought **1.12x** over serial while destabilising the null.
+`br-frankenpandas-xv9qf` made this family parallel on the premise that serial was
+the wrong default; on this host, at this shape, it was not — but the fix is not to
+revert to a serial witness path, it is to delete the witness. Also measured and
+REJECTED: `FP_ELEMENTWISE_WRITE_ONCE=1` moved nothing on `floor @1M` (p50 3988.9 vs
+3921.0 at w8, 4007.5 vs 4058.0 at w16) — though that pass ran at loadavg 63.77 and
+is only worth the paragraph as "no visible effect", not as a bound.
+
+**BIT-IDENTITY IS ASSERTED, NOT ASSUMED.** `floor_ceil_trunc_fast_are_bit_identical_o57rj`
+compares `to_bits()` against `f64::floor/ceil/trunc` over an edge corpus (±0.0, NaN
+with a live payload, ±inf, subnormals, both sides of every binade to 2^53) plus a
+200k seeded-LCG sweep, and asserts the naive `(x as i64) as f64` DISAGREES on >1000
+of them so the corpus cannot go toothless. The existing
+`floor_ceil_trunc_match_scalar_oracle_61try` could not have caught this: it uses
+`assert_eq!` on `f64`, under which `-0.0 == 0.0`. The first `ceil_fast` returned
+`+0.0` where IEEE requires `-0.0` for every x in (-1.0, -0.5] — **359 mismatches,
+found by the bit test before it ever compiled here**. Every whole-binary bench
+checksum above is identical between arms, at both sizes.
+
+**Artifacts:** `artifacts/bench/bench_2026-08-16T22-1[45]-*.json`, `…T22-1[678]-*.json`.
