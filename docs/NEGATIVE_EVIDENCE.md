@@ -25396,3 +25396,64 @@ rebuilding would have confounded the comparison it exists to settle. Invocation
 `vs-pandas-20260816T201506.748613Z-pid3013074`, git `4ba575f31`.
 
 **Artifacts:** `artifacts/bench/mti15_df_dot_1M_thinkstation1_2026-08-16_stable_run3.json`
+
+---
+
+## br-frankenpandas-u5cg4 — the grouped-rolling kernel is COMPUTE-bound (IPC 2.74), so memory bandwidth is NOT why parallelising it bought nothing; and the parallel arm no longer exists to re-measure
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** two findings, one
+from reading and one counted. NO certification attempted — `uptime` at decision
+time was **1-min 58.73 against 5-min 37.66**, rising and unstable, which fails
+the stability criterion.
+
+### 1. THE PARALLEL ARM IS GONE, so the bead's question is not measurable as posed
+
+`SeriesGroupByRolling::apply_grouped_rolling` (`crates/fp-frame/src/lib.rs:40665`)
+contains **no** parallel construct — 400 lines scanned for `thread::scope`,
+`par_map`, `scope.spawn`, `pool()`, `rayon`, all absent. `FP_SGBROLL_SERIAL`, the
+toggle the 2026-07-16 experiment used, **does not exist anywhere in `crates/` or
+`docs/`**. The arm was reverted in July and no trace remains.
+
+So candidate (4) on this bead — "the parallel arm never actually ran" — **cannot
+be tested against today's tree at all**, and neither can any re-measurement: the
+July A/B is the only evidence that will ever exist for that code unless someone
+re-implements it. **Re-implementation is a prerequisite, not a follow-up.**
+
+### 2. COUNTED: the kernel is compute-bound, which REFUTES candidate (1)
+
+Counted on the EXISTING serial path via the `instr_whole_rolling_mean_lyaqi`
+probe, so no parallel arm was needed. Release binary
+`target/release/deps/fp_frame-0f1e18ea8175608b`, `perf stat`, slopes taken across
+10 and 20 reps so process/harness/fixture overhead cancels:
+
+**Counted mechanism:** the grouped-rolling call retires **74,307,078**
+instructions in **27,094,797** cycles — **IPC 2.742** — with **377,095**
+cache-misses against **2,225,142** cache-references, i.e. **5.07 misses per 1,000
+instructions**, all on the same fixture in the same binary.
+
+**IPC 2.74 is compute-dense.** A memory-bandwidth-bound loop stalls on misses and
+cannot sustain it; such kernels sit well below 1. **So the per-group rolling is
+not bandwidth-bound, and candidate (1) — "if it is bandwidth-bound the extra
+workers contend rather than add throughput" — is refuted.** That also makes this
+kernel *unlike* `df_dot`, whose 2026-07-23 entry proved bandwidth-bound behaviour;
+the analogy I drew when filing this bead does not hold.
+
+**⚠️ THE CONTENTION CAVEAT RUNS THE RIGHT WAY.** These counts were taken at load
+~50, and cycles are the load-sensitive term — frequency scaling and co-tenant
+pressure inflate cycles and therefore **depress** IPC. So 2.742 is a **lower
+bound** on the uncontended IPC, and the compute-bound conclusion is strengthened,
+not threatened, by the noisy window. Instruction and cache counts are themselves
+largely load-insensitive; this is why the measurement was admissible when a
+timing row was not.
+
+### WHAT IS LEFT
+
+Of the four candidates filed with this bead: (1) bandwidth is **refuted**, (4)
+"the arm never ran" is **untestable** without re-implementation. That leaves
+(2) per-call spawn cost — which at ~397us/8thr against a 12ms call is ~3% and
+cannot by itself explain 0.9x — and (3) group-size skew across 2000 groups of
+~100 rows. **(3) is now the leading candidate and is the cheapest thing to look
+at next**, since a 100-row group is small enough that per-group fixed costs and
+imbalance plausibly dominate any per-group parallel gain.
+
+**No loadavg-bearing timing row is banked here** because no timing was measured.
