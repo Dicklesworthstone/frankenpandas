@@ -26851,3 +26851,51 @@ while BOTH arms' busy cores read 4292.2, ratio 1.0000. A row quoting the host
 median here would understate both arms by 3x and is meaningless for a comparison;
 the per-arm busy-core figure is the one that belongs beside a ratio. Same
 conclusion the placement audit reached from the other direction.
+
+### 2026-08-16 CrimsonPine — CORRECTING MY OWN NUMBERS AGAIN: the 1.647x/1.425x `copysign`→OR figures were a FUNCTION-POINTER artifact. Measured the way the real code calls it, the lever is 1.08x/1.15x/1.06x
+
+Two entries above I banked `floor` 1.647x and `ceil` 1.425x for the
+`copysign(r,x)` → `r | (x & signbit)` rewrite, and flagged that the gain "exceeds
+what one saved op predicts". It did, and here is why.
+
+**THE PROBE PASSED THE KERNELS AS `fn` POINTERS** — `floor_shipped as fn(f64) -> f64`
+inside an array, to iterate the arms. That erases the fn ITEM to a POINTER, so the
+generic `map_slice` collapses to ONE instantiation that CALLS through it every
+element. Nothing inlines and nothing vectorizes. `fp-columnar` does the opposite:
+`typed_float_witness_free_unary` is generic over `F` precisely so each call site
+monomorphizes and the kernel inlines into the slice loop — the crate's own doc
+comment says so. **I benchmarked the one calling convention the production code
+does not use.**
+
+Re-timed with fn items so the kernels inline, everything else identical (same
+corpus, same ABBA, same binary):
+
+| op | shipped p50 | candidate p50 | ratio | previously CLAIMED |
+|---|---|---|---|---|
+| `floor` | 744.5us | 689.5us | **1.080x** | ~~1.647x~~ |
+| `ceil` | 825.5us | 720.9us | **1.145x** | ~~1.425x~~ |
+| `trunc` | 739.3us | 695.7us | **1.063x** | ~~1.094x~~ |
+
+The absolute times also fell from ~2400us to ~740us, which is the tell: the
+earlier arms were paying a call per element. **The ratios were inflated roughly
+2x because the indirection penalised the copysign form more than the OR form —
+neither number described the code that would ship.**
+
+**The lever is still real, still bit-identical (0 mismatches across all 3066760
+corpus values), and still worth landing — it is just 1.06–1.15x, not 1.4–1.6x.**
+Against `ceil @1M` at 0.297x it moves the ratio to roughly 0.34x, not 0.42x.
+Anyone landing it should quote these figures.
+
+**THE GENERAL RULE, which is the reusable part:** benchmark a kernel through the
+same calling convention the production path uses. A `fn`-pointer array is the
+natural way to write a multi-arm probe and it silently defeats both inlining and
+vectorization — the two things the entire `math_unary` family's performance turns
+on. Every standalone probe in this bead's history that used the array form is
+suspect for the same reason; the `round_probe2` round(2) figure (1.21x branchless)
+used generic dispatch and is NOT affected, and the shipped `round(2)` result was
+measured in-repo against live pandas, so it stands.
+
+**Measured at loadavg 24.79** — note the orchestrator reported 5.0 for this same
+window and my own `uptime` read 15.24 rising to 24.79 across the run. The load
+figure quoted to an agent is stale on arrival; read it yourself, and read it again
+after.
