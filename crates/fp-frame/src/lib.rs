@@ -193334,6 +193334,28 @@ mod columns_view_u387a {
 /// structural conclusion (whether `build_groups` is or is not the dominant
 /// share), and prints the exact counts for the ledger. Run it with
 /// `--ignored --nocapture` to reproduce the banked numbers.
+///
+/// # ANSWERED — the premise this module was written to test is REFUTED
+///
+/// `build_groups` is a MINORITY of the call, by three independent methods:
+///
+/// ```text
+///   instructions, release   15,321,983 / 74,195,308   20.65%
+///   instructions, debug     65,879,390 / 419,878,227  15.69%
+///   wall clock, Int64 keys   5,999,147 / 58,926,096   10.18%
+/// ```
+///
+/// So the bead's stated cause — "SeriesGroupBy rolling is DOMINATED by
+/// `build_groups`, the per-group rolling is a small fraction" — is false, and
+/// with it the Amdahl explanation for why group-parallelising the per-group work
+/// produced no speedup. The per-group work is the DOMINANT share (79-90%), so
+/// parallelising it should have paid and did not. **Why it did not is now an
+/// open question with no banked answer** — see br-frankenpandas-lyaqi.
+///
+/// The nanosecond probes below cannot satisfy the perf preflight, whose
+/// `COUNTED_METRIC` accepts instructions / cycles / syscalls / allocations /
+/// cache-and-branch misses / IPC and NOT nanoseconds. The `instr_*` probes were
+/// added for that reason; prefer them when banking.
 #[cfg(test)]
 mod sgb_rolling_build_groups_share_lyaqi {
     use std::time::Instant;
