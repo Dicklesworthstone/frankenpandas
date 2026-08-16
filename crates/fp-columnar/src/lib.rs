@@ -69,6 +69,15 @@ use thiserror::Error;
 
 const STRIDED_FLOAT64_MIN_LEN: usize = 1024;
 
+/// `2^52`, the magnitude at or above which every `f64` is already an integer.
+///
+/// The magic number behind the branchless rounding kernels
+/// (`round_ties_even_fast`, `floor_fast`, `ceil_fast`, `trunc_fast`): adding and
+/// then subtracting it forces a round-to-nearest-even through the FPU using only
+/// SSE2 arithmetic, and it doubles as the cutoff above which those kernels return
+/// their input untouched.
+const TWO_POW_52: f64 = 4_503_599_627_370_496.0;
+
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Utf8LowerHexSequence {
@@ -25791,6 +25800,92 @@ impl Column {
         Self::round_ties_even_fast(value * factor) / factor
     }
 
+    /// `(|x| + 2^52) - 2^52` — the magnitude of `x` rounded to the nearest even
+    /// integer, exact for `|x| < 2^52`, using only SSE2 `addpd`/`subpd`.
+    ///
+    /// Shared by [`Self::floor_fast`], [`Self::ceil_fast`] and
+    /// [`Self::trunc_fast`], which each nudge this one step in their own
+    /// direction. See [`Self::round_ties_even_fast`] for why the magic number and
+    /// not the intrinsic.
+    #[inline]
+    fn nearest_even_magnitude(abs: f64) -> f64 {
+        (abs + TWO_POW_52) - TWO_POW_52
+    }
+
+    /// Branchless `floor` that VECTORIZES on the baseline x86-64 target.
+    ///
+    /// br-frankenpandas-o57rj. `f64::floor` lowers to `roundpd`, which is SSE4.1;
+    /// on the generic target LLVM cannot emit it and falls back to a libm `floor`
+    /// CALL per element, which no amount of parallelism vectorizes. That libcall
+    /// is why this family measured ≈0.127x vs pandas at 1M (`floor @1M`, n=7
+    /// screened cluster, `docs/NEGATIVE_EVIDENCE.md` br-frankenpandas-h67zz) —
+    /// numpy runtime-dispatches a vectorized round regardless of ITS build target.
+    ///
+    /// This is the same lever [`Self::round_ties_even_fast`] already ships, which
+    /// beat the intrinsic 3.40ms → 11.9ms on the same host class; `floor`/`ceil`/
+    /// `trunc` were simply never given it. It composes with, and does not
+    /// substitute for, br-frankenpandas-cu22b (`+sse4.1`): that flag is a
+    /// workspace-wide policy decision, this is source that needs no decision and
+    /// works on any baseline build.
+    ///
+    /// BIT-IDENTICAL to `f64::floor`, not approximately equal — asserted over an
+    /// edge corpus plus a seeded sweep by `floor_ceil_trunc_fast_are_bit_identical`
+    /// and `math_unary_fast_kernels_reject_the_int_cast`. The reasoning:
+    ///   * `|x| >= 2^52` (and NaN, ±inf) is already integral, so the input is
+    ///     returned UNCHANGED — which also preserves a NaN's exact payload and
+    ///     sign, something `-(-x)` style formulations do not.
+    ///   * below 2^52 the magic number is exact, so `nearest` is `x` rounded to
+    ///     the nearest even integer and is at most 1 above `floor(x)`; subtracting
+    ///     that one is the whole correction.
+    ///   * `floor` never needs a zero-sign fixup: for `x > 0` the result is `+0.0`
+    ///     or positive, for `x < 0` it is `-0.0` (only at `x == -0.0`, where
+    ///     `nearest` is already `-0.0`) or ≤ -1. `ceil` DOES — see there.
+    #[inline]
+    fn floor_fast(value: f64) -> f64 {
+        let abs = value.abs();
+        let nearest = Self::nearest_even_magnitude(abs).copysign(value);
+        let adjusted = if nearest > value { nearest - 1.0 } else { nearest };
+        if abs < TWO_POW_52 { adjusted } else { value }
+    }
+
+    /// Branchless `ceil`; see [`Self::floor_fast`] for the mechanism and the
+    /// bit-identity argument.
+    ///
+    /// The trailing `copysign` is NOT redundant and NOT symmetry with `floor`: for
+    /// `x` in `(-1.0, -0.5]`, `nearest + 1.0` computes `+0.0` where IEEE `ceil`
+    /// returns `-0.0`. It was a real defect caught by the bit-identity corpus
+    /// (359 mismatches, all of that shape) before this ever compiled here. `ceil`
+    /// never flips sign otherwise — for `x > 0` it is ≥ 1, for `x < 0` it is ≤ 0 —
+    /// so restoring the input's sign is total, not a special case.
+    #[inline]
+    fn ceil_fast(value: f64) -> f64 {
+        let abs = value.abs();
+        let nearest = Self::nearest_even_magnitude(abs).copysign(value);
+        let adjusted = if nearest < value { nearest + 1.0 } else { nearest };
+        if abs < TWO_POW_52 {
+            adjusted.copysign(value)
+        } else {
+            value
+        }
+    }
+
+    /// Branchless `trunc`; see [`Self::floor_fast`] for the mechanism and the
+    /// bit-identity argument.
+    ///
+    /// Rounds toward zero by flooring the MAGNITUDE and restoring the sign, so
+    /// `trunc(-0.5)` is `-0.0` as IEEE requires rather than `0.0`.
+    #[inline]
+    fn trunc_fast(value: f64) -> f64 {
+        let abs = value.abs();
+        let nearest = Self::nearest_even_magnitude(abs);
+        let toward_zero = if nearest > abs { nearest - 1.0 } else { nearest };
+        if abs < TWO_POW_52 {
+            toward_zero.copysign(value)
+        } else {
+            value
+        }
+    }
+
     /// All-valid numeric column → an owned `f64` view (Float64 copied, Int64 cast
     /// `x as f64`), exactly as `Scalar::to_f64` would. `None` for nullable /
     /// non-numeric columns (so binary ufuncs fall back to the scalar loop).
@@ -25868,7 +25963,9 @@ impl Column {
         // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
         // for why this family was the only one left serial and why that is now
         // the wrong default. (br-frankenpandas-xv9qf)
-        if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::floor) {
+        // `Self::floor_fast`, not `f64::floor`: the intrinsic is a libm CALL per
+        // element on the baseline target. br-frankenpandas-o57rj.
+        if let Some(out) = self.typed_float_unary_nullable_owned_par(Self::floor_fast) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -25879,7 +25976,7 @@ impl Column {
             }
             match v {
                 Scalar::Int64(x) => out.push(Scalar::Float64(*x as f64)),
-                Scalar::Float64(x) => out.push(Scalar::Float64(x.floor())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(Self::floor_fast(*x))),
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
@@ -25899,7 +25996,8 @@ impl Column {
         // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
         // for why this family was the only one left serial and why that is now
         // the wrong default. (br-frankenpandas-xv9qf)
-        if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::ceil) {
+        // `Self::ceil_fast`, not `f64::ceil` — see `Column::floor`.
+        if let Some(out) = self.typed_float_unary_nullable_owned_par(Self::ceil_fast) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -25910,7 +26008,7 @@ impl Column {
             }
             match v {
                 Scalar::Int64(x) => out.push(Scalar::Float64(*x as f64)),
-                Scalar::Float64(x) => out.push(Scalar::Float64(x.ceil())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(Self::ceil_fast(*x))),
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
@@ -25930,7 +26028,8 @@ impl Column {
         // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
         // for why this family was the only one left serial and why that is now
         // the wrong default. (br-frankenpandas-xv9qf)
-        if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::trunc) {
+        // `Self::trunc_fast`, not `f64::trunc` — see `Column::floor`.
+        if let Some(out) = self.typed_float_unary_nullable_owned_par(Self::trunc_fast) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -25941,7 +26040,7 @@ impl Column {
             }
             match v {
                 Scalar::Int64(x) => out.push(Scalar::Float64(*x as f64)),
-                Scalar::Float64(x) => out.push(Scalar::Float64(x.trunc())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(Self::trunc_fast(*x))),
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
@@ -36126,6 +36225,146 @@ mod tests {
                             ),
                         }
                     }
+                }
+            }
+        }
+
+        /// br-frankenpandas-o57rj. The branchless SSE2 kernels must be
+        /// BIT-identical to `f64::floor/ceil/trunc`, not merely equal.
+        ///
+        /// The distinction is the whole test. `floor_ceil_trunc_match_scalar_oracle_61try`
+        /// above compares with `assert_eq!` on `f64`, under which `-0.0 == 0.0`
+        /// and no NaN ever compares equal — so it passes for a kernel that
+        /// returns `+0.0` where IEEE requires `-0.0`. The first draft of
+        /// `ceil_fast` did exactly that for every `x` in `(-1.0, -0.5]`, and only
+        /// a `to_bits()` comparison found it. That defect is why this exists.
+        #[test]
+        fn floor_ceil_trunc_fast_are_bit_identical_o57rj() {
+            fn corpus() -> Vec<f64> {
+                let mut v = vec![
+                    0.0,
+                    -0.0,
+                    0.5,
+                    -0.5,
+                    -0.75,
+                    -0.9999999999999999,
+                    1.5,
+                    -1.5,
+                    2.5,
+                    -2.5,
+                    f64::MIN_POSITIVE,
+                    -f64::MIN_POSITIVE,
+                    5e-324,
+                    -5e-324,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::MAX,
+                    f64::MIN,
+                    crate::TWO_POW_52,
+                    -crate::TWO_POW_52,
+                    crate::TWO_POW_52 - 0.5,
+                    -(crate::TWO_POW_52 - 0.5),
+                    crate::TWO_POW_52 + 2.0,
+                    1e300,
+                    -1e300,
+                ];
+                // NaN, including a non-default payload: the kernels must hand the
+                // input back untouched, sign and payload intact.
+                v.push(f64::NAN);
+                v.push(-f64::NAN);
+                v.push(f64::from_bits(0x7ff8_0000_dead_beef));
+                v.push(f64::from_bits(0xfff8_0000_dead_beef));
+                // A ladder across every binade up to 2^53, straddling each
+                // integer boundary from both sides.
+                for e in 0..54 {
+                    let base = (2.0_f64).powi(e);
+                    for d in [-1.5, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.5] {
+                        v.push(base + d);
+                        v.push(-(base + d));
+                    }
+                    v.push(f64::from_bits(base.to_bits() - 1));
+                    v.push(f64::from_bits(base.to_bits() + 1));
+                }
+                // Seeded LCG across six magnitude regimes; no rand, no mocks.
+                let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+                for i in 0..200_000u64 {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let unit = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                    let scale = match i % 6 {
+                        0 => 1.0,
+                        1 => 1e3,
+                        2 => 1e-3,
+                        3 => crate::TWO_POW_52,
+                        4 => crate::TWO_POW_52 * 4.0,
+                        _ => 1e18,
+                    };
+                    let sign = if state & 1 == 0 { 1.0 } else { -1.0 };
+                    v.push(sign * unit * scale);
+                }
+                v
+            }
+
+            let values = corpus();
+            for &x in &values {
+                assert_eq!(
+                    Column::floor_fast(x).to_bits(),
+                    x.floor().to_bits(),
+                    "floor_fast({x:e}) bits {:#018x}",
+                    x.to_bits()
+                );
+                assert_eq!(
+                    Column::ceil_fast(x).to_bits(),
+                    x.ceil().to_bits(),
+                    "ceil_fast({x:e}) bits {:#018x}",
+                    x.to_bits()
+                );
+                assert_eq!(
+                    Column::trunc_fast(x).to_bits(),
+                    x.trunc().to_bits(),
+                    "trunc_fast({x:e}) bits {:#018x}",
+                    x.to_bits()
+                );
+            }
+
+            // NEGATIVE CASE. The obvious wrong kernel — `(x as i64) as f64` —
+            // is right on the bench fixture (positive, non-integral, < 2^53) and
+            // wrong across this corpus. If it ever stops disagreeing, the corpus
+            // has lost its teeth and this test is no longer proving anything.
+            let naive_disagreements = values
+                .iter()
+                .filter(|&&x| ((x as i64) as f64).to_bits() != x.floor().to_bits())
+                .count();
+            assert!(
+                naive_disagreements > 1000,
+                "the int-cast kernel must disagree widely with floor, got {naive_disagreements}"
+            );
+
+            // The SHIPPED path, not just the kernels: a non-integral all-valid
+            // Float64 column routes through `typed_float_unary_nullable_owned_par`.
+            // Integral values would short-circuit on the identity witness and
+            // measure the guard instead of the arithmetic.
+            let finite: Vec<f64> = values
+                .iter()
+                .copied()
+                .filter(|x| x.is_finite())
+                .chain([0.25_f64, -0.25, 1.75, -1.75])
+                .collect();
+            let column = Column::from_f64_values(finite.clone());
+            for (name, out, oracle) in [
+                ("floor", column.floor().expect("floor"), f64::floor as fn(f64) -> f64),
+                ("ceil", column.ceil().expect("ceil"), f64::ceil as fn(f64) -> f64),
+                ("trunc", column.trunc().expect("trunc"), f64::trunc as fn(f64) -> f64),
+            ] {
+                let got = out.as_f64_slice().expect("all-valid f64 output");
+                assert_eq!(got.len(), finite.len(), "{name} length drift");
+                for (i, (&g, &x)) in got.iter().zip(finite.iter()).enumerate() {
+                    assert_eq!(
+                        g.to_bits(),
+                        oracle(x).to_bits(),
+                        "column {name} at {i}: input {x:e}"
+                    );
                 }
             }
         }
