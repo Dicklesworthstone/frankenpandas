@@ -25623,3 +25623,55 @@ independent mechanism pushing the same way as br-frankenpandas-h67zz's load
 findings and my own `@1M` retraction: rows taken at different loads are not
 comparable, and `df_dot @1M` in particular has now produced 16.5, 17.2, 20.5,
 20.6, 20.9, 21.4 and 21.6 ms from a single ELF within one hour.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oxv4u) — both `@100k` ISA rows REJECTED on the incumbent's null; what survives is 1.175x on FrankenPandas' own best, and a pandas MINIMUM that held to 0.3% across an 8x load swing while its median moved 1.5x
+
+`uptime` read **6.56 1-min against 13.22 5-min**, both low and falling — the best
+window of the session. I spent it on the question the pending decision needs: what
+does `+avx2,+fma` do at `dim = 316`, the shape where FrankenPandas already holds a
+certified 7.255x win and runs 15 workers rather than 63, so neither all-core turbo
+nor parallel slack is binding. Two invocations back to back, 31 rounds each, AVX2
+first then baseline as a same-window control.
+
+**The fleet woke up 30 seconds in** — loadavg 6.48 at the first launch, 47.29
+between the two runs, 56.79 at the end — so BOTH rows were refused on pandas' A/A
+null (0.890089 and 1.023567). Neither is banked as an incumbent row.
+
+| | AVX2 `76661ac3…` (load 6.5 -> 47) | baseline `4a89472f…` (load 47 -> 57) |
+|---|---|---|
+| FP min / p50 / cv | **1.1880** / 1.3716 ms / 4.9% | **1.3964** / 1.5692 ms / 5.8% |
+| pandas min / p50 / cv | **2.9489** / 7.5994 ms / 38.9% | **2.9399** / 5.0824 ms / 48.6% |
+| gated ratio (refused) | 5.967x | 3.710x |
+| best-vs-best | 2.4822 | 2.1053 |
+
+**WHAT SURVIVES THE REFUSALS IS THE PART I CAME FOR.** FrankenPandas' own best
+sample drops **1.3964 -> 1.1880 ms, a 1.175x gain, for bit-identical output** —
+measured at `dim = 316` with 15 workers, where the earlier 1M measurement was
+muddied by turbo and parallel slack. That is the ISA lever, isolated, on the shape
+that matters most to this op's headline number.
+
+**AND PANDAS' MINIMUM IS LOAD-INVARIANT WHILE ITS MEDIAN IS NOT.** Across two runs
+whose loads differ by 8x, the incumbent's fastest sample reproduced to **0.3%**
+(2.9489 vs 2.9399 ms) while its median moved **1.5x** (7.5994 vs 5.0824 ms) at cv
+38.9% and 48.6%. This is the strongest evidence yet for the best-vs-best statistic
+added to the harness earlier today (br-frankenpandas-mti15): the minimum measures
+what an engine does when it gets the machine, and it is exactly the quantity that
+does NOT move with the fleet. The gated median — the number the campaign has been
+banking — moved 1.5x on the incumbent side alone in four minutes.
+
+**A/A null control (same invocation):** AVX2 run, 31 rounds, FrankenPandas median
+ratio 0.995718 (inside 2%) and pandas 0.890089 (outside); baseline control,
+FrankenPandas 0.997433 (inside) and pandas 1.023567 (outside). FrankenPandas' arm
+held its null in both runs across an 8x load swing; the incumbent's failed in
+both, in opposite directions.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=76661ac389c685da64e582aecd53aacb398c3dbe3557c6fd724847f2d6561e9f (78866952 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench-avx2fma
+
+**Decision: REJECT both as certified rows** — the incumbent's null failed and no
+vs-pandas ratio is banked from either. The measurement that stands is
+FrankenPandas-versus-FrankenPandas: **1.175x from AVX2 at `dim = 316`,
+bit-identical**, which is the number br-frankenpandas-oxv4u's decision should be
+weighed against, alongside the 3.26x instruction-count reduction already banked.
+Neither row raised `dispersion_warning`, correctly: at this shape the median and
+the minima agree that FrankenPandas is far ahead, unlike the retracted `@1M` row.
