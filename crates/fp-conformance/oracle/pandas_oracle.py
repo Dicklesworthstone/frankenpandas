@@ -3349,12 +3349,21 @@ def op_dataframe_shift(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("dataframe_shift requires frame payload")
 
     periods = payload.get("shift_periods", 1)
+    # An out-of-range axis is PANDAS' question to answer. The adapter used to
+    # pre-refuse it, so fp_p2d_144_dataframe_shift_invalid_axis_strict recorded
+    # error_origin=oracle_adapter -- "the oracle also failed here", about a
+    # question the oracle never put to pandas, and therefore unattestable
+    # forever. MEASURED, live pandas 2.2.3:
+    #     pd.DataFrame({"a": [1, 2]}).shift(1, axis=2)
+    #       -> ValueError: No axis named 2 for object type DataFrame
+    # (br-frankenpandas-f9xlz)
     axis = payload.get("shift_axis", 0)
-    if axis not in (0, 1):
-        raise OracleError(f"dataframe_shift shift_axis must be 0 or 1 (got {axis!r})")
 
     frame = dataframe_from_json(pd, frame_payload)
-    out = frame.shift(periods=int(periods), axis=axis)
+    try:
+        out = frame.shift(periods=int(periods), axis=axis)
+    except Exception as exc:  # noqa: BLE001 - re-raised with pandas as __cause__
+        raise OracleError(f"dataframe_shift failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(out)}
 
 
@@ -3364,12 +3373,17 @@ def op_dataframe_pct_change(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("dataframe_pct_change requires frame payload")
 
     periods = payload.get("diff_periods", payload.get("pct_change_periods", 1))
+    # Same pre-refusal as dataframe_shift above, and the same fix. No corpus
+    # fixture exercises this one today, but leaving the twin in place would put
+    # the next pct_change axis fixture straight back into the unattestable
+    # bucket. (br-frankenpandas-f9xlz)
     axis = payload.get("diff_axis", payload.get("pct_change_axis", 0))
-    if axis not in (0, 1):
-        raise OracleError(f"dataframe_pct_change axis must be 0 or 1 (got {axis!r})")
 
     frame = dataframe_from_json(pd, frame_payload)
-    out = frame.pct_change(periods=int(periods), axis=axis)
+    try:
+        out = frame.pct_change(periods=int(periods), axis=axis)
+    except Exception as exc:  # noqa: BLE001 - re-raised with pandas as __cause__
+        raise OracleError(f"dataframe_pct_change failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(out)}
 
 
@@ -7437,9 +7451,17 @@ def resolve_merge_validate(payload: dict[str, Any], op_name: str) -> str | None:
         return "many_to_one"
     if normalized in {"m:m", "many_to_many"}:
         return "many_to_many"
-    raise OracleError(
-        f"{op_name} merge_validate must be one_to_one, one_to_many, many_to_one, or many_to_many"
-    )
+    # NOT the adapter's call. pandas validates this argument itself and names
+    # every accepted spelling in the message. Pre-refusing it left
+    # fp_p2d_035_dataframe_merge_validate_invalid_value_error_strict pinned to
+    # error_origin=oracle_adapter. MEASURED, live pandas 2.2.3:
+    #     pd.merge(l, r, on="key", validate="bogus")
+    #       -> ValueError: "bogus" is not a valid argument. Valid arguments are:
+    #          - "1:1" - "1:m" - "m:1" - "m:m"
+    #          - "one_to_one" - "one_to_many" - "many_to_one" - "many_to_many"
+    # Hand the unrecognized string straight through so pandas raises.
+    # (br-frankenpandas-f9xlz)
+    return validate_raw
 
 
 def resolve_merge_suffixes(payload: dict[str, Any], op_name: str) -> tuple[str | None, str | None]:
@@ -7472,11 +7494,32 @@ def resolve_merge_sort(payload: dict[str, Any], op_name: str) -> bool:
     return sort_raw
 
 
-def validate_cross_merge_payload(
+def cross_merge_conflicting_kwargs(
     payload: dict[str, Any], op_name: str, *, use_index_keys: bool
-) -> None:
-    if use_index_keys:
-        raise OracleError(f"{op_name} does not support join_type='cross'")
+) -> dict[str, Any]:
+    """The key/index selectors a `how='cross'` payload asked for, if any.
+
+    pandas refuses `how='cross'` combined with ANY key or index selector, and it
+    does so itself, with its own class and wording. MEASURED, live pandas 2.2.3
+    — all three shapes collapse to one message:
+
+        pd.merge(l, r, how="cross", on="key")
+        pd.merge(l, r, how="cross", left_on="key", right_on="key")
+        pd.merge(l, r, how="cross", left_index=True, right_index=True)
+          -> MergeError: Can not pass on, right_on, left_on or set
+             right_index=True or left_index=True
+
+    This function used to RAISE those refusals itself, which is why
+    fp_p2d_039_dataframe_merge_cross_rejects_keys_strict and
+    ..._rejects_index_flags_hardened both recorded error_origin=oracle_adapter:
+    pandas was never invoked, so "the oracle also failed here" attested nothing
+    and the rows could never be stamped. Now the selectors are RETURNED and the
+    merge call hands them to pandas, so the refusal that lands is pandas' own.
+
+    The type checks below stay — a non-boolean `left_index` is a malformed
+    fixture, not a question about pandas. (br-frankenpandas-f9xlz)
+    """
+    conflicting: dict[str, Any] = {}
 
     if (
         payload.get("merge_on") is not None
@@ -7484,9 +7527,12 @@ def validate_cross_merge_payload(
         or payload.get("left_on_keys") is not None
         or payload.get("right_on_keys") is not None
     ):
-        raise OracleError(
-            f"{op_name} join_type='cross' does not allow merge_on/merge_on_keys/left_on_keys/right_on_keys"
-        )
+        left_keys, right_keys = resolve_merge_key_pairs(payload, op_name)
+        if left_keys == right_keys:
+            conflicting["on"] = left_keys
+        else:
+            conflicting["left_on"] = left_keys
+            conflicting["right_on"] = right_keys
 
     left_index_raw = payload.get("left_index")
     right_index_raw = payload.get("right_index")
@@ -7494,8 +7540,14 @@ def validate_cross_merge_payload(
         raise OracleError(f"{op_name} left_index must be a boolean when provided")
     if right_index_raw is not None and not isinstance(right_index_raw, bool):
         raise OracleError(f"{op_name} right_index must be a boolean when provided")
-    if bool(left_index_raw) or bool(right_index_raw):
-        raise OracleError(f"{op_name} join_type='cross' does not allow left_index/right_index")
+    # `dataframe_merge_index` means "join on the index", so a cross request
+    # through that op is itself the left_index/right_index conflict.
+    if use_index_keys or bool(left_index_raw):
+        conflicting["left_index"] = True
+    if use_index_keys or bool(right_index_raw):
+        conflicting["right_index"] = True
+
+    return conflicting
 
 
 def dataframe_with_index_keys(frame, key_names: list[str]):
@@ -7517,10 +7569,13 @@ def op_dataframe_merge(
     how = require_join_type(payload, op_name, allow_cross=True)
 
     if how == "cross":
-        validate_cross_merge_payload(payload, op_name, use_index_keys=use_index_keys)
+        cross_conflicts = cross_merge_conflicting_kwargs(
+            payload, op_name, use_index_keys=use_index_keys
+        )
         left_use_index = False
         right_use_index = False
     else:
+        cross_conflicts = {}
         left_use_index = _resolve_index_flag(payload, "left_index", op_name, use_index_keys)
         right_use_index = _resolve_index_flag(payload, "right_index", op_name, use_index_keys)
 
@@ -7556,14 +7611,24 @@ def op_dataframe_merge(
     if validate_mode is not None:
         merge_kwargs["validate"] = validate_mode
 
-    if how == "cross":
-        out = left.merge(right, **merge_kwargs)
-    elif left_merge_keys == right_merge_keys:
-        out = left.merge(right, on=left_merge_keys, **merge_kwargs)
-    else:
-        out = left.merge(
-            right, left_on=left_merge_keys, right_on=right_merge_keys, **merge_kwargs
-        )
+    # The pandas call is wrapped so its exception becomes this OracleError's
+    # __cause__ and `oracle_error_origin` can see PANDAS refused. Unwrapped, a
+    # real pandas MergeError escaped every adapter try-block and main() labelled
+    # it `unexpected` -- which, like `oracle_adapter`, blocks attestation. That
+    # is what fp_p2d_036_dataframe_merge_suffixes_missing_error_strict and
+    # ..._duplicate_output_error_hardened were sitting in, even though pandas
+    # itself had raised on both. (br-frankenpandas-f9xlz)
+    try:
+        if how == "cross":
+            out = left.merge(right, **merge_kwargs, **cross_conflicts)
+        elif left_merge_keys == right_merge_keys:
+            out = left.merge(right, on=left_merge_keys, **merge_kwargs)
+        else:
+            out = left.merge(
+                right, left_on=left_merge_keys, right_on=right_merge_keys, **merge_kwargs
+            )
+    except Exception as exc:  # noqa: BLE001 - re-raised with pandas as __cause__
+        raise OracleError(f"{op_name} failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(out)}
 
 

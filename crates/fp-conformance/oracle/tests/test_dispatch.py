@@ -1033,3 +1033,269 @@ def test_dtype_check_ops_report_pandas_own_spelling(oracle, pd):
     )
     sparse["operation"] = "series_dtype_check"
     assert dtype_of(sparse) == "Sparse[int64, 0]"
+
+
+# ---------------------------------------------------------------------------
+# br-frankenpandas-f9xlz — the adapter must not answer questions that belong to
+# pandas.
+#
+# Only `error_origin == pandas` unlocks an error-agreement attestation
+# (scripts/regenerate_fixtures.py). A refusal the ADAPTER raised from its own
+# argument validation is true but vacuous — pandas was never invoked — so those
+# fixtures are permanently unstampable. Each test below names the corpus fixture
+# that was stuck in that state, and pins the message PANDAS actually produces.
+#
+# MEASURED, live pandas 2.2.3, by putting each case to pandas directly rather
+# than through the oracle.
+# ---------------------------------------------------------------------------
+
+
+def test_dataframe_shift_out_of_range_axis_is_a_pandas_error(oracle, pd):
+    """fp_p2d_144_dataframe_shift_invalid_axis_strict was origin=oracle_adapter."""
+    payload = {
+        "operation": "dataframe_shift",
+        "frame": _frame_payload({"a": [1]}),
+        "shift_axis": 2,
+        "shift_periods": 1,
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "dataframe_shift failed: No axis named 2 for object type DataFrame"
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_dataframe_pct_change_out_of_range_axis_is_a_pandas_error(oracle, pd):
+    """The unexercised twin of dataframe_shift's pre-refusal, fixed with it."""
+    payload = {
+        "operation": "dataframe_pct_change",
+        "frame": _frame_payload({"a": [1, 2]}),
+        "pct_change_axis": 2,
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "dataframe_pct_change failed: No axis named 2 for object type DataFrame"
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_dataframe_shift_valid_axis_still_computes(oracle, pd):
+    """Control: removing the guard must not change the answer on a good axis."""
+    payload = {
+        "operation": "dataframe_shift",
+        "frame": _frame_payload({"a": [1, 2, 3]}),
+        "shift_axis": 0,
+        "shift_periods": 1,
+    }
+    response = oracle.dispatch(pd, payload)
+    values = [v["value"] for v in response["expected_frame"]["columns"]["a"]]
+    assert values[1:] == [1.0, 2.0]
+
+
+def test_dataframe_merge_unknown_validate_is_a_pandas_error(oracle, pd):
+    """fp_p2d_035_dataframe_merge_validate_invalid_value_error_strict.
+
+    pandas names every accepted spelling in its own message; the adapter's
+    whitelist was pre-empting it.
+    """
+    payload = {
+        "operation": "dataframe_merge",
+        "frame": _frame_payload({"id": [1], "left_v": [10]}),
+        "frame_right": _frame_payload({"id": [1], "right_v": [100]}),
+        "join_type": "inner",
+        "merge_on": "id",
+        "merge_validate": "diagonal",
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    message = str(exc_info.value)
+    assert message.startswith('dataframe_merge failed: "diagonal" is not a valid argument')
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_dataframe_merge_recognized_validate_aliases_still_reach_pandas(oracle, pd):
+    """Control: '1:1' must keep working, and must still ENFORCE one-to-one.
+
+    A naive "just pass everything through" that also dropped the alias mapping
+    would fail here, and so would one that silently stopped forwarding
+    `validate` at all — the duplicate left key below has to be caught.
+    """
+    ok = {
+        "operation": "dataframe_merge",
+        "frame": _frame_payload({"id": [1], "left_v": [10]}),
+        "frame_right": _frame_payload({"id": [1], "right_v": [100]}),
+        "join_type": "inner",
+        "merge_on": "id",
+        "merge_validate": "1:1",
+    }
+    assert "expected_frame" in oracle.dispatch(pd, ok)
+
+    violating = copy.deepcopy(ok)
+    violating["frame"] = _frame_payload({"id": [1, 1], "left_v": [10, 11]})
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, violating)
+    assert "one-to-one" in str(exc_info.value)
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_dataframe_merge_cross_with_keys_is_a_pandas_error(oracle, pd):
+    """fp_p2d_039_dataframe_merge_cross_rejects_keys_strict."""
+    payload = {
+        "operation": "dataframe_merge",
+        "frame": _frame_payload({"id": [1]}),
+        "frame_right": _frame_payload({"id": [2]}),
+        "join_type": "cross",
+        "merge_on": "id",
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "dataframe_merge failed: Can not pass on, right_on, left_on or set "
+        "right_index=True or left_index=True"
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_dataframe_merge_cross_with_left_index_only_is_a_pandas_error(oracle, pd):
+    """fp_p2d_039_dataframe_merge_cross_rejects_index_flags_hardened.
+
+    Note this fixture sets left_index ALONE. pandas refuses on either flag, so
+    the adapter must forward exactly the flag it was given rather than
+    normalizing both on.
+    """
+    payload = {
+        "operation": "dataframe_merge",
+        "frame": _frame_payload({"left_v": [10]}),
+        "frame_right": _frame_payload({"right_v": [20]}),
+        "join_type": "cross",
+        "left_index": True,
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert str(exc_info.value) == (
+        "dataframe_merge failed: Can not pass on, right_on, left_on or set "
+        "right_index=True or left_index=True"
+    )
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_dataframe_merge_clean_cross_still_produces_the_cartesian_product(oracle, pd):
+    """Control: a cross join with NO conflicting selector must still succeed."""
+    payload = {
+        "operation": "dataframe_merge",
+        "frame": _frame_payload({"left_v": [10, 11]}),
+        "frame_right": _frame_payload({"right_v": [20, 21]}),
+        "join_type": "cross",
+    }
+    response = oracle.dispatch(pd, payload)
+    assert [v["value"] for v in response["expected_frame"]["columns"]["left_v"]] == [
+        10,
+        10,
+        11,
+        11,
+    ]
+    assert [v["value"] for v in response["expected_frame"]["columns"]["right_v"]] == [
+        20,
+        21,
+        20,
+        21,
+    ]
+
+
+def test_dataframe_merge_overlapping_columns_without_suffixes_is_a_pandas_error(
+    oracle, pd
+):
+    """fp_p2d_036_dataframe_merge_suffixes_missing_error_strict.
+
+    pandas DID raise here all along. The merge call sat outside every adapter
+    try-block, so the exception escaped to main()'s catch-all and was labelled
+    `unexpected` — which blocks attestation just as `oracle_adapter` does.
+    """
+    payload = {
+        "operation": "dataframe_merge",
+        "frame": _frame_payload({"id": [1], "val": [10]}),
+        "frame_right": _frame_payload({"id": [1], "val": [100]}),
+        "join_type": "inner",
+        "merge_on": "id",
+        "merge_suffixes": ["", ""],
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert "columns overlap but no suffix specified" in str(exc_info.value)
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_dataframe_merge_suffixes_causing_duplicates_is_a_pandas_error(oracle, pd):
+    """fp_p2d_036_dataframe_merge_suffixes_duplicate_output_error_hardened."""
+    payload = {
+        "operation": "dataframe_merge",
+        "frame": _frame_payload({"id": [1], "val": [10], "val_L": [77]}),
+        "frame_right": _frame_payload({"id": [1], "val": [100]}),
+        "join_type": "inner",
+        "merge_on": "id",
+        "merge_suffixes": ["_L", "_R"],
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert "duplicate columns" in str(exc_info.value)
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_a_malformed_merge_payload_is_STILL_the_adapter(oracle, pd):
+    """THE NEGATIVE CASE, and the reason this change is not just a loosening.
+
+    A blanket "wrap everything and call it pandas" would turn genuinely
+    malformed fixtures into forged attestations. A payload that does not
+    describe a runnable case must still classify as `oracle_adapter`, because
+    pandas still never sees it.
+    """
+    payload = {
+        "operation": "dataframe_merge",
+        "frame": _frame_payload({"id": [1]}),
+        "join_type": "inner",
+        "merge_on": "id",
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert "requires frame and frame_right payloads" in str(exc_info.value)
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_ADAPTER
+    assert oracle.oracle_error_origin(exc_info.value) != oracle.ERROR_ORIGIN_PANDAS
+
+
+def test_a_non_boolean_left_index_on_a_cross_merge_is_STILL_the_adapter(oracle, pd):
+    """The type checks inside the cross helper are malformed-fixture checks.
+
+    They must survive the conversion from "raise the refusal" to "return the
+    selectors": a string where a boolean belongs is not a question about pandas.
+    """
+    payload = {
+        "operation": "dataframe_merge",
+        "frame": _frame_payload({"left_v": [10]}),
+        "frame_right": _frame_payload({"right_v": [20]}),
+        "join_type": "cross",
+        "left_index": "yes",
+    }
+
+    with pytest.raises(oracle.OracleError) as exc_info:
+        oracle.dispatch(pd, payload)
+
+    assert "left_index must be a boolean when provided" in str(exc_info.value)
+    assert oracle.oracle_error_origin(exc_info.value) == oracle.ERROR_ORIGIN_ADAPTER
