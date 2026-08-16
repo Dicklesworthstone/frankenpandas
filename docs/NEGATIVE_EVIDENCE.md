@@ -25675,3 +25675,58 @@ bit-identical**, which is the number br-frankenpandas-oxv4u's decision should be
 weighed against, alongside the 3.26x instruction-count reduction already banked.
 Neither row raised `dispersion_warning`, correctly: at this shape the median and
 the minima agree that FrankenPandas is far ahead, unlike the retracted `@1M` row.
+
+---
+
+## br-frankenpandas-284ul — the elementwise parallel arm IS live at 1M (counts differ by 6.41%), so the instrument is sound; but the split costs 6.4% in INSTRUCTIONS against ~30% in LATENCY
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** counted, and it
+establishes the prerequisite the bead's two questions both rest on. NO
+certification attempted — I sampled `uptime` three times and watched the window
+collapse **6.56 → 6.48 → 16.90 → 28.64 in about 40 seconds**, the fifth and
+fastest closure recorded today.
+
+**WHY THIS WAS THE PREREQUISITE.** `br-frankenpandas-284ul` asks whether
+`PAR_MIN` is too low or the worker cap too low at 1M. **Both presuppose the
+parallel arm executes at that size, and nothing on file established it.** That is
+precisely the assumption that left `u5cg4`'s candidate (4) untestable: the
+harness's `thread_count_actually_used` cannot see `thread::scope` workers (banked
+under h67zz), so a serial-vs-serial comparison is indistinguishable from a
+parallel one that did not pay.
+
+**Counted mechanism:** `Column::sqrt` over 1,000,000 f64 retires **15,667,017**
+instructions per call at `FP_ELEMENTWISE_MAX_WORKERS=1` and **16,671,536** at
+`=8` — a difference of **1,004,520 instructions, 6.41%**, on the same input in
+the same binary. Release binary
+`target/release/deps/fp_columnar-489da42f214cdf29`, `perf stat -e instructions`,
+slopes taken across 10 and 20 reps so process and fixture overhead cancel.
+
+| `FP_ELEMENTWISE_MAX_WORKERS` | instructions / call |
+|---|---|
+| 1 | 15,667,017 |
+| 8 | 16,671,536 |
+| delta | **+1,004,520 (+6.41%)** |
+
+**FINDING 1 — THE INSTRUMENT IS SOUND AND THE ARM IS REAL.** The counts differ,
+so the env setting genuinely reaches the kernel and the parallel path genuinely
+executes at 1M. Any A/B built on `FP_ELEMENTWISE_MAX_WORKERS` is comparing two
+different code paths, not an arm with itself. **This is the check that should
+precede every toggle-based A/B in this repo**, and it costs one counted probe.
+
+**FINDING 2 — INSTRUCTIONS ARE THE WRONG PLACE TO LOOK FOR SPAWN COST, and the
+contrast is the useful part.** The split adds only **6.41%** in retired
+instructions. But the bead's own row has `sqrt @1M` at FP p50 **1338.84us**, and
+the banked per-call scope-spawn figure is **~397us for 8 threads** — roughly
+**30%** of that call. So the spawn cost is real and large in WALL CLOCK while
+nearly invisible in INSTRUCTIONS, because thread creation is scheduling latency
+and kernel work, not user-space instructions retired.
+
+**Consequence: this measurement cannot settle 284ul's timing question, and I am
+not going to pretend it does.** 6.41% is a LOWER bound on the split's true cost.
+What it does settle is that the arm runs, which the timing question needs and did
+not have — and it bounds the instruction-side contribution, so anyone seeing a
+large wall-clock gap now knows it is latency, not extra work.
+
+**Probe:** `instr_sqrt_1m_under_current_policy_284ul` in
+`crates/fp-columnar/src/lib.rs`, `FP_284UL_REPS`-driven. Gate:
+`cargo test -p fp-columnar --lib` 622 passed / 0 failed / 58 ignored, EXIT=0.
