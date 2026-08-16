@@ -1,5 +1,5 @@
-         val
-a         20
-b         30
+          val
+a        20.0
+b        30.0
 
 [2 rows x 1 columns]

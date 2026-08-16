@@ -1,7 +1,7 @@
-           a    b
-0        NaN  NaN
-1          2    6
-2          6    6
-3         12    4
+            a    b
+0         NaN  NaN
+1         2.0  6.0
+2         6.0  6.0
+3        12.0  4.0
 
 [4 rows x 2 columns]

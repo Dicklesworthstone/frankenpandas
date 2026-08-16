@@ -1,16 +1,16 @@
 aligned1:
            a
-0          1
-1          2
-2          3
+0        1.0
+1        2.0
+2        3.0
 3        NaN
 
 [4 rows x 1 columns]
 aligned2:
-           a
-0        NaN
-1         10
-2        NaN
-3         20
+            a
+0         NaN
+1        10.0
+2         NaN
+3        20.0
 
 [4 rows x 1 columns]

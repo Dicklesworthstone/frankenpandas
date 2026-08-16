@@ -1,12 +1,12 @@
 aligned1:
-a    1
-b    2
-c    3
-d    None
-Name: x, Length: 4, dtype: Int64
+a    1.0
+b    2.0
+c    3.0
+d    NaN
+Name: x, Length: 4, dtype: Float64
 aligned2:
-a    None
-b    20
-c    30
-d    40
-Name: y, Length: 4, dtype: Int64
+a    NaN
+b    20.0
+c    30.0
+d    40.0
+Name: y, Length: 4, dtype: Float64

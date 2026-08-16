@@ -1,4 +1,4 @@
-         a   b
-0        1  10
+           a     b
+0        1.0  10.0
 
 [1 rows x 2 columns]

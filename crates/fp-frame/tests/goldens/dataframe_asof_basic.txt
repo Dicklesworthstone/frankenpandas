@@ -1,2 +1,2 @@
-a    20
+a    20.0
 Name: 3, Length: 1, dtype: Float64

@@ -1,6 +1,6 @@
          val
-a          1
-b          2
-c          3
+a        1.0
+b        2.0
+c        3.0
 
 [3 rows x 1 columns]

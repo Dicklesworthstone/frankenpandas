@@ -1,6 +1,6 @@
-           a    b
-0          1  NaN
-1        NaN   20
-2          3  NaN
+           a     b
+0        1.0   NaN
+1        NaN  20.0
+2        3.0   NaN
 
 [3 rows x 2 columns]

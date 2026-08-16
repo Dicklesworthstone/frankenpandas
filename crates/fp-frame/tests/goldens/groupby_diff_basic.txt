@@ -1,7 +1,7 @@
          val
 0        NaN
-1          2
+1        2.0
 2        NaN
-3          5
+3        5.0
 
 [4 rows x 1 columns]

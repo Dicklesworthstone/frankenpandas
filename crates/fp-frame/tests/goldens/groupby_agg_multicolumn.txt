@@ -1,5 +1,5 @@
          revenue_sum  qty_mean
-east             250      12.5
-west             200        20
+east           250.0      12.5
+west           200.0      20.0
 
 [2 rows x 2 columns]

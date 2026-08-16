@@ -1,6 +1,6 @@
            a
-y          2
+y        2.0
 z        NaN
-x          1
+x        1.0
 
 [3 rows x 1 columns]

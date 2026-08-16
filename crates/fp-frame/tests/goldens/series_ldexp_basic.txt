@@ -1,4 +1,4 @@
-0    8
-1    16
-2    4
+0    8.0
+1    16.0
+2    4.0
 Name: mantissa, Length: 3, dtype: Float64

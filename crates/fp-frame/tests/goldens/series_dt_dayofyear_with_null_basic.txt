@@ -1,4 +1,4 @@
-0    1
+0    1.0
 1    NaN
-2    366
+2    366.0
 Name: ts, Length: 3, dtype: Float64

@@ -1,5 +1,5 @@
-         a   b
-sum      6  60
-mean     2  20
+           a     b
+sum      6.0  60.0
+mean     2.0  20.0
 
 [2 rows x 2 columns]

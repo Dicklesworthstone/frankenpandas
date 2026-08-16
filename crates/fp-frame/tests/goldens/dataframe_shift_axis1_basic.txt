@@ -1,5 +1,5 @@
-           a  b   c
-0        NaN  1  10
-1        NaN  2  20
+           a    b     c
+0        NaN  1.0  10.0
+1        NaN  2.0  20.0
 
 [2 rows x 3 columns]

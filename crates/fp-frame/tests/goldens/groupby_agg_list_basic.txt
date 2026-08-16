@@ -1,5 +1,5 @@
          val_sum  val_mean
-a              3       1.5
-b             10        10
+a            3.0       1.5
+b           10.0      10.0
 
 [2 rows x 2 columns]

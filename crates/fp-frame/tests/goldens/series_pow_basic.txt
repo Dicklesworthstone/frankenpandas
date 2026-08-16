@@ -1,4 +1,4 @@
-0    4
-1    9
-2    64
+0    4.0
+1    9.0
+2    64.0
 Name: base**exp, Length: 3, dtype: Float64

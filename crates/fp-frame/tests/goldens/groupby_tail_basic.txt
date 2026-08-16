@@ -1,5 +1,5 @@
-         key  val
-2          a    3
-3          b   10
+         key   val
+2          a   3.0
+3          b  10.0
 
 [2 rows x 2 columns]

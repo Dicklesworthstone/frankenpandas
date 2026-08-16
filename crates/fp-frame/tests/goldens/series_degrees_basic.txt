@@ -1,4 +1,4 @@
-0    0
-1    90
-2    180
+0    0.0
+1    90.0
+2    180.0
 Name: vals, Length: 3, dtype: Float64

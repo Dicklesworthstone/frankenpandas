@@ -1,8 +1,8 @@
-           a    b
-0        NaN  NaN
-1        NaN  NaN
-2          2   15
-3          3   20
-4          4   25
+           a     b
+0        NaN   NaN
+1        NaN   NaN
+2        2.0  15.0
+3        3.0  20.0
+4        4.0  25.0
 
 [5 rows x 2 columns]

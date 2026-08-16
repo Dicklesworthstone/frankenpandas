@@ -1,5 +1,5 @@
-           A    B
-east     100  150
-west     200  250
+             A      B
+east     100.0  150.0
+west     200.0  250.0
 
 [2 rows x 2 columns]
