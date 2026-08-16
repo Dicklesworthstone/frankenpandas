@@ -23552,3 +23552,77 @@ flag REGRESSES sqrt and log. That is a scoping-and-policy question to put to the
 user, not a lever to write. Filing a lever against it without answering it first
 would repeat the `1hjgz` pattern recorded elsewhere in this file: writing code
 against a premise the ledger had already settled.
+
+---
+
+## 2026-08-16 cod-pandas — the sqrt double-write MECHANISM, pinned against the timing code; and why the obvious chunked fix is a TRAP (br-frankenpandas-284ul)
+
+Follow-up to the allocator entry above, still build-free. The previous entry said
+the 8 MB output buffer is "written twice" but left open WHICH of the two costs it
+is — a kernel page-zero on fresh mmap, or a memset over a recycled mimalloc
+segment. Reading `crates/fp-bench/src/main.rs` settles it: **it is the memset, and
+it is inside the timed region.**
+
+`timed_batch_us` (:725) stops its clock BEFORE the produced value is consumed:
+
+```
+let started = Instant::now();
+let mut last_result = None;
+for _ in 0..repeat { last_result = Some(black_box(op())); }
+let mut elapsed_us = started.elapsed()...;     // <-- clock stops HERE
+let result = last_result.expect(...);
+black_box(result);                              // <-- Series (8 MB) drops AFTER
+```
+
+At `repeat = 1` (what `time_us` passes, :858) each timed region therefore contains
+exactly one `series.sqrt()` — allocate + write — and the FREE of the previous
+iteration's 8 MB happened moments earlier, OUTSIDE the clock. So mimalloc enters
+every timed region with a warm, dirty 8 MB block on its free list, and
+`vec![0.0_f64; n]` (which specialises to `alloc_zeroed`) must MEMSET that
+recycled block before returning it. The zeroing is not a kernel freebie here; it
+is 8 MB of stores charged to the measurement, followed by our own 8 MB of stores.
+
+That is the mechanism. It also predicts the sibling projects' load coupling:
+whether mimalloc recycles or re-mmaps depends on purge state, so the same code
+can land on either side of that cost run to run — which is what an unstable A/A
+null looks like.
+
+**⚠ THE OBVIOUS FIX IS A TRAP, AND THE TRAP IS ARITHMETIC.** "Have each worker
+`collect()` its own chunk, then assemble" removes the memset but adds a
+concatenation:
+
+```
+today            memset 8 MB      + map writes 8 MB              = 16 MB stores
+naive chunked    map writes 8 MB  + copy (read 8 MB + write 8 MB) = 16 MB stores + 8 MB loads
+```
+
+Strictly worse. The chunked form only pays if the chunks are never concatenated —
+i.e. if the column KEEPS its chunked representation.
+
+**AND THAT REPRESENTATION ALREADY EXISTS, WITH THE WRONG INNER TYPE.**
+`ScalarValues::LazyAllValidFloat64Chunks { chunks: Arc<[Float64Chunk]>, .. }`
+(:2155) and `Float64Chunk { data: Arc<[f64]>, start, len }` (:889) are already in
+the tree, and `Column::from_f64_all_valid_chunks` (:10203) already builds a column
+from them with no concatenation. But `Float64Chunk.data` is `Arc<[f64]>`, and
+`Arc::from(Vec<f64>)` is a fresh alloc + memcpy — this file says so itself at
+:2068 and :2086, where the same trap was hit before and worked around for i64 by
+keeping `Arc<Vec<i64>>` instead. So a worker that `collect()`s a `Vec<f64>` and
+wraps it pays the copy at the wrap instead of at the concat. Same 8 MB, moved.
+
+**THEREFORE THE LEVER, PRECISELY STATED, and it is a storage change, not a loop
+change:** `Float64Chunk` needs an `Arc<Vec<f64>>` inner form (or an enum over
+both) so a worker's `collect()`ed buffer becomes a chunk by pointer move, exactly
+as `lazy_all_valid_float64_owned_with_finite` (:2744) already does for the
+single-buffer case with `Arc::new(data)`. Only then does the write-once path
+actually save the 8 MB. Anyone who implements the loop change without the storage
+change will measure a regression and may well bank it as "write-once does not
+pay", which would be a false negative on a real lever.
+
+**NOT MEASURED — this is a mechanism read off source and timing code, not a
+number.** The predictions it makes, in falsification order, for the first quiet
+build window:
+  1. `MIMALLOC_PURGE_DELAY=0` on sqrt should make the arm SLOWER and more stable
+     (forces re-mmap: kernel-zeroed pages, no memset, but full fault cost). If it
+     makes no difference, the recycling story is wrong and this entry is refuted.
+  2. A large `MIMALLOC_PURGE_DELAY` should make it faster and noisier.
+  3. Only if 1 and 2 behave as predicted is the storage change worth building.
