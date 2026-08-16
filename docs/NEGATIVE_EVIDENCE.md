@@ -22748,3 +22748,65 @@ cu22b rather than flipped.
 
 **No build was taken for this entry** — `/data` at 54G against a 59G floor. It is
 a ledger read, two prior measurements already banked, and one retraction.
+
+---
+
+## br-frankenpandas-1hjgz — LOCATED (not landed): df.dot is 0.136x because it runs on ONE core, and parallelism alone plausibly reaches parity
+
+**Date:** 2026-08-16 · **Agent:** CalmMink · **Status:** LOCATED, with the wrong
+approach ruled out. No lever written — `/data` sat at 58G against the 59G floor,
+so I declined the build rather than write a kernel I could not gate.
+
+**THE ROW,** `artifacts/bench/bench_2026-08-16T11-04-13.790912+00-00.json`,
+`df_dot @ 1M` (fp-bench builds a square GEMM at `dim = isqrt(1M) = 1000`):
+
+```
+FP      p50 208692.79us  (209ms)   thread_count_actually_used = 1
+pandas  p50  28326.26us  ( 28ms)
+ratio   0.136x SLOWER, DECIDABLE — A/A nulls 0.9807 (fp) / 0.9883 (pandas), both inside 2%
+```
+
+A second run agrees at 0.137x. This is my worst vs-incumbent ratio that is NOT
+ISA-blocked: unlike the math_unary family it needs no build-policy decision.
+
+**THE ARITHMETIC POINTS AT ONE CAUSE.** A 1000-cube GEMM is 2 GFLOP:
+
+```
+FP      2 GFLOP / 209ms  =  ~9.6 GFLOP/s   on ONE thread
+pandas  2 GFLOP /  28ms  =  ~71 GFLOP/s    multithreaded + AVX
+```
+
+9.6 × 8 threads ≈ 77 GFLOP/s — at or above pandas **without touching the ISA
+question**. Per-thread throughput is already competitive, because the kernel
+auto-vectorizes to FMA with unit-stride reads (the AXPY-order comment on
+`materialize_float64_dot` records fixing an earlier strided version that ran at
+0.59 GFLOP/s). FrankenPandas is simply running a competitive kernel on one core.
+
+**⚠️ THE OBVIOUS PARALLELISATION IS THE WRONG ONE, and the numbers are
+unforgiving.** `materialize_float64_dot(a_cols, b_col, len)` computes ONE output
+column, and each output column sits behind its own `OnceLock`
+(`LazyAllValidFloat64Dot` → `data.get_or_init`). The consumer reads columns one
+at a time, which is exactly why `thread_count_actually_used` is 1.
+
+Row-blocking *inside* that function is the natural-looking fix. At `dim = 1000` a
+column is only 1000 rows, so it would spawn a `thread::scope` **per output
+column** — 1000 spawn batches at ~397us/8thr (the parallel-per-call-overhead
+ledger row) ≈ **400ms of pure spawn against a 209ms total**. Strictly worse than
+doing nothing.
+
+The right shape is ONE scope for the whole result, parallel across the `n` output
+columns. Each is independent (`out[row] += a_col[row] * b_j` for `j = 0..k`), so
+it is embarrassingly parallel and **bit-identical** — the per-output summation
+order is untouched.
+
+**DESIGN QUESTION TO SETTLE BEFORE CODING:** the result is deliberately LAZY, so
+batch-parallel materialization needs a hook — either `DataFrame::dot` eagerly
+materializes a large result, or a frame-level "materialize all pending lazy
+columns in parallel" entry point. The latter is preferable if the other lazy
+column kinds (transpose rows, pairwise-stat columns) can share it; they have the
+same one-`OnceLock`-per-column shape.
+
+**Method note for whoever takes it:** the A/B must be parallel-vs-serial
+INTERLEAVED in one process with a runtime toggle, per the 2026-07-03 retraction
+in this ledger — separate builds and standalone microbenches have lied about
+exactly this class of question before.
