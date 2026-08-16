@@ -26541,3 +26541,57 @@ structural — a block-born result that allocates ONE `n x m` buffer and lets ea
 output column view a slice, instead of n independent allocations and n lazy
 columns. The `Float64Block` machinery for that already exists behind the
 `block-storage` feature.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-03fp5) — the BLOCK-BORN `df.dot` result: ~2% on the wide shapes, **7x WORSE** on a 1-column result — REJECT
+
+The narrowed target from the previous entry was allocation: at `dim = 100`, 61%
+of a `df.dot` is per-output-column construction (~1.9us each), the store lookup
+was measured and rejected, and what remained per column was one `Vec<f64>`, one
+lazy `Column` with two `OnceLock`s and Arc refcount traffic. So I built the
+structural fix that removes n allocations: ONE column-major `n x m` block, each
+output column a view into it, filled in one parallel pass over disjoint slices.
+
+Implemented properly rather than as a spike: `fill_float64_dot` factored so the
+per-column path and the block path share one accumulation and cannot drift (the
+same discipline that fixed `reindex`), the block filled through the existing
+worker/work-per-worker rule, and `Column::dot_product_block_columns` returning
+views. fp-frame 3311/0 throughout — the change is correctness-neutral.
+
+Measured with the committed phase-split probe, `uptime` 11.48-21.54 across the
+session, medians of 3-4 runs each:
+
+| shape | before | after | |
+|---|---:|---:|---|
+| `dim = 100` square | 0.3221 ms | 0.3179 ms | 1.3%, noise |
+| `dim = 200` square | 1.0794 ms | 1.0514 ms | 2.6%, noise |
+| **A 100x100 . B 100x1** | **0.0153 ms** | **0.1050 ms** | **7x WORSE** |
+
+**The one-column case is the finding.** It is reproducible across three runs
+(0.1074, 0.1069, 0.0985 against 0.0153, 0.0158, 0.0152) and it is not subtle. A
+1-column result allocates a 100-element block — smaller than the per-column
+`Vec<f64>` it replaced — so the cost is not the allocation size. I do not have
+the mechanism, only the measurement, and I am not going to invent one: what I
+can say is that the wide-shape gain the design predicted did not materialise
+(~2%, inside this probe's spread) while the narrow shape got 7x worse, and that
+combination rejects the design regardless of the mechanism.
+
+**Counted mechanism:** heap allocations per call drop from 100 (one `Vec<f64>`
+per output column, plus 100 lazy plans) to 1 block plus 100 views at
+`dim = 100` — a 100x reduction in allocation count — and the wide shapes moved
+1.3% and 2.6%, while the arithmetic is unchanged (same `fill_float64_dot`, same
+`j = 0..k` order, 3311/0). **The allocation count was not the constraint
+either.** That is the fourth candidate eliminated from the 1.9us: not the kernel,
+not the consumer read, not the store lookup, not the allocation count.
+
+**Decision: REJECT**; reverted, patch parked at
+`/data/projects/.scratch/03fp5_dot_block_born_REJECTED.patch` (355 lines, kept
+because the `fill_float64_dot` factoring and the block API are reusable if
+someone attacks this with a mechanism in hand).
+
+**Where this leaves `df_dot @10k` (0.573x certified, my worst ratio):** its cost
+is 61% per-output-column construction, and four separate candidates for what that
+construction IS have now been measured and eliminated. The next attempt needs a
+profile that attributes those 1.9us at instruction level inside the timed region
+— not another structural guess. Seven levers on this op have been rejected with
+numbers; that is a map, but it is not progress on the ratio, and I am recording
+it as such.
