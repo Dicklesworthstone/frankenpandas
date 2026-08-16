@@ -25148,3 +25148,67 @@ best-vs-best (4.087, 4.955), with FP's own A/A null clean in both. Invocation
 `vs-pandas-20260816T195031.918655Z-pid2678892`, git `1f0416555`.
 
 **Artifacts:** `artifacts/bench/oarkz_df_dot_100k_thinkstation1_2026-08-16_replication_run2.json`
+
+---
+
+## br-frankenpandas-h67zz — ⚠️ RETRACTING MY OWN REPEATED RECOMMENDATION: "reuse a worker pool instead of per-call `thread::scope`" is NOT implementable here, and the only safe-Rust route to it was already measured and rejected
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** code analysis, NO
+measurement taken. `uptime` read first per the standing rule: **load average
+74.42** (1/5/15: 74.42 59.76 39.89) — far above the 30 defer threshold, so no
+certification was attempted and none is reported.
+
+**WHAT I HAVE BEEN RECOMMENDING, AND WHY IT IS WRONG.** Across four entries in
+this file I closed with some form of *"what would actually change the answer is a
+harness that reuses a worker pool across the timed region instead of spawning per
+call"*, offered as the fix for FrankenPandas' unstable A/A nulls on parallel
+kernels. I never checked whether it can be written. It cannot, and the reason is
+structural rather than a matter of effort.
+
+**THE BLOCKER, read from the code.** `par_map_slice_f64_with_witness_with_policy`
+(`crates/fp-columnar/src/lib.rs:8233`) spawns into `std::thread::scope` and its
+workers write through **borrowed mutable slices** — `out.chunks_mut(chunk)`,
+`words.chunks_mut(chunk / 64)`, and `flags.iter_mut()`. Borrowing the caller's
+buffers is precisely what `thread::scope` exists to permit.
+
+The repo's existing persistent pool, `str_worker_pool` (`fp-frame:42307`, the one
+I reshaped under `att6b`/`vrjrf`), cannot take that work. Its signature is
+
+```rust
+pub fn run<T, F>(&self, jobs: Vec<F>) -> Vec<T>
+where F: FnOnce() -> T + Send + 'static, T: Send + 'static
+```
+
+**`'static` rules out borrowing `out`/`words`/`flags`.** That is not an oversight
+in the pool; a persistent pool outlives any caller frame, so it cannot hold
+borrows into one.
+
+**THE THREE WAYS OUT, ALL CLOSED:**
+
+1. **A hand-rolled scoped thread pool** — needs `unsafe` to prove the borrows
+   outlive the jobs. This crate is `#![forbid(unsafe_code)]`.
+2. **A scoped-threadpool crate** (rayon and friends) — a new dependency for a
+   measurement convenience, which is the dependency-smuggling this project
+   forbids.
+3. **Restructure so jobs own their output** — each worker `collect()`s its own
+   `Vec<f64>` and the caller stitches them, making the closures `'static`. This is
+   the only safe-Rust route, and it is **already measured and REJECTED**:
+   `2026-08-16 cod-pandas — REJECTED: the write-once elementwise path is 1.0207x
+   SLOWER. The memset was never the cost; the PURGE is (br-frankenpandas-284ul)`,
+   p50 1980.78us against baseline. The same entry identifies "per-worker
+   `collect()`" as the safe-Rust shape, so the experiment that would be needed
+   here has been run and lost.
+
+**SO THE A/A NULL INSTABILITY ON PARALLEL KERNELS HAS NO CHEAP FIX IN THIS
+CODEBASE.** The realistic options are the two I have been treating as fallbacks:
+accept a low certification yield and report cv-screened clusters (as `floor @1M`
+≈0.125x, n=6 now does), or change the shared measurement contract — a wider null
+band, or admitting cv-qualified clusters. Both are decisions for whoever owns the
+harness.
+
+**I am recording this against my own advice deliberately.** Four entries carry a
+recommendation I had not costed, and anyone acting on it would have spent a
+campaign discovering points 1–3 the hard way. The recommendation should be read
+as withdrawn wherever it appears above.
+
+**No loadavg row is banked with this entry because no measurement was taken.**
