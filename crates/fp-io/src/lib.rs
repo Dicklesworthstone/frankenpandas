@@ -24958,13 +24958,12 @@ mod tests {
             "plain_ints_with_a_null".to_string(),
             "nullable_ints_all_valid".to_string(),
         ];
-        let frame =
-            DataFrame::new_with_column_order(
-                Index::new_known_unique_int64_unit_range(0, 3),
-                columns,
-                order,
-            )
-            .unwrap();
+        let frame = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 3),
+            columns,
+            order,
+        )
+        .unwrap();
 
         let bytes = super::write_ipc_stream_bytes(&frame).expect("write ipc stream");
         let back = super::read_ipc_stream_bytes(&bytes).expect("read ipc stream");
