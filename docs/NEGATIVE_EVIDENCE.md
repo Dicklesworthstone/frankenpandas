@@ -26773,3 +26773,37 @@ row, and nothing is claimed against pandas on their strength. `trunc`'s gain is
 inside the noise on the minima and should be treated as unproven. The floor/ceil
 figures exceed what one saved op predicts, which suggests `copysign` is costing
 more than three ops here — worth confirming with `perf stat` before landing.
+
+### 2026-08-16 CrimsonPine — CORRECTING THE ENTRY ABOVE: the `copysign`→OR gain is NOT a saved op. Scalar op counts are equal; the mechanism is vectorization and is still unconfirmed
+
+The preceding entry proposed landing `r | (x & signbit)` in place of
+`copysign(r, x)` and guessed the mechanism: "`copysign` is likely costing more
+than three ops here". **Checked it before landing anything, and that guess is
+wrong.** Disassembling the out-of-line kernels in the same probe binary:
+
+| kernel | instructions | shape |
+|---|---|---|
+| `floor_shipped` | 21 | 4 `andpd`, 3 `andnpd`, 3 `orpd`, 3 `addsd`, 2 `cmpltsd` |
+| `floor_cand` | **22** | 3 `andpd`, 2 `andnpd`, 2 `orpd`, 3 `addsd`, 2 `cmpltsd` |
+| `ceil_shipped` | 24 | 5 `andpd`, 4 `orpd`, 3 `andnpd` |
+| `ceil_cand` | **23** | 2 `or`, 4 `movq`, 1 `movmskpd` |
+| `trunc_shipped` | 21 | — |
+| `trunc_cand` | **17** | — |
+
+`floor_cand` retires ONE MORE instruction than `floor_shipped` in the scalar copy
+while measuring **1.647x faster**. An op-count story cannot produce that. These are
+also `addsd`/`cmpltsd` — SCALAR — so they are the out-of-line copies, not the hot
+loop, which is inlined into `map_slice` and vectorized. **The gain therefore lives
+in how the two forms VECTORIZE, not in how many operations they name**, and note
+`ceil_cand` has fallen to `movq`/`or` on the general-purpose registers plus a
+`movmskpd`, which is a different lowering strategy entirely rather than a cheaper
+one.
+
+**Nothing changes about the correctness result** — the candidates are still
+bit-identical over all 3066760 corpus values, and the signed-magic refutation
+above still stands. What changes is that the *reason* for the speedup is not
+established, so the next agent must not land it with "saves an op" in the commit
+message. Confirm by disassembling the INLINED `map_slice` instantiations (count
+`ymm`/packed ops per element in each) before writing any mechanism claim down.
+This is the same failure the entry above is about, one level up: a number that
+reproduces is not a mechanism that is understood.
