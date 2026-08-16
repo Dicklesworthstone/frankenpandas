@@ -138,8 +138,8 @@ pub const fn overflow_policy_for_mode(mode: RuntimeMode) -> OverflowPolicy {
     }
 }
 use fp_types::{
-    DType, Interval, IntervalClosed, NullKind, OverflowPolicy, Period, PeriodFreq, Scalar,
-    SparseDType, Timedelta, Timestamp, common_dtype,
+    DType, Interval, IntervalClosed, NullKind, OverflowPolicy, PandasTemporalError, Period,
+    PeriodFreq, Scalar, SparseDType, TemporalFailure, Timedelta, Timestamp, common_dtype,
 };
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -14130,6 +14130,69 @@ impl Series {
         }
 
         (total, count)
+    }
+
+    /// Fallible sibling of [`Self::sum`] for a `Timedelta64` column: reports a
+    /// reduction overflow instead of surfacing it as `NaT`.
+    ///
+    /// `Some(Ok(ns))` for a timedelta64 column that folds without overflowing,
+    /// `Some(Err(failure))` when it overflows, and `None` when the column is not
+    /// `Timedelta64` — so the caller can tell "no overflow" from "this reduction
+    /// has no timedelta overflow contract at all" without a second dtype match.
+    ///
+    /// MEASURED, live pandas 2.2.3 — the reduction does NOT raise the scalar
+    /// additive class, it raises its own:
+    ///
+    /// ```text
+    ///   pd.Series([pd.Timedelta.max, pd.Timedelta.max]).sum()
+    ///     -> ValueError: overflow in timedelta operation
+    ///   pd.Timedelta.max + pd.Timedelta('1ns')
+    ///     -> OverflowError
+    /// ```
+    ///
+    /// so the failure carries [`PandasTemporalError::OverflowInTimedeltaOperation`]
+    /// rather than the `Overflow` that [`Timedelta::try_add`] attaches — the
+    /// taxonomy reserves that variant for exactly `Series.sum()` / `Series.std()`.
+    /// The operands recorded are the running total and the element that could
+    /// not be folded into it, which is what a caller needs to report the row.
+    ///
+    /// ⚠ THIS CHANGES NO EXISTING BEHAVIOUR. [`Self::sum`] still folds with the
+    /// saturating [`Timedelta::add`] and still yields `NaT`. This is the
+    /// vectorized counterpart of the pattern the scalar half of
+    /// br-frankenpandas-fyr1z-strict-raise-arms-t7ht2 already landed, where
+    /// `Timedelta::try_div_scalar` was added beside an unchanged `div_scalar`:
+    /// the fallible sibling makes the failure *available* to a policy, and
+    /// nothing routes through it until a mode carrier does. Feed it to
+    /// [`OverflowPolicy::resolve`] — STRICT surfaces the failure, HARDENED
+    /// recovers as `NaT` and writes the audit entry, `SurfaceNat` reproduces
+    /// today's answer bit-for-bit.
+    ///
+    /// NaT elements are skipped exactly as [`Self::sum`] skips them, so the two
+    /// agree element-for-element on every input that does not overflow.
+    pub fn try_sum_timedelta_ns(&self) -> Option<Result<i64, TemporalFailure>> {
+        if self.column.dtype() != DType::Timedelta64 {
+            return None;
+        }
+        let mut total: i64 = 0;
+        for value in self.column.values() {
+            let Scalar::Timedelta64(ns) = value else {
+                continue;
+            };
+            if *ns == Timedelta::NAT {
+                continue;
+            }
+            match Timedelta::try_add(total, *ns) {
+                Ok(next) => total = next,
+                Err(failure) => {
+                    return Some(Err(TemporalFailure::new(
+                        "Series::sum",
+                        PandasTemporalError::OverflowInTimedeltaOperation,
+                    )
+                    .with_operands(failure.operands.map_or(total, |(lhs, _)| lhs), *ns)));
+                }
+            }
+        }
+        Some(Ok(total))
     }
 
     /// Sum of non-null numeric values. Returns `Scalar::Float64(0.0)` for empty.
@@ -192879,9 +192942,13 @@ mod sgb_rolling_build_groups_share_lyaqi {
 #[cfg(test)]
 mod overflow_policy_mode_mapping_5e47p {
     use fp_runtime::RuntimeMode;
-    use fp_types::{OverflowPolicy, Timedelta, overflow_audit};
+    // PandasTemporalError/Scalar/Series added by CalmMink: the in-progress
+    // t7ht2 tests below reference them but the module imported neither, so
+    // fp-frame did not compile for ANY agent in this shared checkout. Purely
+    // additive — no test body or assertion was touched. See agent-mail thread.
+    use fp_types::{OverflowPolicy, PandasTemporalError, Scalar, Timedelta, overflow_audit};
 
-    use super::overflow_policy_for_mode;
+    use super::{Series, overflow_policy_for_mode};
 
     /// br-frankenpandas-5e47p: STRICT surfaces the failure so a caller can
     /// raise what pandas raises; HARDENED recovers as NaT and records it.
@@ -192907,6 +192974,83 @@ mod overflow_policy_mode_mapping_5e47p {
     /// End-to-end through the mapping: HARDENED recovers to the SAME value
     /// STRICT would have failed on, and leaves an audit entry naming the op and
     /// the operands. This is the behaviour the mode split is supposed to buy.
+    #[test]
+    /// The vectorized reduction reports pandas' OWN class, and `sum()` is
+    /// untouched. br-frankenpandas-fyr1z-strict-raise-arms-t7ht2.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    /// ```text
+    ///   pd.Series([pd.Timedelta.max, pd.Timedelta.max]).sum()
+    ///     -> ValueError: overflow in timedelta operation
+    ///   pd.Timedelta.max + pd.Timedelta('1ns')
+    ///     -> OverflowError
+    /// ```
+    /// Two different classes for the same arithmetic, which is why the fold
+    /// cannot simply propagate `Timedelta::try_add`'s `Overflow`.
+    #[test]
+    fn timedelta_sum_reports_the_reduction_class_not_the_scalar_one_t7ht2() {
+        let overflowing = Series::from_values(
+            "d",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Timedelta64(i64::MAX), Scalar::Timedelta64(i64::MAX)],
+        )
+        .unwrap();
+
+        let outcome = overflowing
+            .try_sum_timedelta_ns()
+            .expect("a Timedelta64 column has a timedelta overflow contract");
+        let failure = outcome.expect_err("two Timedelta::max values cannot fold");
+        assert_eq!(
+            failure.pandas_error,
+            PandasTemporalError::OverflowInTimedeltaOperation,
+            "the REDUCTION raises ValueError('overflow in timedelta operation'), \
+             not the scalar path's OverflowError"
+        );
+        assert_eq!(failure.op, "Series::sum");
+
+        // sum() ITSELF IS UNCHANGED -- this slice adds availability, not
+        // behaviour. A caller that never asks still gets today's NaT.
+        assert_eq!(
+            overflowing.sum().unwrap(),
+            Scalar::Timedelta64(Timedelta::NAT)
+        );
+
+        // The policy carrier consumes it exactly as it consumes the scalar
+        // siblings: STRICT surfaces, SurfaceNat reproduces today bit-for-bit.
+        let strict = overflow_policy_for_mode(RuntimeMode::Strict)
+            .resolve(overflowing.try_sum_timedelta_ns().unwrap(), Timedelta::NAT);
+        assert!(
+            strict.is_err(),
+            "STRICT must surface the reduction overflow"
+        );
+        assert_eq!(
+            OverflowPolicy::SurfaceNat
+                .resolve(overflowing.try_sum_timedelta_ns().unwrap(), Timedelta::NAT)
+                .unwrap(),
+            Timedelta::NAT,
+        );
+
+        // A column that does NOT overflow agrees with sum() element-for-element,
+        // and NaT elements are skipped by both.
+        let ok = Series::from_values(
+            "d",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Timedelta64(5),
+                Scalar::Timedelta64(Timedelta::NAT),
+                Scalar::Timedelta64(7),
+            ],
+        )
+        .unwrap();
+        assert_eq!(ok.try_sum_timedelta_ns().unwrap().unwrap(), 12);
+        assert_eq!(ok.sum().unwrap(), Scalar::Timedelta64(12));
+
+        // A non-timedelta column has no such contract, which is distinct from
+        // "did not overflow".
+        let ints = Series::from_values("i", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        assert!(ints.try_sum_timedelta_ns().is_none());
+    }
+
     #[test]
     fn hardened_mode_recovers_and_audits_while_strict_surfaces() {
         overflow_audit::enable();
