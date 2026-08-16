@@ -24468,3 +24468,97 @@ regardless of when it is launched.
 Run 10 is excluded by the cv screen and does not move it.
 
 **Artifacts:** `artifacts/bench/floor_1M_thinkstation1_2026-08-16_run10_load18_elf_4a89472f.json`
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-03fp5) — register-blocking and j-tiling the dot kernel both lose to the AXPY order — REJECT
+
+`df_dot @10k` is `dim = 100`: 1e6 multiply-adds, and a `perf record` of the whole
+job puts 16% of process cycles in `materialize_float64_dot` against 55% in the
+startup self-SHA — i.e. the kernel IS the timed job at this size, with no
+construction overhead worth attacking. So the kernel was attacked directly.
+
+**Lever 1, register blocking.** The AXPY arm spends THREE memory ops per FMA —
+load `a`, load `out`, store `out` — because the running sum lives in `out` and is
+re-read and re-written on each of the `k` passes. Keeping `R` rows' accumulators
+in registers across the whole `j` sweep drops that to one. Measured, one ELF,
+`FP_DOT_ROW_BLOCK` varied in process, p50 ms:
+
+| arm | AXPY | R=4 | R=8 | R=16 | R=32 |
+|---|---:|---:|---:|---:|---:|
+| 10k | 0.292 / 0.297 | 0.460 / 0.346 | 0.390 / 0.314 | 0.284 / 0.288 | 0.404 / 0.325 |
+| 1M serial | 215.7 | | **450.8** | 292.0 | |
+
+**Lever 2, j-tiling on top of it.** The 1M collapse is a prefetch failure, not a
+capacity one: with no tiling a row block touches `R` doubles in each of `k`
+SEPARATE `Arc<[f64]>` allocations before returning to the first — 1000 concurrent
+streams at `dim = 1000`. Tiling `j` bounds the live stream count, and a tile
+boundary re-loads the running sum from `out` so the `j` order is untouched.
+Measured, one ELF, `FP_DOT_ROW_BLOCK` x `FP_DOT_J_TILE`, 1M serial p50 ms:
+
+| AXPY | R8/T8 | R8/T32 | R8/T128 | R16/T8 | R16/T32 | R16/T128 | AXPY again |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 192.4 | 195.1 | 333.8 | 420.5 | 197.9 | 263.0 | 292.7 | 188.8 |
+
+**Counted mechanism:** the FMA count is UNCHANGED at `n · k · len` and the
+allocation count is UNCHANGED at `n` output `Vec<f64>` — both levers only move
+where the running sum lives and in what order independent cells are visited.
+Tiling recovers the 450.8 ms collapse back to 195.1 ms, which confirms the
+1000-stream diagnosis, and then stops: 195.1 ms against the AXPY arm's 188.8-192.4
+ms in the same session. The out-traffic those levers remove was already absorbed
+by L1, so the AXPY order is not the constraint.
+
+**Decision: REJECT** both; reverted, patch parked at
+`/data/projects/.scratch/03fp5_dot_register_block_tiling_REJECTED.patch`. This is
+the SECOND structural rejection on this kernel today (the first was output-column
+fusion, entry above). Two rejections pointing the same way is a signal about where
+the constraint actually is — see the next entry.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-03fp5) — the dot kernel emits SSE2 `mulpd`, and widening it to AVX2 is 1.19-1.24x, bit-identical — MEASURED, NOT LANDED
+
+Disassembling `materialize_float64_dot` in the shipped ELF explains both
+rejections above: the loop compiles to **2-wide `mulpd`/`addpd` with ZERO `%ymm`
+references** — this workspace builds for baseline `x86-64`, so the hot loop runs
+SSE2 while the incumbent's BLAS runs AVX2+FMA. At 1e6 multiply-adds per 0.29 ms
+the 10k arm is already at the 2-wide roof; no rearrangement of an SSE2 loop can
+reach a 4-wide incumbent.
+
+Two ELFs from identical source, one with `RUSTFLAGS=-C target-feature=+avx2,+fma`:
+
+| ELF | kernel instruction mix | `%ymm` refs |
+|---|---|---:|
+| `4a89472f…` (baseline) | 2 `mulpd`, 2 `addpd`, 3 `mulsd`, 3 `addsd` | **0** |
+| `76661ac3…` (+avx2,+fma) | 5 `vmulpd`, 5 `vaddpd`, 3 `vmulsd`, 3 `vaddsd` | **20** |
+
+**No `vfmadd` in either.** Rust does not contract `a * b + c` without fast-math,
+so the AVX2 arm widens the lanes and changes nothing else — and the measurement
+confirms it: **both ELFs report checksum `4957dea0fe3e2ed1` at both sizes.** The
+widening is bit-identical, which is exactly what makes it a candidate rather than
+a numerics change.
+
+Interleaved ABAB, both ELFs, same host and session, p50 ms:
+
+| size | sse2 | avx2 | sse2 | avx2 | sse2 | avx2 | paired median |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 10k | 0.3494 | 0.2930 | 0.2809 | 0.2359 | 0.2814 | 0.2893 | **1.19x** |
+| 1M | 18.895 | 15.790 | 19.906 | 14.147 | 18.794 | 15.220 | **1.24x** |
+
+**A/A null control (same invocation):** the AVX2 ELF against live pandas 2.2.3,
+balanced-square 15 rounds: at 10k FrankenPandas A/A median ratio 1.0067 and pandas
+0.9859 — BOTH inside 2% of unity, and the row is fully decidable at **0.633x**,
+effect CI [0.60093478, 0.67898298]. At 1M the FP A/A median was 1.0203 and pandas'
+0.8543, so that row (1.32x) is NULL_UNDECIDABLE and is not banked.
+
+**NOT LANDED, and deliberately so.** This is a build-policy change, and a BLANKET
+`x86-64-v3` target policy is already REJECTED in this ledger (2026-07-31 CyanLynx:
+sqrt 0.361x and log regressing against the default build). Nothing in this entry
+contradicts that — it measures ONE workload and shows the gain is bit-identical
+there. The open question is whether a targeted mechanism exists that does not put
+the whole surface on a wider baseline. Filed as br-frankenpandas-oxv4u; do not
+re-run the blanket-flag experiment.
+
+**Where this leaves `df_dot @10k`:** still a loss, now measured on both arms —
+**0.53x** on the shipped ELF and **0.633x** on the AVX2 ELF (the latter CERTIFIED,
+all three clauses). The remaining gap at this size is ISA width plus numpy's very
+small dispatch overhead at `dim = 100`, not kernel structure.
+
+**Artifacts:** `artifacts/bench/03fp5_dot_avx2fma_10k_thinkstation1_2026-08-16.json`,
+`artifacts/bench/03fp5_dot_avx2fma_1M_thinkstation1_2026-08-16.json`.
