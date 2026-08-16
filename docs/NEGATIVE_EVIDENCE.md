@@ -23115,3 +23115,63 @@ inside the call, so it is not evidence either way about whether the parallel pat
 executed. The p50 is the evidence.
 
 **Artifacts:** `artifacts/bench/dot_abba_1M_thinkstation1_2026-08-16_local_elf.json`
+
+---
+
+## 2026-08-16 cod-pandas — the interleaved FP_DOT_SERIAL A/B settles it: the lever is LIVE (5.6x) and 6df71eae2 measured the SERIAL arm (br-frankenpandas-1hjgz)
+
+`6df71eae2` banked `df_dot @1M` FP p50 = 201954.47us on a hash-verified local
+build (ELF `86355328fe14f5e5e527ab60d330a2aa2590d2b9e48edb0c0a5a453675513585`,
+git_sha c23e94f5f), called it "unmoved" against the 208692us measured BEFORE the
+column-parallel lever, and concluded that HEAD's "0.136x -> 0.475x" does not
+reproduce. It also named the test that would settle the question: the
+interleaved `FP_DOT_SERIAL` A/B in ONE process on ONE ELF.
+
+Ran exactly that. No rebuild — both ELFs were already on disk, and
+`86355328…` is the peer's own binary, byte-for-byte:
+
+```
+ELF                                        FP_DOT_SERIAL   p50 df_dot @1M   n
+target/release-perf/fp-bench  86355328…    unset            31932.8us       50
+target/release-perf/fp-bench  86355328…    =1              179185.7us       50
+target/release/fp-bench       cc70daba…    unset            32716.1us       50
+target/release/fp-bench       cc70daba…    =1              177420.3us       50
+
+serial/parallel   release-perf (the peer's ELF)  5.61x
+                  release      (my ELF)          5.42x
+```
+
+**THE LEVER IS NOT INERT, AND IT IS LIVE IN THE PEER'S OWN BINARY.** `strings
+86355328… | grep -c FP_DOT_SERIAL` = 1, and that ELF runs 31932.8us on the
+parallel arm. The 201954.47us it banked is the SERIAL arm's number
+(179185.7us here, same order, and the run was on a load-19 box). So the row did
+not refute the lever; it measured the path the lever exists to avoid. The most
+likely mechanism is an exported `FP_DOT_SERIAL` leaking from an earlier
+interleaved A/B into the harness invocation — the variable is read once per
+process through a `OnceLock`, so it silently applies to everything downstream in
+the same shell.
+
+**⚠ OPERATIONAL RULE THIS BUYS: `FP_DOT_SERIAL` MUST BE UNSET EXPLICITLY, NOT
+ASSUMED UNSET.** Use `env -u FP_DOT_SERIAL` on every harness invocation that is
+not deliberately measuring the serial arm. An exported toggle is invisible in the
+harness's own provenance block — the bench JSON records host, ELF sha, ISA,
+governor and thread counts, but NOT the environment that selected the code path,
+so a leaked toggle produces a fully "provenanced" row that names the wrong arm.
+This is the same failure shape as the harness-identity and worker-identity rows
+already in this ledger: the artifact looked complete and was still measuring
+something other than what it claimed.
+
+**WHAT THIS IS AND IS NOT.** 5.61x is FP-vs-FP — a SELF-speedup, which is
+MAINTENANCE, not a win, and it is not a vs-pandas claim of any kind. The
+withdrawn 0.475x stays withdrawn: both the 9-round and 25-round vs-pandas runs
+had a failing or luck-passing pandas A/A null, and nothing here repairs that.
+What is now settled is narrower and worth exactly what it says: the
+column-parallel materialization moves FrankenPandas' own df.dot arm by ~5.6x on
+this host, on two independently built ELFs, measured in one process each with
+the incumbent-side question deliberately excluded.
+
+Both profiles agree (5.61x vs 5.42x), which also disposes of profile choice as an
+explanation: `release-perf` (thin LTO, codegen-units=1, unstripped, 78415608
+bytes) and plain `release` (24885488 bytes) land within 4% of each other on both
+arms. `release-perf` is the sanctioned measurement profile and should be the one
+quoted; the difference is not what anyone was arguing about.
