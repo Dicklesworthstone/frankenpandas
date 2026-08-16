@@ -24871,6 +24871,16 @@ impl Column {
     /// into one pass by [`par_map_vec_f64_with_witness`]; the witness used to be a
     /// second, serial read of the whole output. Bit-identical to the serial helper
     /// (same `f`, same NaN→invalid rule, same order/witness).
+    /// Generic over `F` (not a `fn` pointer) so every call site monomorphizes
+    /// and `f` inlines into each worker's slice loop. That matters most for
+    /// floor/ceil/trunc: inlined, LLVM can lower them to a vectorized `roundpd`
+    /// — but `roundpd` is SSE4.1, so on a baseline x86-64 target it falls back
+    /// to a per-element libm call instead, which is why that family measured
+    /// ~0.09x vs pandas at 1M. Parallelism here and the ISA flag
+    /// (br-frankenpandas-h67zz / -cu22b, owned by cod-pandas) COMPOSE: each
+    /// worker runs the same inlinable loop, so enabling the flag vectorizes
+    /// inside every chunk rather than replacing this. Do not treat one as a
+    /// substitute for the other. (br-frankenpandas-xv9qf)
     fn typed_float_unary_nullable_owned_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
         let len = self.len();
         let (out, validity_words, all_valid, all_finite) = if let Some(data) = self.as_f64_slice() {
@@ -24928,71 +24938,6 @@ impl Column {
         ))
     }
 
-    /// `typed_float_unary` for maps that NEVER introduce NaN and preserve
-    /// finiteness EXACTLY (floor/ceil/trunc — `f(finite)` is finite and never
-    /// overflows, `f(±inf)=±inf`). The caller MUST only pass such `f`; passing
-    /// e.g. sqrt/exp/recip here would mis-witness the output. Skips
-    /// `from_f64_values`' has_nan/all_finite rescan: an all-valid input has no
-    /// NaN so the output has none either, and the all-finite witness equals the
-    /// input's (carried for free; the i64→f64 cast is always finite ⇒ `true`).
-    /// Bit-identical to `typed_float_unary(f)` (same values, all-valid mask).
-    /// Generic over `F` (not a `fn` pointer) so each call site monomorphizes
-    /// and `f` inlines — letting LLVM lower `f64::floor`/`ceil`/`trunc` to a
-    /// vectorized `roundpd` instead of a per-element indirect call.
-    fn typed_float_unary_finite_preserving<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
-        if let Some(data) = self.as_f64_slice() {
-            let witness = self.f64_finite_witness();
-            let out: Vec<f64> = data.iter().map(|&x| f(x)).collect();
-            return Some(Self::from_f64_all_valid_with_finite_opt(out, witness));
-        }
-        if let Some(data) = self.as_i64_slice() {
-            let out: Vec<f64> = data.iter().map(|&x| f(x as f64)).collect();
-            // i64→f64 is always finite and floor/ceil/trunc keep it finite.
-            return Some(Self::from_f64_all_valid_with_finite_opt(out, Some(true)));
-        }
-        // Nullable Float64/Int64 INPUT (Float64-output ops floor/ceil/trunc): the all-
-        // valid arms above bail on ANY missing, so nullable input fell to the per-
-        // element Scalar loop. Invalid slot ⇒ NaN; a present slot ⇒ f(v) which is
-        // finite (f preserves finiteness) UNLESS the input datum was itself NaN, and
-        // f(NaN)=NaN for floor/ceil/trunc — so from_f64_values (which re-derives
-        // validity from NaN) marks both the absent slots AND a valid-bit-set-NaN datum
-        // missing, exactly as the Scalar loop's is_missing does. Bit-identical: present
-        // Float64 ⇒ Float64(f(x)); present Int64 ⇒ Float64(f(x as f64)) (== x as f64,
-        // integral); missing ⇒ Null(NaN). Cannot carry the all-finite witness (the
-        // output has NaN at missing slots), so this scans — still far cheaper than the
-        // Vec<Scalar> Scalar loop.
-        if self.dtype == DType::Float64
-            && let Some((data, validity)) = self.as_f64_slice_with_validity()
-        {
-            return Some(Self::from_f64_values(
-                (0..data.len())
-                    .map(|i| {
-                        if validity.get(i) {
-                            f(data[i])
-                        } else {
-                            f64::NAN
-                        }
-                    })
-                    .collect(),
-            ));
-        }
-        if self.dtype == DType::Int64
-            && let Some((data, validity)) = self.as_i64_slice_with_validity()
-        {
-            return Some(Self::from_f64_values(
-                (0..data.len())
-                    .map(|i| {
-                        if validity.get(i) {
-                            f(data[i] as f64)
-                        } else {
-                            f64::NAN
-                        }
-                    })
-                    .collect(),
-            ));
-        }
-        None
-    }
 
     fn f64_integral_or_infinite_identity(x: f64) -> bool {
         const SIGN_MASK: u64 = 0x8000_0000_0000_0000;
@@ -25164,7 +25109,10 @@ impl Column {
         if let Some(out) = self.typed_float_integral_identity() {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_finite_preserving(f64::floor) {
+        // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
+        // for why this family was the only one left serial and why that is now
+        // the wrong default. (br-frankenpandas-xv9qf)
+        if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::floor) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -25192,7 +25140,10 @@ impl Column {
         if let Some(out) = self.typed_float_integral_identity() {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_finite_preserving(f64::ceil) {
+        // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
+        // for why this family was the only one left serial and why that is now
+        // the wrong default. (br-frankenpandas-xv9qf)
+        if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::ceil) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -25220,7 +25171,10 @@ impl Column {
         if let Some(out) = self.typed_float_integral_identity() {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_finite_preserving(f64::trunc) {
+        // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
+        // for why this family was the only one left serial and why that is now
+        // the wrong default. (br-frankenpandas-xv9qf)
+        if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::trunc) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
