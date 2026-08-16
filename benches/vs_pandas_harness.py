@@ -3141,10 +3141,17 @@ def host_state_snapshot() -> dict[str, Any]:
             "max": round(max(mhz), 1),
             "cpus_sampled": len(mhz),
         }
+        # Sorted descending, kept for the top-k estimator in
+        # `summarize_host_state`. In-memory only: the leading underscore marks it
+        # as not for the artifact, and the summariser never copies it out.
+        snapshot["_sorted_mhz_desc"] = sorted(mhz, reverse=True)
     return snapshot
 
 
-def summarize_host_state(samples: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+def summarize_host_state(
+    samples: list[tuple[str, dict[str, Any]]],
+    threads_by_arm: dict[str, int] | None = None,
+) -> dict[str, Any]:
     """Per-arm clock and whole-cell load, plus a clock-skew flag.
 
     br-frankenpandas-633fb. The campaign's rule is that both arms must sit inside
@@ -3176,18 +3183,42 @@ def summarize_host_state(samples: list[tuple[str, dict[str, Any]]]) -> dict[str,
     # arm's execution speed, so the same-window flag is computed from it.
     busy: dict[str, float] = {}
     host: dict[str, float] = {}
+    topk: dict[str, dict[str, Any]] = {}
     for arm in ("frankenpandas", "pandas"):
         rows = [s["cpu_mhz"] for tag, s in samples if tag == arm and s.get("cpu_mhz")]
         if rows:
             busy[arm] = round(float(np.median([r["max"] for r in rows])), 1)
             host[arm] = round(float(np.median([r["median"] for r in rows])), 1)
+        # ⚠ THE ESTIMATOR THAT ANSWERS "DID BOTH ARMS RUN ON COMPARABLE CORES".
+        # An arm using k threads occupies roughly the k fastest cores, so its
+        # cores are estimated by the top k of each sample rather than by the max
+        # (which is one core, blind to a 64-thread arm's slow tail) or the median
+        # (which is dominated by idle cores). k comes from the arm's OBSERVED
+        # thread count, never a requested one.
+        k = (threads_by_arm or {}).get(arm)
+        vectors = [s["_sorted_mhz_desc"] for tag, s in samples
+                   if tag == arm and s.get("_sorted_mhz_desc")]
+        if k and vectors:
+            heads = [v[: max(1, min(int(k), len(v)))] for v in vectors]
+            topk[arm] = {
+                "k": int(k),
+                "median": round(float(np.median([float(np.median(h)) for h in heads])), 1),
+                "slowest": round(float(np.median([min(h) for h in heads])), 1),
+                "fastest": round(float(np.median([max(h) for h in heads])), 1),
+            }
     if busy:
         summary["busy_core_mhz_by_arm"] = busy
         summary["host_median_mhz_after_arm"] = host
-    if len(busy) == 2:
-        low, high = sorted(busy.values())
+    if topk:
+        summary["arm_core_mhz_top_k"] = topk
+    # Prefer the top-k medians for the same-window judgement; fall back to the
+    # single busy core only when thread counts were unavailable.
+    basis = ({arm: v["median"] for arm, v in topk.items()} if len(topk) == 2 else busy)
+    if len(basis) == 2:
+        low, high = sorted(basis.values())
         summary["arms_saw_same_clock"] = bool(high <= low * 1.05)
         summary["arm_clock_ratio"] = round(high / low, 4) if low else None
+        summary["same_clock_basis"] = "top_k_median" if len(topk) == 2 else "busy_core_max"
     every = [s["cpu_mhz"]["median"] for _, s in samples if s.get("cpu_mhz")]
     if every:
         summary["observed_cpu_mhz"] = {
@@ -3282,9 +3313,19 @@ def run_balanced_square_cell(
                 "ratio_pandas_over_frankenpandas": round_ratios[-1],
             }
         )
+    fp_aggregate = _balanced_square_aggregate(fp_slots, engine="frankenpandas")
+    pandas_aggregate = _balanced_square_aggregate(pandas_slots, engine="pandas")
+    observed_threads = {
+        arm: value
+        for arm, value in (
+            ("frankenpandas", fp_aggregate.operation_threads_used),
+            ("pandas", pandas_aggregate.operation_threads_used),
+        )
+        if value
+    }
     return (
-        _balanced_square_aggregate(fp_slots, engine="frankenpandas"),
-        _balanced_square_aggregate(pandas_slots, engine="pandas"),
+        fp_aggregate,
+        pandas_aggregate,
         {
             "design": "balanced-square-abbaabba-v1",
             "incumbent_arm": "A=pandas",
@@ -3295,7 +3336,8 @@ def run_balanced_square_cell(
             "rounds_detail": rounds_artifact,
             "host_wide_quiescence_required": False,
             "host_state": summarize_host_state(
-                host_state_samples + [("final", host_state_snapshot())]
+                host_state_samples + [("final", host_state_snapshot())],
+                observed_threads,
             ),
         },
     )
@@ -3506,6 +3548,54 @@ def _host_state_self_test() -> None:
         raise RuntimeError("equal busy-core clocks must read as one window")
     if idle_skew["host_median_mhz_after_arm"] != {"frankenpandas": 1500.0, "pandas": 3950.0}:
         raise RuntimeError("the box-median must still be recorded, separately labelled")
+
+    # TOP-K: an arm's cores are the k fastest, k = its OBSERVED thread count.
+    def vec(arm: str, freqs: list[float]) -> tuple[str, dict[str, Any]]:
+        ordered = sorted(freqs, reverse=True)
+        return (arm, {"loadavg": [1.0, 1, 1],
+                      "cpu_mhz": {"min": min(ordered), "median": float(np.median(ordered)),
+                                  "max": max(ordered), "cpus_sampled": len(ordered)},
+                      "_sorted_mhz_desc": ordered})
+
+    # NEGATIVE CASE, and the one this estimator exists for: a 1-thread arm on a
+    # single fast core against a 64-thread arm spread over fast AND slow ones.
+    # The single busy core reads 4000 for both and calls it one window; the top-k
+    # medians do not, because the wide arm's own cores really are slower.
+    spread = [4000.0] * 8 + [2000.0] * 56
+    mixed = summarize_host_state(
+        [vec("frankenpandas", spread), vec("pandas", spread)] * 3,
+        {"frankenpandas": 1, "pandas": 64},
+    )
+    if mixed["arm_core_mhz_top_k"]["frankenpandas"]["median"] != 4000.0:
+        raise RuntimeError("a 1-thread arm must be credited with its one fast core")
+    if mixed["arm_core_mhz_top_k"]["pandas"]["median"] != 2000.0:
+        raise RuntimeError("a 64-thread arm's cores must include its slow tail")
+    if mixed["arms_saw_same_clock"]:
+        raise RuntimeError("arms on 4000MHz and 2000MHz cores are not one window")
+    if mixed["same_clock_basis"] != "top_k_median":
+        raise RuntimeError("the judgement must be based on top-k when threads are known")
+    if mixed["arm_core_mhz_top_k"]["pandas"]["slowest"] != 2000.0:
+        raise RuntimeError("the slow tail must be reported, not averaged away")
+
+    # Equal thread counts on the same machine state remain one window.
+    even = summarize_host_state(
+        [vec("frankenpandas", spread), vec("pandas", spread)] * 3,
+        {"frankenpandas": 8, "pandas": 8},
+    )
+    if not even["arms_saw_same_clock"]:
+        raise RuntimeError("identical thread counts must read as one window")
+
+    # k larger than the machine must clamp rather than raise.
+    clamped = summarize_host_state(
+        [vec("frankenpandas", [3000.0, 2000.0]), vec("pandas", [3000.0, 2000.0])] * 2,
+        {"frankenpandas": 999, "pandas": 999},
+    )
+    if clamped["arm_core_mhz_top_k"]["pandas"]["median"] != 2500.0:
+        raise RuntimeError("k beyond the CPU count must clamp to the sampled cores")
+
+    # The in-memory vector must never reach the artifact.
+    if any(key.startswith("_") for key in mixed):
+        raise RuntimeError("host state must not emit the raw frequency vector")
 
     # Arms inside 5% are one window.
     tight = summarize_host_state(

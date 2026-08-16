@@ -26226,3 +26226,63 @@ close it; the scheduling axis at this shape is already closed
 
 **Artifacts:** `artifacts/bench/03fp5_df_dot_10k_fp-bench-sse2_clockprov_thinkstation1_2026-08-16.json`,
 `artifacts/bench/03fp5_df_dot_10k_fp-bench-avx2fma_clockprov_thinkstation1_2026-08-16.json`
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-633fb) — the 2.8x cross-core clock spread is an IDLE-CORE artifact: the cores an arm actually occupies agree within 0.6%
+
+The fleet's current explanation for ratios moving between windows is cross-core
+frequency spread, put at 2.879x. I reproduced that number on this host and then
+decomposed it, because a spread statistic taken over all cores says nothing about
+the cores a measurement runs on.
+
+Live snapshot across all 64 CPUs in the affinity, `uptime` 39.68 1-min:
+
+| statistic | value |
+|---|---:|
+| max / median / min | 4043 / 3751 / **1429** MHz |
+| all-core spread | **2.829x** |
+| the 8 slowest cores | 1429, 1429, 1429, 1429, 1429, 1429, 1429, 1429 |
+| the 8 fastest cores | 4043, 4038, 4038, 4037, 4036, 4029, 4028, 4026 |
+| spread among the 16 fastest | **1.006x** |
+
+**The eight slowest cores are all at exactly 1429 MHz, which is this host's
+`scaling_min_freq` — they are not slow, they are PARKED.** Remove the idle floor
+and the working cores agree to 0.6%. The 2.8x is a real snapshot statistic and a
+false description of a measurement's cores.
+
+**Confirmed on a live row rather than by argument.** A deliberately asymmetric
+cell — FrankenPandas forced to 1 thread against pandas' 64, `dim = 316`, loadavg
+rising 49.16 -> 83.89 mid-cell — now reports each arm's own cores via a top-k
+estimator keyed on the arm's OBSERVED thread count:
+
+| arm | k | its cores: slowest / median / fastest |
+|---|---:|---|
+| FrankenPandas | 1 | 3901.2 / **3901.2** / 3901.2 |
+| pandas | 64 | 3914.8 / **3921.1** / 3953.8 |
+
+`arms_saw_same_clock: true`, ratio **1.0051**, basis `top_k_median`. A 64-thread
+arm's slowest core was within 1% of its fastest, and within 0.5% of the
+single-threaded arm's core, while the box as a whole spanned 3768-4008 MHz. **On
+these shapes the two arms demonstrably share a clock, at loadavg 84, and
+cross-core spread cannot be what moves their ratio.**
+
+**A/A null control (same invocation):** that asymmetric row, 3 balanced-square
+rounds, FrankenPandas median ratio 0.992950 and pandas 1.052695 — the incumbent
+outside 2%, so the row is refused and no ratio is banked from it. Its 64-thread
+incumbent arm failing its null while both arms sat at the same clock is itself
+the point: the instability is the incumbent's threading
+(br-frankenpandas-633fb), not the machine's frequency state.
+
+**Instrument change:** `arm_core_mhz_top_k` is now recorded per arm, k taken from
+the observed thread count, reporting that arm's slowest, median and fastest core.
+The same-window judgement uses the top-k medians rather than a single busy core,
+which is blind to a wide arm's slow tail. Self-tested with a 1-thread-versus-
+64-thread fixture over a deliberately bimodal machine (8 cores at 4000, 56 at
+2000): the estimator credits the narrow arm with 4000, the wide arm with 2000,
+and refuses to call that one window — the case a max-based reading gets wrong.
+
+**Not a claim about other projects' hosts or workloads.** frankenfs measured
+2.879x and I reproduce 2.829x here; what this entry adds is that the figure is
+composed of parked cores, and that on `df_dot` shapes both arms' working cores
+agree to within 0.5%. A workload whose threads are periodically idle enough to be
+parked mid-measurement could genuinely straddle the floor, and this instrument
+would now show it.
