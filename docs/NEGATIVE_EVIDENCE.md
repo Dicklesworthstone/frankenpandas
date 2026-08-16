@@ -22279,3 +22279,73 @@ failure-set diff each time, not corpus-wide.
 `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-conformance`.
 
 No timing was measured, so this row names no worker and no harness.
+
+---
+
+## br-frankenpandas-vprpg (2) — payload-dtype chooser WIDENED to the frame path: target FIXED, four gaps EXPOSED, still not landable
+
+**Date:** 2026-08-16 · **Agent:** CalmMink · **Verdict:** REJECT AS SCOPED, and a
+PARTIAL REFUTATION of the row immediately above.
+
+The previous row rejected the chooser wired into `build_series` only, and closed
+with a prediction: *"widening it to `build_dataframe` would only enlarge the
+regression surface."* **That prediction is wrong, and this row retracts it.**
+
+Widening the chooser to the frame path (`build_dataframe`'s two
+`from_dict_with_index` call sites, via a `new_with_column_order` helper) did the
+opposite of what was predicted:
+
+- It **FIXED its target.** `fp_p2d_056_dataframe_merge_asof_backward_nan_left_key_strict`
+  — the last case mismatch in the packet suite, red for the whole campaign — goes
+  GREEN. `fp-join`'s `Int64Nullable` rejection (br-frankenpandas-sopel, 870a1003c)
+  fires exactly as designed once the harness stops handing it a plain `int64` key.
+  The earlier attempt failed only because that fixture carries its data in
+  `frame`/`frame_right`, so `build_series` was never on its path.
+- The regression surface did **not** enlarge — it stayed at four, and it is a
+  DIFFERENT four. `series_filter_non_boolean_mask_strict`, which the narrow
+  version broke, is green under the wide one.
+
+**Measured.** Both arms `cargo test -p fp-conformance --release`, both on rch
+worker **vmi1227854**, same harness (the in-tree fp-conformance packet runner),
+separate invocations — acceptable here ONLY because this is a deterministic
+pass/fail set, not a timing row. No time was measured, so nothing here is a
+ratio.
+
+```
+baseline (pristine, 7ebf937c1)   1599 passed /  8 failed   1/1259 fixtures
+treatment (chooser, frame path)  1596 passed / 11 failed   5/1259 fixtures
+
+  dataframe_merge_asof_backward_nan_left_key_strict   FIXED  <- the target
+  column_dtype_check_int_only_hardened                new   dtype: Int64 vs int64
+  dataframe_clip_nulls_hardened                       new   Int64(-5) vs Int64(-1)
+  ipc_stream_round_trip_null_hardened                 new   round-trip false vs true
+  series_clip_with_nulls_hardened                     new   Float64(2.0) vs Int64(2)
+  series_mul_union_alignment_hardened                 new   Int64(6) vs Float64(6.0)
+```
+
+**Why still rejected.** The packet suite is gate G6. Trading one red for five is
+not a strict improvement, and the bead's own staging rule ("land only if the set
+strictly improves") is what forbids it. Reverted; the complete patch is kept at
+`scratchpad/vprpg_chooser_COMPLETE.patch`.
+
+**What this actually bought — the reason this is a finding and not a dead end.**
+The four new reds are not damage the chooser caused. They are FrankenPandas
+behaving differently on `Int64Nullable` than on `Int64`, which the harness had
+been MASKING by handing FP the easier input. The chooser is a probe that
+converts one opaque red into a map of where nullable-`Int64` support actually
+stops: `clip` (two fixtures, frame and Series), the IPC stream round trip, and
+union-alignment arithmetic.
+
+One of the five is NOT an FP defect at all. `column_dtype_check_int_only_hardened`
+pins `int64`, but under br-frankenpandas-62d1s (7ebf937c1) live pandas 2.2.3 was
+asked this exact fixture and answered **`Int64`** — the fixture contradicts the
+oracle, which is DISC-011 and needs re-banking, not a code fix. It is listed
+above for completeness of the diff, not as a gap to close.
+
+**What this rules out.** Corpus-wide adoption in one commit, still. **What it
+opens:** the chooser is now known to be the LAST blocker on a fully green packet
+suite (1607/0), gated on four per-operation gaps rather than on an unbounded
+unknown. Decomposed into child beads under vprpg.
+
+**Reproduce:** apply `scratchpad/vprpg_chooser_COMPLETE.patch`, then
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-conformance --release`.
