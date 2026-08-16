@@ -25781,3 +25781,56 @@ this host today had BOTH A/A nulls inside 2%. A 75% refusal rate is a property o
 the fleet, not of the gate or the code, and it is the reason so much of today's
 `df.dot` evidence is FrankenPandas-versus-FrankenPandas rather than
 vs-incumbent.
+
+---
+
+## br-frankenpandas-h67zz — ⚠️ THE STABILITY CHECK IS DESTROYING THE WINDOW IT CHECKS: 2-for-2 when I sampled once and launched, 0-for-5 when I sampled for ~40s first
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** operational
+finding from seven observed windows. No measurement taken this turn — the window
+collapsed **during verification**, 13.01 → 18.74 → 32.98 → **39.52** across three
+samples ~36s apart, a 44.2% spread.
+
+**THE PATTERN, and it is the opposite of what I assumed.** Sorting every window I
+have launched into or abandoned today by HOW I DECIDED:
+
+| decision procedure | window | outcome |
+|---|---|---|
+| **one `uptime`, launch immediately** | run 11, load 13.56 | **HELD** 12.77 → 12.11 |
+| **one `uptime`, launch immediately** | run 12, load 11.81 | **HELD** 11.14 → 11.59 |
+| sample 3× over ~40s, then launch | trunc "quiet window" | collapsed 16.8 → 28.7 |
+| sample 3× over ~40s, then launch | ceil "quietest window" | collapsed 13 → 36.1 |
+| sample 3× over ~40s, then launch | trunc "hardest" | collapsed 6.12 → 23.30 mid-run |
+| sample 3× over ~40s | this turn, earlier | collapsed 6.56 → 28.64 **during sampling** |
+| sample 3× over ~40s | this turn, now | collapsed 13.01 → 39.52 **during sampling** |
+
+**2 held out of 2 when I checked once and went. 0 held out of 5 when I verified
+first.** The two holds are also, not coincidentally, the two tightest runs of the
+whole series — run 11 had the lowest max-cv of twelve (10.65%) and run 12 the
+lowest of all (11.37%).
+
+**THE MECHANISM IS UNCOMFORTABLE BECAUSE IT IS MY OWN PROCEDURE.** These windows
+close on a timescale of **tens of seconds** — the fastest observed went 6.56 →
+28.64 in about 40. My stability check takes three samples with 12–15s sleeps,
+i.e. **~40 seconds**. **The verification consumes exactly the resource it is
+verifying.** By the time a three-sample check certifies a window as stable, the
+window it certified no longer exists; and worse, the check preferentially
+survives only into windows that were going to be long-lived anyway, which is why
+sampling correlates with failure rather than causing it in any single case.
+
+**I introduced this procedure myself**, several entries ago, in response to being
+handed load readings that were stale on arrival. It solved the stale-reading
+problem and created a worse one.
+
+**REVISED PROCEDURE, and it is nearly the opposite of what I have been doing:**
+read `uptime` ONCE, and if it passes, launch in the SAME action. Do not sample to
+confirm. If the window was an illusion the run's own start/end loadavg will say
+so — every row already records both — and a wasted invocation costs less than a
+verification that reliably destroys good windows. Reserve multi-sample checking
+for deciding whether to do *code work*, where nothing is consumed by looking.
+
+**This does not retract the volatility finding** — a window that moves during a
+run still poisons it, and the start/end loadavg on every banked row remains the
+right record. What it retracts is the idea that you can establish stability
+*before* committing to a run on this fleet. You cannot: the observation is not
+free.
