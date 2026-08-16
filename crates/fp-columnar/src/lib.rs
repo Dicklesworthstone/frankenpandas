@@ -4310,9 +4310,8 @@ impl ScalarValues {
     /// `var()` per call would be its own measurable cost.
     fn dot_materialization_is_serial() -> bool {
         static SERIAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *SERIAL.get_or_init(|| {
-            std::env::var("FP_DOT_SERIAL").is_ok_and(|v| v != "0" && !v.is_empty())
-        })
+        *SERIAL
+            .get_or_init(|| std::env::var("FP_DOT_SERIAL").is_ok_and(|v| v != "0" && !v.is_empty()))
     }
 
     fn pairwise_stat_float64_data(&self) -> Option<&[f64]> {
@@ -25532,7 +25531,6 @@ impl Column {
         ))
     }
 
-
     fn f64_integral_or_infinite_identity(x: f64) -> bool {
         const SIGN_MASK: u64 = 0x8000_0000_0000_0000;
         const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
@@ -45642,7 +45640,10 @@ mod tests {
                 !all_valid,
                 "fixture must actually mint NaN, or this test proves nothing"
             );
-            assert!(!all_finite, "sqrt of a negative is NaN, which is not finite");
+            assert!(
+                !all_finite,
+                "sqrt of a negative is NaN, which is not finite"
+            );
 
             // The producer's own witness must mark exactly the negative inputs missing.
             let validity = ValidityMask::from_words(words, input.len());
@@ -45727,8 +45728,16 @@ mod tests {
 
             let shared_values = shared.as_f64_slice().expect("shared chunks are typed f64");
             let owned_values = owned.as_f64_slice().expect("owned chunks are typed f64");
-            assert_eq!(shared_values.to_vec(), values, "shared backing must round-trip");
-            assert_eq!(owned_values.to_vec(), values, "owned backing must round-trip");
+            assert_eq!(
+                shared_values.to_vec(),
+                values,
+                "shared backing must round-trip"
+            );
+            assert_eq!(
+                owned_values.to_vec(),
+                values,
+                "owned backing must round-trip"
+            );
             assert_eq!(
                 shared_values.to_vec(),
                 owned_values.to_vec(),
@@ -45736,8 +45745,10 @@ mod tests {
             );
 
             // A non-zero `start` must be honoured the same way by both.
-            let offset_owned =
-                Column::from_f64_all_valid_owned_chunks(vec![(std::sync::Arc::new(values.clone()), 100, 50)], 50);
+            let offset_owned = Column::from_f64_all_valid_owned_chunks(
+                vec![(std::sync::Arc::new(values.clone()), 100, 50)],
+                50,
+            );
             assert_eq!(
                 offset_owned.as_f64_slice().expect("offset owned").to_vec(),
                 values[100..150].to_vec(),
@@ -45757,7 +45768,8 @@ mod tests {
         /// as the buffer handed in.
         #[test]
         fn an_owned_chunk_is_a_pointer_move_not_a_copy() {
-            let buffer = std::sync::Arc::new((0..256_usize).map(|i| i as f64).collect::<Vec<f64>>());
+            let buffer =
+                std::sync::Arc::new((0..256_usize).map(|i| i as f64).collect::<Vec<f64>>());
             let source_ptr = buffer.as_ptr();
             let strong_before = std::sync::Arc::strong_count(&buffer);
 
@@ -45897,13 +45909,12 @@ mod tests {
         fn a_short_input_under_an_aggressive_par_min_does_not_panic() {
             for len in [0_usize, 1, 2, 63, 64, 65] {
                 let input: Vec<f64> = (0..len).map(|i| 1.0 + i as f64).collect();
-                let (out, words, valid, finite) =
-                    crate::par_map_slice_f64_with_witness_with_policy(
-                        &input,
-                        |x: f64| x.sqrt(),
-                        0,
-                        0,
-                    );
+                let (out, words, valid, finite) = crate::par_map_slice_f64_with_witness_with_policy(
+                    &input,
+                    |x: f64| x.sqrt(),
+                    0,
+                    0,
+                );
                 assert_eq!(out.len(), len, "one output per input at len={len}");
                 assert_eq!(
                     words.len(),
