@@ -193650,10 +193650,16 @@ mod overflow_policy_mode_mapping_5e47p {
         );
     }
 
-    /// End-to-end through the mapping: HARDENED recovers to the SAME value
-    /// STRICT would have failed on, and leaves an audit entry naming the op and
-    /// the operands. This is the behaviour the mode split is supposed to buy.
-    #[test]
+    // ORPHANED, and the reason `cargo clippy -p fp-frame --all-targets -- -D
+    // warnings` was RED at HEAD for every agent: this doc block and its `#[test]`
+    // annotate nothing — the function they belonged to is gone, so the attribute
+    // bound to the NEXT test's doc comment and tripped `duplicate_macro_attributes`.
+    // The text is kept as a plain comment rather than deleted, because it records
+    // a test someone intended to write and I am not going to invent its body:
+    //
+    //   End-to-end through the mapping: HARDENED recovers to the SAME value
+    //   STRICT would have failed on, and leaves an audit entry naming the op and
+    //   the operands. This is the behaviour the mode split is supposed to buy.
     /// The vectorized reduction reports pandas' OWN class, and `sum()` is
     /// untouched. br-frankenpandas-fyr1z-strict-raise-arms-t7ht2.
     ///
