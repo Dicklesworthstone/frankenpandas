@@ -194559,7 +194559,7 @@ mod introduced_missing_is_nan_nywa8 {
     use std::collections::BTreeMap;
 
     use fp_columnar::Column;
-    use fp_index::{Index, IndexLabel};
+    use fp_index::{AlignMode, Index, IndexLabel};
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{DataFrame, Series};
@@ -194649,6 +194649,79 @@ mod introduced_missing_is_nan_nywa8 {
             Scalar::Null(NullKind::NaN),
             "pandas invents a float nan even in an object column"
         );
+    }
+
+    /// `align` invents a gap on BOTH sides here, so both widen.
+    ///
+    /// Live pandas 2.2.3:
+    /// ```text
+    /// a = pd.Series([1,2], index=['a','b']); b = pd.Series([10,20], index=['b','c'])
+    /// a.align(b) -> left  float64 [1.0, 2.0, nan]
+    ///               right float64 [nan, 10.0, 20.0]
+    /// ```
+    #[test]
+    fn series_align_widens_both_gapped_sides_and_mints_nan() {
+        let left = Series::new(
+            "l",
+            Index::new(vec!["a".into(), "b".into()]),
+            Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("int64"),
+        )
+        .expect("left");
+        let right = Series::new(
+            "r",
+            Index::new(vec!["b".into(), "c".into()]),
+            Column::new(DType::Int64, vec![Scalar::Int64(10), Scalar::Int64(20)]).expect("int64"),
+        )
+        .expect("right");
+
+        let (la, ra) = left.align(&right, AlignMode::Outer).expect("align");
+        assert_eq!(
+            la.column().dtype(),
+            DType::Float64,
+            "left gained a gap at 'c'"
+        );
+        assert_eq!(
+            ra.column().dtype(),
+            DType::Float64,
+            "right gained a gap at 'a'"
+        );
+        assert_eq!(la.column().values()[2], Scalar::Null(NullKind::NaN));
+        assert_eq!(ra.column().values()[0], Scalar::Null(NullKind::NaN));
+    }
+
+    /// NEGATIVE CASE that keeps RULE 1 from becoming "align always promotes":
+    /// only the side that ACTUALLY gains a gap widens.
+    ///
+    /// Live pandas 2.2.3:
+    /// ```text
+    /// d1 = pd.DataFrame({'x':[1,2]}, index=['a','b'])
+    /// d2 = pd.DataFrame({'x':[9]},   index=['b'])
+    /// d1.align(d2) -> left  x int64   [1, 2]        (no gap: left has every label)
+    ///                 right x float64 [nan, 9.0]
+    /// ```
+    #[test]
+    fn dataframe_align_widens_only_the_side_that_gained_a_gap() {
+        let mut left_cols = BTreeMap::new();
+        left_cols.insert("x".to_owned(), int64_column(&[1, 2]));
+        let left = DataFrame::new(Index::new(vec!["a".into(), "b".into()]), left_cols)
+            .expect("left frame");
+        let mut right_cols = BTreeMap::new();
+        right_cols.insert("x".to_owned(), int64_column(&[9]));
+        let right = DataFrame::new(Index::new(vec!["b".into()]), right_cols).expect("right frame");
+
+        let (la, ra) = left.align(&right, AlignMode::Outer).expect("align");
+        assert_eq!(
+            la.column("x").expect("left x").dtype(),
+            DType::Int64,
+            "the left frame already covers every union label — no gap, no widening"
+        );
+        let right_x = ra.column("x").expect("right x");
+        assert_eq!(
+            right_x.dtype(),
+            DType::Float64,
+            "the right frame gained label 'a' and must widen to hold the NaN"
+        );
+        assert_eq!(right_x.values()[0], Scalar::Null(NullKind::NaN));
     }
 
     /// RULE 2 GUARD, and the reason this cannot be fixed by minting NaN
