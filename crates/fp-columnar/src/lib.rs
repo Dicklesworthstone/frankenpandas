@@ -2825,11 +2825,28 @@ impl ScalarValues {
     }
 
     fn lazy_all_valid_float64_chunks(chunks: Arc<[Float64Chunk]>, len: usize) -> Self {
+        Self::lazy_all_valid_float64_chunks_with_finite(chunks, len, None)
+    }
+
+    /// As [`Self::lazy_all_valid_float64_chunks`], but SEEDING the all-finite
+    /// witness instead of leaving it to a later scan.
+    ///
+    /// br-frankenpandas-284ul. The write-once elementwise producer already knows
+    /// `all_finite` — it accumulated it in the same pass that produced the values.
+    /// Dropping that on the floor and letting the first reader re-derive it would
+    /// add a full extra read of the 8 MB output, which is exactly the class of
+    /// cost this lever exists to remove; the lever would then be paying back its
+    /// own saving.
+    fn lazy_all_valid_float64_chunks_with_finite(
+        chunks: Arc<[Float64Chunk]>,
+        len: usize,
+        all_finite: Option<bool>,
+    ) -> Self {
         Self::LazyAllValidFloat64Chunks {
             chunks,
             len,
             data: OnceLock::new(),
-            all_finite: OnceLock::new(),
+            all_finite: Self::bool_once_lock(all_finite),
             values: OnceLock::new(),
         }
     }
@@ -8042,6 +8059,32 @@ fn elementwise_witness_policy() -> (usize, usize) {
     })
 }
 
+/// Is the write-once chunked elementwise path enabled? From
+/// `FP_ELEMENTWISE_WRITE_ONCE`; DEFAULT OFF.
+///
+/// br-frankenpandas-284ul. Off by default because the saving is a HYPOTHESIS with
+/// a mechanism, not a measurement: `vec![0.0_f64; n]` specialises to
+/// `alloc_zeroed`, and whether that costs a memset (recycled mimalloc block) or
+/// nothing (fresh zero pages from the OS) depends on allocator state this code
+/// does not control. The mechanism entry (7ebcb54e7) predicts a memset because
+/// `timed_batch_us` frees the previous 8 MB just outside the clock, but a
+/// prediction is not a number.
+///
+/// Defaulting this ON before measuring would repeat the exact mistake that put
+/// three mutually inconsistent `df_dot` ratios in the ledger — changing a default
+/// on an argument. The toggle exists so both arms run in ONE process on ONE
+/// binary; whichever wins becomes the default in a commit citing the run.
+///
+/// ⚠ Exported toggles are invisible in bench provenance (see `6df71eae2`, a fully
+/// provenanced row that was measuring the wrong arm). Pass
+/// `env -u FP_ELEMENTWISE_WRITE_ONCE` on any invocation not deliberately varying it.
+fn elementwise_write_once_enabled() -> bool {
+    static WRITE_ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WRITE_ONCE.get_or_init(|| {
+        std::env::var("FP_ELEMENTWISE_WRITE_ONCE").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
+}
+
 fn par_map_slice_f64_with_witness<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
     input: &[T],
     f: F,
@@ -10392,6 +10435,23 @@ impl Column {
         chunks: Vec<(Arc<Vec<f64>>, usize, usize)>,
         len: usize,
     ) -> Self {
+        Self::from_f64_all_valid_owned_chunks_with_finite(chunks, len, None)
+    }
+
+    /// As [`Self::from_f64_all_valid_owned_chunks`], carrying the all-finite
+    /// witness the producer already computed.
+    ///
+    /// br-frankenpandas-284ul. See
+    /// [`ScalarValues::lazy_all_valid_float64_chunks_with_finite`] — discarding a
+    /// witness that is already in hand costs a later full read of the output and
+    /// would cancel the saving this path exists to make.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_f64_all_valid_owned_chunks_with_finite(
+        chunks: Vec<(Arc<Vec<f64>>, usize, usize)>,
+        len: usize,
+        all_finite: Option<bool>,
+    ) -> Self {
         debug_assert_eq!(
             chunks
                 .iter()
@@ -10405,7 +10465,11 @@ impl Column {
             .collect();
         Self {
             dtype: DType::Float64,
-            values: ScalarValues::lazy_all_valid_float64_chunks(Arc::from(chunks), len),
+            values: ScalarValues::lazy_all_valid_float64_chunks_with_finite(
+                Arc::from(chunks),
+                len,
+                all_finite,
+            ),
             validity: ValidityMask::all_valid(len),
             data: None,
         }
@@ -25371,6 +25435,48 @@ impl Column {
     /// substitute for the other. (br-frankenpandas-xv9qf)
     fn typed_float_unary_nullable_owned_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
         let len = self.len();
+
+        // br-frankenpandas-284ul. Write-once arm, OFF by default. Only the
+        // contiguous all-valid Float64 input takes it: that is the shape `sqrt`
+        // at 1M actually has, and it is the one the 8 MB pre-zeroing dominates.
+        //
+        // ⚠ THE ALL-VALID FALLBACK IS NOT FREE AND IS NOT HIDDEN. The chunked
+        // column constructor is an ALL-VALID form, so if the map produced any NaN
+        // (sqrt of a negative, log of zero) the chunks cannot become the result
+        // and must be concatenated into one buffer — paying exactly the 8 MB copy
+        // this lever exists to avoid, on top of having skipped the memset. That
+        // arm is therefore SLOWER than the shared path, not faster. It is
+        // acceptable only because the fixture and the real hot case are all-valid;
+        // a workload that mints NaNs should keep the default path. Anyone
+        // measuring this must confirm `all_valid` held, or they are timing the
+        // fallback and will bank a loss against the wrong mechanism.
+        if elementwise_write_once_enabled()
+            && let Some(data) = self.as_f64_slice()
+        {
+            let (max_workers, par_min) = elementwise_witness_policy();
+            let (chunks, validity_words, all_valid, all_finite) =
+                par_map_slice_f64_to_owned_chunks(data, &f, max_workers, par_min);
+            if all_valid {
+                return Some(Self::from_f64_all_valid_owned_chunks_with_finite(
+                    chunks,
+                    len,
+                    Some(all_finite),
+                ));
+            }
+            let out: Vec<f64> = chunks
+                .iter()
+                .flat_map(|(buffer, start, chunk_len)| {
+                    buffer[*start..*start + *chunk_len].iter().copied()
+                })
+                .collect();
+            let validity = ValidityMask::from_words(validity_words, len);
+            return Some(Self::from_f64_values_owned_with_validity(
+                out,
+                validity,
+                Some(all_finite),
+            ));
+        }
+
         let (out, validity_words, all_valid, all_finite) = if let Some(data) = self.as_f64_slice() {
             // Contiguous + all-valid: hand each worker its own INPUT SLICE so the
             // value loop is a bounds-check-free slice zip that vectorizes. The
@@ -45507,6 +45613,60 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// NEGATIVE CASE: the write-once arm must survive a map that MINTS NaN.
+        ///
+        /// br-frankenpandas-284ul. The chunked column constructor is an ALL-VALID
+        /// form. `sqrt` of a negative produces NaN, which pandas semantics make
+        /// MISSING — so the chunks cannot become the result and the code must fall
+        /// back to a contiguous buffer plus a real validity mask. A rewiring that
+        /// forgot this would hand NaNs to an all-valid constructor and produce a
+        /// column that claims every slot is present: `isna()` would return all-false
+        /// over values that are actually missing. Every VALUE would still be
+        /// bit-correct, so no value-comparing test would catch it.
+        ///
+        /// Asserts on the validity mask, not just the values, for exactly that
+        /// reason — and pins that the two arms agree on WHICH slots are missing.
+        #[test]
+        fn the_write_once_arm_handles_a_nan_minting_map_without_claiming_all_valid() {
+            // sqrt over a range that straddles zero: negatives -> NaN -> missing.
+            let input: Vec<f64> = (0..1000_usize).map(|i| i as f64 - 500.0).collect();
+            let column = Column::from_f64_values(input.clone());
+            let square_root = |x: f64| x.sqrt();
+
+            let (chunks, words, all_valid, all_finite) =
+                crate::par_map_slice_f64_to_owned_chunks(&input, square_root, 4, 1);
+
+            assert!(
+                !all_valid,
+                "fixture must actually mint NaN, or this test proves nothing"
+            );
+            assert!(!all_finite, "sqrt of a negative is NaN, which is not finite");
+
+            // The producer's own witness must mark exactly the negative inputs missing.
+            let validity = ValidityMask::from_words(words, input.len());
+            for (i, &x) in input.iter().enumerate() {
+                assert_eq!(
+                    validity.get(i),
+                    !square_root(x).is_nan(),
+                    "validity bit {i} disagrees with the value at input {x}"
+                );
+            }
+
+            // And the values, reassembled, must equal the shared path's.
+            let owned: Vec<f64> = chunks
+                .iter()
+                .flat_map(|(buffer, start, len)| buffer[*start..*start + *len].to_vec())
+                .collect();
+            let (shared, _, _, _) =
+                crate::par_map_slice_f64_with_witness_with_policy(&input, square_root, 4, 1);
+            assert_eq!(
+                owned.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                shared.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                "NaN bit patterns must match the shared path exactly"
+            );
+            let _ = column;
         }
 
         /// NEGATIVE CASE: every chunk boundary must be a multiple of 64.
