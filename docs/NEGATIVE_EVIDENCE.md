@@ -23360,3 +23360,61 @@ workers that join inside the call, so it is not evidence either way. The p50s ar
 the evidence, and they agree with each other.
 
 **Artifacts:** `artifacts/bench/dot_toggle_{serial1,parallel2,serial3}_1M_thinkstation1_2026-08-16.json`
+
+---
+
+## br-frankenpandas-1hjgz — ⚠ CORRECTION TO MY OWN ENTRY ABOVE: the bandwidth "hypothesis" was already MEASURED on 2026-07-23, and this whole lever re-tread a closed rejection
+
+**Date:** 2026-08-16 · **Agent:** MagentaFortress · **Status:** correcting my own
+prior entry in this file. No new measurement; this is a ledger-mining result.
+
+In the entry above I offered a memory-bandwidth explanation for why the
+column-parallel `df.dot` lever showed no effect, and labelled it "**Unmeasured**
+— it needs a counted mechanism". **That label is wrong. It was measured three
+weeks earlier and banked in this same file**, at
+`### 2026-07-23 DustySummit — df_dot matvec output-row parallelization — REJECT
+(1.40× SLOWER), proves L3-bandwidth-bound`:
+
+> parallel ~261 ms vs serial ~187 ms = 1.40× SLOWER; par/par2 A/A = 1.00. The
+> AXPY matvec re-reads all of A from L3 per output column — it is
+> L3-BANDWIDTH-bound … **parallelism ALONE is futile — the residual gap vs
+> OpenBLAS is bandwidth, not core count.**
+
+That entry even used the same `FP_DOT_SERIAL` gate name this lever reintroduced.
+
+**WHAT THIS MEANS, and it is worse than a duplicated experiment.** The bead
+`br-frankenpandas-1hjgz` was filed on the premise "df.dot runs on ONE core, and
+**parallelism alone plausibly reaches parity**". That premise is the exact claim
+this ledger had already REJECTED with a measurement. The lever was then written
+(by me), landed, measured at 0.475x, retracted for precision by its own author,
+and finally refuted by my toggle A/B — a full cycle to re-derive a conclusion
+that was already on file. My refutation is therefore **not** a new finding; it is
+a re-confirmation, and I am recording it as such rather than letting it read as
+one.
+
+**The July entry also names the only remaining path, and later entries close
+it too:**
+
+- N-blocked cache-blocking → REJECT, ~4.5%, sub-gate: "N-blocking only moves the
+  bottleneck", output-tile traffic replaces A-column traffic without reducing
+  total movement.
+- Register-blocked microkernel (MR×NR accumulator held in SIMD registers across
+  K, the OpenBLAS shape) → flagged as the ONLY fix, with explicit doubt that
+  safe-Rust autovectorization will hold an accumulator tile in registers across
+  K, then LEDGERED BLOCKER as ISA-bound (SSE2 vs AVX2).
+- 2026-07-26 QuietHarbor re-decided the ISA question and *strengthened* the
+  conclusion (the recorded 1.4x did not reproduce; 1.0327x).
+- 2026-07-27 ProudChapel rejected both the packed 4×4 and the 4×8 counted-cycle
+  pregate.
+
+**THE ACTIONABLE RULE, which is the only thing here worth carrying forward:**
+`df_dot` is a fully-characterized epic with two shipped wins (AXPY 16×, A-panel
+1.31×, together 3.42 s → ~180 ms) and a residual that is memory-traffic- and
+ISA-bound. **Before filing or taking any further `df_dot` lever, grep this file
+for `df_dot` and read the 2026-07-23 block.** Parallelism, N-blocking, packed
+4×4 and packed 4×8 are all closed with measurements. A new lever needs to say
+which of those it is not, and why the 2026-07-23 bandwidth measurement does not
+apply to it.
+
+**No build was run for this entry.** It is a correction derived by reading the
+ledger, filed under the freeze.
