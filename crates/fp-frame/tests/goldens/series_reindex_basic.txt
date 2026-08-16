@@ -1,5 +1,5 @@
-c    30
-b    20
-a    10
-d    None
-Name: vals, Length: 4, dtype: Int64
+c    30.0
+b    20.0
+a    10.0
+d    NaN
+Name: vals, Length: 4, dtype: Float64

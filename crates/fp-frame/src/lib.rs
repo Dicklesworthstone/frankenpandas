@@ -8322,7 +8322,7 @@ impl Series {
             reindex_positions_int64_direct(self.index.labels(), new_index.labels())
                 .unwrap_or_else(|| self.index.get_indexer(&new_index));
 
-        let col = self.column.reindex_by_positions(&positions)?;
+        let col = reindex_column_with_invented_gaps(&self.column, &positions)?;
         Self::new(self.name.clone(), new_index, col)
     }
 
@@ -53011,6 +53011,36 @@ fn column_with_invented_gaps(
     Column::from_values(values).map_err(Into::into)
 }
 
+/// Reindex one column by `positions`, applying br-frankenpandas-nywa8 RULE 1 to
+/// any gap the operation INVENTS.
+///
+/// A missing value pandas invents is always a float `NaN`, in every dtype, and an
+/// all-valid int64 column widens to float64 because numpy int64 cannot hold one.
+/// A column that ALREADY carried a missing value is nullable, can hold the gap,
+/// and keeps its dtype — the same condition [`column_with_invented_gaps`] uses
+/// for the concat/constructor sites.
+///
+/// ONE function because the drift between two copies WAS the bug:
+/// `DataFrame::reindex` carried this logic inline while `Series::reindex` called
+/// the columnar default, so `pd.Series([1,2]).reindex([0,1,2])` returned Int64
+/// with a `Null` gap where the frame path already returned float64 with `NaN`.
+/// Both call here now.
+fn reindex_column_with_invented_gaps(
+    column: &Column,
+    positions: &[Option<usize>],
+) -> Result<Column, FrameError> {
+    let invented_a_gap = positions.iter().any(Option::is_none);
+    // `count_valid` reads the validity mask; the old `values().iter().any(is_missing)`
+    // materialized a `Vec<Scalar>` of the whole source just to ask this.
+    let source_was_all_valid = column.validity().count_valid() == column.len();
+    if invented_a_gap && source_was_all_valid && column.dtype() == DType::Int64 {
+        let widened = column.astype(DType::Float64)?;
+        return Ok(widened
+            .reindex_by_positions_with_absent_scalar(positions, Scalar::Null(NullKind::NaN))?);
+    }
+    Ok(column.reindex_by_positions_with_absent_scalar(positions, Scalar::Null(NullKind::NaN))?)
+}
+
 /// Concatenate DataFrames along axis 0 (row-wise).
 ///
 /// Matches `pd.concat([df1, df2, ...], axis=0)` semantics:
@@ -68968,19 +68998,7 @@ impl DataFrame {
                 // hold the gap, and keeps its dtype with a Null gap — the same
                 // condition as the concat/constructor sites.
                 // (br-frankenpandas-nywa8)
-                let invented_a_gap = positions_ref.iter().any(Option::is_none);
-                let source_was_all_valid = !col.values().iter().any(fp_types::Scalar::is_missing);
-                if invented_a_gap && source_was_all_valid && col.dtype() == DType::Int64 {
-                    let widened = col.astype(DType::Float64)?;
-                    return Ok(widened.reindex_by_positions_with_absent_scalar(
-                        positions_ref,
-                        Scalar::Null(NullKind::NaN),
-                    )?);
-                }
-                Ok(col.reindex_by_positions_with_absent_scalar(
-                    positions_ref,
-                    Scalar::Null(NullKind::NaN),
-                )?)
+                reindex_column_with_invented_gaps(col, positions_ref)
             }
         };
 
@@ -97307,8 +97325,14 @@ mod tests {
             .reindex(vec![1_i64.into(), 2_i64.into(), 3_i64.into()])
             .unwrap();
         assert_eq!(result.len(), 3);
-        assert_eq!(result.values()[0], Scalar::Int64(10));
-        assert_eq!(result.values()[1], Scalar::Int64(20));
+        // br-frankenpandas-nywa8 RULE 1: reindex INVENTS the `3` row, and numpy
+        // int64 cannot hold a missing value, so pandas widens the whole column.
+        // Verified on live pandas 2.2.3, not the oracle:
+        //   pd.Series([10,20], index=[1,2]).reindex([1,2,3])
+        //     -> [10.0, 20.0, nan], dtype float64
+        // This assertion previously pinned FP's pre-fix Int64 answer.
+        assert_eq!(result.values()[0], Scalar::Float64(10.0));
+        assert_eq!(result.values()[1], Scalar::Float64(20.0));
         assert!(result.values()[2].is_missing());
     }
 
@@ -143587,8 +143611,10 @@ mod tests {
         .unwrap();
         let result = s1.reindex_like(&s2).unwrap();
         assert_eq!(result.len(), 3);
-        assert_eq!(result.column().values()[0], Scalar::Int64(2)); // b
-        assert_eq!(result.column().values()[1], Scalar::Int64(3)); // c
+        // Same RULE 1 widening as `reindex`. Live pandas 2.2.3:
+        //   s1.reindex_like(s2) -> [2.0, 3.0, nan], dtype float64
+        assert_eq!(result.column().values()[0], Scalar::Float64(2.0)); // b
+        assert_eq!(result.column().values()[1], Scalar::Float64(3.0)); // c
         assert!(result.column().values()[2].is_missing()); // d -> NaN
     }
 
@@ -194508,5 +194534,138 @@ mod dot_column_parallel_materialization_1hjgz {
         let b = frame("b", 3, 0, 1.0);
         let out = a.dot(&b).expect("dot with no output columns");
         assert_eq!(out.column_names().len(), 0);
+    }
+}
+
+/// br-frankenpandas-nywa8 RULE 1: a missing value the OPERATION invents is
+/// always a float `NaN`, in every dtype, and an all-valid int64 column widens to
+/// float64 to hold it.
+///
+/// Verified against LIVE pandas 2.2.3 rather than the oracle, because
+/// `pandas_oracle.py` rewrites dtypes before banking an answer:
+///
+/// ```text
+/// pd.Series([1, 2]).reindex([0, 1, 2])       -> float64, [1.0, 2.0, nan]
+/// pd.Series(['a', 'b']).reindex([0, 1, 2])   -> object,  ['a', 'b', nan]
+/// pd.Series([True, False]).reindex([0, 1, 2])-> object,  [True, False, nan]
+/// pd.DataFrame({'a': [1, 2]}).reindex([0,1,2]) -> a: float64
+/// pd.Series(['a', None])                     -> object,  ['a', None]   (RULE 2)
+/// ```
+///
+/// The last line is the guard: a SUPPLIED `None` in an object column is NOT an
+/// invented gap and must survive as `Null`, which is what lufpu/joeff protect.
+#[cfg(test)]
+mod introduced_missing_is_nan_nywa8 {
+    use std::collections::BTreeMap;
+
+    use fp_columnar::Column;
+    use fp_index::{Index, IndexLabel};
+    use fp_types::{DType, NullKind, Scalar};
+
+    use super::{DataFrame, Series};
+
+    fn int64_column(values: &[i64]) -> Column {
+        let column = Column::new(
+            DType::Int64,
+            values.iter().copied().map(Scalar::Int64).collect(),
+        )
+        .expect("int64 column");
+        assert_eq!(column.dtype(), DType::Int64, "fixture must start as int64");
+        column
+    }
+
+    fn int64_series(values: &[i64]) -> Series {
+        let column = Column::new(
+            DType::Int64,
+            values.iter().copied().map(Scalar::Int64).collect(),
+        )
+        .expect("int64 column");
+        assert_eq!(column.dtype(), DType::Int64, "fixture must start as int64");
+        Series::new(
+            "s",
+            Index::new((0..values.len() as i64).map(IndexLabel::Int64).collect()),
+            column,
+        )
+        .expect("series")
+    }
+
+    fn utf8_series(values: &[&str]) -> Series {
+        let column = Column::from_values(
+            values
+                .iter()
+                .map(|v| Scalar::Utf8((*v).to_owned()))
+                .collect(),
+        )
+        .expect("utf8 column");
+        Series::new(
+            "s",
+            Index::new((0..values.len() as i64).map(IndexLabel::Int64).collect()),
+            column,
+        )
+        .expect("series")
+    }
+
+    fn labels(n: i64) -> Vec<IndexLabel> {
+        (0..n).map(IndexLabel::Int64).collect()
+    }
+
+    #[test]
+    fn series_reindex_widens_int64_and_mints_nan() {
+        let out = int64_series(&[1, 2]).reindex(labels(3)).expect("reindex");
+        assert_eq!(
+            out.column().dtype(),
+            DType::Float64,
+            "an invented gap must widen int64 to float64, as numpy int64 cannot hold one"
+        );
+        assert_eq!(
+            out.column().values()[2],
+            Scalar::Null(NullKind::NaN),
+            "the invented value must be NaN, not Null"
+        );
+    }
+
+    #[test]
+    fn dataframe_reindex_widens_int64_and_mints_nan() {
+        let mut columns = BTreeMap::new();
+        columns.insert("s".to_owned(), int64_column(&[1, 2]));
+        let frame = DataFrame::new(Index::new(labels(2)), columns).expect("frame");
+        let out = frame.reindex(labels(3)).expect("reindex");
+        let column = out.column("s").expect("column");
+        assert_eq!(
+            column.dtype(),
+            DType::Float64,
+            "DataFrame::reindex must widen like Series::reindex"
+        );
+        assert_eq!(column.values()[2], Scalar::Null(NullKind::NaN));
+    }
+
+    #[test]
+    fn series_reindex_mints_nan_into_a_utf8_column() {
+        let out = utf8_series(&["a", "b"])
+            .reindex(labels(3))
+            .expect("reindex");
+        assert_eq!(
+            out.column().values()[2],
+            Scalar::Null(NullKind::NaN),
+            "pandas invents a float nan even in an object column"
+        );
+    }
+
+    /// RULE 2 GUARD, and the reason this cannot be fixed by minting NaN
+    /// everywhere: a `None` the CALLER supplied is not an invented gap.
+    #[test]
+    fn a_supplied_null_in_a_utf8_column_is_not_rewritten() {
+        let column = Column::from_values(vec![
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Null(NullKind::Null),
+        ])
+        .expect("utf8 column with a supplied None");
+        let series = Series::new("s", Index::new(labels(2)), column).expect("series");
+        let out = series.reindex(labels(2)).expect("reindex");
+        assert_eq!(
+            out.column().values()[1],
+            Scalar::Null(NullKind::Null),
+            "a supplied None must survive; only INVENTED gaps become NaN"
+        );
     }
 }
