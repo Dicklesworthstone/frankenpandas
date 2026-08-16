@@ -7063,16 +7063,52 @@ impl Series {
             let right = other.column.reindex_by_positions(&right_positions)?;
 
             // Pandas promotes to Float64 when alignment introduces missing values,
-            // so NaN can be used as the missing sentinel (Int64 has no NaN).
-            let has_alignment_gaps = left_positions.iter().any(Option::is_none)
-                || right_positions.iter().any(Option::is_none);
-            let (left, right) = if has_alignment_gaps
-                && matches!(left.dtype(), DType::Int64 | DType::Bool)
-                && matches!(right.dtype(), DType::Int64 | DType::Bool)
-            {
-                (left.astype(DType::Float64)?, right.astype(DType::Float64)?)
+            // so NaN can be used as the missing sentinel (numpy int64 has no NaN).
+            //
+            // THE PROMOTION IS PER-LANE: a lane widens iff IT gains a gap and it
+            // cannot represent one. This is the same nywa8 rule `align_on_index`
+            // already applies — "a lane widens iff IT gains a gap; the join mode
+            // only decides which lanes do" — but this path was asking a different
+            // question. It required BOTH sides to be numpy `Int64`/`Bool` and
+            // then widened BOTH on a gap ANYWHERE, so a NULLABLE lane on either
+            // side switched the promotion off entirely.
+            //
+            // MEASURED, live pandas 2.2.3, `s1 * s2` under union alignment:
+            //
+            //   Int64[a,b,c]   * int64[c,a,d]   both gain gaps   -> Float64
+            //   Int64[a,b,c]   * int64[a,b]     only RIGHT gains -> Float64
+            //   Int64[a,b]     * int64[a,b,c]   only LEFT  gains -> Int64
+            //   Int64[a,b,c]   * int64[a,b,c]   neither gains    -> Int64
+            //   boolean[a,b,c] * int64[c,a,d]   both gain gaps   -> Float64
+            //   int64[a,b,c]   * int64[c,a,d]   both gain gaps   -> float64
+            //
+            // Rows 2 and 3 are the pair that settles it: the SAME dtypes give
+            // different answers depending on WHICH side the gap lands on, so no
+            // rule phrased over "are there gaps anywhere" can reproduce pandas.
+            // A nullable lane holds pd.NA natively and never widens; the numpy
+            // lane beside it still does, and `common_dtype` then carries the
+            // result to `Float64Nullable` — which is why FP returned `Int64(6)`
+            // where pandas gives 6.0. (br-frankenpandas-f0aaa)
+            //
+            // Restricting the widen set to numpy `Int64`/`Bool` is deliberate and
+            // leaves the existing corpus untouched: for two numpy-int lanes this
+            // is result-equivalent, because widening a lane that gained no gap is
+            // numerically a no-op and `common_dtype(Int64, Float64)` is Float64
+            // either way.
+            let left_gains_gap = left_positions.iter().any(Option::is_none);
+            let right_gains_gap = right_positions.iter().any(Option::is_none);
+            let widens = |column: &Column, gains_gap: bool| {
+                gains_gap && matches!(column.dtype(), DType::Int64 | DType::Bool)
+            };
+            let left = if widens(&left, left_gains_gap) {
+                left.astype(DType::Float64)?
             } else {
-                (left, right)
+                left
+            };
+            let right = if widens(&right, right_gains_gap) {
+                right.astype(DType::Float64)?
+            } else {
+                right
             };
 
             left.binary_numeric(&right, op)?
@@ -193741,5 +193777,189 @@ mod clip_nullable_int64_77x9g {
         assert_eq!(s_out.dtype(), DType::Utf8);
         assert_eq!(s_out.values()[0], Scalar::Utf8("keep".to_owned()));
         assert_eq!(s_out.values()[1], Scalar::Utf8("me".to_owned()));
+    }
+}
+
+/// br-frankenpandas-f0aaa: union-aligned arithmetic promotes PER LANE.
+///
+/// Every row below was read off live pandas 2.2.3 before the fix. The pair that
+/// settles the rule is rows 2 and 3: identical dtypes, different answers,
+/// decided purely by WHICH side the alignment gap lands on — so no rule phrased
+/// over "are there gaps anywhere" can reproduce pandas.
+///
+/// ```text
+///   Int64[a,b,c]   * int64[c,a,d]   both gain gaps    -> Float64 (nullable)
+///   Int64[a,b,c]   * int64[a,b]     only RIGHT gains  -> Float64 (nullable)
+///   Int64[a,b]     * int64[a,b,c]   only LEFT  gains  -> Int64
+///   Int64[a,b,c]   * int64[a,b,c]   neither gains     -> Int64
+///   boolean[a,b,c] * int64[c,a,d]   both gain gaps    -> Float64 (nullable)
+///   int64[a,b,c]   * int64[c,a,d]   both gain gaps    -> float64 (numpy)
+/// ```
+///
+/// The nullable-float rows return `Float64Nullable`, not numpy `Float64`:
+/// pandas prints both as "Float64"/"float64" respectively, and it is the
+/// NULLABLE one it returns whenever a nullable lane is involved. That dtype
+/// arrived with br-frankenpandas-qkqfb, which is what unblocked this fix.
+#[cfg(test)]
+mod union_align_per_lane_promotion_f0aaa {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::{DType, NullKind, Scalar};
+
+    use super::Series;
+
+    fn series(name: &str, labels: &[&str], column: Column) -> Series {
+        Series::new(
+            name,
+            Index::new(labels.iter().map(|l| (*l).into()).collect()),
+            column,
+        )
+        .expect("series")
+    }
+
+    fn nullable_int64(labels: &[&str], values: Vec<Scalar>) -> Series {
+        let column = Column::new(DType::Int64Nullable, values).expect("nullable Int64");
+        assert_eq!(column.dtype(), DType::Int64Nullable);
+        series("lhs", labels, column)
+    }
+
+    fn numpy_int64(labels: &[&str], values: &[i64]) -> Series {
+        let column = Column::new(
+            DType::Int64,
+            values.iter().copied().map(Scalar::Int64).collect(),
+        )
+        .expect("int64");
+        series("rhs", labels, column)
+    }
+
+    fn dtype_of(s: &Series) -> DType {
+        s.column().dtype()
+    }
+
+    /// The shape of corpus fixture `fp_p2d_055_series_mul_union_alignment_hardened`,
+    /// but with the left lane built as the DECLARED nullable Int64. FP answered
+    /// `Int64(6)`; pandas answers `6.0`.
+    ///
+    /// The fixture itself is NOT this case and is deliberately untouched: today's
+    /// harness builds that lane by numpy inference, so the null makes it float64
+    /// and it pins `float64`/`na_n`. It only becomes this case if the vprpg
+    /// payload-dtype chooser lands.
+    #[test]
+    fn a_nullable_lane_beside_a_gapped_numpy_lane_promotes_to_float() {
+        let lhs = nullable_int64(
+            &["a", "b", "c"],
+            vec![
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(4),
+            ],
+        );
+        let rhs = numpy_int64(&["c", "a", "d"], &[5, 3, 7]);
+        let out = lhs.mul(&rhs).expect("mul");
+
+        assert_eq!(out.index().labels().len(), 4, "union index a,b,c,d");
+        assert_eq!(dtype_of(&out), DType::Float64Nullable);
+        let values = out.column().values();
+        assert_eq!(values[0], Scalar::Float64(6.0), "a: 2 * 3");
+        assert!(
+            values[1].is_missing(),
+            "b: present only on the left, and NA"
+        );
+        assert_eq!(values[2], Scalar::Float64(20.0), "c: 4 * 5");
+        assert!(values[3].is_missing(), "d: present only on the right");
+    }
+
+    /// The discriminating pair. Same dtypes both times; only the side carrying
+    /// the gap differs. If the promotion were driven by "gaps anywhere", these
+    /// two would have to agree — and pandas says they do not.
+    #[test]
+    fn which_side_gains_the_gap_decides_the_result_dtype() {
+        // RIGHT gains the gap (right is missing 'c') -> the numpy lane widens,
+        // and common_dtype(Int64Nullable, Float64) carries it to Float64Nullable.
+        let out_right = nullable_int64(
+            &["a", "b", "c"],
+            vec![
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(4),
+            ],
+        )
+        .mul(&numpy_int64(&["a", "b"], &[5, 3]))
+        .expect("mul");
+        assert_eq!(
+            dtype_of(&out_right),
+            DType::Float64Nullable,
+            "the numpy lane gained a gap it cannot hold, so it widened"
+        );
+
+        // LEFT gains the gap. The nullable lane holds pd.NA natively and does
+        // NOT widen; the numpy lane gained nothing, so nothing widens.
+        let out_left = nullable_int64(
+            &["a", "b"],
+            vec![Scalar::Int64(2), Scalar::Null(NullKind::Null)],
+        )
+        .mul(&numpy_int64(&["a", "b", "c"], &[5, 3, 7]))
+        .expect("mul");
+        assert_eq!(
+            dtype_of(&out_left),
+            DType::Int64Nullable,
+            "pandas returns Int64 here — widening on a gap ANYWHERE would give float"
+        );
+    }
+
+    /// The control that rules out "the supplied null is what widens it": this
+    /// lane carries a null AND is nullable, and with no invented gap the product
+    /// stays integral.
+    #[test]
+    fn no_gap_at_all_keeps_the_nullable_integer_dtype() {
+        let out = nullable_int64(
+            &["a", "b", "c"],
+            vec![
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(4),
+            ],
+        )
+        .mul(&numpy_int64(&["a", "b", "c"], &[5, 3, 7]))
+        .expect("mul");
+        assert_eq!(dtype_of(&out), DType::Int64Nullable);
+        assert_eq!(out.column().values()[0], Scalar::Int64(10));
+    }
+
+    /// Regression guard for the lane the change is NOT meant to touch: two
+    /// all-valid numpy int lanes must still promote exactly as before, and to
+    /// the NUMPY float — this is the one row that must stay `DType::Float64`.
+    #[test]
+    fn two_numpy_int_lanes_still_promote_to_float_on_a_gap() {
+        let out = numpy_int64(&["a", "b", "c"], &[2, 9, 4])
+            .mul(&numpy_int64(&["c", "a", "d"], &[5, 3, 7]))
+            .expect("mul");
+        assert_eq!(dtype_of(&out), DType::Float64);
+        let values = out.column().values();
+        assert_eq!(values[0], Scalar::Float64(6.0));
+        assert!(values[1].is_missing());
+        assert_eq!(values[2], Scalar::Float64(20.0));
+        assert!(values[3].is_missing());
+    }
+
+    #[test]
+    fn a_nullable_bool_lane_behaves_like_the_nullable_int_lane() {
+        let lhs = series(
+            "lhs",
+            &["a", "b", "c"],
+            Column::new(
+                DType::BoolNullable,
+                vec![
+                    Scalar::Bool(true),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Bool(false),
+                ],
+            )
+            .expect("nullable bool"),
+        );
+        let out = lhs
+            .mul(&numpy_int64(&["c", "a", "d"], &[5, 3, 7]))
+            .expect("mul");
+        assert_eq!(dtype_of(&out), DType::Float64Nullable);
     }
 }
