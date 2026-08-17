@@ -37547,7 +37547,11 @@ mod tests {
         /// and both by `to_bits()`, since `-0.0 == 0.0` would hide a sign error.
         #[test]
         fn int64_input_takes_the_domain_fused_arm_and_matches_float64_4kig1() {
-            type Op = (&'static str, fn(&Column) -> Result<Column, ColumnError>, fn(f64) -> f64);
+            type Op = (
+                &'static str,
+                fn(&Column) -> Result<Column, ColumnError>,
+                fn(f64) -> f64,
+            );
             // One op per domain shape: total, non-negative, and finite-only.
             let ops: [Op; 5] = [
                 ("cbrt", Column::cbrt, f64::cbrt),
@@ -37558,7 +37562,18 @@ mod tests {
             ];
 
             // All-in-domain for every op above: strictly positive.
-            let positive: Vec<i64> = vec![1, 2, 3, 4, 9, 16, 100, 1_000, 1_000_000, 9_007_199_254_740_992];
+            let positive: Vec<i64> = vec![
+                1,
+                2,
+                3,
+                4,
+                9,
+                16,
+                100,
+                1_000,
+                1_000_000,
+                9_007_199_254_740_992,
+            ];
             for (name, op, oracle) in ops {
                 let ints = Column::from_i64_values_owned(positive.clone());
                 let floats = Column::from_f64_values(positive.iter().map(|&x| x as f64).collect());
@@ -37566,7 +37581,11 @@ mod tests {
                 let from_ints = op(&ints).expect(name);
                 let from_floats = op(&floats).expect(name);
 
-                assert_eq!(from_ints.len(), positive.len(), "{name}: length drift on Int64");
+                assert_eq!(
+                    from_ints.len(),
+                    positive.len(),
+                    "{name}: length drift on Int64"
+                );
                 assert!(
                     from_ints.validity().all(),
                     "{name}: every positive integer is in domain and must be present"
@@ -37601,7 +37620,12 @@ mod tests {
             // ignored the predicate would mark sqrt(-4) PRESENT as NaN.
             let mixed: Vec<i64> = vec![4, -4, 9, -9, 0, 1];
             for (name, op, oracle, negatives_in_domain) in [
-                ("cbrt", Column::cbrt as fn(&Column) -> Result<Column, ColumnError>, f64::cbrt as fn(f64) -> f64, true),
+                (
+                    "cbrt",
+                    Column::cbrt as fn(&Column) -> Result<Column, ColumnError>,
+                    f64::cbrt as fn(f64) -> f64,
+                    true,
+                ),
                 ("atan", Column::atan, f64::atan, true),
                 ("sqrt", Column::sqrt, f64::sqrt, false),
                 ("log", Column::log, f64::ln, false),
