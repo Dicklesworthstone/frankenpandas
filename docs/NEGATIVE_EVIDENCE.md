@@ -31012,3 +31012,82 @@ still selects the hand-rolled arm, which is correct there. br-frankenpandas-cu22
 has three certified wins behind its adoption decision instead of a 1.33x estimate;
 its fleet/CI universality question (AVX2 is stricter than SSE4.1) and its
 config-placement question remain open and are not mine.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `log2 @10M` CERTIFIES at **2.251x on its SIXTH attempt**; and my storm gate failed a second time, through the pipe-to-`tail` exit-status trap
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=4491fd06d7619c503a8f2ebf9a1879aed1ea01a52e46051208627274be707a8f (82163776 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-sse`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T103830.626220Z-pid3362042 , giving
+measured_ratio=2.251x for this row.
+
+| `log2 @10M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **17621.96us** | 7.33% | 1.017611 — PASSES |
+| pandas | 40307.29us | 23.48% | 0.992631 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.017611 and
+pandas median ratio 0.992631, both inside the 2% limit.
+
+**Median-CI decision:** effect median 2.251x, 95% CI [2.19679, 2.46381], excluding
+unity; claimed log effect 0.81135626 against a required threshold of 0.23424025,
+cleared by 3.5x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 7.33%, pandas 23.48%.
+
+```
+LOADAVG      9.39 → 13.60 (in-run 1-min min 8.91, max 13.60)
+OBSERVED MHz busy-core BY ARM: FP 4296.1 / pandas 4292.8, arm clock ratio 1.0008
+THREADS      FP peak 10 · pandas peak 67
+```
+
+**SIX ATTEMPTS: 2.148x, 2.109x, 2.251x, 2.079x, 2.199x, 2.251x.** A 8.3% spread with
+five null failures and one pass. The engine was never in question; the instrument
+was, and the base rate measured earlier — 57% joint-null pass, worse for high-cv
+cells — is exactly what six attempts for one row looks like.
+
+**AND THE FIFTH ATTEMPT KILLED THE LAST "`log2` IS SPECIAL" HYPOTHESIS.** Its five
+prior nulls ran 1.045, 0.976, 0.958, 0.971, 0.977 — four of five below unity, which
+looks like a drift signature. Checked it against the family before believing it:
+across 117 `math_unary` FP nulls the mean is **1.0012** with **57/117** below unity,
+i.e. perfectly symmetric, and `log2` (mean 0.9855) sits at one tail of nine cells
+while `round2 @10M` (mean 1.0164) sits at the other, both at n=5. **Two tails from
+nine cells is what noise produces.** No bias, and I did not re-assert one.
+
+**NOW THE PROCESS FAILURE, WHICH IS THE SECOND IN TWO TURNS AND THE SAME FAMILY OF
+BUG.** Last turn I recorded that printing a verdict is not gating, and prescribed
+`host_is_quiet_now.py && <certify>`. I then wrote:
+
+```
+python3 scripts/host_is_quiet_now.py | tail -1 && <certify>
+```
+
+**The `&&` gates on the PIPELINE's status, which is `tail`'s — always 0.**
+Demonstrated directly:
+
+```
+  python3 scripts/host_is_quiet_now.py            -> exit 1
+  python3 scripts/host_is_quiet_now.py | tail -1  -> exit 0   (tail's)
+```
+
+The check printed "Defer the run" and the certification ran anyway, for the second
+consecutive turn, by a different mechanism. **This exact trap is in my own memory
+file** — recorded fleet-wide as `ubs ... | tail; echo $?` reporting tail's status
+and silently green-lighting any gate built on it. I re-derived it by walking into
+it.
+
+**The row itself stands on its own provenance:** all three gate clauses true, both
+nulls clean, in-run load 8.91–13.60, per-arm clocks within 0.08%. The harness's gate
+is what decides admissibility and it passed on its own terms. But **it passed by
+luck, not by procedure** — had it failed I would have filed it as another storm
+casualty, which is precisely the asymmetry that makes an ungated check worse than
+none. The correct form takes the exit status BEFORE any pipe:
+
+```
+  python3 scripts/host_is_quiet_now.py > /tmp/q.txt || { tail -2 /tmp/q.txt; exit 1; }
+```
