@@ -1856,6 +1856,14 @@ def bench_math_floordiv_pandas(df: pd.DataFrame) -> PairedSamples:
     return _bench_math_binary(df, lambda a, b: a.floordiv(b))
 
 
+def bench_math_add_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_binary(df, lambda a, b: a.add(b))
+
+
+def bench_math_div_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_binary(df, lambda a, b: a.div(b))
+
+
 def _bench_math_unary(df: pd.DataFrame, op) -> PairedSamples:
     s = _math_unary_input(len(df))
     return time_operation(partial(op, s))
@@ -2857,6 +2865,8 @@ PANDAS_WORKLOADS = {
         "hypot": bench_math_hypot_pandas,
         "mod": bench_math_mod_pandas,
         "floordiv": bench_math_floordiv_pandas,
+        "add": bench_math_add_pandas,
+        "div": bench_math_div_pandas,
         "sqrt_int64": bench_math_sqrt_int64_pandas,
         "log_int64": bench_math_log_int64_pandas,
         "expm1": bench_math_expm1_pandas,

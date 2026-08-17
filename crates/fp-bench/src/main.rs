@@ -1063,7 +1063,10 @@ fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
     // `pow` finite (a negative base with a fractional exponent is NaN) so the lane
     // measures arithmetic and not the missing-value path — the same reasoning the
     // unary fixture uses.
-    if matches!(workload, "pow" | "atan2" | "hypot" | "mod" | "floordiv") {
+    if matches!(
+        workload,
+        "pow" | "atan2" | "hypot" | "mod" | "floordiv" | "add" | "div"
+    ) {
         let mut rhs_rng = SplitMix64(0x0FED_CBA9_8765_4321);
         let rhs: Vec<f64> = (0..rows).map(|_| 1.0 + rhs_rng.unit() * 9.0).collect();
         let rhs_index = Index::new_known_unique_int64_unit_range(0, rows);
@@ -1081,6 +1084,18 @@ fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
             // measures arithmetic rather than the promotion-to-float rule.
             "mod" => Some(time_us(|| series.r#mod(&rhs_series).expect("mod"))),
             "floordiv" => Some(time_us(|| series.floordiv(&rhs_series).expect("floordiv"))),
+            // br-frankenpandas-4kig1. add/sub/mul/div have NEVER been measured
+            // against pandas in this harness — the four commonest operations in the
+            // library had no lane at all. They also still sit on the `1 << 20`
+            // threshold that cost `pow` a certified loss at 1M, and my reason for
+            // leaving them there ("bandwidth-bound, parallelism will not pay") is
+            // reasoning, not measurement. Two lanes, not four: `add` is the
+            // cheapest of the group and `div` the most expensive (divpd is ~13
+            // cycles against addpd's ~4), so they bracket the cost range that
+            // decides whether the threshold matters. `sub` mirrors `add` and `mul`
+            // mirrors neither usefully.
+            "add" => Some(time_us(|| series.add(&rhs_series).expect("add"))),
+            "div" => Some(time_us(|| series.div(&rhs_series).expect("div"))),
             _ => None,
         };
     }

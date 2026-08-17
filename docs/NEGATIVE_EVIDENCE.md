@@ -31427,3 +31427,53 @@ all 18 runs came in between 0.972396 and 1.053023 on the FrankenPandas arm and
 sequence are CI-width outcomes at a 133us arm, not null failures — no null median in
 the sequence was outside 6% of unity, and the four rows that did certify are the
 ones quoted above.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `add`/`div` lanes: the four commonest operations in the library had NO lane at all, and they still sit on the constant that cost `pow` a certified loss
+
+**COVERAGE GAP FIRST, because it is the larger finding.** `add`, `sub`, `mul` and
+`div` have never been measured against pandas in this harness. Not "measured and
+found wanting" — **never measured**. A grep of the workload registry returns nothing
+for any of them. The four operations a dataframe library exists to perform have been
+outside the vs-incumbent corpus for the whole campaign, while `math_unary` accumulated
+104 rows.
+
+**AND THEY SIT ON THE CONSTANT THAT ALREADY COST ONE OP A CERTIFIED DEFEAT.**
+`apply_f64_slices_nan_tracked` gates its parallel arm at `1 << 20` = 1,048,576, and
+the corpus's canonical 1M is 1,000,000. `pow` fell 4.9% short of that and certified
+as a **LOSS at 0.928x** until `e7d87c811` moved the compute-bound ops off it. I left
+`add`/`sub`/`mul`/`div` on the high threshold deliberately, on the grounds that they
+are bandwidth-bound and autovectorized so parallelism would not pay. **That is
+reasoning, and this bead records four occasions where my reasoning about an adjacent
+quantity was wrong.** It should be measured.
+
+**Counted mechanism:** the parallel arm's threshold is 1048576 elements and the
+corpus's 1M workload supplies 1000000, so it falls short by 48576 and the arm is
+never entered; `divpd` retires at roughly 13 cycles against `addpd`'s 4 cycles, so
+whatever that threshold costs is bounded by the 3x cycle ratio between the two ends
+of this group.
+
+Two lanes, not four: `add` is the cheapest of the group and `div` the most expensive
+(`divpd` ~13 cycles against `addpd` ~4), so they bracket the range that decides
+whether the threshold matters. `sub` mirrors `add`; `mul` adds nothing the pair does
+not already cover.
+
+**Verified to emit before trusting anything** (ELF `1dde689f`): `add` n=50 p50
+549.9us, `div` n=50 p50 905.9us.
+
+**NO ROW TAKEN — AND THE GATE IS WHY, WHICH IS THE FIRST GOOD NEWS ON THAT FRONT.**
+`host_is_quiet_now.py` reported BUSY with loadavg still lagging, and the
+`|| { report; exit }` form **actually stopped the certification**. Three turns ago
+the check only printed and the row ran anyway; two turns ago the `&&` gated on
+`tail`'s exit status and the row ran anyway. This time the guard held and no
+measurement was taken inside a storm. The correct form, for the record:
+
+```
+  python3 scripts/host_is_quiet_now.py > /tmp/q.txt || { tail -2 /tmp/q.txt; exit 0; }
+  <certify>
+```
+
+The prediction on record before the rows are taken, so it can be wrong in public:
+**`add @1M` should be roughly at parity or better and NOT show `pow`'s pathology,
+because at 550us for 24MB of traffic it is already running at ~44 GB/s and has
+little headroom for threads to buy.** `div @1M` at 906us is the one to watch — if
+the threshold is costing anything, it will show there first.
