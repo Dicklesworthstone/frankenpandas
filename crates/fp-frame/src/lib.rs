@@ -65760,13 +65760,28 @@ impl DataFrame {
             let vb = vv.as_bytes();
             let l = vb.len();
             let seg_start = var_bytes.len();
-            if l == 0 {
+            let seg_len = l * n_rows;
+            // GUARD ON seg_len, NOT ON `l`. br-frankenpandas-sn8l4.
+            //
+            // The old guard was `if l == 0`, which misses n_rows == 0: an EMPTY
+            // frame still reached the code below, where `extend_from_slice(vb)`
+            // writes `l` bytes unconditionally while `(1..=n_rows)` is an empty
+            // range that pushes NO offsets. The column then had bytes.len() == l
+            // with offsets still [0], violating the contiguous-Utf8 invariant
+            // `*offsets.last() == bytes.len()` and tripping the debug_assert in
+            // ScalarValues::lazy_contiguous_utf8 — which compiles OUT of release,
+            // so a release build shipped the malformed column silently.
+            //
+            // `seg_len == 0` covers both degenerate cases: an empty variable name
+            // (l == 0) and an empty frame (n_rows == 0). In both the segment
+            // contributes zero bytes, and the loop below pushes exactly n_rows
+            // offsets — which is zero when there are no rows.
+            if seg_len == 0 {
                 for _ in 0..n_rows {
                     var_offsets.push(seg_start);
                 }
                 continue;
             }
-            let seg_len = l * n_rows;
             var_bytes.extend_from_slice(vb);
             while var_bytes.len() - seg_start < seg_len {
                 let have = var_bytes.len() - seg_start;
