@@ -28825,3 +28825,100 @@ ARTIFACT     artifacts/bench/sqrt_1m_cert4_thinkstation1_2026-08-17.json
 FrankenPandas float `sqrt` against a single-threaded numpy ufunc, ~13%, with three
 candidate mechanisms already excluded by measurement (scheduling policy, the
 finiteness witness, the pre-zeroed buffer).
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `expm1 @10M` CERTIFIES **FASTER at 1.536x**, and it was owed a re-run rather than a fix
+
+Previously attempted at 1.532x with FrankenPandas' A/A null failing at 0.956197
+while the in-run load reached 48.9. Re-run in a window I did not disturb — no build
+was started in it, the ELF `d2ddc947` was already current and a name-only diff
+confirmed no `.rs` drift — and it certifies. Same point estimate, 1.532x then and
+1.536x now: **the number was never the problem, the window was.**
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=d2ddc94799b2ccbf6995ea87ee5a5cc361332aa6fd3b3167b4db075ef4859bb8 (81044248 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-fix`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T063108.636842Z-pid4022643 , giving
+measured_ratio=1.536x for this row.
+
+| `expm1 @10M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **19396.18us** | 3.50% | 0.983981 — PASSES |
+| pandas | 29332.70us | 2.06% | 0.999682 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.983981 and
+pandas median ratio 0.999682, both inside the 2% limit.
+
+**Median-CI decision:** effect median 1.536x, 95% CI [1.44566, 1.56312], excluding
+unity; claimed log effect 0.42896064 against a required threshold of 0.05089662,
+cleared by roughly 8x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 3.50%, pandas 2.06%.
+
+```
+LOADAVG      10.49 → 14.79 (in-run 1-min min 10.49, max 15.78)
+OBSERVED MHz busy-core BY ARM: FP 4295.5 / pandas 4292.5, arm clock ratio 1.0007
+THREADS      FP peak 10 · pandas peak 67
+```
+Best-vs-best 1.6019 (FP min 17745.9us vs pandas min 28426.4us), direction agrees.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `atan @10M` CERTIFIES **FASTER at 3.559x**; and `log2` fails its null a FOURTH time IN A CLEAN WINDOW, which kills my own explanation for it
+
+`atan` was previously attempted at 3.894x with FP's null failing at 1.043486 and the
+in-run load reaching **442.77**. Re-run in the same undisturbed window as `expm1`.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=d2ddc94799b2ccbf6995ea87ee5a5cc361332aa6fd3b3167b4db075ef4859bb8 (81044248 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-fix`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T063257.623651Z-pid4062730 , giving
+measured_ratio=3.559x for this row.
+
+| `atan @10M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **22232.05us** | 2.29% | 1.010767 — PASSES |
+| pandas | 78840.71us | 1.70% | 0.998201 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.010767 and
+pandas median ratio 0.998201, both inside the 2% limit.
+
+**Median-CI decision:** effect median 3.559x, 95% CI [3.49445, 3.62088], excluding
+unity; claimed log effect 1.26939996 against a required threshold of 0.05435923,
+cleared by more than 20x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 2.29%, pandas 1.70%.
+
+```
+LOADAVG      14.79 → 9.68 (in-run 1-min min 9.68, max 14.9)
+OBSERVED MHz busy-core BY ARM: FP 4296.5 / pandas 4293.7, arm clock ratio 1.0007
+THREADS      FP peak 10 · pandas peak 67
+```
+Best-vs-best 3.6699 (FP min 20954.4us vs pandas min 76900.4us), direction agrees.
+
+**`log2 @10M`, FOURTH ATTEMPT, AND THIS ONE REFUTES MY OWN DIAGNOSIS.** I wrote two
+entries ago that `log2`'s repeated null failures were "`thread::scope` plus an
+unquiet host" and told whoever came next not to look for another culprit. This run
+had the quietest window of the session — loadavg **9.39 → 11.73** across the whole
+row, FP cv **4.74%**, per-arm clocks identical to four decimal places — and **FP's
+null failed again at 0.971105**, while `expm1` (0.983981) and `atan` (1.010767)
+passed on the SAME ELF in the SAME window minutes either side.
+
+Four attempts, four failures: 1.045422, 0.975814, 0.957584, 0.971105. Four point
+estimates: 2.148x, 2.109x, 2.251x, 2.079x — a 7.6% spread.
+
+**So the host is not the explanation, and neither is the shared arm, because its
+siblings on that same arm certified either side of it.** Something is specific to
+`log2`. I do not know what, and I am recording that rather than inventing a
+mechanism — the last time I explained a result from a cost model instead of
+measuring it, I turned a certified 1.203x win into a certified 0.771x loss within
+the hour. What can be said precisely: `log2` is the only op in this family whose
+null fails in a window where its arm-mates pass, and the next person should compare
+`log2`'s kernel against `log`'s directly rather than re-running it a fifth time.
