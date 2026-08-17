@@ -32410,3 +32410,53 @@ cost 68us here and would cost less on a shallow path. Any hot function that size
 worker pool per call has this defect. `cached_available_parallelism` is `pub` so the
 other crates can adopt it; I have not touched them, and that residue is recorded on
 the bead rather than claimed as done.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — TWO GATED ELFs ARE BUILT AND WAITING; the measurement is held, not skipped
+
+Status entry so this is not repeated by whoever reads next. **No verdict, no ratio, and
+deliberately no code in the shared tree yet.**
+
+**THE PROBLEM THIS SOLVES.** The shared checkout has carried another pane's
+uncommitted `cached_available_parallelism` migration in `crates/fp-columnar/src/lib.rs`
+for over ninety minutes, and a build from it produced a binary that was HEAD plus their
+lever (recorded above). A paired A/B run from that tree would have put a foreign change
+in BOTH arms, where the null passes and nothing flags it.
+
+**THE FIX WAS TO STOP SHARING THE TREE.** A detached worktree at `4c1adb6c6`, with its
+own Cargo target directory, `git status --porcelain` empty at build time:
+
+| | ELF SHA-256 | source |
+|---|---|---|
+| baseline | `31c630ba9b385fe834bb10592a7111dad536c83e5451e42320fce8843369ae81` | worktree at `4c1adb6c6`, 0 dirty files |
+| candidate | `6b2147a7b6ed2acb03bc1fac2bf570bf00f16d985c8fbc3ad5be0f12c4f46b0e` | same worktree + the serial-`collect` patch |
+
+Both preserved at `/data/projects/.scratch/crimsonpine/fp-bench-{BASELINE-4c1adb6c6,CANDIDATE-collect}`,
+so the A/B costs a measurement window and **no rebuild**. The harness takes them
+directly via `--frankenpandas-binary` and `--frankenpandas-reference-binary`, which puts
+both arms in ONE invocation rather than two — strictly better evidence than the two-run
+form this bead has been using.
+
+**GATES, on the candidate, in the worktree:** `cargo test -p fp-columnar` **649 passed,
+0 failed, 0 filtered out** (648 before, so the new test is the increment and it ran —
+`0 filtered out` asserted, since a name-filtered run is this campaign's documented blind
+spot); `cargo clippy --all-targets -- -D warnings` **exit 0 with zero warning lines**,
+checked UNPIPED after `${PIPESTATUS[0]}` came back EMPTY — this shell is zsh, where the
+array is `$pipestatus` and 1-indexed, which is the campaign's exit-code trap wearing a
+new costume; `cargo fmt --check` exit 0. Disk 106G, 105G, 104G immediately before each.
+
+**WHY IT IS NOT COMMITTED.** The identical-looking change was a 2.3-3.5x REGRESSION this
+morning. Its performance is a prediction (1.25x-1.45x, recorded above before the build)
+and predictions do not land in a shared tree. **Measure, then land or reject** — the same
+order that made this morning's failure a reverted experiment instead of a shipped
+slowdown.
+
+**WHY IT IS NOT MEASURED YET.** The candidate build finished at 08:29 and
+`host_is_quiet_now.py` immediately read **655% build CPU across two peer rustc
+processes** against a 1-minute loadavg of 15.31 that does not show them. Measuring in the
+window you built in is how frankenfs closed its own measurement window, and measuring
+under someone else's storm is how this bead produced five uncertifiable `trunc` rows that
+later resolved as pure host noise. Host mean clock at the time of writing: **2905.9 MHz
+across 64 cores**, well under the 3707.7 MHz the quietest certified window of this
+campaign saw — on a `powersave` governor that is itself an error term this bead has
+already had to instrument.
