@@ -34889,3 +34889,71 @@ fetch script, or system pandas promoted to official oracle — is a policy call,
 2 depends on it: setting `FP_REQUIRE_LIVE_ORACLE` in CI today would turn CI permanently
 red, because CI has no oracle either. This run is evidence FOR that decision (system
 pandas is viable and immediately productive) and not a substitute for it.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-03fp5) — REJECTED, my own constant-overhead fit from an hour ago: the df_dot overhead is NOT a fixed per-call constant, it is ~1.43us PER COLUMN, and the source says exactly why
+
+**NO INCUMBENT ARM RAN AND NO A/A NULL WAS TAKEN.** This is a model correction over FP-vs-FP
+timings already banked in the entry above, plus a source reading. Nothing is quotable against
+pandas and nothing is banked as a lock. Measured on the preserved ELF
+`bench_elf_sha256=a802073cf042d28d9807347acee416505a0af97e7e2c0e344877405ea1ef80c5 (82346192 bytes) /data/projects/.scratch/crimsonpine/fp-bench-MAIN-8b263954b`,
+no build taken — the host was at loadavg 40.52 rising from 18.21 with build CPU at 504% against a
+200% threshold, idle 79.0%, iowait 0.5%, CPU MHz 2527.2, disk 200G. **Nothing here is certified and
+this window could not have certified anything.**
+
+**Counted mechanism:** cycles, `perf record -F 20000`, 2K samples, same ELF and workload as the
+entry above: the per-column construction symbols are `Column::from_f64_values` 0.64%,
+`LazyDataFrameColumns::index` 0.49%, `BTreeMap<String, Column>::insert` 0.47%,
+`__memcmp_avx2_movbe` 0.53% — 2.13% of a process that spends 61.96% hashing its own ELF, which is
+why these symbols are *present but unattributable* from that profile and why the model fit below,
+not the profile, is what carries this finding.
+
+**I FITTED A CONSTANT AND THE CONSTANT WAS THE WRONG SHAPE.** An hour ago I reported
+`t = c + flops/r` with c = 141.8us, and I flagged that it missed the held-out 100k point by 32%
+without asking why. The source answers it. `DataFrame::dot` does, for a `dim x dim` frame, work
+that is LINEAR IN THE COLUMN COUNT before any arithmetic happens:
+
+    collect_finite_float64_views(self, m)   k x BTreeMap<String, Column>::get   (O(log k) strcmp each)
+    for name in &other.column_order         n x BTreeMap index
+    col_order.push(name.clone())            n x String clone
+    result_cols.insert(name.clone(), ...)   n x String clone + BTreeMap insert
+    Column::from_f64_values(data)           n x Column construction (m f64s)
+
+Five per-column operations, most of them allocating, none of them arithmetic. So the overhead term
+should go as `dim`, not as a constant. Refitting on the SAME two endpoints, so both models have two
+free parameters and 100k stays held out:
+
+| model | dim=100 | dim=316 (HELD OUT) | dim=1000 |
+|---|---|---|---|
+| `t = c + dim³/r`, c=141.77us, r=51,754 | 161.09 (fit) | 751.47 vs 1094.91 — **-31.4%** | 19463.95 (fit) |
+| `t = a·dim + b·dim³`, **a=1.4306us/col**, 1/b=55,453 | 161.09 (fit) | 1021.09 vs 1094.91 — **-6.7%** | 19463.95 (fit) |
+
+**The linear model cuts the held-out error from 31.4% to 6.7% at equal parameter count.** At
+dim=100 its linear term is **143.1us of a 161.1us call — 89%.**
+
+**WHY THE SHAPE MATTERS MORE THAN THE NUMBER.** Both models put ~142us of overhead at dim=100, so
+on the one measured point they are indistinguishable and my earlier entry was not wrong about the
+magnitude. They disagree completely about WHERE TO LOOK. A constant says "one fixed setup cost per
+call" — you would go hunting for a single expensive initialisation. Linear-in-dim says the cost is
+**per column**, which points at the five operations enumerated above and makes the target concrete:
+**~1.43us per column**, which at ~100ns per allocation is on the order of a dozen allocations and
+two O(log k) String-keyed map traversals per column. That is a plausible budget for the listed work
+and is the first estimate of it this bead has.
+
+**PRE-REGISTERED, FALSIFIABLE, FOR THE NEXT CLEAN WINDOW** (no build needed, same ELF, sizes the
+corpus does not currently carry):
+
+    dim=200  (size 40k)   predicted  430.4us
+    dim=500  (size 250k)  predicted 2969.5us
+
+If the linear model holds, both land within ~10%. If either comes in materially high, the term is
+super-linear and the `Arc::from(slice.to_vec())` fallback in the B loop — which copies k f64s per
+column whenever the zero-copy `start == 0 && data.len() == k` condition fails — is the first
+suspect, because that path is O(n·k) and would bend the curve upward exactly where a linear model
+under-predicts.
+
+⚠️ **THE FIT IS THIN AND I AM NOT GOING TO OVERSELL IT.** Three points, two free parameters, one
+held out. A 6.7% miss on a single held-out point is encouraging, not established; it is enough to
+redirect the search from "find the fixed setup" to "find the per-column cost", which is all I am
+claiming. The measurement that would settle it is the two pre-registered dims above, and I have
+NOT taken it — this window is at 504% build CPU and a 161us workload is exactly the size where
+that noise dominates.
