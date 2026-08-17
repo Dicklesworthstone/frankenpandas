@@ -28631,3 +28631,53 @@ witness (yx692: -12 instructions per iteration, no decidable clock change). It i
 not the pre-zeroed buffer (tyiss: the write-once route is 0.72-0.86x SLOWER once the
 consumer is inside the clock). Three named mechanisms are now excluded by
 measurement, which is the value of having run them.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-284ul) — CORRECTION to the entry above: the certified `sqrt @1M` row measured a SERIAL kernel, the sampler was telling the truth, and the serial-forcing change reached main inside one of MY commits with a message that did not mention it
+
+Three hours ago I banked `sqrt @1M` CERTIFIES SLOWER at 0.877x and attached a
+caveat saying its `thread_count_actually_used: 1` was unreliable, blaming the 20us
+`/proc/self/status` sampler for under-reporting `thread::scope` workers. **The
+sampler was right and I was wrong.** `Column::sqrt` passes
+`par_min_override = Some(usize::MAX)` — it is SERIAL BY DESIGN, on the ground that
+"parallelism is inside the noise for this op and costs it the A/A null it needs to
+certify". One thread is the correct observation.
+
+**Counted mechanism:** the worker counter landed this turn reports the split the
+kernel picks, on the calling thread, before any spawn. Under an identical
+4-worker cap it returns 4 for `log` and 1 for `sqrt`. `grep -c "Some(usize::MAX)"`
+is 1 — `sqrt` is the only op carrying the override.
+
+**THE ROW ITSELF STANDS, and reads better than I gave it credit for.** 0.877x with
+both nulls clean is a SERIAL FrankenPandas against a single-threaded numpy — a
+like-for-like single-core comparison, which is a cleaner measurement than any of the
+8-worker rows above it, not a worse one. It also explains three things I had filed
+as puzzles: FP's cv collapsing to 5.91%, best-vs-best finally AGREEING with the
+median (0.8806 vs 0.877), and FP's minimum getting *worse* between windows
+(1063.57us with 8 workers, 1204.05us serial) — all three are what removing the
+worker-scheduling tail looks like. The "quiet windows are downclocked" explanation
+I reached for was unnecessary.
+
+**HOW IT GOT THERE, which is the part I have to own.** `par_min_override` does not
+exist in `3dc0d4311^` and exists in `3dc0d4311` — my own commit, whose message
+describes only a `Float64Nullable` gather pairing. A peer's uncommitted
+serial-forcing edit was sitting in the shared working tree and my pathspec commit
+snapshotted it. So a change that converts `sqrt` from parallel to serial reached
+main under a message about nullable dtypes, and I then certified a row on it and
+mis-attributed the result. The pathspec-commit hazard is already in this ledger; what
+is new is that it can silently change the SUBJECT of a measurement you are about to
+take.
+
+**Practice this establishes, and it is cheap:** before certifying, diff the op you
+are about to measure against the commit you think you are measuring —
+`git show <sha>:<file> | grep -A5 "pub fn <op>"` — rather than assuming your last
+commit was the last change to it. And when an observed count contradicts your
+expectation, suspect the code before the instrument. I had a memory note saying that
+counter lies in both directions, and it made me discount a true reading.
+
+**A/A null control (same invocation):** unchanged from the row being corrected —
+FrankenPandas 0.99169833, pandas 1.00063623, both inside the 2% limit. No new timing
+was taken for this correction and none is implied; it rests on a counted
+reachability fact and a git bisect of one string.
+
+Gates: `cargo test -p fp-columnar --lib` 642 passed / 0 failed / 58 ignored / 0
+FILTERED OUT; `clippy --all-targets -D warnings` clean; `fmt --check` clean.

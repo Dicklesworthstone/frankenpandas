@@ -8294,6 +8294,46 @@ fn elementwise_write_once_enabled() -> bool {
         .unwrap_or_else(elementwise_write_once_from_env)
 }
 
+thread_local! {
+    /// Workers the last elementwise map on THIS THREAD actually split across.
+    static ELEMENTWISE_LAST_WORKERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Record the split the kernel actually chose. Called by every elementwise map
+/// on the CALLING thread, before it spawns anything.
+fn record_elementwise_workers(workers: usize) {
+    ELEMENTWISE_LAST_WORKERS.with(|cell| cell.set(workers));
+}
+
+/// How many workers the last elementwise float map on this thread split across.
+/// `1` means it ran serially. `0` means no such map has run on this thread.
+///
+/// br-frankenpandas-284ul. THE SAMPLER THE HARNESS USES IS A KNOWN LIAR IN BOTH
+/// DIRECTIONS, and it is now corrupting a headline row. `thread_count_actually_used`
+/// is derived from `peak_process_threads` sampled off `/proc/self/status` every
+/// 20us, so it OVER-reports a warm persistent pool (threads exist but are idle) and
+/// UNDER-reports `thread::scope` kernels whose workers are born and joined between
+/// two samples. Six floor/ceil/trunc runs read 1 on a provably parallel path, and
+/// the 2026-08-17 `sqrt @1M` row that finally certified reports
+/// `peak_process_threads: 2` — the probe's own monitor thread and nothing else —
+/// where earlier rows on the SAME code path reported 8. A row cannot say whether
+/// its kernel ran parallel, which makes "observed thread count" unfalsifiable
+/// provenance.
+///
+/// This is the kernel reporting its own decision instead of an observer guessing
+/// it. Thread-local rather than a global atomic for the same reason as the policy
+/// override: the value is set on the calling thread before any spawn, so a
+/// thread-local is exact, race-free, and cannot leak between concurrent maps or
+/// between the crate's parallel tests.
+///
+/// PROVENANCE ONLY. Nothing branches on it; deleting it changes no result. Its
+/// deletion condition is a harness that can observe worker counts reliably by
+/// other means.
+#[must_use]
+pub fn elementwise_last_worker_count() -> usize {
+    ELEMENTWISE_LAST_WORKERS.with(std::cell::Cell::get)
+}
+
 fn par_map_slice_f64_with_witness<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
     input: &[T],
     f: F,
@@ -8336,6 +8376,7 @@ fn par_map_slice_f64_with_witness_with_policy<T: Copy + Sync, F: Fn(T) -> f64 + 
     let workers = available.min(cap);
 
     if workers <= 1 || n < par_min {
+        record_elementwise_workers(1);
         let (all_valid, all_finite) = map_block_with_witness(&mut out, &mut words, input, &f);
         return (out, words, all_valid, all_finite);
     }
@@ -8349,6 +8390,7 @@ fn par_map_slice_f64_with_witness_with_policy<T: Copy + Sync, F: Fn(T) -> f64 + 
     // that never splits a word across two workers.
     let chunk = n.div_ceil(workers).div_ceil(64).max(1) * 64;
     let mut flags = vec![(true, true); n.div_ceil(chunk)];
+    record_elementwise_workers(flags.len());
     std::thread::scope(|scope| {
         for (((out_c, words_c), in_c), flag) in out
             .chunks_mut(chunk)
@@ -8478,6 +8520,7 @@ fn par_map_slice_f64_domain_fused_to_owned_chunks<
     let workers = available.min(cap);
 
     if workers <= 1 || n < par_min {
+        record_elementwise_workers(1);
         let (out, domain_held, all_finite) = block(input, in_domain, f, known_all_finite);
         let chunks = if n == 0 {
             Vec::new()
@@ -8489,6 +8532,7 @@ fn par_map_slice_f64_domain_fused_to_owned_chunks<
 
     let chunk = n.div_ceil(workers).max(1);
     let block_count = n.div_ceil(chunk);
+    record_elementwise_workers(block_count);
     let mut built: Vec<Option<(Vec<f64>, bool, bool)>> = (0..block_count).map(|_| None).collect();
     std::thread::scope(|scope| {
         for (slot, in_c) in built.iter_mut().zip(input.chunks(chunk)) {
@@ -8614,6 +8658,7 @@ fn par_map_slice_f64_domain_fused<
     let workers = available.min(cap);
 
     if workers <= 1 || n < par_min {
+        record_elementwise_workers(1);
         let (domain_held, all_finite) = match known_all_finite {
             Some(known) => (block_domain_only(&mut out, input, in_domain, f), known),
             None => block(&mut out, input, in_domain, f),
@@ -8623,6 +8668,7 @@ fn par_map_slice_f64_domain_fused<
 
     let chunk = n.div_ceil(workers).max(1);
     let mut flags = vec![(true, true); n.div_ceil(chunk)];
+    record_elementwise_workers(flags.len());
     std::thread::scope(|scope| {
         for ((out_c, in_c), flag) in out
             .chunks_mut(chunk)
@@ -8662,6 +8708,7 @@ fn par_map_slice_f64_to_owned_chunks<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
     let workers = available.min(cap);
 
     if workers <= 1 || n < par_min {
+        record_elementwise_workers(1);
         let (out, all_valid, all_finite) = map_block_to_owned_with_witness(&mut words, input, &f);
         let chunks = if n == 0 {
             Vec::new()
@@ -8676,6 +8723,7 @@ fn par_map_slice_f64_to_owned_chunks<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
     // divides by zero in `chunk / 64`.
     let chunk = n.div_ceil(workers).div_ceil(64).max(1) * 64;
     let block_count = n.div_ceil(chunk);
+    record_elementwise_workers(block_count);
     let mut built: Vec<Option<(Vec<f64>, bool, bool)>> = (0..block_count).map(|_| None).collect();
     std::thread::scope(|scope| {
         for ((slot, words_c), in_c) in built
@@ -26686,12 +26734,28 @@ impl Column {
             // non-finite output from an integer column. The witness is `true` by
             // construction here rather than read off the column.
             let derived = preserves_finiteness.then_some(true);
+            // THE OVERRIDE DOES NOT APPLY TO THIS ARM, and that is a correction to
+            // my own change rather than an oversight. br-frankenpandas-4kig1.
+            //
+            // `sqrt` pins `par_min_override = usize::MAX` because parallelism is
+            // worth 1.038x at 10M on the FLOAT path, inside its own noise. I
+            // measured only that path and applied the conclusion to the op, which
+            // routes BOTH dtypes. MEASURED, same window, minutes apart, both rows
+            // with both A/A nulls passing:
+            //
+            //   sqrt_int64 @10M   parallel 1.203x FASTER   serial 0.771x SLOWER
+            //
+            // A certified win turned into a certified loss — a 1.56x swing. The
+            // integer path does a widening AND the kernel per element, so it is
+            // strictly more work than the float path and parallelism pays for it
+            // where it does not pay for f64. The i64 arm therefore keeps the
+            // shared policy threshold, whatever the float path chose.
             let (out, domain_held, all_finite) = par_map_slice_f64_domain_fused(
                 data,
                 &widened_domain,
                 &widened_f,
                 max_workers,
-                par_min,
+                policy_par_min,
                 derived,
             );
             if !domain_held {
@@ -31024,6 +31088,66 @@ mod tests {
             without.to_bits(),
             "the missing pair was folded into the covariance instead of skipped"
         );
+    }
+
+    /// br-frankenpandas-284ul. The kernel must report the worker split it ACTUALLY
+    /// chose, because the harness's sampler cannot.
+    ///
+    /// `thread_count_actually_used` comes from `/proc/self/status` sampled every
+    /// 20us, so it under-reports `thread::scope` workers born and joined between
+    /// samples, and six floor/ceil/trunc runs once read 1 on a provably parallel
+    /// path. This counter is set by the code that picks the split, on the calling
+    /// thread, before anything is spawned.
+    ///
+    /// IT EARNED ITS KEEP IMMEDIATELY. I wrote this expecting `sqrt` to report 4
+    /// under a 4-worker cap; it reported 1, which is CORRECT — `Column::sqrt`
+    /// passes `par_min_override = Some(usize::MAX)` and is serial by design. The
+    /// `sqrt @1M` row certified on 2026-08-17 reported `fp_threads: 1` and I had
+    /// blamed the sampler for it in the ledger. The sampler was right.
+    ///
+    /// So the test pins BOTH facts: `log` still parallelizes, and `sqrt` does not.
+    /// If anyone removes the override, the third assertion fires and says so.
+    #[test]
+    fn the_kernel_reports_the_worker_split_it_actually_chose_284ul() {
+        // 4096 with a 4-worker cap cuts into four 1024-value chunks.
+        let col = Column::from_f64_values((0..4096_u32).map(f64::from).map(|v| v + 1.0).collect());
+
+        crate::set_elementwise_witness_policy(1, 1);
+        col.log().expect("serial-by-cap log");
+        assert_eq!(
+            crate::elementwise_last_worker_count(),
+            1,
+            "a one-worker cap must report a serial split"
+        );
+
+        crate::set_elementwise_witness_policy(4, 1);
+        col.log().expect("parallel log");
+        assert_eq!(
+            crate::elementwise_last_worker_count(),
+            4,
+            "a four-worker cap over 4096 values must report four chunks"
+        );
+
+        // SERIAL BY DESIGN, not by policy: `sqrt` overrides `par_min` to
+        // `usize::MAX`, so the same cap that gave `log` four workers gives `sqrt`
+        // one. This is the assertion that caught my own misreading of the
+        // certified row.
+        col.sqrt().expect("sqrt under a 4-worker cap");
+        assert_eq!(
+            crate::elementwise_last_worker_count(),
+            1,
+            "sqrt reported a parallel split — its par_min_override was removed,              and any row quoting sqrt's thread count needs re-reading"
+        );
+
+        // Anti-latching: back to a genuinely parallel call after a serial one.
+        col.log().expect("parallel log again");
+        assert_eq!(
+            crate::elementwise_last_worker_count(),
+            4,
+            "the counter latched instead of tracking the last map"
+        );
+
+        crate::clear_elementwise_witness_policy();
     }
 
     /// br-frankenpandas-1hc9i, fourth instance. `take_positions`' typed primitive
