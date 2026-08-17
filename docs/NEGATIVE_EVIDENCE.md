@@ -30028,3 +30028,78 @@ rising**. I have refused rows at this load repeatedly, including one that missed
 null by 0.05 percentage points, and making an exception because a row is newly
 available would be exactly the wrong reason. The three rows are queued for the next
 window, with `pow @1M` first on the reasoning above.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-cu22b) — `+sse4.1` CERTIFIES at 0.415x/0.446x on this host, which is only 1.33x over the default and FAR SHORT of v3's 2.94x. And a COLD BINARY contaminated the incumbent arm until I warmed it — an artefact my own adaptive-rounds change amplifies
+
+Two findings, and the second one nearly cost me the first.
+
+**THE ARTEFACT, because it invalidated my first two attempts.** The `+sse4.1` binary
+was built minutes earlier and was page-COLD. Every slot spawns a fresh `fp-bench`
+process, and `--adaptive-rounds` had just raised that from 36 to **128 spawns per
+arm** of an 80 MB executable. The resulting I/O did not merely slow the subject — it
+slowed the INCUMBENT, which is interleaved with it:
+
+| run | FP p50 | FP cv | **pandas p50** | verdict |
+|---|---:|---:|---:|---|
+| sse4.1 a (cold) | 496.8us | 41.56% | **284.0us** | UNDECIDABLE |
+| sse4.1 b (cold) | 475.6us | 34.88% | **271.2us** | UNDECIDABLE |
+| sse4.1 c (warm) | 435.4us | 7.58% | **180.1us** | **SLOWER 0.415x** |
+| sse4.1 d (warm) | 450.7us | 7.40% | **203.0us** | **SLOWER 0.446x** |
+| default a | 572.5us | 7.63% | 192.3us | **SLOWER 0.343x** |
+| default b | 603.8us | 9.40% | 204.9us | **SLOWER 0.343x** |
+
+pandas cannot be affected by a Rust compiler flag, so a 40% swing in the INCUMBENT
+between two binaries is the tell that the run, not the code, was wrong. It
+reproduced twice cold and vanished twice warm. **The default arm was never affected
+because its binary had been executed dozens of times today and was already
+resident.** A/B-ing a freshly built binary against a well-used one is therefore
+biased against the NEW binary, which is exactly the direction that would have made
+`+sse4.1` look worse than it is — I would have banked a wrong conclusion.
+
+**PRACTICE: warm a newly built benchmark binary before the arm that uses it counts,
+and treat a moving INCUMBENT as an invalidation signal.** The incumbent is the
+control; when the control moves 40% the row is measuring the host. This matters more
+now than last week because `--adaptive-rounds` multiplies spawns by 3.5x, so the
+feature I validated one turn ago makes this artefact stronger. That caveat belongs
+with it.
+
+**A/A null control (same invocation):** the warm `+sse4.1` rows pass — FrankenPandas
+median ratio 1.0118 and pandas median ratio 1.0408 on run b (FAIL, cold) against
+clean nulls on runs c and d; the default rows pass at FrankenPandas 1.0025 and pandas
+0.9963. Only the warm rows are quoted.
+
+**NOW THE ACTUAL RESULT, and it does not support this bead's flag choice.** All rows
+are `floor @1M`, one host, adaptive rounds, `floor`'s entire executed path verified
+byte-identical across the two commits (`floor`, `floor_fast`,
+`typed_float_witness_free_unary`, `f64_finite_witness`,
+`from_f64_all_valid_with_finite_opt` all hash the same):
+
+| build | FP p50 | FP ns/elem | vs pandas | FP self-speedup |
+|---|---:|---:|---:|---:|
+| default (SSE2) | ~588us | 0.588 | **0.343x** certified | — |
+| `+sse4.1` | ~443us | 0.443 | **0.415-0.446x** certified | **1.33x** |
+| `x86-64-v3` | 186.8us | 0.187 | 0.909x (refused) | **2.94x** |
+
+**`+sse4.1` is worth 1.33x here and v3 is worth 2.94x — v3 is 2.2x better than the
+flag this bead proposes.** cu22b argues `+sse4.1` is the minimal sufficient flag and
+that v3's only argument would be `sqrt`. On `floor @1M` that is not what this host
+shows. The bead's own evidence was `floor @10M` on a DIFFERENT machine, and the
+`floor` size-curve entry above establishes that a 10M elementwise row cannot see the
+kernel at all — both engines are memory-bound there. So the flag comparison was made
+at the one size where the thing being compared is invisible.
+
+**I am not proposing v3.** The bead's argument against it stands on its own ground:
+v3 enables FMA and re-opens br-frankenpandas-jawxr, where `+fma,+avx2` was reverted
+after FMA contraction proved neutral-to-worse for the corr/cov/spearman Gram. What
+this row changes is the PRICE of that decision — declining v3 costs 2.2x on this
+family at the cache-resident size, which is a real number the adoption decision
+should carry rather than a hypothetical. The obvious follow-up is `+sse4.1,+avx2`
+WITHOUT `+fma`, which no one has measured and which would separate width from
+contraction.
+
+**Counted mechanism:** `roundpd`/`roundsd` count 0 in the default binary against 66
+in the `+sse4.1` build; FP p50 588us → 443us → 186.8us across default, `+sse4.1` and
+v3 with the incumbent held at 180-205us in every quoted row.
+
+**CV role:** provenance only, no vote — and here it was the DIAGNOSTIC: 41.56% and
+34.88% on the cold runs against 7.4-9.4% on every warm one.
