@@ -29726,3 +29726,58 @@ which retrospectively explains its 0-for-4 null record far better than the
 round multiplier on a 19.5ms row is 23 minutes of measurement, so for the worst
 cells the honest options are to fix the dispersion at its source or to accept that
 those cells do not certify — not to buy them with rounds.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — RETRACTING MY CRITIQUE OF THE ADAPTIVE-ROUNDS TRIGGER: I measured the wrong quantity. Duration DOES predict the null's input, 8.65% → 2.12%
+
+One entry ago I wrote that adaptive round scaling by duration "targets an axis that
+does not correlate with the problem", on the strength of `r(log10 p50, cv) = +0.009`.
+**That is wrong and I am withdrawing it. The error is which dispersion I measured.**
+
+`cv_pct` is the spread of the ~36 timed SAMPLES in a row. The A/A null is not built
+from those. It is a median over per-round ratios, and each round's ratio comes from
+SLOT medians — so the statistic that drives it is BETWEEN-SLOT dispersion, a
+different quantity that I did not compute. Recomputed from `rounds_detail` across
+320 arm-rows:
+
+```
+  p50 bucket    n   between-slot dispersion   sample cv
+      <300us   47            8.65%              11.44%
+        <1ms   24            3.17%               7.69%
+        <3ms   64            5.97%               9.03%
+       <20ms  110            2.83%               5.20%
+      >=20ms   75            2.12%               6.40%
+```
+
+**Between-slot dispersion falls roughly 4x across the duration range, and the
+fastest bucket is the noisiest by a wide margin.** That is exactly the effect
+`78ee215d2` measured independently over 463 arm-rows and encoded in
+`ADAPTIVE_DISPERSION_BY_P50_US`, and it is why scaling rounds by duration is
+well-founded. My `+0.009` correlation was real but about sample cv, which is not
+what the gate consumes.
+
+**AND THE AUTHOR HAD ALREADY REJECTED THE ARGUMENT I WAS MAKING**, which I would
+have seen by reading the code before writing about it. Their comment records that
+they first justified adaptive rounds by "a slot is short for a fast op", found it
+false because `fp-bench` does WARMUP=3 + ITERS=25 at every size, then tested fixed
+per-slot cost and found the data refutes that too — absolute spread scales 222x over
+a 170x p50 range. They landed on multiplicative noise as the only surviving fact.
+**I critiqued a rule they had already discarded, using a metric that does not feed
+the gate.**
+
+**WHAT SURVIVES FROM MY SIDE, stated narrowly:** sample cv still predicts the null
+OUTCOME (r = +0.362; every row under 3% cv has passed, 18 for 18), which is
+unsurprising once the two dispersions are understood as correlated but distinct, and
+it remains a cheap post-hoc read on whether a row was ever likely to bank. It is not
+a better trigger than duration and I should not have offered it as one.
+
+**Their invariant is the part worth copying.** `adaptive_balanced_square_rounds` can
+only ever ADD rounds — never fewer than `base_rounds`, for any input including 0,
+negative, NaN and inf — so it strengthens the measurement without touching the 2%
+limit. That is the distinction between scaling the measurement to the op and
+loosening the threshold to the failures, and it is the same line I refused to cross
+when a row of mine missed by 0.05 percentage points.
+
+This is my fourth correction in this bead: `floor` → `sqrt`/`log`, f64 → i64 (which
+cost a certified 1.203x win), `math_unary` → the repo, and now sample cv → the
+null's actual input. **All four are the same failure: reasoning about a quantity
+adjacent to the one that decides, and not checking which is which.**
