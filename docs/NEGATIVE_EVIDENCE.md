@@ -34085,3 +34085,59 @@ unit of work on this bead is an `fp-bench` arm that calls the setter directly an
 reports both arms from ONE process. Until that exists, **nobody should quote 7.505x as
 evidence that group-parallelism paid** — it is evidence that FrankenPandas beats pandas
 at this op, which is a different and previously unmeasured claim.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — BOTH div ARMS CERTIFY ON CURRENT MAIN IN ONE WINDOW. `+avx2` is worth **1.7353x**, and the row that failed the margin clause now passes it for exactly the predicted reason
+
+The `+avx2` row failed once on the margin clause alone, and I recorded why: its effect is small
+(0.846x is 15% from unity) while its null CI was wide, so `required_log_effect` (0.26344) exceeded
+`claim_log_effect` (0.16725). **I predicted before re-running that a quieter window would narrow
+the null CI, and that the row certifies if the null half-width falls below 0.0836.**
+
+**It fell to 0.05497.** Required margin 0.26344 → **0.10995**, now comfortably under a claim of
+0.13011. The 2x-null interval tightened from `[0.768406, 1.301395]` to `[0.89588, 1.116221]`.
+
+**A/A null control (same invocation):** `+avx2` FrankenPandas median ratio 0.99513 with pandas
+1.01655; default FrankenPandas 0.99615 with pandas 1.00620. All four inside the 2% limit, and
+**all three clauses pass on BOTH rows.**
+
+**Median-CI decision:** `+avx2` effect median 0.878x, 95% CI [0.82874, 0.90219], excluding unity
+and clearing its required threshold 0.13011 > 0.10995. Default 0.496x, CI [0.49196, 0.50116],
+clearing 0.70186 > 0.14694.
+
+**CV role:** provenance only, no vote — **1.69%** on the default arm, the cleanest measurement
+recorded in this campaign, and 9.81% on `+avx2`.
+
+| arm | ELF | FP p50 | pandas p50 | ratio | verdict |
+|---|---|---:|---:|---:|---|
+| main default | `a802073c…` | 620.36us | 307.02us | **0.496x** | SLOWER, 3/3 |
+| main `+avx2` | `10468acf…` | **357.49us** | 313.32us | **0.878x** | SLOWER, 3/3 |
+
+**WIDTH GAIN = 1.7353x, WITH BOTH ARMS CERTIFIED IN THE SAME WINDOW.** This is the strongest form
+this measurement has taken: previously the gain came from comparing a certified row against an
+uncertified one, or across windows. pandas' control sits 2.1% apart (307.02 vs 313.32us). The
+progression across the day — 1.6056x on stale ELFs, 1.6650x on main with one arm uncertified,
+1.7353x with both certified — is consistent and the estimate has firmed upward each time the
+conditions improved.
+
+**WHAT IT CONFIRMS METHODOLOGICALLY, and this is the part worth keeping.** I wrote earlier that
+"the gate is easiest to satisfy when you are losing badly and hardest as you approach parity", and
+that **the remedy for a near-parity row is a tighter null, not a bigger effect.** This is that
+claim tested: the effect barely moved (0.846x → 0.878x) while the null half-width halved, and the
+row flipped from refused to certified. The gate was never wrong about this row; it was correctly
+demanding evidence proportional to a small claim.
+
+**div @1M REMAINS A LOSS, and now precisely: pandas is 1.14x faster on the flag build** (0.878x)
+and **2.02x faster on the default** (0.496x). The width lever closes most of a 2x gap and does not
+close it.
+
+```
+LOADAVG      24.01 / 31.14 / 29.40 at launch — DRAINING, and it kept falling to 15.73 mid-run;
+             28.39 fifteen-minute at the end. Build CPU 177% at launch, under the 200% threshold.
+CPU IDLE     88.9% and 90.2% across two 1s samples, iowait 0.0% — and unlike the previous turn,
+             loadavg AGREED with idle this time, which is why this window held and that one did not
+OBSERVED MHz host mean 2859.7 before -> 3647.1 after; arms_saw_same_clock=true on both rows
+LIKE-FOR-LIKE ok on both; peak_process_threads=2 (serial arm); pandas peak 67 on both
+INCUMBENT    pandas 2.2.3, same invocation, 307.02us and 313.32us — 2.1% apart
+ARTIFACTS    artifacts/bench/4kig1_div1M_{MAINAVX2,MAIN}_retry_2026-08-17.json
+```
