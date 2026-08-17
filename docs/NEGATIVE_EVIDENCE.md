@@ -34367,3 +34367,60 @@ and @1k the constant WAS ~99.8% of the measurement (190us vs the post-fix 0.30us
 it inverts the verdict as far up as @100k (0.709x -> 1.157x). **A pre-2a2aa6905 row at size
 <=100k is not comparable to a post-fix row**, in the same way and for the same reason that rows
 across a harness sha are not comparable.
+
+## br-frankenpandas-kko5z — log carries the SAME 66.5us constant (+69.00us removed), but log @10k CANNOT be certified: the INCUMBENT's A/A null fails, twice, while FP's is clean
+
+**Campaign result class:** uncertified-measurement (reported, not claimed)
+
+kko5z names sqrt **and** log. The entry above certified sqrt; this one finishes the bead by
+measuring log, and the result is a rejection worth more than the ratio would have been.
+
+Window: loadavg 13.43 draining from 20.18, idle 81.0%, iowait 0.0%, **build CPU 0%**, CPU MHz
+2848.7 before / 3540.7 after. Harness `60ed3c58fdd5`, ELF `a802073cf042`, no build taken.
+
+| run | FP p50 | FP cv | pandas p50 | pandas cv | ratio | FP null | **pandas null** | verdict |
+|---|---|---|---|---|---|---|---|---|
+| log @10k  | 39.60us | 23.66% | 65.19us | — | 1.644x | 0.99753 | **1.04098** | NULL_UNDECIDABLE |
+| log @10k retry | 39.20us | 19.03% | 65.07us | 12.23% | 1.653x | 0.99717 | **1.02172** | NULL_UNDECIDABLE |
+| log @100k | 406.62us | 8.70% | 378.29us | — | 0.932x | 1.00488 | **0.96114** | NULL_UNDECIDABLE |
+
+**The constant is confirmed on log too.** Pre-fix `3qpj4_cand_log_10k` r0/r1 read 108.6us and
+105.7us on ELF ded4edcb2b; post-fix is 39.60us. **-69.00us**, against sqrt's -66.92us and -66.74us
+and q1evw's measured 66-68us. Three workloads, one constant, agreeing inside 2us.
+
+### THE ROWS ARE REPRODUCIBLE AND STILL UNCERTIFIABLE — AND I AM NOT TOUCHING THE GATE
+
+Two independent invocations agree to **0.5% on the ratio** (1.644x / 1.653x), **1.0% on FP's p50**
+(39.60 / 39.20us) and **0.2% on pandas' p50** (65.19 / 65.07us). By every reproducibility measure
+available these are the same measurement twice. They fail anyway, and both times on exactly one
+clause:
+
+    effect_ci_excludes_unity          True
+    effect_exceeds_two_x_null_margin  True
+    null_medians_within_2pct_unity    FALSE   <- pandas arm: 1.04098, then 1.02172
+
+**The failing arm is the INCUMBENT, not FrankenPandas.** FP's null is 0.99753 and 0.99717 — among
+the cleanest in the campaign. This is the mirror image of the problem this ledger spent the week
+on, where FP's parallel arm was the unstable one. The retry's 1.02172 misses the band by 0.17
+percentage points.
+
+**I am explicitly NOT widening NULL_MEDIAN_MAX_ABS_DEVIATION**, and I want that on the record next
+to the temptation, because gate self-weakening is banned by the standing orders and this is
+precisely the moment it would feel justified: I have a reproducible 1.65x and a threshold standing
+0.17pp in the way. A gate that only ever fires when I disagree with it is not a gate. **1.644x and
+1.653x are NOT claims and are not banked as locks.**
+
+The legitimate route to certifying log @10k is to make the incumbent's null converge — more rounds
+on the pandas arm, so its per-round median tightens — not to move the line it fails to clear. Note
+sqrt @100k's pandas null was already 1.01551, inside the band but close to it: the incumbent's
+stability across the 10k-100k sizes is marginal generally, and log is simply the workload that
+pushes it over. That is a property of pandas at these sizes on this host, and it bounds what this
+harness can certify at small n regardless of what FrankenPandas does.
+
+### BEAD STATUS
+
+kko5z asked why sqrt/log carry a 66.5us fixed per-call cost while floor on the same machinery pays
+1.4us. **Answered and fixed** — the cost was `available_parallelism` walking the cgroup hierarchy
+per call, removed by a peer in 2a2aa6905. Confirmed on three workloads to within 2us. sqrt @10k
+(3.73x) and @100k (1.157x) are certified and locked; log is confirmed on the mechanism but
+uncertified on the ratio for the incumbent-side reason above.
