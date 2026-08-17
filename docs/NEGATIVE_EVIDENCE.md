@@ -32986,3 +32986,83 @@ regression pass, and it does not run in CI. `perf_ratchet.py` is still the only 
 can BLOCK, and nothing currently invokes it on a schedule. A lock that no one runs is a
 record, not a defence — wiring it into a gate is a decision with a blast radius across every
 pane, so it is proposed here rather than imposed.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — NEITHER `+avx2` NOR ITS CONTROL CERTIFIES: both A/A nulls fail in a window that closed mid-run. What IS settled is correctness — the flag build is bit-identical — and `div @1M` remains a LOSS to pandas on both builds
+
+The diagnosis said the div kernel runs at half the host's vector width and the flag build was
+verified to emit `vdivpd %ymm`. This is the first timing of it, and the honest answer has two
+halves: the correctness claim is settled, the performance claim is not.
+
+**A/A null control (same invocation):** FAILED on both rows, and that is why nothing is banked
+— `+avx2` FrankenPandas median ratio 0.94903 with pandas 0.99058; SSE2 control FrankenPandas
+0.92516 with pandas 1.11067. Three of those four are outside the 2% limit, so both rows are
+NULL_UNDECIDABLE and no ratio here is certified.
+
+**CV role:** provenance only, no vote — recorded at 44.59% and 46.22%, the highest this bead
+has seen, which is itself the evidence that the window was unusable.
+
+**BIT-IDENTICAL, SETTLED.** Both ELFs, run directly on the same workload, report the same
+`fp-bench` checksum:
+
+```
+BASELINE (SSE2)  checksum=e700f53534db5c6d
+AVX2             checksum=e700f53534db5c6d
+```
+
+This is the claim I said had to be measured rather than assumed, and it is now measured.
+Widening a divide does not change the quotients — `vdivpd` on four lanes computes what two
+`divpd` on two lanes compute — and building without `+fma` kept the one transform that WOULD
+have changed results out of the picture.
+
+**⚠️ I NEARLY REPORTED A BIT-IDENTITY FAILURE THAT DOES NOT EXIST.** The artifact's
+`frankenpandas.checksum` differed between the two rows (`a25ae7e3…` vs `7d9af39d…`) and I
+flagged it as a mismatch. It is not a value hash: the harness builds it as
+`sha256("|".join(per-slot checksums))`, and the two runs had **different round counts (15 vs
+19)**, so the strings differ by length alone even when every slot agrees. The harness's own
+source calls it "a liveness token". **A field named `checksum` is not automatically a
+bit-identity check, and I was one sentence from banking a correctness alarm off it.** The real
+check is the engine's own per-run checksum, which required running both ELFs directly.
+
+**THE TIMING, AND WHY IT IS NOT BANKABLE:**
+
+| | FP p50 | pandas p50 | ratio | nulls (FP / pandas) | cv | verdict |
+|---|---:|---:|---:|---|---:|---|
+| SSE2 control | 860.00us | 509.51us | 0.557x | 0.92516 / 1.11067 | 46.22% | NULL_UNDECIDABLE |
+| `+avx2` | 486.25us | 355.06us | **0.756x** | 0.94903 / 0.99058 | 44.59% | NULL_UNDECIDABLE |
+
+**Both rows fail the null clause and neither certifies.** `host_is_quiet_now.py` returned
+quiet at launch and the host degraded immediately: loadavg **17.73 → 26.20** across the two
+runs, host mean clock **2485.8 → 3150.8 MHz**, and — the clearest tell — **pandas' own arm
+moved 509.51us → 355.06us, a 43% swing between invocations eleven seconds apart.** An
+incumbent that unstable is the signature of a window that closed, and it is exactly the
+condition this ledger's `trunc` rows resolved to.
+
+**SO THE DEFENSIBLE NUMBER IS THE RATIO, NOT THE RAW p50.** Each row measured FP and pandas in
+the SAME invocation, so the pandas-relative ratio absorbs the drift the raw microseconds do
+not: **0.557x → 0.756x, a 1.36x relative improvement.** The naive p50-over-p50 figure is
+860.00/486.25 = **1.77x, and I do not believe it** — it credits the flag with a 43% incumbent
+swing it had nothing to do with. Quoting 1.77x here would be the same error this bead already
+made when a `df_dot` row certified at 1.187x on incumbent dispersion and was retracted.
+
+**WHAT THIS DOES AND DOES NOT ESTABLISH.** It establishes that the flag is safe (bit-identical)
+and that its direction is large and matches the counted mechanism. It does NOT establish a
+certified ratio, and `div @1M` remains a LOSS against pandas either way — 0.756x is still
+pandas ahead by a third. **The width was worth roughly what the instruction count predicted,
+and it is not enough on its own to close the gap.**
+
+**NEXT, and it needs a genuinely stable window rather than a quiet instant:** re-measure both
+arms with `--adaptive-rounds` when `host_is_quiet_now.py` is quiet AND the 1-minute loadavg is
+below its own 15-minute average, so the window is provably improving rather than merely
+momentarily idle. The ELFs are preserved, so that costs a window and no rebuild.
+
+```
+LOADAVG      17.73 / 20.14 / 18.77 at launch (quiet verdict, 0% build CPU) →
+             26.20 / 21.91 / 19.43 at the end; the rise is the two runs plus peer load
+OBSERVED MHz host mean 2485.8 before → 3150.8 after; harness reported
+             arms_saw_same_clock=true, arm_clock_ratio 1.0054 (avx2) and 1.0059 (sse2)
+LIKE-FOR-LIKE both rows ok=true (par=64, no thread cap)
+ELFs         avx2 3314b1a61352c47febd00109144222326bb6a221d2fda1ae0c915da237b40d31
+             sse2 31c630ba9b385fe834bb10592a7111dad536c83e5451e42320fce8843369ae81
+ARTIFACTS    artifacts/bench/4kig1_div_{AVX2,SSE2_control}_2026-08-17.json
+```
