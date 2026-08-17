@@ -27552,3 +27552,129 @@ four exist now, so the rows are takeable; this commit is the code and its tests.
 
 Gates: `cargo test -p fp-columnar` 628 passed / 0 failed / 0 filtered out,
 `clippy -D warnings` clean, `fmt --check` clean.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-284ul) — REJECTED: raise the elementwise worker cap. REJECTED: raise `PAR_MIN`. At `sqrt @1M` the default `(8, 200_000)` beats every other setting, serial included
+
+The bead posed two hypotheses that pull in opposite directions and said neither
+could be settled by reasoning. They are now settled by measurement, and both fail.
+
+**Lever 1 — `PAR_MIN` is too low at 1M, so `thread::scope` spawn eats the win.**
+Hypothesis: 1M is barely above the 200_000 threshold and the banked spawn figure
+is ~397us/8thr against a ~1338us call, so forcing the serial arm should be
+FASTER. **Measured: forcing serial LOSES, 0.5721x / 0.6598x / 0.6558x / 0.6714x
+across four null-passing runs** (through the `workers = 1` door) and 0.6191x /
+0.6858x / 0.8145x (through the `par_min = 2_000_000` door). Both doors reach the
+same code and both say the same thing. REJECTED.
+
+**Lever 2 — the `.min(8)` cap is too low for a bandwidth-bound map on 32C/64T.**
+Hypothesis: eight workers do not reach memory-level saturation. **Measured: every
+raised cap LOSES, monotonically** — 16 workers 0.8996x / 0.9079x / 0.8060x, 32
+workers 0.7124x / 0.7729x / 0.7799x, 64 workers 0.5737x / 0.6101x / 0.5332x /
+0.6434x. REJECTED. This reproduces ProudChapel's 2026-07-29 cap-32-vs-cap-64
+rejection on a COMPLETELY DIFFERENT kernel (that was a row×column `df_abs`
+scheduler; this is the unary witness map with no new allocation), so the retry
+predicate that was explicitly scoped to "this design" now has a second,
+independent instance behind it.
+
+**The interesting middle.** `(4, 1)` is the only setting that never certifies in
+either direction — 1.0020x, 1.0070x, 1.0164x, 0.9525x. Four workers and eight
+workers are indistinguishable on this path at this size, so the cap is already
+past the knee; the 5th–8th worker buys nothing and the 9th onward costs.
+
+**Certified table, `sqrt @1M`, ELF `eaf79091…`, the one HEAD run whose A/A null
+passed** (null 0.9873, log margin 0.0397 ⇒ a candidate needs |log effect| > 0.0794):
+
+| setting | cand p50 | base p50 | paired ratio | 95% CI | obs threads | verdict |
+|---|---:|---:|---:|---|---:|---|
+| `(8, 200_000)` | 1306.2us | 1259.6us | 0.9873 | [0.9611, 1.0219] | 7 | **A/A NULL** |
+| `(1, 1)` serial | 1916.4us | 1038.3us | **0.5721** | [0.5369, 0.6933] | 1 | SLOWER |
+| `(2, 1)` | 2371.4us | 2344.3us | 0.9772 | [0.6803, 1.6138] | 2 | undecidable |
+| `(4, 1)` | 1157.6us | 1113.8us | 1.0020 | [0.9396, 1.0312] | 4 | undecidable |
+| `(16, 1)` | 1308.8us | 1165.0us | **0.8996** | [0.8804, 0.9294] | 8 | SLOWER |
+| `(32, 1)` | 1424.6us | 980.3us | **0.7124** | [0.6510, 0.7880] | 9 | SLOWER |
+| `(64, 1)` | 2334.6us | 1292.8us | **0.5737** | [0.5467, 0.5998] | 13 | SLOWER |
+| `(8, 2_000_000)` serial | 1996.8us | 1078.9us | **0.6191** | [0.4989, 0.6883] | 1 | SLOWER |
+
+Every arm is BIT-IDENTICAL to the baseline (checksummed over `to_bits()` inside
+the run, per arm) — the settings move block boundaries, never values.
+
+```
+CLASS        FP-vs-FP setting sweep. This picks a DEFAULT; it is NOT a vs-incumbent row.
+ELF          eaf7909137ad2d02cfc721b183b4c8280a10e1bb22fdd2dcef051abeab424f5b
+             (80218872 bytes) target/release-perf/fp-bench, self-reported by the process
+HOST         thinkstation1, governor powersave, available_parallelism 64
+LOADAVG      21.29 1-min / 24.76 5-min / 25.59 15-min at launch, 20.86 at the end
+OBSERVED MHz host mean 3456.0 (min 2510.3, max 4150.9) before, 3066.1 (1429.0-4039.3) after
+METHOD       ONE process, ONE ELF, 15 ABBA-interleaved rounds per candidate after 3
+             warmup pairs, policy installed OUTSIDE the clock via a per-thread override
+ARTIFACT     artifacts/bench/284ul_elementwise_policy_sweep_thinkstation1_2026-08-16.json
+```
+
+**A/A null control (same invocation):** the `(8, 200_000)` arm ran against itself
+in the same interleave, 15 ABBA rounds, one process — paired median ratio
+0.987300, 95% CI [0.961100, 1.021900], log margin 0.039700, so a candidate has to
+reach a |log effect| above 0.079400 before it is decidable at all. Nine of the
+thirteen sweeps in the artifact were refused because that median sat further than
+2% from unity.
+
+**Median-CI decision:** serial `(1, 1)` effect median 0.5721x, CI [0.5369, 0.6933],
+log effect 0.558450 against the required 0.079400 — seven times the margin, which
+is why it decides. `(64, 1)` 0.5737x, CI [0.5467, 0.5998], log effect 0.555655.
+`(4, 1)` 1.0020x, CI [0.9396, 1.0312] straddles unity and does not decide.
+
+**CV role:** provenance only, no vote — baseline arm 14.78%, candidates 15.09%
+(4 workers) to 22.15% (32 workers).
+
+**`log @1M` agrees and agrees harder, but NO log run passed its null and none is
+quoted as certified.** Direction across five log sweeps: serial 0.2992x–0.4603x,
+2 workers 0.4906x–0.5622x, 4 workers 0.7210x–0.8348x, 16 workers the only arm
+that ever reads above unity and never decidably. `log` is ~2x more compute per
+element than `sqrt`, so parallelism pays MORE there, which is the opposite of
+what the spawn-overhead hypothesis predicts. Screened point estimates only.
+
+**THE SHIPPED INSTRUMENT COULD NOT RUN ITS OWN PROTOCOL, and that is the reason
+this bead sat unmeasured.** `elementwise_witness_policy()` read the env pair
+through a `OnceLock`, so the FIRST elementwise map in the process froze the
+policy and every later setting was silently ignored. The bead's plan — one
+process, seven worker counts × two thresholds — would have timed ONE setting
+sixteen times and banked fifteen null results as data, and nothing would have
+looked wrong: the OUTPUT is identical at every setting, which is exactly what the
+existing equivalence test pins. Fixed with a per-thread override
+(`set_elementwise_witness_policy`), thread-local rather than global so it cannot
+leak into the crate's other tests the way `FP_DOT_SERIAL` leaked in `6df71eae2`.
+The regression guard counts DISTINCT THREADS the mapped closure runs on, because
+the answer cannot distinguish the arms — under the cached implementation both
+arms report one thread and the test fails.
+
+**THE NULL GATE PAID FOR ITSELF IN THIS RUN, once, and loudly.** Of 13 sweeps, 9
+were REFUSED because their A/A null missed unity by more than 2%. One of the
+refused runs (`final_sqrt_a`, null 1.0311, candidate CV 43.3%) reported `(4, 1)`
+at **1.6613x FASTER, CI [1.2658, 2.1616]** — a clean-looking 66% win, with an
+excluding CI, from a setting that four passing runs put at parity. That row is
+noise wearing a confidence interval, and the only thing standing between it and
+this ledger was the null. Quote nothing from a run whose null failed.
+
+**A SECOND, UNRELATED HAZARD THIS RUN SURFACED: the measured binary was replaced
+under me by a peer.** The first five sweeps self-reported ELF `e3068152…`; twenty
+minutes later `sha256sum` on the same path returned `5b12dd8d…`. A dozen agents
+share this checkout AND share `target/release-perf/`, so "the binary at the path
+I built to" is not a stable identity — only the sha the process prints about
+itself is. Every row here carries that sha. (The pre-`fmt` ELF's three
+null-passing runs are banked in the artifact and quoted above; they agree with
+the HEAD ELF arm-for-arm, which is also a cross-binary check on the finding.)
+
+**DEFAULTS LEFT ALONE.** `ELEMENTWISE_WITNESS_DEFAULT_WORKERS = 8` and
+`ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN = 200_000` stay exactly as they were,
+because nothing beat them. The bead pre-committed to that outcome: "If NO setting
+beats 8/200_000, bank that as negative evidence and the AVX2-tier verdict stands
+on real evidence rather than on an untested transfer." It does now. `sqrt @1M`'s
+0.805x-vs-pandas deficit is NOT a scheduling-policy defect, and the next lever on
+it has to attack the per-element work, not the split.
+
+Gates: `cargo test -p fp-columnar --lib` 627 passed / 0 failed / 0 filtered out,
+`cargo test -p fp-bench` 8 passed / 0 failed / 0 filtered out, `clippy -p
+fp-columnar -p fp-bench --all-targets -D warnings` clean, `fmt --check` clean.
+`cargo check --all-targets` workspace-wide is RED on a pre-existing fp-io
+`#[cfg(test)]` `DType` match that does not cover `Float64Nullable`
+(crates/fp-io/src/lib.rs:22308) — committed at HEAD, untouched by this change,
+and taken next.
