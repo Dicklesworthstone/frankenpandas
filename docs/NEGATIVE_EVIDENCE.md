@@ -29781,3 +29781,73 @@ This is my fourth correction in this bead: `floor` → `sqrt`/`log`, f64 → i64
 cost a certified 1.203x win), `math_unary` → the repo, and now sample cv → the
 null's actual input. **All four are the same failure: reasoning about a quantity
 adjacent to the one that decides, and not checking which is which.**
+
+### 2026-08-17 CrimsonPine — GATE AUDIT against the three shapes other projects found: TWO DO NOT REPRODUCE HERE, measured, and the one that does is not the shape it was reported as. The binding constraint is the null clause, alone, in 66% of refusals
+
+Asked to audit my own gates for frankenfs' threshold-at-the-operating-point,
+frankenscipy's gate-biased-against-the-faster-arm, and franken_networkx's
+arm-asymmetric A/A null. Measured all three over the banked corpus rather than
+reasoning about them. No timing was taken; this is arithmetic over artifacts.
+
+**1. ARM-ASYMMETRIC A/A NULL (networkx's shape) — DOES NOT REPRODUCE.** My square
+gives the two arms structurally different null groupings, so this was the one I
+expected to find: pandas occupies positions 0,3,4,7 of `ABBAABBA` and FrankenPandas
+occupies 1,2,5,6, and `_balanced_square_aggregate` compares `slot_p50s[0:2]` against
+`[2:4]` per group of four — so pandas' two groups each SPAN three slots while
+FrankenPandas' are CONTIGUOUS pairs. Different within-group averaging of any
+intra-round drift. Paired within-invocation over 227 rows:
+
+| | median \|dev\| | mean \|dev\| |
+|---|---:|---:|
+| FrankenPandas arm | 0.94% | 1.97% |
+| pandas arm | 1.04% | 1.91% |
+
+paired difference (FP − pandas) median **+0.096%**, FrankenPandas worse in **121/227
+= 53.3%** of rows, sign-test **z = +1.00 — not significant at two sigma**. Rows where
+only FP's null fails: 46. Rows where only pandas' null fails: 43. **The structural
+asymmetry is real in the code and does not show up in the data.**
+
+**2. GATE BIASED AGAINST THE FASTER ARM (scipy's shape) — DOES NOT REPRODUCE.** The
+candidate here is per-arm busy-core MHz: a faster arm is sampled over a shorter
+window, so it could systematically read a lower clock and look unfairly penalised.
+Over the 80 rows carrying `busy_core_mhz_by_arm`, the faster arm read a LOWER clock
+in **41/80 = 51.2%**, median (faster − slower) **−0.2 MHz**, sign-test **z = +0.22**.
+Unbiased. Worth adding that `like_for_like.gate_input` is **False** in every row —
+that check is PROVENANCE, not a gate, so even a bias there could not have refused a
+row.
+
+**3. THRESHOLD AT THE OPERATING POINT (frankenfs' shape) — PRESENT, BUT NOT WHERE IT
+WAS REPORTED.** Already audited two turns ago: the 2% limit sits at roughly the 68th
+percentile of each arm's deviation, NOT at the median (0.94% / 1.04%). The reported
+version of this finding for my project said 1.75% and the median; my corpus does not
+show that. What is true is the CONJUNCTION — the gate is an AND over two arms, and
+0.677 × 0.686 = 0.464 against an observed joint 48.7%.
+
+**AND THE NUMBER THAT SHOULD DRIVE ANY FIX — clause attribution over 227 rows with a
+full verdict, 98 decidable (43.2%):**
+
+| clause | fails in | sole blocker in |
+|---|---:|---:|
+| `null_medians_within_2pct_unity` | 117 (90.7% of refusals) | **85 (65.9%)** |
+| `effect_exceeds_two_x_null_margin` | 44 (34.1%) | 11 (8.5%) |
+| `effect_ci_excludes_unity` | 5 (3.9%) | 0 |
+
+**Two thirds of all refusals are the null clause ALONE** — the effect was decidable
+and the instrument was what failed. The margin clause is the sole blocker in only
+8.5%, and the CI clause never blocks by itself. So effort spent widening the
+decidability margin would address 8.5% of refusals; effort spent making the null
+tighter addresses 66%. That is the case for `br-frankenpandas-flicz` (more rounds
+where dispersion is higher), and it is an argument from attribution rather than from
+the mechanism stories I got wrong twice.
+
+**Counted mechanism:** 227 rows with 3-clause verdicts; 98 decidable; null clause
+sole blocker in 85; paired arm sign-test z = +1.00 over 227; faster-arm clock
+sign-test z = +0.22 over 80.
+
+**A/A null control (same invocation):** not applicable — no measurement was taken for
+this audit.
+
+**Saying it either way, as asked: two of the three shapes are absent here and I am
+not going to manufacture them.** The one that is present is milder and differently
+located than reported, and the actionable finding is not a threshold at all — it is
+that the null clause is doing nearly all the refusing.
