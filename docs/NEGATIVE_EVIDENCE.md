@@ -30544,3 +30544,89 @@ coincidence as a mechanism and having to retract it. **I am not calling `round2`
 anomalous. I am recording that it has now cost four attempts and remains unbanked,
 and that its cv sits in the band where the peer's adaptive-rounds lever should
 help.**
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-3qpj4) — THE INTRINSIC FIX CERTIFIES: `floor @1M` 1.544x FASTER and `ceil @1M` 1.516x FASTER, both 3/3 clauses. The campaign's worst certified ratio becomes a certified win
+
+Predicted last turn from a symbol count: `Column::floor` carried ZERO rounding
+instructions in every flagged binary because `floor_fast` never calls `f64::floor`,
+so `+sse4.1` had no intrinsic to lower. Routing the three kernels through the std
+functions under `cfg(target_feature = "sse4.1")` put **10 rounding instructions into
+`Column::floor`** where there had been none, and the timing followed.
+
+| workload | ratio | 95% CI | FP p50 | FP ns/elem | pandas p50 | clauses |
+|---|---:|---|---:|---:|---:|---|
+| `floor @1M` | **1.544x FASTER** | [1.52002, 1.57856] | 161.3us | **0.161** | 248.5us | **3/3** |
+| `ceil @1M` | **1.516x FASTER** | [1.45009, 1.55347] | 148.3us | **0.148** | 230.8us | **3/3** |
+| `trunc @1M` | 1.354x | [1.32303, 1.42240] | 144.3us | 0.144 | 199.1us | 2/3 REFUSED |
+
+**A/A null control (same invocation):** `floor` FrankenPandas median ratio 0.982170
+and pandas median ratio 1.003622, both inside the 2% limit; `ceil` 0.998793 and
+1.016431, both inside. `trunc`'s FrankenPandas null came back 0.974490 — 2.55% off,
+FAILING — so that row is REFUSED and its 1.354x is not quoted as a result.
+
+**Campaign result class:** incumbent-win.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=0797b4b29b6bfe7e0875f6df617bc590079956dadb538b796b31693bb3b3b174 (82377808 bytes) /data/projects/frankenpandas/target-avx2nofma/release-perf/fp-bench
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files, 70681559 bytes), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T085242.308223Z-pid2546645 , giving
+measured_ratio=1.544x for the `floor` row.
+
+**Median-CI decision:** `floor` effect median 1.544x, 95% CI [1.52002122,
+1.57856137] excluding unity; claim log effect 0.43406 against a required threshold
+of 0.06764, cleared by 6.4x. `ceil` effect median 1.516x, CI [1.45009164,
+1.55346793], claim 0.41587 against 0.11850.
+
+**⚠ THE INCUMBENT WAS SLOWER IN THESE ROWS THAN IN ADJACENT ONES, and the ratio is
+flattered by it.** pandas measured 248.5us and 230.8us here against 171-204us in
+every other `floor @1M` row today. The nulls passed, so the rows are internally
+valid, but a 24% slower incumbent inflates the quoted multiple. **The robust quantity
+is FrankenPandas' own absolute time**, and on that the progression is monotone and
+unambiguous:
+
+| build | FP ns/elem |
+|---|---:|
+| default (SSE2, `floor_fast`) | 0.588 |
+| `+sse4.1,+avx2`, `floor_fast` | 0.198 |
+| **`+sse4.1,+avx2`, INTRINSIC** | **0.161** |
+
+161.3us also beats pandas' best time observed anywhere today (171.2us), so the
+DIRECTION survives the most conservative comparison available even though the
+magnitude should be re-measured against a settled incumbent.
+
+**THE FULL ARC OF THIS OP, all on one host:** `floor @1M` was certified at **0.343x
+SLOWER** — the worst ratio in this campaign — and is now certified at **1.544x
+FASTER**. That is a 4.5x swing, and none of it came from a cleverer algorithm. It
+came from two facts found by counting instructions rather than timing them: the
+generic x86-64 target denies the op its hardware instruction, and our own hand-rolled
+kernel denied it a second time by never asking for the instruction the flag provides.
+
+**Counted mechanism:** rounding instructions in `Column::floor` 0 → 10; FP p50
+588 → 198 → 161.3 ns-per-element-equivalent across default, flag-only and
+flag-plus-intrinsic.
+
+**CV role:** provenance only, no vote.
+
+```
+BINARY       0797b4b29b6bfe7e0875f6df617bc590079956dadb538b796b31693bb3b3b174
+             built locally with -C target-feature=+sse4.1,+avx2, no [RCH] line,
+             0 warnings, WARMED with three throwaway runs before measuring
+LOADAVG      21.69 / 24.68 / 35.77 at launch → 28.28 / 26.61 / 35.82 at the end.
+             RISING during the sequence, which is the likely cause of the slow
+             incumbent above; recorded rather than hidden
+OBSERVED MHz host mean 2590.6 → 3390.3 (min 1429.0, max 4078.4), host-level not per-arm
+ARTIFACTS    artifacts/bench/3qpj4_{floor,ceil,trunc}_intrinsic.json
+```
+
+**WHAT IS CONTINGENT.** This win exists only on a build carrying `+sse4.1`. The
+default build is byte-for-byte unchanged — the `cfg` sees to that, and the default
+suite passes 646/0 with the hand-rolled arm still selected. So this does NOT ship a
+win; it converts br-frankenpandas-cu22b from "adopt a flag worth 1.33x" into "adopt a
+flag worth a certified 1.5x on three ops", and the adoption decision and its fleet/CI
+questions remain open and are not mine.
+
+**`trunc` is owed a re-run** in a settled window; its effect is the smallest of the
+three and its FP null missed by 0.55 percentage points.

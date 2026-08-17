@@ -26499,6 +26499,66 @@ impl Column {
     ///   * `floor` never needs a zero-sign fixup: for `x > 0` the result is `+0.0`
     ///     or positive, for `x < 0` it is `-0.0` (only at `x == -0.0`, where
     ///     `nearest` is already `-0.0`) or ≤ -1. `ceil` DOES — see there.
+    /// Pick the rounding kernel the BUILD can actually execute.
+    ///
+    /// br-frankenpandas-3qpj4. `floor_fast` and its siblings are hand-rolled bit
+    /// arithmetic that never call `f64::floor`, so LLVM never sees
+    /// `llvm.floor.f64` and `-C target-feature=+sse4.1` — whose whole effect for
+    /// this op is lowering that intrinsic to ONE `roundpd` — has nothing to act on.
+    /// Counted: `Column::floor` appears in the rounding-instruction symbol list of
+    /// NO flagged binary, while `Column::round` (which uses std `round_ties_even`)
+    /// collects 5-7 `roundsd` sites in every one.
+    ///
+    /// Both prior decisions were right in isolation. WITHOUT the flag `f64::floor`
+    /// lowers to a libm CALL and the branchless trick beats it — that is the
+    /// measured 2.1-2.4x this ledger banks. WITH the flag the intrinsic is a single
+    /// instruction and the ~dozen-op trick becomes the slow path. So the choice is
+    /// made at COMPILE TIME by what the target can do, and the default build is
+    /// byte-for-byte unchanged.
+    ///
+    /// ⚠ Swapping unconditionally would regress every build lacking `+sse4.1`,
+    /// which today is the default and every contributor on unknown hardware. The
+    /// `cfg` is the whole safety argument, and
+    /// `the_rounding_kernels_match_std_on_both_cfg_arms_3qpj4` pins that whichever
+    /// arm is compiled agrees with the std function bit-for-bit.
+    #[inline]
+    fn floor_kernel(value: f64) -> f64 {
+        #[cfg(target_feature = "sse4.1")]
+        {
+            value.floor()
+        }
+        #[cfg(not(target_feature = "sse4.1"))]
+        {
+            Self::floor_fast(value)
+        }
+    }
+
+    /// See [`Self::floor_kernel`].
+    #[inline]
+    fn ceil_kernel(value: f64) -> f64 {
+        #[cfg(target_feature = "sse4.1")]
+        {
+            value.ceil()
+        }
+        #[cfg(not(target_feature = "sse4.1"))]
+        {
+            Self::ceil_fast(value)
+        }
+    }
+
+    /// See [`Self::floor_kernel`].
+    #[inline]
+    fn trunc_kernel(value: f64) -> f64 {
+        #[cfg(target_feature = "sse4.1")]
+        {
+            value.trunc()
+        }
+        #[cfg(not(target_feature = "sse4.1"))]
+        {
+            Self::trunc_fast(value)
+        }
+    }
+
     #[inline]
     fn floor_fast(value: f64) -> f64 {
         let abs = value.abs();
@@ -26945,7 +27005,7 @@ impl Column {
         }
         // All-valid f64: no validity words, no pre-zeroed buffer, no per-element
         // NaN test — the witness is provably the input's. br-frankenpandas-o57rj.
-        if let Some(out) = self.typed_float_witness_free_unary(Self::floor_fast) {
+        if let Some(out) = self.typed_float_witness_free_unary(Self::floor_kernel) {
             return Ok(out);
         }
         // PARALLEL, like sqrt/exp/log — see `typed_float_unary_finite_preserving`
@@ -26985,7 +27045,7 @@ impl Column {
         // for why this family was the only one left serial and why that is now
         // the wrong default. (br-frankenpandas-xv9qf)
         // All-valid f64: witness-free single pass — see `Column::floor`.
-        if let Some(out) = self.typed_float_witness_free_unary(Self::ceil_fast) {
+        if let Some(out) = self.typed_float_witness_free_unary(Self::ceil_kernel) {
             return Ok(out);
         }
         // `Self::ceil_fast`, not `f64::ceil` — see `Column::floor`.
@@ -27021,7 +27081,7 @@ impl Column {
         // for why this family was the only one left serial and why that is now
         // the wrong default. (br-frankenpandas-xv9qf)
         // All-valid f64: witness-free single pass — see `Column::floor`.
-        if let Some(out) = self.typed_float_witness_free_unary(Self::trunc_fast) {
+        if let Some(out) = self.typed_float_witness_free_unary(Self::trunc_kernel) {
             return Ok(out);
         }
         // `Self::trunc_fast`, not `f64::trunc` — see `Column::floor`.
@@ -49010,6 +49070,82 @@ mod tests {
                         "flags differ at workers={workers} par_min={par_min}"
                     );
                 }
+            }
+        }
+
+        /// br-frankenpandas-3qpj4. WHICHEVER cfg arm this build compiled, the
+        /// rounding kernel must agree with the std function bit-for-bit.
+        ///
+        /// This is the whole safety argument for routing `floor`/`ceil`/`trunc`
+        /// through a compile-time choice. On a default build it compares the
+        /// hand-rolled trick against std; on a `+sse4.1` build it confirms the
+        /// intrinsic arm is wired to the right function. Either way the assertion
+        /// is the same sentence, which is what makes it safe to flip the arm.
+        ///
+        /// The corpus is deliberately nasty: the half-integers and negative
+        /// half-integers are where floor/ceil/trunc disagree with each other and
+        /// with round; the huge values straddle 2^52 where the trick's
+        /// `abs < TWO_POW_52` guard switches behaviour; and the signed zeros are
+        /// where `-0.0` must survive as `-0.0` rather than becoming `0.0`, which a
+        /// naive `copysign`-free implementation gets wrong and which no
+        /// value-equality assertion would catch because `-0.0 == 0.0`.
+        #[test]
+        fn the_rounding_kernels_match_std_on_both_cfg_arms_3qpj4() {
+            let corpus: Vec<f64> = vec![
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+                0.5,
+                -0.5,
+                1.5,
+                -1.5,
+                2.5,
+                -2.5,
+                0.49999999999999994,
+                -0.49999999999999994,
+                1.0 - f64::EPSILON,
+                -(1.0 - f64::EPSILON),
+                4_503_599_627_370_495.5,
+                -4_503_599_627_370_495.5,
+                4_503_599_627_370_496.0,
+                -4_503_599_627_370_496.0,
+                9_007_199_254_740_992.0,
+                -9_007_199_254_740_992.0,
+                f64::MAX,
+                f64::MIN,
+                f64::MIN_POSITIVE,
+                -f64::MIN_POSITIVE,
+                1e300,
+                -1e300,
+                1e-300,
+                -1e-300,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ];
+            for &x in &corpus {
+                assert_eq!(
+                    Column::floor_kernel(x).to_bits(),
+                    x.floor().to_bits(),
+                    "floor_kernel disagrees with f64::floor at {x:?}"
+                );
+                assert_eq!(
+                    Column::ceil_kernel(x).to_bits(),
+                    x.ceil().to_bits(),
+                    "ceil_kernel disagrees with f64::ceil at {x:?}"
+                );
+                assert_eq!(
+                    Column::trunc_kernel(x).to_bits(),
+                    x.trunc().to_bits(),
+                    "trunc_kernel disagrees with f64::trunc at {x:?}"
+                );
+            }
+            // NaN separately: NaN != NaN, so compare by nan-ness, not by bits
+            // (the payload is not guaranteed identical across implementations).
+            for x in [f64::NAN, -f64::NAN] {
+                assert!(Column::floor_kernel(x).is_nan());
+                assert!(Column::ceil_kernel(x).is_nan());
+                assert!(Column::trunc_kernel(x).is_nan());
             }
         }
 
