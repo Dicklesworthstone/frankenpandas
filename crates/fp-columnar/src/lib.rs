@@ -8349,6 +8349,83 @@ fn map_block_to_owned_with_witness<T: Copy, F: Fn(T) -> f64>(
 /// The witness word buffer stays `vec![0_u64; ..]`, deliberately: at n = 1M it is
 /// 125 KB against the values' 8 MB, so zeroing it is noise and keeping it shared
 /// avoids a second assembly step.
+/// Map an all-valid `f64` slice, folding a DOMAIN predicate and a finiteness
+/// witness as plain boolean reductions instead of building a validity mask.
+///
+/// br-frankenpandas-4kig1. The sibling
+/// [`par_map_slice_f64_with_witness_with_policy`] writes a validity word per 64
+/// elements and asks `is_nan()` of every result. For `sqrt`/`ln` that is
+/// avoidable: an all-valid input is NaN-free and both are NaN exactly when the
+/// input is negative, so ONE predicate over the input replaces the whole mask.
+///
+/// PARALLEL, and that is not optional — MEASURED (br-frankenpandas-4kig1): a
+/// SERIAL fused arm was 0.433x on `log @1M`, a 2.3x REGRESSION, because these ops
+/// are libm-compute-bound at ~10-30ns/element and the shared arm's threads are
+/// worth far more than its witness costs. The opposite of `floor`/`round`, where
+/// the map is trivial and serial won. Do not collapse this to a `collect`.
+///
+/// Bit-identical to the shared arm at every worker count: `f` is unchanged and
+/// per-element, each output element is written once by one worker, and both flags
+/// are `all()` reductions over booleans, which are associative and commutative.
+fn par_map_slice_f64_domain_fused<D: Fn(f64) -> bool + Sync, F: Fn(f64) -> f64 + Sync>(
+    input: &[f64],
+    in_domain: &D,
+    f: &F,
+    max_workers: usize,
+    par_min: usize,
+) -> (Vec<f64>, bool, bool) {
+    fn block<D: Fn(f64) -> bool, F: Fn(f64) -> f64>(
+        out: &mut [f64],
+        input: &[f64],
+        in_domain: &D,
+        f: &F,
+    ) -> (bool, bool) {
+        let (mut domain_held, mut all_finite) = (true, true);
+        for (o, &x) in out.iter_mut().zip(input.iter()) {
+            domain_held &= in_domain(x);
+            let y = f(x);
+            all_finite &= y.is_finite();
+            *o = y;
+        }
+        (domain_held, all_finite)
+    }
+
+    let n = input.len();
+    let mut out = vec![0.0_f64; n];
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let cap = if max_workers == 0 {
+        available
+    } else {
+        max_workers
+    };
+    let workers = available.min(cap);
+
+    if workers <= 1 || n < par_min {
+        let (domain_held, all_finite) = block(&mut out, input, in_domain, f);
+        return (out, domain_held, all_finite);
+    }
+
+    let chunk = n.div_ceil(workers).max(1);
+    let mut flags = vec![(true, true); n.div_ceil(chunk)];
+    std::thread::scope(|scope| {
+        for ((out_c, in_c), flag) in out
+            .chunks_mut(chunk)
+            .zip(input.chunks(chunk))
+            .zip(flags.iter_mut())
+        {
+            scope.spawn(move || {
+                *flag = block(out_c, in_c, in_domain, f);
+            });
+        }
+    });
+
+    let domain_held = flags.iter().all(|&(held, _)| held);
+    let all_finite = flags.iter().all(|&(_, finite)| finite);
+    (out, domain_held, all_finite)
+}
+
 fn par_map_slice_f64_to_owned_chunks<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
     input: &[T],
     f: F,
@@ -10638,7 +10715,20 @@ impl Column {
     /// `k` `Float64DotInput`s + a fresh `Arc<[..]>` for every column — the prior
     /// `from_f64_all_valid_dot_product` did the latter `n` times, an O(n·k)
     /// Arc-and-alloc construction tax that dominated `df.dot` construction.
+    /// One output column of a dot product, as owned data.
+    ///
+    /// br-frankenpandas-03fp5. Exposed so the ORCHESTRATOR can decide how to
+    /// parallelise: everything this needs is `Arc`-backed, so a caller can clone
+    /// the handles into a `'static` job and hand it to a persistent worker pool
+    /// instead of paying a `thread::scope` spawn per call. The arithmetic is the
+    /// same `materialize_float64_dot` the lazy path runs, so which mechanism
+    /// computes it cannot change a value.
+    #[doc(hidden)]
     #[must_use]
+    pub fn dot_column_data(a_panel: &Float64DotAPanel, b_col: &[f64], len: usize) -> Vec<f64> {
+        ScalarValues::materialize_float64_dot(&a_panel.0, b_col, len)
+    }
+
     pub fn from_f64_all_valid_dot_product_shared(
         a_panel: &Float64DotAPanel,
         b_col: Arc<[f64]>,
@@ -26077,23 +26167,15 @@ impl Column {
     /// That is not hypothetical — a `fn`-pointer probe inflated an earlier reading
     /// of the `copysign` lever from 1.08x to 1.647x for exactly this reason
     /// (docs/NEGATIVE_EVIDENCE.md, 2026-08-16).
-    fn typed_float_domain_fused_unary<D: Fn(f64) -> bool, F: Fn(f64) -> f64>(
+    fn typed_float_domain_fused_unary<D: Fn(f64) -> bool + Sync, F: Fn(f64) -> f64 + Sync>(
         &self,
         in_domain: D,
         f: F,
     ) -> Option<Self> {
         let data = self.as_f64_slice()?;
-        let mut domain_held = true;
-        let mut all_finite = true;
-        let out: Vec<f64> = data
-            .iter()
-            .map(|&x| {
-                domain_held &= in_domain(x);
-                let y = f(x);
-                all_finite &= y.is_finite();
-                y
-            })
-            .collect();
+        let (max_workers, par_min) = elementwise_witness_policy();
+        let (out, domain_held, all_finite) =
+            par_map_slice_f64_domain_fused(data, &in_domain, &f, max_workers, par_min);
         if !domain_held {
             return None;
         }
