@@ -11840,6 +11840,85 @@ use std::cell::RefCell;
 // MySQL SqlConnection Implementation (feature = "sql-mysql")
 // ============================================================================
 
+/// Map an fp-types `DType` to a MySQL column type declaration.
+///
+/// br-frankenpandas-lkrb8. A free function rather than a method body so the
+/// nullable-pairing contract can be tested without a live MySQL server — the
+/// only reason `Float64Nullable => TEXT` survived is that nothing could reach
+/// this mapping without one.
+///
+/// ⚠ THE `_` ARM IS THE HAZARD, and it stays only because the trailing dtypes
+/// (`Categorical`, `Null`, `Sparse`, `Period`, `Interval`) genuinely serialize as
+/// text here. Every NUMERIC dtype, nullable or not, must be listed explicitly
+/// above it: `Float64Nullable` was added to fp-types and fell straight through to
+/// `TEXT`, which is a wrong column type in generated DDL and produced no error
+/// anywhere. `mysql_nullable_dtypes_declare_the_same_column_as_their_base`
+/// pins the pairing so the next nullable variant cannot repeat it.
+#[cfg(feature = "sql-mysql")]
+fn mysql_dtype_sql(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Bool | DType::BoolNullable => "TINYINT(1)",
+        DType::Int64 | DType::Int64Nullable => "BIGINT",
+        DType::Float64 | DType::Float64Nullable => "DOUBLE",
+        DType::Utf8 => "TEXT",
+        DType::Datetime64 => "DATETIME",
+        DType::Timedelta64 => "TIME",
+        _ => "TEXT",
+    }
+}
+
+/// br-frankenpandas-lkrb8. A nullable extension dtype must declare the SAME
+/// column type as its non-nullable base — the nullability is a property of the
+/// values, not of the storage.
+///
+/// The observed defect this pins: `Float64Nullable` was added to fp-types
+/// (crates/fp-types/src/lib.rs:101) and neither fp-io SQL mapper was updated.
+/// The exhaustive one (the test mock's) became a hard compile error and took
+/// `cargo check --all-targets` red on main. The MySQL one has a `_ => "TEXT"`
+/// arm, so it compiled fine and quietly declared nullable floats as TEXT.
+///
+/// This asserts the PAIRING rather than the three specific strings, so the next
+/// nullable variant added to `DType` fails here instead of falling through a
+/// catch-all. A test that merely called the mapper and checked it returned
+/// something would have passed against the broken arm.
+#[cfg(test)]
+mod nullable_dtype_sql_pairing_lkrb8 {
+    use fp_types::DType;
+
+    const NULLABLE_PAIRS: [(DType, DType); 3] = [
+        (DType::BoolNullable, DType::Bool),
+        (DType::Int64Nullable, DType::Int64),
+        (DType::Float64Nullable, DType::Float64),
+    ];
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sqlite_nullable_dtypes_declare_the_same_column_as_their_base() {
+        for (nullable, base) in NULLABLE_PAIRS {
+            assert_eq!(
+                super::dtype_to_sql(nullable),
+                super::dtype_to_sql(base),
+                "{nullable:?} must declare the same SQLite column type as {base:?}"
+            );
+        }
+        assert_eq!(super::dtype_to_sql(DType::Float64Nullable), "REAL");
+    }
+
+    #[cfg(feature = "sql-mysql")]
+    #[test]
+    fn mysql_nullable_dtypes_declare_the_same_column_as_their_base() {
+        for (nullable, base) in NULLABLE_PAIRS {
+            assert_eq!(
+                super::mysql_dtype_sql(nullable),
+                super::mysql_dtype_sql(base),
+                "{nullable:?} must declare the same MySQL column type as {base:?}"
+            );
+        }
+        // The exact instance that was wrong: this returned "TEXT" via the `_` arm.
+        assert_eq!(super::mysql_dtype_sql(DType::Float64Nullable), "DOUBLE");
+    }
+}
+
 /// Wrapper around `mysql::Conn` providing interior mutability for the
 /// `SqlConnection` trait (which requires `&self`).
 #[cfg(feature = "sql-mysql")]
@@ -11932,15 +12011,7 @@ impl SqlConnection for MysqlConnection {
     }
 
     fn dtype_sql(&self, dtype: DType) -> &'static str {
-        match dtype {
-            DType::Bool | DType::BoolNullable => "TINYINT(1)",
-            DType::Int64 | DType::Int64Nullable => "BIGINT",
-            DType::Float64 => "DOUBLE",
-            DType::Utf8 => "TEXT",
-            DType::Datetime64 => "DATETIME",
-            DType::Timedelta64 => "TIME",
-            _ => "TEXT",
-        }
+        mysql_dtype_sql(dtype)
     }
 
     fn index_dtype_sql(&self, index: &Index) -> &'static str {
@@ -22312,7 +22383,11 @@ mod tests {
                 | DType::BoolNullable
                 | DType::Timedelta64
                 | DType::Datetime64 => "BIGINT",
-                DType::Float64 => "DOUBLE PRECISION",
+                // Paired with `Float64` the way `Int64Nullable` is paired with
+                // `Int64` above. This match is EXHAUSTIVE on purpose — leaving it
+                // that way is what turned the missing variant into a compile error
+                // instead of a silent `TEXT` column. br-frankenpandas-lkrb8.
+                DType::Float64 | DType::Float64Nullable => "DOUBLE PRECISION",
                 DType::Utf8
                 | DType::Categorical
                 | DType::Null
