@@ -8259,11 +8259,39 @@ fn elementwise_witness_policy() -> (usize, usize) {
 /// ⚠ Exported toggles are invisible in bench provenance (see `6df71eae2`, a fully
 /// provenanced row that was measuring the wrong arm). Pass
 /// `env -u FP_ELEMENTWISE_WRITE_ONCE` on any invocation not deliberately varying it.
-fn elementwise_write_once_enabled() -> bool {
+fn elementwise_write_once_from_env() -> bool {
     static WRITE_ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *WRITE_ONCE.get_or_init(|| {
         std::env::var("FP_ELEMENTWISE_WRITE_ONCE").is_ok_and(|v| v != "0" && !v.is_empty())
     })
+}
+
+thread_local! {
+    /// Per-thread override of the write-once env base.
+    static ELEMENTWISE_WRITE_ONCE_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Install a write-once override for THIS THREAD.
+///
+/// Same OnceLock defect, and the same fix, as
+/// [`set_elementwise_witness_policy`]: the env form is read once per process, so
+/// the first elementwise map froze it and the A/B this toggle exists for could
+/// never be run in ONE process. Thread-local so it cannot leak between the
+/// crate's concurrently-running tests.
+pub fn set_elementwise_write_once(enabled: bool) {
+    ELEMENTWISE_WRITE_ONCE_OVERRIDE.with(|cell| cell.set(Some(enabled)));
+}
+
+/// Drop this thread's write-once override.
+pub fn clear_elementwise_write_once() {
+    ELEMENTWISE_WRITE_ONCE_OVERRIDE.with(|cell| cell.set(None));
+}
+
+fn elementwise_write_once_enabled() -> bool {
+    ELEMENTWISE_WRITE_ONCE_OVERRIDE
+        .with(std::cell::Cell::get)
+        .unwrap_or_else(elementwise_write_once_from_env)
 }
 
 fn par_map_slice_f64_with_witness<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
@@ -8379,6 +8407,107 @@ fn map_block_to_owned_with_witness<T: Copy, F: Fn(T) -> f64>(
         *word = bits;
     }
     (out, all_valid, all_finite)
+}
+
+/// Write-once, chunk-returning sibling of [`par_map_slice_f64_domain_fused`].
+///
+/// br-frankenpandas-yx692 follow-on. The shared-buffer form opens with
+/// `vec![0.0_f64; n]` and then overwrites every element, so on 1M Float64 it
+/// makes THREE passes over 8 MB — zero, read input, write output — where numpy
+/// makes two. Whether that first pass costs anything depends on allocator state:
+/// a fresh mmap gives zero pages for free, but a RECYCLED mimalloc block is an
+/// explicit 8 MB memset, and a loop that allocates and frees the same size every
+/// call recycles by construction. Each worker here builds its OWN buffer and
+/// hands it back as an `Arc<Vec<f64>>` for
+/// [`Column::from_f64_all_valid_owned_chunks_with_finite`] to take by pointer
+/// move, so nothing is pre-zeroed and nothing is concatenated.
+///
+/// ⚠ ONLY SOUND WHEN THE DOMAIN HELD. The all-valid chunk constructor cannot
+/// represent a missing slot, so if `domain_held` comes back false the caller MUST
+/// discard these chunks and take the fallback path rather than try to salvage
+/// them — which is why `domain_held` is returned first and the caller checks it
+/// before touching the chunks.
+///
+/// Mirrors [`map_block_to_owned_with_witness`]'s 64-element sub-blocking: the
+/// value map and the domain fold are separate loops over the SAME sub-block, so
+/// each vectorizes on its own while the input stays cache-hot between them.
+fn par_map_slice_f64_domain_fused_to_owned_chunks<
+    T: Copy + Sync,
+    D: Fn(T) -> bool + Sync,
+    F: Fn(T) -> f64 + Sync,
+>(
+    input: &[T],
+    in_domain: &D,
+    f: &F,
+    max_workers: usize,
+    par_min: usize,
+    known_all_finite: Option<bool>,
+) -> (OwnedFloat64Chunks, bool, bool) {
+    fn block<T: Copy, D: Fn(T) -> bool, F: Fn(T) -> f64>(
+        in_c: &[T],
+        in_domain: &D,
+        f: &F,
+        known_all_finite: Option<bool>,
+    ) -> (Vec<f64>, bool, bool) {
+        let mut out: Vec<f64> = Vec::with_capacity(in_c.len());
+        let (mut domain_held, mut all_finite) = (true, true);
+        for in_b in in_c.chunks(64) {
+            let base = out.len();
+            out.extend(in_b.iter().map(|&x| f(x)));
+            for &x in in_b {
+                domain_held &= in_domain(x);
+            }
+            if known_all_finite.is_none() {
+                for &y in &out[base..] {
+                    all_finite &= y.is_finite();
+                }
+            }
+        }
+        (out, domain_held, known_all_finite.unwrap_or(all_finite))
+    }
+
+    let n = input.len();
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let cap = if max_workers == 0 {
+        available
+    } else {
+        max_workers
+    };
+    let workers = available.min(cap);
+
+    if workers <= 1 || n < par_min {
+        let (out, domain_held, all_finite) = block(input, in_domain, f, known_all_finite);
+        let chunks = if n == 0 {
+            Vec::new()
+        } else {
+            vec![(Arc::new(out), 0_usize, n)]
+        };
+        return (chunks, domain_held, all_finite);
+    }
+
+    let chunk = n.div_ceil(workers).max(1);
+    let block_count = n.div_ceil(chunk);
+    let mut built: Vec<Option<(Vec<f64>, bool, bool)>> = (0..block_count).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        for (slot, in_c) in built.iter_mut().zip(input.chunks(chunk)) {
+            scope.spawn(move || {
+                *slot = Some(block(in_c, in_domain, f, known_all_finite));
+            });
+        }
+    });
+
+    let mut chunks = Vec::with_capacity(block_count);
+    let (mut domain_held, mut all_finite) = (true, true);
+    for slot in built {
+        let (out, held, finite) = slot.expect("every block is written by exactly one worker");
+        domain_held &= held;
+        all_finite &= finite;
+        let len = out.len();
+        chunks.push((Arc::new(out), 0_usize, len));
+    }
+    (chunks, domain_held, all_finite)
 }
 
 /// Write-once, chunk-returning sibling of
@@ -26443,6 +26572,29 @@ impl Column {
             } else {
                 None
             };
+            // WRITE-ONCE ARM: no pre-zeroed shared buffer. Discarded outright if
+            // the domain did not hold — the all-valid chunk constructor cannot
+            // represent a missing slot, so salvaging these chunks is not an
+            // option and the fallback path redoes the work.
+            if elementwise_write_once_enabled() {
+                let (chunks, domain_held, all_finite) =
+                    par_map_slice_f64_domain_fused_to_owned_chunks(
+                        data,
+                        &in_domain,
+                        &f,
+                        max_workers,
+                        par_min,
+                        derived,
+                    );
+                if !domain_held {
+                    return None;
+                }
+                return Some(Self::from_f64_all_valid_owned_chunks_with_finite(
+                    chunks,
+                    data.len(),
+                    Some(all_finite),
+                ));
+            }
             let (out, domain_held, all_finite) =
                 par_map_slice_f64_domain_fused(data, &in_domain, &f, max_workers, par_min, derived);
             if !domain_held {
@@ -30767,6 +30919,98 @@ mod tests {
         assert_eq!(out.values()[0], Scalar::Float64(1.0));
         assert_eq!(out.values()[1], Scalar::Float64(f64::INFINITY));
         assert_eq!(out.values()[2], Scalar::Float64(2.0));
+    }
+
+    /// br-frankenpandas-yx692 follow-on. The write-once arm returns the output as
+    /// per-worker `Arc<Vec<f64>>` chunks instead of one pre-zeroed shared buffer,
+    /// so it must be INDISTINGUISHABLE from the shared arm in every observable:
+    /// values by `to_bits()`, length, validity, and the finiteness witness.
+    ///
+    /// Run at a length that crosses the parallel threshold so the chunked
+    /// assembly actually runs, and with both the derived-witness op (`sqrt`) and
+    /// the folding one (`log`), since the two arms combine the witness
+    /// differently.
+    #[test]
+    fn the_write_once_arm_is_indistinguishable_from_the_shared_buffer_arm_yx692() {
+        let data: Vec<f64> = (0..300_000_u32).map(|i| 0.5 + f64::from(i)).collect();
+        let col = Column::from_f64_values(data);
+
+        crate::clear_elementwise_write_once();
+        let shared_sqrt = col.sqrt().expect("shared sqrt");
+        let shared_log = col.log().expect("shared log");
+
+        crate::set_elementwise_write_once(true);
+        let owned_sqrt = col.sqrt().expect("write-once sqrt");
+        let owned_log = col.log().expect("write-once log");
+        crate::clear_elementwise_write_once();
+
+        for (name, shared, owned) in [
+            ("sqrt", &shared_sqrt, &owned_sqrt),
+            ("log", &shared_log, &owned_log),
+        ] {
+            assert_eq!(owned.len(), shared.len(), "{name}: length");
+            assert_eq!(
+                owned.values().len(),
+                shared.values().len(),
+                "{name}: value count"
+            );
+            assert!(owned.validity().all(), "{name}: all-valid");
+            assert_eq!(
+                owned.f64_finite_witness(),
+                shared.f64_finite_witness(),
+                "{name}: finiteness witness differs between the two arms"
+            );
+            let owned_bits: Vec<u64> = owned
+                .as_f64_slice()
+                .expect("owned f64")
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            let shared_bits: Vec<u64> = shared
+                .as_f64_slice()
+                .expect("shared f64")
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            assert_eq!(owned_bits, shared_bits, "{name}: values differ BY BITS");
+        }
+    }
+
+    /// NEGATIVE CASE for the write-once arm: a domain miss must fall back, not
+    /// ship a chunked column.
+    ///
+    /// The all-valid chunk constructor CANNOT represent a missing slot, so an
+    /// implementation that builds the chunks and returns them without consulting
+    /// `domain_held` would turn `sqrt(-4.0)` — which pandas reports as missing —
+    /// into a present NaN. The two arms must agree that the element is MISSING.
+    #[test]
+    fn a_domain_miss_falls_back_on_the_write_once_arm_too_yx692() {
+        let col = Column::from_f64_values(vec![4.0, -4.0, 9.0]);
+
+        crate::clear_elementwise_write_once();
+        let shared = col.sqrt().expect("shared sqrt with a negative");
+        crate::set_elementwise_write_once(true);
+        let owned = col.sqrt().expect("write-once sqrt with a negative");
+        crate::clear_elementwise_write_once();
+
+        // The missing slot is compared by MISSINGNESS, never with `assert_eq!`:
+        // both arms store `Float64(NaN)` there and `NaN == NaN` is false, so an
+        // equality assertion fails on two values that are in fact identical. The
+        // present slots are compared by `to_bits()` for the same reason.
+        assert!(
+            owned.values()[1].is_missing(),
+            "sqrt(-4.0) must be MISSING, not a present NaN"
+        );
+        assert!(shared.values()[1].is_missing());
+        assert_eq!(owned.validity().get(1), shared.validity().get(1));
+        for i in [0_usize, 2] {
+            let (Scalar::Float64(o), Scalar::Float64(s)) =
+                (&owned.values()[i], &shared.values()[i])
+            else {
+                panic!("slot {i} is a present Float64 on both arms");
+            };
+            assert_eq!(o.to_bits(), s.to_bits(), "slot {i} differs by bits");
+        }
     }
 
     /// The derived arm and the folding arm must agree on the VALUES, at a length
