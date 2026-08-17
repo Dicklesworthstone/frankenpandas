@@ -2827,6 +2827,35 @@ fn run(
                 let _ = series.rolling(10, Some(10)).mean().expect("rolling mean");
             })
         }
+        ("rolling", "groupby_rolling_mean_w10") => {
+            // br-frankenpandas-u5cg4. SeriesGroupBy grouped rolling had NO lane at
+            // all, so the op this bead is about had never been measured against the
+            // incumbent — the same gap that left mod/floordiv unmeasurable until
+            // e7d87c811 got lanes.
+            //
+            // The key is derived from the ROW INDEX, not from a value column, on
+            // both sides: `i % 100` here and `np.arange(rows) % 100` in the
+            // harness. A key derived from a random column would have to reproduce
+            // fp-bench's generator exactly to stay like-for-like, and getting that
+            // wrong is invisible in the ratio. 100 groups also clears the
+            // 64-group parallel threshold, which is the point of the lane.
+            let keys: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
+            let key_series = Series::new(
+                "key",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_i64_values(keys),
+            )
+            .expect("grouped rolling key series");
+            let values = df.get_column("col_0");
+            time_us(|| {
+                let _ = values
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .rolling(10)
+                    .mean()
+                    .expect("grouped rolling mean");
+            })
+        }
         ("rolling", "expanding_skew") => {
             let series = df.get_column("col_0");
             time_us(|| {

@@ -2420,6 +2420,32 @@ def bench_rolling_std_w50_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df["col_0"].rolling(50).std())
 
 
+def bench_groupby_rolling_mean_w10_pandas(df: pd.DataFrame) -> list[float]:
+    """Grouped rolling mean, flattened back onto the original row order.
+
+    br-frankenpandas-u5cg4. FrankenPandas' ``SeriesGroupBy.rolling`` returns a
+    FLAT series on the original index; pandas' ``groupby().rolling()`` returns a
+    two-level (key, original-index) MultiIndex whose rows come out group-by-group.
+    ``droplevel(0).sort_index()`` is what a pandas user writes to get
+    FrankenPandas' answer, so it is part of the task, not overhead added to the
+    incumbent — FrankenPandas pays the equivalent cost in its scatter.
+
+    THE FASTER PANDAS ROUTE IS THE ONE MEASURED. The obvious alternative,
+    ``groupby(key).transform(lambda x: x.rolling(10).mean())``, is a Python-level
+    callback per group and is far slower; picking it would inflate the ratio by
+    choosing a bad incumbent rather than by being fast.
+
+    The key is derived from the ROW INDEX rather than from a value column so that
+    it matches fp-bench's ``i % 100`` exactly without having to reproduce that
+    crate's value generator.
+    """
+    key = pd.Series(np.arange(len(df)) % 100, index=df.index)
+    series = df["col_0"]
+    return time_operation(
+        lambda: series.groupby(key).rolling(10).mean().droplevel(0).sort_index()
+    )
+
+
 def bench_rolling_apply_stateful_pandas(df: pd.DataFrame) -> PairedSamples:
     """Run the fastest pandas route for an ordered rolling callback.
 
@@ -2955,6 +2981,7 @@ PANDAS_WORKLOADS = {
     "rolling": {
         "rolling_mean_w10": bench_rolling_mean_w10_pandas,
         "rolling_std_w50": bench_rolling_std_w50_pandas,
+        "groupby_rolling_mean_w10": bench_groupby_rolling_mean_w10_pandas,
         "rolling_apply_stateful": bench_rolling_apply_stateful_pandas,
         "expanding_sum": bench_expanding_sum_pandas,
         "expanding_apply_stateful": bench_expanding_apply_stateful_pandas,

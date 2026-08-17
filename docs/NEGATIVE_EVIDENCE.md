@@ -34000,3 +34000,88 @@ OBSERVED MHz host mean 3784.9 before -> 3176.4 after — FELL 16% under the arri
 LIKE-FOR-LIKE ok on both; peak_process_threads=2 (serial arm, as expected below 1<<20)
 ARTIFACTS    artifacts/bench/4kig1_add1M_{MAIN,MAINAVX2}_2026-08-17.json
 ```
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-u5cg4) — SeriesGroupBy grouped rolling had NO LANE, and on its first measurement ever it CERTIFIES at 7.505x. The parallel arm runs (6 workers observed) — but this row does NOT attribute the ratio to it
+
+`u5cg4` eliminated all four candidate explanations for the July 0.9x and ended at the
+only conclusion left: the group-parallel arm no longer existed, so re-implementation
+was a prerequisite for any further measurement. That arm landed (`0928c5486`,
+`994c5aec2`), observable this time. This entry is the second half of the prerequisite:
+**the op had no bench lane at all**, so it had never been compared to the incumbent.
+
+Lane added on both sides and verified to EMIT before any row was trusted — `fp-bench`
+`--category rolling --workload groupby_rolling_mean_w10` returns a populated
+`times_us` at ~2.5ms/100k. The key is derived from the ROW INDEX on both sides
+(`i % 100` in Rust, `np.arange(rows) % 100` in the harness) rather than from a value
+column: a key derived from a random column would have to reproduce fp-bench's
+generator exactly to stay like-for-like, and getting that wrong is invisible in the
+ratio. 100 groups also clears the 64-group parallel threshold, which is the point.
+
+**THE INCUMBENT ROUTE IS THE FASTER OF THE TWO, deliberately.** FrankenPandas'
+`SeriesGroupBy.rolling` returns a FLAT series on the original index; pandas'
+`groupby().rolling()` returns a two-level `(key, original-index)` MultiIndex whose rows
+come out group-by-group, so `droplevel(0).sort_index()` is what a pandas user writes to
+get FrankenPandas' answer. The alternative, `groupby(key).transform(lambda x:
+x.rolling(10).mean())`, is a Python-level callback per group and is far slower;
+measuring it would have inflated this ratio by choosing a bad incumbent rather than by
+being fast.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=687f8b4fb21e0b2950bd854d3384100de433c8985ccaf5cedebdb4b68782a8ba (82513384 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T193949.126516Z-pid2833209 , giving
+measured_ratio=7.505x for this row.
+
+| `groupby_rolling_mean_w10 @1M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **28717.66us** | 7.54% | 1.002896 — PASSES |
+| pandas | 217625.68us | 10.35% | 1.011302 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.002896 and
+pandas median ratio 1.011302, both inside the 2% limit.
+
+**Median-CI decision:** effect median 7.505x, 95% CI [7.14907627, 7.78742319],
+excluding unity; claimed log effect 2.01554859 against a required threshold of
+0.08584867, cleared by 23.5x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 7.54%, pandas 10.35%.
+
+```
+LOADAVG      19.14 at this row; 19.14 -> 14.79 -> 15.87 across the three repeats,
+             with the host at 33.72 by the end of the sequence
+OBSERVED MHz per run: 2515.1 mean (min 1429.0, max 4267.3) at this row;
+             2897.5 and 3134.0 on the two repeats
+THREADS      FP 6 (peak 8) · pandas 2 (peak 67)
+```
+Best-vs-best 7.2299, direction agrees with the median.
+
+Three repeats: **7.505x FASTER, 7.592x FASTER, 6.934x** (the third undecidable, FP null
+0.987885 with the CI running to 0.839). The two certified rows bracket the third, and
+the spread tracks FP's own cv, which was 7.54% on the certified row and 42.82% / 36.49%
+on the other two — so the honest headline is the range 6.9-7.6x with 7.505x as the
+cleanest certified point, not a single figure.
+
+**WHAT THIS ROW DOES NOT SHOW, and it is the thing the bead actually asked.** It does
+NOT attribute the 7.505x to the group-parallel arm. `thread_count_actually_used` reports
+6 workers, which is what the routing predicts for 100 groups
+(`min(avail,16).min(100/16).max(1)`), so the arm demonstrably RAN — that much the new
+`sgb_rolling_last_worker_count` observability was built to guarantee and it delivered.
+But a vs-pandas ratio cannot separate "the parallel arm paid" from "the serial kernel
+was already this fast". The July 0.9x was a SELF-speedup comparison and this is not
+one, so it neither confirms nor refutes it.
+
+**THE MISSING PIECE IS AN INSTRUMENT, NOT A WINDOW.**
+`set_sgb_rolling_max_workers(Some(1))` forces the serial arm, which is exactly what a
+self-speedup A/B needs, but it is a thread-local Rust API and `fp-bench` has no arm that
+drives it — so the serial/parallel A/B cannot be run from the harness today. That is
+deliberate (an env toggle is process-global and a leaked one silently re-labels a
+measurement, per the `FP_DOT_SERIAL` incident on `6df71eae2`), and it means the next
+unit of work on this bead is an `fp-bench` arm that calls the setter directly and
+reports both arms from ONE process. Until that exists, **nobody should quote 7.505x as
+evidence that group-parallelism paid** — it is evidence that FrankenPandas beats pandas
+at this op, which is a different and previously unmeasured claim.
