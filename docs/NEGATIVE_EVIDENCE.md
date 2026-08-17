@@ -27219,3 +27219,62 @@ within-run instability.
 UNCHANGED op first and use that as the null. If your effect is inside the band that
 null produces, you have measured your build, not your lever. Three rounds is not
 enough to separate them, and reversing the arms changes the answer by 11%.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oxv4u) — MY OWN ISA EVIDENCE HAD DRIFTED: every AVX2 figure was measured on the pre-pooling code, and the `dim = 100` delta falls 1.19x -> 1.065x when re-measured on HEAD
+
+Prompted by franken_networkx's finding that an installed package twelve days
+behind its repo inverted a ratio by 5.4x. Verified against my own setup rather
+than assumed, and the answer is two-part.
+
+**MY SUBJECT ARM CANNOT DRIFT THAT WAY.** There is NO installed FrankenPandas
+package on this host — `import frankenpandas` fails — so the subject arm is
+exclusively the repo build under `target/release-perf/`, with the path taken from
+`--message-format=json`. The incumbent arm IS an installed package
+(`/home/ubuntu/.local/lib/python3.13/site-packages/pandas`, 2.2.3), and the
+harness pins its `artifact_sha256` in every row, so it is auditable rather than
+assumed.
+
+**BUT MY COMPARISON SNAPSHOTS HAD DRIFTED, AND THEY CARRY THIS BEAD'S EVIDENCE.**
+The A/B ELFs I have been citing all day were built this morning:
+
+| artifact | sha256 | state |
+|---|---|---|
+| repo build | `be6261e0…` | HEAD: pooled dispatch + `FP_DOT_POOL_WORK_PER_CHUNK` |
+| `fp-bench-sse2` | `4a89472f…` | this morning, PRE-pooling |
+| `fp-bench-avx2fma` | `76661ac3…` | this morning, PRE-pooling |
+
+So every AVX2 number banked for this bead — 1.19x at `dim = 100`, 1.175x at
+`dim = 316`, 1.24-1.27x at `dim = 1000` — measured the ISA effect ON A DISPATCH
+PATH THAT NO LONGER EXISTS. Rebuilt the AVX2 ELF from HEAD (`5295732f…`) and
+re-ran, interleaved, three rounds per shape, `uptime` 20.37 1-min:
+
+| shape | baseline / AVX2 (ms) | delta on HEAD | delta as banked | change |
+|---|---|---:|---:|---|
+| `dim = 100` | 0.1802/0.1521, 0.1444/0.1443, 0.1682/0.1580 | **1.065x** | 1.19x | **-10%** |
+| `dim = 316` | 1.1475/0.9164, 1.1575/0.9381, 1.0973/0.9282 | **1.234x** | 1.175x | +5% |
+| `dim = 1000` | 20.669/16.520, 24.397/21.597, 20.446/16.951 | **1.206x** | 1.24-1.27x | -4% |
+
+**The `dim = 100` figure moved most, and in the direction that matters for the
+decision.** Pooling removed the per-call construction the ISA lever was partly
+compensating for, so AVX2 now buys 6.5% there rather than 19%. Nothing was
+inverted — this is not networkx's 5.4x — but a 10% shift in the headline shape of
+a pending build-policy decision is exactly the class of error they reported, and
+it was in my evidence until this check.
+
+**Counted mechanism:** the artifacts differ by two commits (`32fac195e`,
+`4315d588c`) that removed 63 thread spawns per call and one lazy `Column` with
+two `OnceLock`s per output column; the instruction stream the AVX2 flags act on is
+therefore not the same one. The refreshed figures supersede the stale ones for
+br-frankenpandas-oxv4u.
+
+**Decision input, restated on current code:** `+avx2,+fma` is worth **1.065x at
+`dim = 100`, 1.234x at `dim = 316`, 1.206x at `dim = 1000`**, bit-identical, on
+top of the pooling win already landed. The cost side is unchanged — cargo-unstable
+`profile-rustflags`, and a SIGILL on a pre-AVX2 CPU guarded by discipline rather
+than types.
+
+**Practice this establishes for me:** an A/B snapshot is an artifact like any
+other and goes stale the moment the repo moves. Any ELF kept for comparison
+across commits must be re-derived, or the row must say which commit it was built
+from. My earlier rows said "ELF 4a89472f" without saying WHAT that was, which is
+how the drift survived a day of measurement.
