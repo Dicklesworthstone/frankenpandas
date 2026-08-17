@@ -200,6 +200,33 @@ impl IndexLabel {
     }
 }
 
+/// `std::thread::available_parallelism()`, resolved ONCE per process.
+///
+/// br-frankenpandas-q1evw. A local copy of `fp_columnar::cached_available_parallelism`
+/// rather than a shared call, because `fp-index` deliberately does not depend on
+/// `fp-columnar` and six lines are cheaper than a new edge in the crate graph. Keep
+/// the two in step.
+///
+/// WHY THIS IS CACHED AT ALL, measured on `fp-columnar` (br-frankenpandas-kko5z):
+/// `available_parallelism` honours cgroup CPU quota by WALKING THE CGROUP HIERARCHY
+/// ON THE FILESYSTEM — `/proc/self/cgroup` plus `cpu.max` at every level, 7 opens and
+/// ~10 reads per call, six levels deep for a tmux-spawned process. That cost 66-68us
+/// per elementwise call there.
+///
+/// `fp-index`'s two call sites were NOT the bug — both already sit inside an
+/// `n >= FLATIDX_PAR_MIN_ROWS` (50_000) gate, so a small call never reached the walk.
+/// That is the shape `fp-columnar` got wrong by calling it BEFORE its size check.
+/// Caching is still worth it at the boundary, where the walk was a real fraction of
+/// the parallel work it was sizing.
+///
+/// Caching means this will not notice an affinity or quota change made from outside a
+/// running process; that is the right trade for sizing a worker pool.
+fn cached_available_parallelism() -> usize {
+    static AVAILABLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *AVAILABLE
+        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+}
+
 fn index_label_is_truthy(label: &IndexLabel) -> bool {
     if label.is_missing() {
         return false;
@@ -19101,8 +19128,7 @@ impl MultiIndex {
         const FLATIDX_PAR_MIN_ROWS: usize = 50_000;
         const FLATIDX_PAR_MIN_PER_WORKER: usize = 16_384;
         let workers = if n >= FLATIDX_PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            cached_available_parallelism()
                 .min(16)
                 .min(n / FLATIDX_PAR_MIN_PER_WORKER)
                 .max(1)
@@ -19179,8 +19205,7 @@ impl MultiIndex {
         const FLATIDX_PAR_MIN_ROWS: usize = 50_000;
         const FLATIDX_PAR_MIN_PER_WORKER: usize = 16_384;
         let workers = if n >= FLATIDX_PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            cached_available_parallelism()
                 .min(16)
                 .min(n / FLATIDX_PAR_MIN_PER_WORKER)
                 .max(1)

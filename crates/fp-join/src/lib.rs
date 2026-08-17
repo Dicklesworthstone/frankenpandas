@@ -1456,9 +1456,7 @@ struct AffineInnerPositionPlan {
 const AFFINE_I64_INNER_MAX_MORSELS: usize = 64;
 
 fn affine_inner_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(AFFINE_I64_INNER_MAX_MORSELS)
+    fp_columnar::cached_available_parallelism().min(AFFINE_I64_INNER_MAX_MORSELS)
 }
 
 fn balanced_partition(total: usize, index: usize, parts: usize) -> (usize, usize) {
@@ -3223,9 +3221,7 @@ const DENSE_I64_INNER_PARALLEL_MAX_CHUNKS: usize = 16;
 fn join_parallel_thread_count() -> usize {
     static THREAD_COUNT: OnceLock<usize> = OnceLock::new();
     *THREAD_COUNT.get_or_init(|| {
-        std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS)
+        fp_columnar::cached_available_parallelism().min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS)
     })
 }
 
@@ -7151,8 +7147,7 @@ fn build_single_key_ordered_unique_outer_merge_output(
         }
     };
 
-    let worker_count = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
+    let worker_count = fp_columnar::cached_available_parallelism()
         .min(64)
         .min(jobs.len().max(1));
     let computed: Vec<Result<Column, JoinError>> = if worker_count >= 2 && jobs.len() >= 2 {

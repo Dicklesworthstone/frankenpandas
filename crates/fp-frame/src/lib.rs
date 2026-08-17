@@ -791,8 +791,7 @@ fn materialize_value_counts_output(
 
     let len = counts.len();
     let worker_count = if len >= PAR_MIN_COUNTS {
-        std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
+        fp_columnar::cached_available_parallelism()
             .min(MAX_WORKERS)
             .min(len)
     } else {
@@ -1112,8 +1111,7 @@ fn materialize_float64_value_counts_output(
 
     let len = counts.len();
     let worker_count = if len >= PAR_MIN_COUNTS {
-        std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
+        fp_columnar::cached_available_parallelism()
             .min(MAX_WORKERS)
             .min(len)
     } else {
@@ -2906,8 +2904,7 @@ fn json_par_workers(n: usize) -> usize {
     if n < JSON_PAR_MIN_ROWS {
         return 1;
     }
-    std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
+    fp_columnar::cached_available_parallelism()
         .min(16)
         .min(n / JSON_PAR_MIN_PER_WORKER)
         .max(1)
@@ -32024,9 +32021,7 @@ impl DataFrameRolling<'_> {
         let worker_count = if ncols >= ROLL_PAR_MIN_COLS
             && ncols.saturating_mul(self.df.index.len()) >= ROLL_PAR_MIN_VALUES
         {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -32405,9 +32400,7 @@ impl DataFrameExpanding<'_> {
 
         let ncols = numeric.len();
         let worker_count = if ncols >= 2 && ncols.saturating_mul(self.df.index.len()) >= 16_384 {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -32646,9 +32639,7 @@ impl DataFrameEwm<'_> {
 
         let ncols = numeric.len();
         let worker_count = if ncols >= 2 && ncols.saturating_mul(self.df.index.len()) >= 16_384 {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -41938,10 +41929,7 @@ fn par_map_f64_buf<G: Fn(f64) -> f64 + Sync>(data: &[f64], g: G) -> Vec<f64> {
     const PAR_MIN: usize = 200_000;
     let n = data.len();
     let mut out = vec![0.0_f64; n];
-    let workers = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .min(8);
+    let workers = fp_columnar::cached_available_parallelism().min(8);
     if workers <= 1 || n < PAR_MIN {
         for (o, &x) in out.iter_mut().zip(data) {
             *o = g(x);
@@ -41967,10 +41955,7 @@ fn par_map_f64_from_i64<G: Fn(f64) -> f64 + Sync>(data: &[i64], g: G) -> Vec<f64
     const PAR_MIN: usize = 200_000;
     let n = data.len();
     let mut out = vec![0.0_f64; n];
-    let workers = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .min(8);
+    let workers = fp_columnar::cached_available_parallelism().min(8);
     if workers <= 1 || n < PAR_MIN {
         for (o, &x) in out.iter_mut().zip(data) {
             *o = g(x as f64);
@@ -42381,9 +42366,7 @@ mod str_worker_pool {
         /// width is the per-call cap the scoped-spawn path used, so the pool
         /// can still grow to serve any chunking those kernels ask for.
         pub fn new() -> Self {
-            let threads = std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(64);
+            let threads = fp_columnar::cached_available_parallelism().min(64);
             Self {
                 job_txs: (0..threads).map(|_| OnceLock::new()).collect(),
                 threads,
@@ -42622,8 +42605,7 @@ impl StringAccessor<'_> {
             const MIN_ROWS_PER_WORKER: usize = 131_072;
             let n = in_offsets.len() - 1;
             let workers = if in_bytes.len() >= PARALLEL_MIN_BYTES {
-                std::thread::available_parallelism()
-                    .map_or(1, std::num::NonZeroUsize::get)
+                fp_columnar::cached_available_parallelism()
                     .min(64)
                     .min(n.div_ceil(MIN_ROWS_PER_WORKER))
             } else {
@@ -42727,8 +42709,7 @@ impl StringAccessor<'_> {
         const MIN_ROWS_PER_WORKER: usize = 131_072;
         let n = in_offsets.len() - 1;
         let workers = if in_bytes.len() >= PARALLEL_MIN_BYTES {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(64)
                 .min(n.div_ceil(MIN_ROWS_PER_WORKER))
         } else {
@@ -42814,8 +42795,7 @@ impl StringAccessor<'_> {
         const MIN_ROWS_PER_WORKER: usize = 131_072;
         let n = in_offsets.len() - 1;
         let workers = if in_bytes.len() >= PARALLEL_MIN_BYTES {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(64)
                 .min(n.div_ceil(MIN_ROWS_PER_WORKER))
         } else {
@@ -43030,8 +43010,7 @@ impl StringAccessor<'_> {
             const MIN_ROWS_PER_WORKER: usize = 131_072;
             let n = in_offsets.len() - 1;
             let workers = if in_bytes.len() >= PARALLEL_MIN_BYTES {
-                std::thread::available_parallelism()
-                    .map_or(1, std::num::NonZeroUsize::get)
+                fp_columnar::cached_available_parallelism()
                     .min(64)
                     .min(n.div_ceil(MIN_ROWS_PER_WORKER))
             } else {
@@ -43102,8 +43081,7 @@ impl StringAccessor<'_> {
         const PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
         const MIN_BYTES_PER_WORKER: usize = 512 * 1024;
         let workers = if bytes.len() >= PARALLEL_MIN_BYTES {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(32)
                 .min(bytes.len().div_ceil(MIN_BYTES_PER_WORKER))
         } else {
@@ -43308,8 +43286,7 @@ impl StringAccessor<'_> {
                 const PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
                 const MIN_ROWS_PER_WORKER: usize = 131_072;
                 let workers = if bytes.len() >= PARALLEL_MIN_BYTES {
-                    std::thread::available_parallelism()
-                        .map_or(1, std::num::NonZeroUsize::get)
+                    fp_columnar::cached_available_parallelism()
                         .min(64)
                         .min(n.div_ceil(MIN_ROWS_PER_WORKER))
                 } else {
@@ -46268,10 +46245,7 @@ impl DatetimeAccessor<'_> {
         const PAR_MIN: usize = 200_000;
         let n = nanos.len();
         let mut out = vec![0_i64; n];
-        let workers = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(1)
-            .min(8);
+        let workers = fp_columnar::cached_available_parallelism().min(8);
         if workers <= 1 || n < PAR_MIN {
             for (o, &ns) in out.iter_mut().zip(nanos) {
                 *o = map(ns);
@@ -46301,10 +46275,7 @@ impl DatetimeAccessor<'_> {
         const PAR_MIN: usize = 200_000;
         let n = nanos.len();
         let mut out = vec![false; n];
-        let workers = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(1)
-            .min(8);
+        let workers = fp_columnar::cached_available_parallelism().min(8);
         if workers <= 1 || n < PAR_MIN {
             for (o, &ns) in out.iter_mut().zip(nanos) {
                 *o = map(ns);
@@ -56244,8 +56215,7 @@ impl DataFrameDictResult {
             out
         };
         let workers = if n >= TO_DICT_INDEX_MATERIALIZE_PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(16)
                 .min((n / TO_DICT_INDEX_MATERIALIZE_PAR_MIN_PER_WORKER).max(1))
                 .max(1)
@@ -56467,8 +56437,7 @@ fn complete_spearman_centered_parallel(
         return None;
     }
 
-    let worker_count = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
+    let worker_count = fp_columnar::cached_available_parallelism()
         .min(MAX_WORKERS)
         .min(n);
     if worker_count < 2 {
@@ -56561,8 +56530,7 @@ fn complete_spearman_parallel_matrix(
         return None;
     }
 
-    let worker_count = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
+    let worker_count = fp_columnar::cached_available_parallelism()
         .min(MAX_WORKERS)
         .min(n);
     if worker_count < 2 {
@@ -56653,8 +56621,7 @@ fn complete_spearman_gram_matrix(
             .map(|b| (b * band, ((b + 1) * band).min(len)))
             .filter(|&(a, b)| a < b)
             .collect();
-        let worker_count = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
+        let worker_count = fp_columnar::cached_available_parallelism()
             .min(64)
             .min(bands.len());
         let next_band = std::sync::atomic::AtomicUsize::new(0);
@@ -56762,8 +56729,7 @@ fn complete_kendall_no_tie_parallel_matrix(
         return None;
     }
 
-    let worker_count = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
+    let worker_count = fp_columnar::cached_available_parallelism()
         .min(MAX_WORKERS)
         .min(pair_count);
     if worker_count < 2 {
@@ -57573,8 +57539,7 @@ impl DataFrame {
             }
         };
         let ncols = col_refs.len();
-        let worker_count = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
+        let worker_count = fp_columnar::cached_available_parallelism()
             .min(64)
             .min(ncols.max(1));
         let big_enough = (n as u128) * (ncols as u128) >= (1u128 << 18);
@@ -60366,9 +60331,7 @@ impl DataFrame {
         // each worker a disjoint output slice so writes never alias.
         const DEDUP_PAR_MIN_ROWS: usize = 8_192;
         let worker_count = if row_count >= DEDUP_PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(row_count)
+            fp_columnar::cached_available_parallelism().min(row_count)
         } else {
             1
         };
@@ -65036,8 +64999,7 @@ impl DataFrame {
         const TORECORDS_PAR_MIN_ROWS: usize = 50_000;
         const TORECORDS_PAR_MIN_PER_WORKER: usize = 16_384;
         let workers = if n >= TORECORDS_PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(16)
                 .min(n / TORECORDS_PAR_MIN_PER_WORKER)
                 .max(1)
@@ -65277,9 +65239,7 @@ impl DataFrame {
         let worker_count = if ncols >= RANK_PAR_MIN_COLS
             && ncols.saturating_mul(self.len()) >= RANK_PAR_MIN_VALUES
         {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -65464,8 +65424,7 @@ impl DataFrame {
             const RANK_PAR_MIN_ROWS: usize = 50_000;
             const RANK_PAR_MIN_PER_WORKER: usize = 16_384;
             let rank_workers = if n_rows >= RANK_PAR_MIN_ROWS {
-                std::thread::available_parallelism()
-                    .map_or(1, std::num::NonZeroUsize::get)
+                fp_columnar::cached_available_parallelism()
                     .min(16)
                     .min(n_rows / RANK_PAR_MIN_PER_WORKER)
                     .max(1)
@@ -67035,8 +66994,7 @@ impl DataFrame {
             // Per-column moments are independent; fan them out when the volume
             // (~len·n) pays for thread spin-up. Bit-identical: each column's
             // s/s2 fold is r-ascending exactly as the in-line loop.
-            let moment_workers = std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            let moment_workers = fp_columnar::cached_available_parallelism()
                 .min(64)
                 .min(n.max(1));
             if moment_workers >= 2 && (len as u128) * (n as u128) >= (1u128 << 20) {
@@ -67108,8 +67066,7 @@ impl DataFrame {
                     .map(|b| (b * band, ((b + 1) * band).min(len)))
                     .filter(|&(a, b)| a < b)
                     .collect();
-                let worker_count = std::thread::available_parallelism()
-                    .map_or(1, std::num::NonZeroUsize::get)
+                let worker_count = fp_columnar::cached_available_parallelism()
                     .min(64)
                     .min(bands.len());
                 let next_band = std::sync::atomic::AtomicUsize::new(0);
@@ -67251,8 +67208,7 @@ impl DataFrame {
 
             let pairs: Vec<(usize, usize)> =
                 (0..n).flat_map(|j| (0..=j).map(move |i| (i, j))).collect();
-            let worker_count = std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            let worker_count = fp_columnar::cached_available_parallelism()
                 .min(64)
                 .min(pairs.len().max(1));
             let big_enough = (pairs.len() as u128) * (len as u128) >= (1u128 << 20);
@@ -67511,8 +67467,7 @@ impl DataFrame {
                 let rank = order.as_deref().map(Series::kendall_rank_by_row_from_order);
                 (values, order, rank)
             };
-            let workers = std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            let workers = fp_columnar::cached_available_parallelism()
                 .min(64)
                 .min(n.max(1));
             let mut prepped: Vec<KendallPrep> = Vec::with_capacity(n);
@@ -68170,8 +68125,7 @@ impl DataFrame {
             }
         };
 
-        let worker_count = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
+        let worker_count = fp_columnar::cached_available_parallelism()
             .min(64)
             .min(m.div_ceil(BI).max(1));
         let big_enough = (m as u128) * (k as u128) * (n as u128) >= (1u128 << 20);
@@ -69103,8 +69057,7 @@ impl DataFrame {
             .map(|name| &self.columns[name])
             .collect();
         let ncols = col_refs.len();
-        let worker_count = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
+        let worker_count = fp_columnar::cached_available_parallelism()
             .min(64)
             .min(ncols.max(1));
         let big_enough = (new_len as u128) * (ncols as u128) >= (1u128 << 18);
@@ -70481,8 +70434,7 @@ impl DataFrame {
                 const KEYS_PAR_MIN_ROWS: usize = 50_000;
                 const KEYS_PAR_MIN_PER_WORKER: usize = 16_384;
                 let key_workers = if nkeys >= KEYS_PAR_MIN_ROWS {
-                    std::thread::available_parallelism()
-                        .map_or(1, std::num::NonZeroUsize::get)
+                    fp_columnar::cached_available_parallelism()
                         .min(16)
                         .min(nkeys / KEYS_PAR_MIN_PER_WORKER)
                         .max(1)
@@ -70530,8 +70482,7 @@ impl DataFrame {
                 let total_cells = keys.len().saturating_mul(ncols);
                 let workers =
                     if ncols >= MAPPING_PAR_MIN_COLS && total_cells >= MAPPING_PAR_MIN_CELLS {
-                        std::thread::available_parallelism()
-                            .map_or(1, std::num::NonZeroUsize::get)
+                        fp_columnar::cached_available_parallelism()
                             .min(16)
                             .min(ncols)
                             .max(1)
@@ -70606,8 +70557,7 @@ impl DataFrame {
                 const RECORDS_PAR_MIN_ROWS: usize = 50_000;
                 const RECORDS_PAR_MIN_PER_WORKER: usize = 16_384;
                 let workers = if n >= RECORDS_PAR_MIN_ROWS {
-                    std::thread::available_parallelism()
-                        .map_or(1, std::num::NonZeroUsize::get)
+                    fp_columnar::cached_available_parallelism()
                         .min(16)
                         .min(n / RECORDS_PAR_MIN_PER_WORKER)
                         .max(1)
@@ -72371,8 +72321,7 @@ impl DataFrame {
         const STACK_LABEL_PAR_MIN_ROWS: usize = 50_000;
         const STACK_LABEL_PAR_MIN_PER_WORKER: usize = 16_384;
         let label_workers = if n_rows >= STACK_LABEL_PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(16)
                 .min(n_rows / STACK_LABEL_PAR_MIN_PER_WORKER)
                 .max(1)
@@ -73420,9 +73369,7 @@ impl DataFrame {
 
         let mut values = vec![Scalar::Int64(0); n];
         let worker_count = if n >= 16_384 && !self.column_order.is_empty() {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(16)
+            fp_columnar::cached_available_parallelism().min(16)
         } else {
             1
         };
@@ -73625,8 +73572,7 @@ impl DataFrame {
         const ARG_PAR_MIN_ROWS: usize = 50_000;
         const ARG_PAR_MIN_PER_WORKER: usize = 16_384;
         let workers = if n >= ARG_PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(16)
                 .min(n / ARG_PAR_MIN_PER_WORKER)
                 .max(1)
@@ -74177,9 +74123,7 @@ impl DataFrame {
         let worker_count = if ncols >= MODE_PAR_MIN_COLS
             && ncols.saturating_mul(self.len()) >= MODE_PAR_MIN_VALUES
         {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -74403,9 +74347,7 @@ impl DataFrame {
         let ncols = names.len();
         let worker_count =
             if ncols >= PAR_MIN_COLS && ncols.saturating_mul(self.len()) >= par_min_values {
-                std::thread::available_parallelism()
-                    .map_or(1, std::num::NonZeroUsize::get)
-                    .min(ncols)
+                fp_columnar::cached_available_parallelism().min(ncols)
             } else {
                 1
             };
@@ -75138,8 +75080,7 @@ impl DataFrame {
         const PAR_MIN_ROWS: usize = 200_000;
         const PAR_MIN_PER_WORKER: usize = 65_536;
         let workers = if self.len() >= PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(16)
                 .min(self.len() / PAR_MIN_PER_WORKER)
                 .max(1)
@@ -79323,9 +79264,7 @@ impl DataFrame {
 
         let ncols = all_cols.len();
         let worker_count = if ncols >= 2 && (self_len + other_len) >= 16_384 {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -84130,9 +84069,7 @@ impl DataFrameGroupBy<'_> {
         let worker_count = if ncols >= DENSE_AGG_PAR_MIN_COLS
             && ncols.saturating_mul(gid_per_row.len()) >= DENSE_AGG_PAR_MIN_VALUES
         {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -84333,7 +84270,7 @@ impl DataFrameGroupBy<'_> {
             value_slices.push(values);
         }
 
-        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let available = fp_columnar::cached_available_parallelism();
         let worker_count = available
             .min((keys.len() / MIN_ROWS_PER_WORKER).max(1))
             .min(range.div_ceil(MIN_SLOTS_PER_WORKER).max(1));
@@ -88677,9 +88614,7 @@ impl DataFrameGroupBy<'_> {
         let ncols = value_cols.len();
         let worker_count =
             if ncols >= CUM_PAR_MIN_COLS && ncols.saturating_mul(nrows) >= CUM_PAR_MIN_VALUES {
-                std::thread::available_parallelism()
-                    .map_or(1, std::num::NonZeroUsize::get)
-                    .min(ncols)
+                fp_columnar::cached_available_parallelism().min(ncols)
             } else {
                 1
             };
@@ -88761,9 +88696,7 @@ impl DataFrameGroupBy<'_> {
         let ncols = value_cols.len();
         let worker_count = if ncols >= PAR_MIN_COLS && ncols.saturating_mul(nrows) >= PAR_MIN_VALUES
         {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -89757,9 +89690,7 @@ impl DataFrameGroupBy<'_> {
 
         // Fan columns out across workers (chunked so a wide frame never spawns a
         // thread per column). A single column / single worker stays inline.
-        let worker_count = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(1)
+        let worker_count = fp_columnar::cached_available_parallelism()
             .min(value_cols.len())
             .max(1);
         let computed: Vec<(String, Column)> = if worker_count <= 1 {
@@ -90340,8 +90271,7 @@ impl DataFrameGroupBy<'_> {
         const VC_PAR_MIN_PER_WORKER: usize = 16;
         let n_groups = group_order.len();
         let workers = if n_groups >= VC_PAR_MIN_GROUPS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(16)
                 .min(n_groups / VC_PAR_MIN_PER_WORKER)
                 .max(1)
@@ -91615,9 +91545,7 @@ impl GroupByRolling<'_> {
         const GBROLL_PAR_MIN_COLS: usize = 2;
         let ncols = value_cols.len();
         let worker_count = if ncols >= GBROLL_PAR_MIN_COLS && n >= 16_384 {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -91837,9 +91765,7 @@ impl GroupByExpanding<'_> {
 
         let ncols = value_cols.len();
         let worker_count = if ncols >= 2 && n >= 16_384 {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -92055,9 +91981,7 @@ impl GroupByEwm<'_> {
 
         let ncols = value_cols.len();
         let worker_count = if ncols >= 2 && n >= 16_384 {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
+            fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
@@ -191496,8 +191420,7 @@ mod transpose_reject_reaudit_cod_fp {
         let mut new_order = Vec::with_capacity(n_rows);
 
         let workers = if n_rows >= PAIR_BUFFER_PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(16)
                 .min(n_rows / PAIR_BUFFER_PAR_MIN_PER_WORKER)
                 .max(1)
@@ -191577,7 +191500,7 @@ mod transpose_reject_reaudit_cod_fp {
         const CHILD_ENV: &str = "FP_PAIR_BUFFER_PROFILE_CHILD";
         const SENTINEL: &str = "pair_buffer_build_morsel_candidate_cod_fp";
 
-        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let available = fp_columnar::cached_available_parallelism();
         let workers = available
             .min(16)
             .clamp(1, ROWS / PAIR_BUFFER_PAR_MIN_PER_WORKER);
@@ -191710,8 +191633,7 @@ mod transpose_reject_reaudit_cod_fp {
         const INDEX_PAR_MIN_PER_WORKER: usize = 16_384;
 
         let workers = if n >= INDEX_PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(16)
                 .min(n / INDEX_PAR_MIN_PER_WORKER)
                 .max(1)
@@ -192337,8 +192259,7 @@ mod axis1_moment_void_audit_cod_fp {
         const PAR_MIN_ROWS: usize = 200_000;
         const PAR_MIN_PER_WORKER: usize = 65_536;
         let workers = if df.len() >= PAR_MIN_ROWS {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
+            fp_columnar::cached_available_parallelism()
                 .min(16)
                 .min(df.len() / PAR_MIN_PER_WORKER)
                 .max(1)

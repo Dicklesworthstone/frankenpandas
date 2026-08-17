@@ -1004,9 +1004,7 @@ fn simple_numeric_csv_parallel_worker_count(data_len: usize) -> usize {
     if data_len < SIMPLE_NUMERIC_CSV_PARALLEL_MIN_BYTES {
         return 1;
     }
-    std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(SIMPLE_NUMERIC_CSV_PARALLEL_MAX_WORKERS)
+    fp_columnar::cached_available_parallelism().min(SIMPLE_NUMERIC_CSV_PARALLEL_MAX_WORKERS)
 }
 
 fn split_simple_numeric_csv_chunks(
@@ -2458,8 +2456,7 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
     const CSV_PAR_MIN_ROWS: usize = 50_000;
     const CSV_PAR_MIN_ROWS_PER_WORKER: usize = 16_384;
     let workers = if n >= CSV_PAR_MIN_ROWS {
-        std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
+        fp_columnar::cached_available_parallelism()
             .min(16)
             .min(n / CSV_PAR_MIN_ROWS_PER_WORKER)
             .max(1)
@@ -6693,8 +6690,7 @@ fn try_read_json_records_flat_parallel(input: &str) -> Result<Option<DataFrame>,
     if nrec < PAR_MIN_RECORDS {
         return Ok(None);
     }
-    let workers = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
+    let workers = fp_columnar::cached_available_parallelism()
         .min(16)
         .min(nrec / PAR_MIN_RECORDS_PER_WORKER)
         .max(1);

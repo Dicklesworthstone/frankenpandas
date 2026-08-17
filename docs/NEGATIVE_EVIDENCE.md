@@ -32632,3 +32632,106 @@ NOTE         37.34% of process samples are `sha2::sha256::compress` — the ELF 
              the timed region, and does not touch any ratio; recorded because it makes
              the raw profile look wrong until you know why.
 ```
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-q1evw) — the cgroup walk was on THREE `dataframe_ops` hot paths too; `cumsum @10k` crosses unity to a certified 1.172x, and `filter_bool_mask` nearly doubles
+
+`kko5z` fixed `available_parallelism`'s per-call cgroup walk in `fp-columnar` and left
+96 call sites in the other crates as recorded residue. This closes them — but the
+useful part of this entry is that **most of those sites turned out not to matter, and
+I found which three did by counting syscalls rather than by assuming.**
+
+**I DID NOT ASSUME THE FIX WOULD PAY.** Before touching anything I probed the shipped
+binary for paths that actually pay the walk PER CALL. The harness runs ~55 timed calls
+per row, and one walk is 6 `cpu.max` opens, so a per-call offender shows ~330:
+
+| `@10k`, `strace -e trace=openat`, `cpu.max` opens | before |
+|---|---:|
+| `dataframe_ops/sort_values_single` | **336** |
+| `dataframe_ops/filter_bool_mask` | **330** |
+| `dataframe_ops/cumsum` | **330** |
+| `strings/str_len` @100k | 6 |
+| `rolling/rolling_mean_w10` @1M | 6 |
+| `dataframe_ops/df_abs`, `df_transpose`, `value_counts`, `drop_duplicates` | 6 |
+| `groupby/groupby_sum_int64`, `groupby_mean_float64`, `groupby_transform_mean` | 6 |
+
+Six opens is ONE walk for the whole process — an initialisation, not a per-call cost.
+So of everything probed, exactly three workloads had the defect on a measured path.
+`fp-index`'s two sites turned out to be the CORRECT shape already: both sit inside an
+`n >= FLATIDX_PAR_MIN_ROWS` (50_000) gate, so a small call never reaches the walk —
+which is precisely what `fp-columnar` got wrong by calling it BEFORE its size check.
+
+⚠ **A METHOD WARNING I PAID FOR IN THIS RUN.** My first sweep reported `cpu.max=0` for
+seven workloads and I nearly wrote that down as "no defect anywhere". Two separate
+faults: `set -- $spec` does not word-split in zsh, so every probe ran with one garbage
+argument; and once fixed, `filter_bool` and `groupby_sum` are not real workload names,
+so `fp-bench` exited 2 and produced zero syscalls of interest. **A zero count from a
+process that never ran is indistinguishable from a clean result.** Every probe in the
+table above carries its `rc=0`. Check the exit code of the thing you are counting.
+
+**Counted mechanism, after:** all three drop from 330-336 to **12**.
+
+**RESULT, one post-fix ELF `57e9d125`, default build, `ref` arm, load 13.7-14.7 (the
+before rows were taken at 12.6-20.2 on ELF `d370a302`, minutes earlier, same host):**
+
+| `@10k` | FP p50 before | FP p50 after | removed | vs pandas before | vs pandas after |
+|---|---:|---:|---:|---:|---:|
+| `sort_values_single` | 648.9us | **548.0us** | 101us | 0.517 / 0.524 | **0.616 / 0.644** |
+| `filter_bool_mask` | 140.5us | **75.7us** | 65us | 2.126 / 2.201 | **3.914 / 4.395** |
+| `cumsum` | 437.6us | **339.1us** | 98us | 0.852 / 0.890 | **1.172 / 1.153** |
+
+**The prediction was made before the build and was slightly conservative.** From
+`kko5z`'s 66-68us I predicted 649→581, 140→72 and 437→369. `filter_bool_mask` landed
+almost exactly (65us removed against 68 predicted); the other two removed MORE than one
+walk's worth (101us and 98us), so those paths evidently call `available_parallelism`
+more than once per timed call. I am reporting the measured deltas rather than defending
+the single-walk model.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=57e9d1251dbbfeda41c8bf335e63437a75fc0e63bff70c1b5612520bc6ab2cec (82345648 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T123839.677559Z-pid1314853 , giving
+measured_ratio=1.172x for this row.
+
+| `cumsum @10k` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **340.27us** | 4.12% | 0.990917 — PASSES |
+| pandas | 397.57us | 4.83% | 0.995351 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.990917 and
+pandas median ratio 0.995351, both inside the 2% limit.
+
+**Median-CI decision:** effect median 1.172x, 95% CI [1.15487945, 1.17373803],
+excluding unity; claimed log effect 0.15831644 against a required threshold of
+0.10006741, cleared by 1.58x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 4.12%, pandas 4.83%.
+
+```
+LOADAVG      13.72 → 14.65 across the post-fix sequence (1-min, sampled per run)
+OBSERVED MHz host-wide mean 2924-3888 per run, cross-core min 1429.0 max 4298.3
+THREADS      cumsum FP 9 · sort_values_single FP 10 · filter_bool_mask FP 1 · pandas 1
+```
+Best-vs-best 1.202, direction agrees with the median.
+
+**`sort_values_single @10k` ALSO CERTIFIED and is still a LOSS:** 0.616x, CI
+[0.58424946, 0.66262194], nulls 0.990311 / 1.018700, best-vs-best 0.641 agreeing,
+invocation_id=vs-pandas-20260817T123829.351100Z-pid1294384. It improved from 0.517x
+and remains the worst of the three; the walk was 101us of a 649us arm and what is left
+is the sort itself.
+
+**SCOPE, stated so nobody reads this as more than it is.** 62 call sites rewritten
+across `fp-frame` (56), `fp-io` (3) and `fp-join` (3), all routed to
+`fp_columnar::cached_available_parallelism`; `fp-index` (2) got a local six-line copy
+because it deliberately does not depend on `fp-columnar` and a new crate-graph edge is
+a worse trade than six lines. **`fp-bench`'s two sites are deliberately NOT changed**:
+both are provenance — they report the host's parallelism into the bench row — so they
+must read live host state, and they run once per invocation rather than per call, where
+the walk costs nothing. Sweeping them would have been wrong in principle and worth
+nothing in practice. Of the 62 rewritten sites, exactly three workloads are shown here
+to benefit; the rest are correctness-of-shape changes with no measured effect, and I am
+not claiming one.
