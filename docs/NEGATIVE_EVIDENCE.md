@@ -29851,3 +29851,70 @@ this audit.
 not going to manufacture them.** The one that is present is milder and differently
 located than reported, and the actionable finding is not a threshold at all — it is
 that the null clause is doing nearly all the refusing.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — GATE AUDIT, no compute spent: neither failure shape is present, and the real cost is a CONJUNCTION — two independent ~70% clauses multiply to 50%
+
+Three projects reported gates rejecting good measurements: frankenfs's spread gate
+sitting at its median, frankenscipy's clock gate biased against the faster arm,
+franken_networkx's arm-asymmetric null. Audited mine for both shapes over 160 gated
+rows. **Neither shape is present, and looking for them found something else.**
+
+**SHAPE 1 — A THRESHOLD AT THE OPERATING POINT: NOT FOUND.** Which clause actually
+rejects:
+
+```
+  null_medians_within_2pct_unity     80   50.0%
+  NONE (certified)                   71   44.4%
+  effect_exceeds_two_x_null_margin   26   16.2%
+  effect_ci_excludes_unity            1    0.6%
+```
+
+The margin clause is well clear of my operating point: the median row clears its
+required log-effect by **4.77x** (p10 0.59x, p90 14.61x), and only 16% of rows land
+within a factor of two of that threshold either side. The CI clause binds once in
+160 rows. **Neither is a threshold sitting where the work sits.**
+
+**SHAPE 2 — AN ARM-ASYMMETRIC GATE: NOT FOUND, AND THE ASYMMETRY THAT EXISTS RUNS
+THE OTHER WAY.** The balanced square is `ABBAABBA`, so the incumbent occupies slots
+{0,3,4,7} and FrankenPandas {1,2,5,6}. Both arms' nulls compare "first two versus
+final two placements", but the incumbent's pair members are three slots apart while
+ours are ADJACENT — the two arms' nulls therefore average over different temporal
+structure, which is exactly the shape networkx found. Recomputing every row's null
+under the as-is pairing and under an interleaved pairing of the same four numbers:
+
+| arm | n | as-is pairing | interleaved | penalty |
+|---|---|---|---|---|
+| FrankenPandas | 160 | 3.802% | 3.385% | **+0.417%** |
+| pandas | 160 | 3.213% | 2.628% | **+0.585%** |
+
+Both arms pay for the pairing, and **the incumbent pays MORE**. If this gate favours
+anyone it is us, so there is nothing here to claim and nothing to fix.
+
+**WHAT THE AUDIT DID FIND: the cost is in the CONJUNCTION, not in either
+threshold.**
+
+```
+  FP arm within 2%              105/160 = 65.6%
+  pandas arm within 2%          116/160 = 72.5%
+  BOTH, which is what the gate needs   = 50.0%
+  independent prediction (0.656 x 0.725) = 47.6%
+```
+
+**Each arm individually clears its own threshold about two times in three — a
+perfectly reasonable place for a limit to sit. The gate requires both at once, so
+the yield is the product.** 50.0% observed against 47.6% predicted under
+independence is close enough that the two arms' null failures are essentially
+uncorrelated, and that is itself a mechanistic result: **a shared ambient
+disturbance — a build storm, a scheduler burst — would correlate them. It does not.
+So the null noise is arm-LOCAL** (allocator state, thread spawn, per-process
+scheduling), which is consistent with everything else in this bead: the serial arm's
+72% against the parallel arm's 44%, and the fact that quiet windows did not rescue
+`log2` or `round2`.
+
+**THE HONEST CONSEQUENCE, and it is not a proposal to change anything.** A
+44.4% certification rate is not evidence of a badly-placed threshold; it is two
+independent two-thirds clauses multiplied. The lever that follows is the one already
+landed by a peer — scale the MEASUREMENT so each arm's null tightens — and not
+loosening either limit, which would be gate self-weakening and which this ledger
+records catching a 2.7x phantom with. Everything here is arithmetic over artifacts
+already on disk: no build, no benchmark, no measurement, at load 603 and 89% iowait.
