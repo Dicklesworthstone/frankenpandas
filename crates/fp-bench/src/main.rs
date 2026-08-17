@@ -1032,6 +1032,12 @@ fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
         "round2" => time_us(|| series.round(2).expect("round")),
         "sqrt" => time_us(|| series.sqrt().expect("sqrt")),
         "log" => time_us(|| series.log().expect("log")),
+        // br-frankenpandas-4kig1. These three joined the domain-fused arm with NO
+        // workload covering them, so the change landed unmeasurable. A lever with
+        // no post-fix ratio is not a win, and the missing lane was the reason.
+        "log10" => time_us(|| series.log10().expect("log10")),
+        "log2" => time_us(|| series.log2().expect("log2")),
+        "log1p" => time_us(|| series.log1p().expect("log1p")),
         _ => return None,
     };
     Some(samples)
