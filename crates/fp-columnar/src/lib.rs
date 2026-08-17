@@ -8416,16 +8416,20 @@ fn map_block_to_owned_with_witness<T: Copy, F: Fn(T) -> f64>(
 /// Bit-identical to the shared arm at every worker count: `f` is unchanged and
 /// per-element, each output element is written once by one worker, and both flags
 /// are `all()` reductions over booleans, which are associative and commutative.
-fn par_map_slice_f64_domain_fused<D: Fn(f64) -> bool + Sync, F: Fn(f64) -> f64 + Sync>(
-    input: &[f64],
+fn par_map_slice_f64_domain_fused<
+    T: Copy + Sync,
+    D: Fn(T) -> bool + Sync,
+    F: Fn(T) -> f64 + Sync,
+>(
+    input: &[T],
     in_domain: &D,
     f: &F,
     max_workers: usize,
     par_min: usize,
 ) -> (Vec<f64>, bool, bool) {
-    fn block<D: Fn(f64) -> bool, F: Fn(f64) -> f64>(
+    fn block<T: Copy, D: Fn(T) -> bool, F: Fn(T) -> f64>(
         out: &mut [f64],
-        input: &[f64],
+        input: &[T],
         in_domain: &D,
         f: &F,
     ) -> (bool, bool) {
@@ -13269,10 +13273,18 @@ impl Column {
     ///
     /// Matches np.zeros().
     pub fn zeros(n: usize, dtype: DType) -> Result<Self, ColumnError> {
+        // Each nullable extension dtype seeds the SAME scalar as its
+        // non-nullable base. Nullability is a property of the values, not of the
+        // zero. br-frankenpandas-lkrb8: this is the same catch-all class as the
+        // fp-io SQL mappers — `Float64Nullable` was added to `DType` and every
+        // `match dtype` with a `_` arm silently absorbed it. Here the arm handed
+        // a float column `Scalar::Int64(0)` and a BOOL column an integer, which
+        // is not a bool at all; `Column::new` then had to coerce every one of
+        // the `n` seeds back to the declared dtype.
         let zero = match dtype {
-            DType::Int64 => Scalar::Int64(0),
-            DType::Float64 => Scalar::Float64(0.0),
-            DType::Bool => Scalar::Bool(false),
+            DType::Int64 | DType::Int64Nullable => Scalar::Int64(0),
+            DType::Float64 | DType::Float64Nullable => Scalar::Float64(0.0),
+            DType::Bool | DType::BoolNullable => Scalar::Bool(false),
             _ => Scalar::Int64(0),
         };
         Self::new(dtype, vec![zero; n])
@@ -13282,10 +13294,11 @@ impl Column {
     ///
     /// Matches np.ones().
     pub fn ones(n: usize, dtype: DType) -> Result<Self, ColumnError> {
+        // Same pairing as `zeros`. See the note there.
         let one = match dtype {
-            DType::Int64 => Scalar::Int64(1),
-            DType::Float64 => Scalar::Float64(1.0),
-            DType::Bool => Scalar::Bool(true),
+            DType::Int64 | DType::Int64Nullable => Scalar::Int64(1),
+            DType::Float64 | DType::Float64Nullable => Scalar::Float64(1.0),
+            DType::Bool | DType::BoolNullable => Scalar::Bool(true),
             _ => Scalar::Int64(1),
         };
         Self::new(dtype, vec![one; n])
@@ -26341,17 +26354,55 @@ impl Column {
         in_domain: D,
         f: F,
     ) -> Option<Self> {
-        let data = self.as_f64_slice()?;
         let (max_workers, par_min) = elementwise_witness_policy();
-        let (out, domain_held, all_finite) =
-            par_map_slice_f64_domain_fused(data, &in_domain, &f, max_workers, par_min);
-        if !domain_held {
-            return None;
+
+        if let Some(data) = self.as_f64_slice() {
+            let (out, domain_held, all_finite) =
+                par_map_slice_f64_domain_fused(data, &in_domain, &f, max_workers, par_min);
+            if !domain_held {
+                return None;
+            }
+            return Some(Self::from_f64_all_valid_with_finite_opt(
+                out,
+                Some(all_finite),
+            ));
         }
-        Some(Self::from_f64_all_valid_with_finite_opt(
-            out,
-            Some(all_finite),
-        ))
+
+        // INT64 INPUT TAKES THE SAME ARM. br-frankenpandas-4kig1.
+        //
+        // Without this every one of the ~17 ops migrated onto this helper still
+        // fell to `typed_float_unary_par` for an integer column — which reaches
+        // its values BY INDEX (bounds-checked, so the loop does not vectorize)
+        // and then re-reads the whole output asking `is_nan()`. An Int64 column
+        // is an ordinary shape, not an edge case, so the migration was only half
+        // done for `sqrt`, `log`, `sin` and the rest.
+        //
+        // `as_i64_slice` is all-valid exactly as `as_f64_slice` is, and `x as f64`
+        // is the identical widening `typed_float_unary_par`'s own i64 arm performs
+        // — exact for |x| < 2^53 and correctly rounded above it — so this arm is
+        // bit-identical to the path it replaces. The predicate is evaluated on the
+        // WIDENED value, which is what makes a domain like `x >= 0.0` mean the
+        // same thing for both input types.
+        if let Some(data) = self.as_i64_slice() {
+            let widened_domain = |x: i64| in_domain(x as f64);
+            let widened_f = |x: i64| f(x as f64);
+            let (out, domain_held, all_finite) = par_map_slice_f64_domain_fused(
+                data,
+                &widened_domain,
+                &widened_f,
+                max_workers,
+                par_min,
+            );
+            if !domain_held {
+                return None;
+            }
+            return Some(Self::from_f64_all_valid_with_finite_opt(
+                out,
+                Some(all_finite),
+            ));
+        }
+
+        None
     }
 
     fn typed_float_witness_free_unary<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
@@ -30508,6 +30559,65 @@ mod tests {
         assert_eq!(out.values()[0], Scalar::Float64(3.0));
         assert_eq!(out.values()[1], Scalar::Null(NullKind::NaN));
         assert_eq!(out.values()[2], Scalar::Null(NullKind::NaN));
+    }
+
+    /// br-frankenpandas-lkrb8. `zeros`/`ones` seed from a `match dtype` with a
+    /// `_ => Scalar::Int64(..)` arm, so every nullable extension dtype fell into
+    /// it: a `Float64Nullable` column was seeded with an INTEGER zero and a
+    /// `BoolNullable` column with an integer that is not a bool at all.
+    ///
+    /// This is the third instance of one defect class in two days — the fp-io
+    /// SQL mappers were the first two. A nullable variant is added to `DType`
+    /// and every catch-all absorbs it silently, because the type still checks
+    /// and `Column::new` coerces the seeds back one at a time.
+    ///
+    /// It reaches real code through `zeros_like`/`ones_like`, which pass
+    /// `self.dtype` straight in, so any nullable column asking for a like-shaped
+    /// zero column hit the wrong arm.
+    ///
+    /// The assertion is the PAIRING — a nullable dtype seeds the same scalar as
+    /// its base — rather than three literals, so the next nullable variant added
+    /// to `DType` fails here instead of falling through.
+    #[test]
+    fn zeros_and_ones_seed_nullable_dtypes_like_their_base_dtype() {
+        for (nullable, base) in [
+            (DType::Int64Nullable, DType::Int64),
+            (DType::Float64Nullable, DType::Float64),
+            (DType::BoolNullable, DType::Bool),
+        ] {
+            let zeros_nullable = Column::zeros(3, nullable).expect("zeros nullable");
+            let zeros_base = Column::zeros(3, base).expect("zeros base");
+            assert_eq!(
+                zeros_nullable.values()[0],
+                zeros_base.values()[0],
+                "zeros({nullable:?}) seeded a different scalar than zeros({base:?})"
+            );
+            assert_eq!(zeros_nullable.dtype(), nullable);
+
+            let ones_nullable = Column::ones(3, nullable).expect("ones nullable");
+            let ones_base = Column::ones(3, base).expect("ones base");
+            assert_eq!(
+                ones_nullable.values()[0],
+                ones_base.values()[0],
+                "ones({nullable:?}) seeded a different scalar than ones({base:?})"
+            );
+            assert_eq!(ones_nullable.dtype(), nullable);
+        }
+    }
+
+    /// NEGATIVE CASE: the bool one is the arm that cannot be rescued by coercion.
+    ///
+    /// A test that only asserted `zeros(n, Float64Nullable)` succeeds would pass
+    /// against the broken code, because `Column::new` coerces `Int64(0)` toward
+    /// the declared dtype and the observable result may come out right anyway.
+    /// `BoolNullable` is the one where the seed is not merely the wrong width but
+    /// the wrong KIND, so it pins the arm directly.
+    #[test]
+    fn a_nullable_bool_column_of_zeros_holds_bools_not_integers() {
+        let zeros = Column::zeros(2, DType::BoolNullable).expect("bool-nullable zeros");
+        assert_eq!(zeros.values()[0], Scalar::Bool(false));
+        let ones = Column::ones(2, DType::BoolNullable).expect("bool-nullable ones");
+        assert_eq!(ones.values()[0], Scalar::Bool(true));
     }
 
     #[test]
@@ -37422,6 +37532,103 @@ mod tests {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        /// br-frankenpandas-4kig1. The domain-fused arm now accepts Int64 input,
+        /// so an integer column takes the same path a float column does.
+        ///
+        /// The risk being tested is not speed, it is DIVERGENCE: if the Int64 arm
+        /// and the Float64 arm ever disagree, the same op returns different values
+        /// for `[1, 4, 9]` typed as integers and `[1.0, 4.0, 9.0]` typed as
+        /// floats. So every case below is asserted twice — once against the scalar
+        /// oracle, and once against the Float64 column carrying the same numbers —
+        /// and both by `to_bits()`, since `-0.0 == 0.0` would hide a sign error.
+        #[test]
+        fn int64_input_takes_the_domain_fused_arm_and_matches_float64_4kig1() {
+            type Op = (&'static str, fn(&Column) -> Result<Column, ColumnError>, fn(f64) -> f64);
+            // One op per domain shape: total, non-negative, and finite-only.
+            let ops: [Op; 5] = [
+                ("cbrt", Column::cbrt, f64::cbrt),
+                ("atan", Column::atan, f64::atan),
+                ("sqrt", Column::sqrt, f64::sqrt),
+                ("log", Column::log, f64::ln),
+                ("sin", Column::sin, f64::sin),
+            ];
+
+            // All-in-domain for every op above: strictly positive.
+            let positive: Vec<i64> = vec![1, 2, 3, 4, 9, 16, 100, 1_000, 1_000_000, 9_007_199_254_740_992];
+            for (name, op, oracle) in ops {
+                let ints = Column::from_i64_values_owned(positive.clone());
+                let floats = Column::from_f64_values(positive.iter().map(|&x| x as f64).collect());
+
+                let from_ints = op(&ints).expect(name);
+                let from_floats = op(&floats).expect(name);
+
+                assert_eq!(from_ints.len(), positive.len(), "{name}: length drift on Int64");
+                assert!(
+                    from_ints.validity().all(),
+                    "{name}: every positive integer is in domain and must be present"
+                );
+
+                let got = from_ints
+                    .as_f64_slice()
+                    .expect("all-valid Int64 input must yield a contiguous typed f64 slice");
+                let via_floats = from_floats
+                    .as_f64_slice()
+                    .expect("the Float64 arm must yield a contiguous typed slice too");
+
+                for (i, &x) in positive.iter().enumerate() {
+                    let expected = oracle(x as f64);
+                    assert_eq!(
+                        got[i].to_bits(),
+                        expected.to_bits(),
+                        "{name} on Int64 at {i}: input {x}"
+                    );
+                    assert_eq!(
+                        got[i].to_bits(),
+                        via_floats[i].to_bits(),
+                        "{name}: Int64 and Float64 arms DISAGREE at {i} for input {x} — \
+                         the same number typed two ways must give the same answer"
+                    );
+                }
+            }
+
+            // NEGATIVE CASE: a negative integer is out of domain for sqrt and log
+            // but perfectly in domain for cbrt and atan. The Int64 arm must make
+            // that distinction exactly as the Float64 arm does — an arm that
+            // ignored the predicate would mark sqrt(-4) PRESENT as NaN.
+            let mixed: Vec<i64> = vec![4, -4, 9, -9, 0, 1];
+            for (name, op, oracle, negatives_in_domain) in [
+                ("cbrt", Column::cbrt as fn(&Column) -> Result<Column, ColumnError>, f64::cbrt as fn(f64) -> f64, true),
+                ("atan", Column::atan, f64::atan, true),
+                ("sqrt", Column::sqrt, f64::sqrt, false),
+                ("log", Column::log, f64::ln, false),
+            ] {
+                let ints = Column::from_i64_values_owned(mixed.clone());
+                let out = op(&ints).expect(name);
+                assert_eq!(out.len(), mixed.len(), "{name}: length drift");
+                for (i, &x) in mixed.iter().enumerate() {
+                    let expected = oracle(x as f64);
+                    if expected.is_nan() {
+                        assert!(
+                            !out.validity().get(i),
+                            "{name}({x}) is NaN, so slot {i} must be MISSING"
+                        );
+                    } else {
+                        assert!(
+                            out.validity().get(i),
+                            "{name}({x}) = {expected:e} is a real value, so slot {i} \
+                             must be PRESENT"
+                        );
+                    }
+                }
+                if negatives_in_domain {
+                    assert!(
+                        out.validity().all(),
+                        "{name} is total: no integer input can be missing"
+                    );
                 }
             }
         }
