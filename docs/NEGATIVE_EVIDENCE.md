@@ -32071,3 +32071,85 @@ the previous one touches no `.rs` file at all. The binaries therefore differ by
 UNCOMMITTED working-tree content at build time, which on this shared checkout is
 routine and is precisely why the executing-ELF marker is required: the commit sha does
 not identify the thing that ran, and here it demonstrably does not.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — PREPARED EXPERIMENT, with the outcome predicted in advance and the ceiling stated up front: dropping the serial memset is worth ~1.3x to `div`, and `div` WILL STILL LOSE to pandas
+
+No verdict here. This is the design and the prediction, written down before the
+measurement, because the last two times I got this family wrong the thing that caught
+it was a falsifiable claim recorded beforehand — the `sqrt` dtype-scoping bug was
+found only because I had predicted what the override would do, and the `collect`
+regression above was found only because I had predicted a speedup and got 0.283x.
+
+**WHY A SECOND ATTEMPT AT ALL, HAVING JUST BEEN WRONG.** The reverted attempt failed
+for a reason that is now counted and understood: it routed every element through
+`binary_f64_apply(op)`, a `fn(f64,f64)->f64`. The shipped `sweep_propagating!` macro
+expands a closure LITERAL per operator, so the divide is inlined and vectorizable.
+The corrected design keeps the macro and changes only where the buffer comes from:
+
+```rust
+macro_rules! collect_propagating {
+    ($f:expr) => {{
+        let data: Vec<f64> = a.iter().zip(b).map(|(&x, &y)| $f(x, y)).collect();
+        // `fold`, NOT `any`: `any` short-circuits, and a short-circuiting loop does
+        // not vectorize. Branchless OR-reduction over data still hot in cache.
+        let output_nan = data.iter().fold(false, |acc, &r| acc | r.is_nan());
+        (data, output_nan)
+    }};
+}
+let (data, output_nan) = match op {
+    ArithmeticOp::Add => collect_propagating!(|x: f64, y: f64| x + y),
+    ArithmeticOp::Div => collect_propagating!(|x: f64, y: f64| x / y),
+    // ...sub, mul, mod, floordiv, pow
+};
+// `powf(NAN, 0.0) == 1.0`, so pow's inputs must always be scanned; for the six
+// propagating ops a clean output proves clean inputs.
+let input_nan = if matches!(op, ArithmeticOp::Pow) || output_nan {
+    a.iter().fold(false, |acc, &x| acc | x.is_nan())
+        || b.iter().fold(false, |acc, &y| acc | y.is_nan())
+} else {
+    false
+};
+```
+
+**THE ARITHMETIC, WHICH SAYS THIS CANNOT WIN, AND IS THE POINT OF WRITING IT DOWN.**
+`div @1M` is below the `1 << 20` parallel threshold and is therefore ALWAYS serial.
+FP p50 is 808.5us and the certified ratio is 0.473x, so pandas sits at 382us. The
+`alloc_zeroed` of the 8MB output measured 187.3us and 249.8us standalone. Removing all
+of it:
+
+| | value |
+|---|---|
+| FP now | 808.5us |
+| FP with the memset gone | ~560-620us |
+| pandas | 382us |
+| predicted ratio | **~0.68x — still a certified LOSS** |
+
+**So the honest statement is that this lever closes about half the log-gap and leaves
+`div` losing.** I would rather record that before spending a measurement window on a
+contended host than discover it afterwards and describe it as progress. The remaining
+~1.6x is unexplained and I am not naming a mechanism for it today.
+
+**PRE-REGISTERED PREDICTION.** `div @1M` self-speedup **1.25x-1.45x**; below 1.05x the
+memset is not the cost and I retire that hypothesis for this family permanently rather
+than reaching for a third variant. `add @1M` moves similarly. `pow`, `mod` and
+`floordiv` at 1M are on the PARALLEL arm and must not move at all — if they do, the
+change is not doing what I think it does. Bit-identical output on every op and every
+NaN pattern, or it does not land.
+
+**THE TEST THAT MUST LAND WITH IT.** The wrapper currently delegates its serial path
+to `apply_f64_slices_nan_tracked_into`; after this change it would not, so the two can
+drift silently. The patch is therefore gated on a test asserting they agree bit-for-bit
+across all seven ops and five NaN arrangements — none, lhs-only, rhs-only, both, and a
+NaN *produced* by the operation from finite inputs (`0.0/0.0`), which is the case that
+separates `input_nan` from `output_nan` and the one a careless rewrite gets wrong.
+Comparison is on `to_bits`, not `==`, because `NaN != NaN` and `-0.0 == 0.0` would hide
+a sign error of exactly the kind `ceil_fast` was shipped with and caught by probe.
+
+**NOT APPLIED TO THE TREE, DELIBERATELY.** The full patch is parked at
+`/data/projects/.scratch/crimsonpine/4kig1_serial_collect_v2.md`. Ungated edits to this
+shared checkout have been built and committed by peers five times this campaign, and
+an uncompiled edit to `fp-columnar` would break every pane that builds after it. It
+lands when a window opens with `scripts/host_is_quiet_now.py` reporting quiet — at the
+time of writing it reports 264% build CPU against a 1-minute loadavg of 28.80, a rustc
+storm the average has not caught up to yet.
