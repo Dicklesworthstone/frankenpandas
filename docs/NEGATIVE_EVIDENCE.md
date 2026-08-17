@@ -34823,3 +34823,69 @@ samples, not the counter, are what established that the GEMM runs parallel here.
 frame/index rebuild) are unseparated by a whole-process profile; `clear_page_erms` at 5.37% is
 suggestive of allocation but cannot be attributed between the 82MB self-hash read buffer and the
 workload. The next instrument is a timed-region-only profile, not another guess.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-live-oracle-passes-by-skip-l7r1p) — the live-oracle differential suite verifies ~ZERO cases by default; switching on the system-pandas fallback verifies 164 and surfaces 4 real divergences
+
+`l7r1p` records that the differential conformance surface passes BY SKIP whenever the
+legacy oracle tree is absent, which is every checkout. This is the measurement of what
+that costs.
+
+**Counted mechanism.** `cargo test -p fp-conformance --lib conformance_` on a host with
+pandas 2.2.3 installed:
+
+| run | passed | failed | wall |
+|---|---:|---:|---:|
+| default (oracle absent, skipping) | 9 | 0 | **0.01s** |
+| `FP_ALLOW_SYSTEM_PANDAS_FALLBACK=1` | **160** | **4** | 8.15s |
+
+Nine cases "passing" in ten milliseconds is the signature. 164 cases are actually
+verified once an oracle is present, and four of them disagree with pandas.
+
+**THE GATE ITSELF WORKS — mutation-tested before it was trusted.**
+`conformance_datetime` reports `9 passed` in 0.01s; the same command under
+`FP_REQUIRE_LIVE_ORACLE=1` exits **101** with every case panicking. So the fail-closed
+mechanism scope item 2 wants is functional, and what blocks item 2 is item 1 (where the
+oracle comes from), not a missing mechanism.
+
+**The four divergences, filed separately per scope item 4 rather than fixed inline:**
+
+| case | drift |
+|---|---|
+| `datetime_utc_mixed_naive_offset_coercion` | `Utf8("2024-01-15 10:30:00+00:00")` vs `Datetime64` |
+| `datetime_utc_timezone_normalization` | `Utf8("2024-01-15 05:00:00+00:00")` vs `Datetime64` |
+| `io_read_csv_missing_heavy_numeric_column` | `Int64(1)` vs `Float64(1.0)` |
+| `reshape_pivot_table_missing_keys_dropna_default` | index `[r1, r2]` vs pandas' index |
+
+Beads `br-frankenpandas-f2mlr` (the two datetime cases — tz-aware input yields a STRING
+column where pandas yields `Datetime64`, so every downstream `.dt` op sees `Utf8`),
+`br-frankenpandas-b8n0q` (the same int64→float64 promotion rule as `nywa8` and `09ygw`,
+reached from a third producer, and it should be decided once for all three) and
+`br-frankenpandas-v3q4j`.
+
+⚠ **A CORRECTION TO MY OWN FIRST READING, recorded because it would have been a bogus
+report.** My first run went through `rch` and returned `127 passed, 37 failed`. I nearly
+wrote those 37 down as divergences. Every one of them was
+`ModuleNotFoundError: No module named 'pandas'` — **rch workers have no pandas
+installed**. Anyone running this suite remotely gets 37 red cases that look exactly like
+parity failures and are environment failures. Check the failure MODE before counting; a
+red count and a real divergence are not the same object.
+
+⚠ **AN UNFILED DEFECT FOUND ON THE WAY: the modules disagree about what a missing oracle
+does.** `conformance_datetime` SKIPS (its guard returns `Ok(false)` and the test returns
+early). `conformance_tseries`, `conformance_io` and `conformance_io_formats` FAIL
+LOUDLY — which is precisely why they showed up as 37 red on the remote run instead of
+skipping quietly. So "passes by skip" is not uniform, and item 2's "fail closed in CI,
+skip locally" has to reckon with modules that already fail closed unconditionally.
+
+**A/A null control (same invocation):** not applicable — this entry reports pass/fail
+counts, not timings. No ratio is claimed and no measurement was taken.
+
+```
+LOADAVG   14.10 (1-min) at the local run; CPU idle 85.0%, iowait 0.05%, by mpstat
+```
+
+**WHAT REMAINS A DECISION AND WAS NOT TAKEN.** Scope item 1 — vendored tree, submodule,
+fetch script, or system pandas promoted to official oracle — is a policy call, and item
+2 depends on it: setting `FP_REQUIRE_LIVE_ORACLE` in CI today would turn CI permanently
+red, because CI has no oracle either. This run is evidence FOR that decision (system
+pandas is viable and immediately productive) and not a substitute for it.
