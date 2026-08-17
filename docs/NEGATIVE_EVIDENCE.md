@@ -28437,3 +28437,51 @@ Recorded so nobody re-runs `log2` a fourth time expecting a different mechanism 
 be at fault: the mechanism is understood, it is `thread::scope` plus an unquiet
 host, and the fix is the persistent pool that is blocked on either an `unsafe`
 exemption or a rayon dependency — neither of which is an agent's call.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `sqrt` leaves the parallel arm: parallelism is worth 1.038x at 10M and **0.977x at 1M**, and it is what costs the op its A/A null
+
+The shared `par_min` is ONE number for every elementwise map. This family has now
+shown five times that whether a change pays is decided almost entirely by how
+expensive the per-element kernel already is, so a single threshold cannot be right
+for both `sqrt` and `log`. Measured rather than assumed:
+
+**One ELF (`fcc8dee4`, which already contains the yx692 finiteness work), both arms
+selected IN-PROCESS via `FP_ELEMENTWISE_PAR_MIN`, interleaved with the order
+reversed on alternate rounds, load 24.65, CPU MHz 3233, checksums identical
+throughout:**
+
+| workload | serial p50 | parallel p50 | parallel gain | serial cv | parallel cv |
+|---|---|---|---|---|---|
+| `sqrt @10M` | 20308.1us | 19568.1us | 1.038x | 4.55% | 3.84% |
+| `sqrt @1M` | 1339.8us | 1371.2us | **0.977x — parallel LOSES** | 8.30% | 13.79% |
+| `log @10M` | 50824.8us | 19807.3us | **2.566x** | 1.85% | 4.87% |
+
+**`log` needs the threads by a factor of 2.6. `sqrt` gains 3.8% at 10M and LOSES
+2.3% at 1M — neither outside the run-to-run spread.** And the parallel arm is
+noisier at both sizes it wins nothing at (13.79% vs 8.30% cv at 1M).
+
+**THE PARALLELISM WAS NOT FREE, IT WAS COSTING THE OP ITS CERTIFICATION.** The
+per-call `thread::scope` is what makes FrankenPandas' A/A null unstable.
+`sqrt_int64 @10M` has failed that null twice (1.020485, then 0.975023), `sqrt @1M`
+failed it earlier at 0.913921, and **no `sqrt` row in this campaign has ever
+certified**. Meanwhile every op this bead moved OFF `thread::scope` — `floor`,
+`ceil`, `trunc`, `round` — passes its null routinely. So `sqrt` was trading the
+clause it needs to be believed for a gain inside its own noise.
+
+`sqrt` now pins `par_min_override = usize::MAX`; the other sixteen ops pass `None`
+and keep the shared policy, unchanged. The threshold is per-op and STATIC — it is
+not read from load or any other host state, because a runtime-adaptive cap would
+make every A/B in this campaign non-reproducible, which is why
+br-frankenpandas-mti15 rejected exactly that for the dot kernel.
+
+**Prediction this makes, recorded BEFORE the run so it cannot be fitted afterwards:
+`sqrt` and `sqrt_int64` should now pass their A/A nulls, and their vs-pandas ratios
+should not measurably drop.** If the nulls still fail, `thread::scope` was not the
+cause and this entry is wrong — which is the whole point of writing it down first.
+
+Gates: `cargo test -p fp-columnar` **640 passed / 0 failed / 0 filtered out**,
+`clippy -D warnings` clean, `fmt --check` clean. The new test
+`sqrt_stays_bit_identical_above_the_old_parallel_threshold_4kig1` exercises the
+CHANGED path specifically — 300_000 elements, above the old 200_000 default, so the
+column used to run parallel — and asserts bit-identity against the scalar oracle
+plus that one negative among 300_000 still comes back missing at exactly its index.
