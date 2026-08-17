@@ -33432,3 +33432,80 @@ OBSERVED MHz host mean 2686.8 before → 3475.0 after; harness recorded arms_saw
 LIKE-FOR-LIKE both rows ok=true, no reasons (par=64, no thread cap)
 ARTIFACTS    artifacts/bench/4kig1_div_{AVX2,SSE2}_quiet_2026-08-17.json
 ```
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `add @1M` width gain is 1.27x against `div`'s 1.61x, NEITHER add row certifies, and I must RETRACT the "bit-identity confirmed in-band" claim I made two entries ago
+
+Three results, one of them against me.
+
+**1. THE PREDICTION WAS NEARLY RIGHT AND I AM SCORING IT AS A MISS.** Before running I
+registered: `div` gained 1.613x because `vdivpd` is throughput-bound, while `add` is cheap per
+element and should be memory-bandwidth-bound, where width buys nothing — **predicted 1.0x-1.25x,
+and >=1.5x would refute the "add is bandwidth-bound" claim in this ledger.**
+
+```
+  add @1M   default 481.37us -> +avx2 378.83us   = 1.2707x
+  div @1M   default 697.16us -> +avx2 434.20us   = 1.6056x
+```
+
+**1.2707x is outside my registered ceiling of 1.25x, by 0.02.** The qualitative claim holds —
+add benefits materially less than div, exactly as the compute-vs-bandwidth argument says — but
+the numeric bound was too tight and I am recording that as a miss rather than rounding it into a
+hit. The bandwidth characterization survives; my calibration of it does not.
+
+**2. NEITHER add ROW CERTIFIES, IN A WINDOW WHERE BOTH div ROWS DID.** Same host, same ELFs,
+same harness, ~15 minutes apart:
+
+| row | ratio | FP null | pandas null | cv | verdict |
+|---|---:|---:|---:|---:|---|
+| `add` +avx2 | 0.809x | 0.93611 | 1.02420 | 16.43% | NULL_UNDECIDABLE |
+| `add` default | 0.748x | 1.00608 | 1.09117 | 18.31% | NULL_UNDECIDABLE |
+| `div` +avx2 | 0.721x | 0.98078 | 1.00128 | 8.76% | **certified** |
+| `div` default | 0.447x | 1.01376 | 0.99932 | 6.77% | **certified** |
+
+**That is the useful methodological datum: dispersion is a property of the WORKLOAD, not only of
+the host.** The window was quiet and draining by the same instrument for both, and pandas' own
+arm moved 0.9% across the div pair but **8.4%** across the add pair (327.70 vs 355.32us). `add`
+is the shorter op (379-481us against div's 434-697us) and this ledger has already measured
+between-slot dispersion falling ~4x from <300us to >=20ms. A quiet host does not make every
+workload certifiable, and "the window was good" is not a defence when the null fails.
+
+**3. RETRACTION — THE HARNESS `checksum` FIELD PROVES NOTHING, AND I USED IT AS PROOF.** Two
+entries ago I wrote of the div pair: *"BIT-IDENTITY CONFIRMED IN-BAND THIS TIME. Both rows report
+the same harness checksum `a25ae7e31fa6dd35...`... independent corroboration."* It is not
+corroboration of anything:
+
+```
+  div  +avx2     a25ae7e31fa6dd355740ac584b51038d0aecf09a70018b87477dd8d37864218f
+  div  default   a25ae7e31fa6dd355740ac584b51038d0aecf09a70018b87477dd8d37864218f
+  add  +avx2     a25ae7e31fa6dd355740ac584b51038d0aecf09a70018b87477dd8d37864218f
+  add  default   a25ae7e31fa6dd355740ac584b51038d0aecf09a70018b87477dd8d37864218f
+```
+
+**Four rows. TWO DIFFERENT WORKLOADS. Two different binaries. One identical value.** A field that
+cannot distinguish `add` from `div` cannot possibly certify that two builds computed the same
+answer. The match I cited was structural, not semantic.
+
+**WHAT STILL STANDS:** the ENGINE-level check. Running each ELF directly on `div @1M` and
+comparing fp-bench's own `checksum` gave `e700f53534db5c6d` from both, and that field IS derived
+from the computed column. Bit-identity for the div kernel remains established — by that check
+alone, not by the harness field.
+
+**AND THE PART THAT STINGS:** I had ALREADY diagnosed this field. In the entry recording the
+failed div window I wrote that `frankenpandas.checksum` "is not a value hash: the harness builds
+it as `sha256("|".join(per-slot checksums))`... the harness's own source calls it a liveness
+token." I diagnosed it correctly, and then two entries later cited it as evidence because it
+happened to agree. **Knowing a field is untrustworthy does not protect you from using it the
+moment it tells you what you want to hear.** That is the fourth proxy failure in this bead today
+and the only one where I had already written down the correct answer beforehand.
+
+```
+LOADAVG      12.79 / 30.58 / 28.50 at launch (quiet AND draining), 12.98 / 28.63 / 27.92 at end;
+             0% build CPU throughout, external storm had passed, no build in this window
+OBSERVED MHz host mean 3016.1 before -> 3454.5 after; arms_saw_same_clock=true, arm_clock_ratio
+             1.0053 (+avx2) and 1.0017 (default)
+LIKE-FOR-LIKE both rows ok=true (par=64, no thread cap)
+STALENESS    both ELFs predate the cached_available_parallelism migration, as recorded for the
+             div pair; the width DELTA is unaffected, the vs-pandas absolutes are dated
+ARTIFACTS    artifacts/bench/4kig1_add_{AVX2,SSE2}_quiet_2026-08-17.json
+```
