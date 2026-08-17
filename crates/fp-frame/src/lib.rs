@@ -193692,7 +193692,8 @@ mod sgb_rolling_group_parallel_u5cg4 {
         // parallel arm hands each worker a different closure instantiation, and
         // min/max (monotonic deque) and std/var (borrow-per-window) carry more
         // per-group state than sum/mean do.
-        let aggs: [(&str, fn(&super::SeriesGroupByRolling<'_, '_>) -> Series); 6] = [
+        type RollingAgg = fn(&super::SeriesGroupByRolling<'_, '_>) -> Series;
+        let aggs: [(&str, RollingAgg); 6] = [
             ("sum", |r| r.sum().expect("sum")),
             ("mean", |r| r.mean().expect("mean")),
             ("min", |r| r.min().expect("min")),
