@@ -159913,6 +159913,79 @@ mod tests {
         assert!(result.values()[2].is_missing());
     }
 
+    /// br-frankenpandas-8yaww. The format lock from br-frankenpandas-hzayc is
+    /// supposed to make `to_datetime` infer ONE format from the first non-null
+    /// element and coerce everything that does not match it. 8yaww was filed
+    /// later against a payload the earlier bead did not cover, so this pins
+    /// whether the lock actually covers it rather than assuming a closed bead
+    /// generalised.
+    ///
+    /// MEASURED, live pandas 2.2.3, this exact payload:
+    ///   to_datetime(s, errors='coerce')
+    ///     -> ['2024-01-15 10:30:00.123456789', NaT,
+    ///         '2024-01-15 10:30:00.500000', NaT]
+    /// `'2024-01-16'` is a perfectly valid date that becomes NaT ONLY because of
+    /// the company it keeps — the lock guessed from element 0 is a datetime with
+    /// a fractional part, and a date-only string cannot match it.
+    #[test]
+    fn to_datetime_locks_format_from_first_element_8yaww() {
+        let s = Series::from_values(
+            "mixed_shapes",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00.123456789".into()),
+                Scalar::Utf8("2024-01-16".into()),
+                Scalar::Utf8("2024-01-15 10:30:00.500000000".into()),
+                Scalar::Utf8("not a date".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+
+        assert!(
+            !result.values()[0].is_missing(),
+            "the element the format was guessed FROM must parse"
+        );
+        assert!(
+            result.values()[1].is_missing(),
+            "'2024-01-16' is a valid date but does not match the datetime format \
+             locked from element 0, so pandas coerces it to NaT"
+        );
+        assert!(
+            !result.values()[2].is_missing(),
+            "'2024-01-15 10:30:00.500000000' shares element 0's shape and must parse"
+        );
+        assert!(
+            result.values()[3].is_missing(),
+            "'not a date' is unparseable under any format"
+        );
+
+        // ORDER DEPENDENCE, which is the proof that ONE format is being inferred
+        // rather than each value parsed on its own. Putting the date-only value
+        // FIRST flips which values survive — measured on live pandas:
+        //   to_datetime(['2024-01-16', '2024-01-15 10:30:00.123456789'])
+        //     -> ['2024-01-16 00:00:00', NaT]
+        let flipped = Series::from_values(
+            "flipped",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-16".into()),
+                Scalar::Utf8("2024-01-15 10:30:00.123456789".into()),
+            ],
+        )
+        .unwrap();
+        let flipped_result = super::to_datetime(&flipped).unwrap();
+        assert!(
+            !flipped_result.values()[0].is_missing(),
+            "the date-only value is now element 0 and defines the format"
+        );
+        assert!(
+            flipped_result.values()[1].is_missing(),
+            "with a date-only format locked, a datetime string must coerce to NaT \
+             — if this passes as a value, the lock is being re-inferred per row"
+        );
+    }
+
     #[test]
     fn to_datetime_normalizes_timezone_aware_strings() {
         let s = Series::from_values(
