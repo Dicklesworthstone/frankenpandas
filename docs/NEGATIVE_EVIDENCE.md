@@ -32460,3 +32460,94 @@ later resolved as pure host noise. Host mean clock at the time of writing: **290
 across 64 cores**, well under the 3707.7 MHz the quietest certified window of this
 campaign saw — on a `powersave` governor that is itself an error term this bead has
 already had to instrument.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — REJECTED, AND THE HYPOTHESIS IS RETIRED BY PRE-REGISTRATION: avoiding the serial memset makes `div` and `add` 7-9% SLOWER, the opposite of a prediction I wrote down four hours earlier
+
+The prediction was registered before the build, in this ledger, with a falsification
+rule attached: **"`div @1M` self-speedup 1.25x-1.45x; below 1.05x the memset is not the
+cost and I retire that hypothesis for this family permanently rather than reaching for
+a third variant."** The measurement came back at **0.919x**. So it is retired, and this
+entry exists to make that binding rather than optional.
+
+| workload | baseline `31c630ba…` | candidate `6b2147a7…` | self-speedup | predicted |
+|---|---:|---:|---:|---|
+| `div @1M` | 722.02us | 785.76us | **0.9189x** | 1.25x-1.45x |
+| `add @1M` | 617.69us | 661.39us | **0.9339x** | 1.25x-1.45x |
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=6b2147a7b6ed2acb03bc1fac2bf570bf00f16d985c8fbc3ad5be0f12c4f46b0e (82305392 bytes) /data/projects/.scratch/crimsonpine/fp-bench-CANDIDATE-collect
+
+**A/A null control (same invocation):** on the `div` candidate row FrankenPandas median
+ratio 0.98421 and pandas median ratio 0.98956, both inside the 2% limit, and that row
+carried all three clauses. The other three rows did NOT: `div` baseline FP null 1.03969,
+`add` baseline 1.04565, `add` candidate 1.01077 with pandas 0.95499 — all
+NULL_UNDECIDABLE. **Only one of the four rows is individually certifiable and I am not
+pretending otherwise.**
+
+**WHAT MAKES THE COMPARISON STAND UP ANYWAY, and it is not the nulls.** The two `div`
+invocations ran eleven seconds apart and **pandas measured 340.58us and 341.32us — 0.2%
+apart**. An incumbent that reproduces to two parts in a thousand across two processes is
+a far better control on ambient conditions than either A/A null, and against that
+control FrankenPandas' own arm moved 722.02 → 785.76us. The `add` pair is weaker on this
+test (pandas 445.82 vs 425.00us, 4.7% apart) and its ratio should carry less weight —
+but it moves the same direction by a similar amount, across four invocations and two
+workloads, in a window with **zero builds running** on the whole host.
+
+**Median-CI decision:** the `div` candidate row's effect median is 0.440x with 95% CI
+[0.43008, 0.45233], excluding unity and clearing its required threshold — i.e. the row
+certifies confidently that FrankenPandas is **2.3x SLOWER than pandas at `div @1M`**,
+which is the honest headline and was already true before this experiment.
+
+**CV role:** provenance only, no vote. Recorded: 8.57% and 10.04% on the `div` pair,
+25.48% and 22.35% on `add` — `add @1M` sits in the high-dispersion band this bead has
+measured before, which is the second reason its rows did not certify.
+
+**THE MECHANISM I GOT WRONG, stated plainly.** The shipped serial loop FUSES the witness
+into the write: one traversal computes the value, ORs `r.is_nan()`, and stores. My
+version could not, because `collect()` produces the Vec and the witness has to come from
+somewhere — so it makes a **second full pass** over the 8MB output with `fold`. I traded
+a ~190-250us `alloc_zeroed` for an extra 8MB read, and in the design note I dismissed
+that pass as "nearly free if cache-hot". **That was the error.** The working set is 8MB
+of output plus 16MB of inputs; re-reading the output after writing it is not free, and it
+cost more than the memset saved.
+
+**THIS IS THE SECOND FAILURE OF THE SAME IDEA BY A DIFFERENT MECHANISM** — first a
+million indirect calls through `binary_f64_apply`, now an extra traversal to recover the
+witness the fused loop got for free. **Both times the arithmetic looked sound and both
+times the thing I was not measuring was the thing that decided.** The pattern is not
+"collect is slow"; it is that this loop's per-element work is already minimal and every
+restructuring pays a traversal or a call it did not previously pay. That is what
+"retired" means here: not that a buffer-avoiding form is impossible, but that **no
+further variant of it gets a measurement window on my say-so without new evidence about
+where the time actually goes** — which needs a profile, not another rewrite.
+
+**NOT LANDED. Nothing to revert.** The candidate exists only in an isolated worktree at
+`/data/projects/.scratch/crimsonpine/wt-4kig1`; the shared tree never saw it. This is the
+whole point of measuring before committing, and it is the second time today that order
+turned a wrong idea into a cheap experiment instead of a shipped regression.
+
+**KEPT, because it is worth keeping:** the drift test
+`wrapper_and_into_agree_bit_for_bit_across_ops_and_nan_patterns_4kig1` (649 passed / 0
+failed / 0 filtered) is written and gated in that worktree. It guards a contract that
+only matters if the wrapper ever stops delegating to `_into` — which it now will not — so
+it is recorded here rather than landed, and the parked patch at
+`/data/projects/.scratch/crimsonpine/4kig1_serial_collect_v2.md` carries the measured
+outcome beside the prediction it failed.
+
+**`div @1M` REMAINS 2.3x SLOWER THAN PANDAS AND THE REASON IS STILL UNKNOWN.** The memset
+is 23-31% of our runtime and removing it does not help. Whatever the remaining gap is, it
+is not the buffer, and the next person should profile before hypothesising — I have now
+spent two experiments proving that reasoning from the source is not enough here.
+
+```
+LOADAVG      10.94 / 19.10 / 18.99 at launch, 14.43 / 16.25 / 17.85 at the end;
+             host_is_quiet_now.py reported 0% build CPU at launch — zero builds on the
+             host for the whole window, the cleanest conditions of the session
+OBSERVED MHz host mean 3017.1 (powersave governor, boost on); the harness recorded
+             arms_saw_same_clock=true with arm_clock_ratio 1.0000 (div baseline) and
+             1.0057 (div candidate) — per-arm MHz fields came back null in these rows
+LIKE-FOR-LIKE all four rows ok=true, no reasons — including the thread-cap check added
+             to `like_for_like` earlier today, which correctly did NOT fire at par=64
+ARTIFACTS    artifacts/bench/4kig1_{div,add}_{BASELINE,CANDIDATE}_2026-08-17.json
+```
