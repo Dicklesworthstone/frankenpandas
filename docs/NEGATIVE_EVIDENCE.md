@@ -32939,3 +32939,50 @@ certified rows, including the `+sse4.1` rounding family (`floor` 1.544x, `ceil` 
 libm family (`hypot` 4.979x, `atan2` 4.864x, `pow @10M` 4.278x), `df_transpose_materialize
 @100k` at 389.358x, and `str_sort @1M` at 10.5x. They are each a JSON assembly away, and none
 of them is defended today.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — ALL 13 identities are now locked: 51 workloads, one command, and the "re-baseline after a harness edit" rule is now executable instead of aspirational
+
+The entry above named 12 identities and ~57 rows as still undefended and said each was "a
+JSON assembly away". Naming remaining work and leaving it is how the 28 unbanked certified
+rows happened in the first place, so it is done: `scripts/assemble_standing_locks.py`,
+**13 baselines, 51 locked workloads**, covering every comparability identity in the repo
+that carries a certified win.
+
+**IT IMPORTS `perf_ratchet.comparability_identity` RATHER THAN REIMPLEMENTING IT.** A
+private copy of the identity rule is precisely the shadow-harness class this ledger already
+records — `fp-conformance` keeping its own copy of an FP op, so a green packet certified the
+harness instead of the engine. The gate's definition is the definition.
+
+**Both selection rules are conservative and are stated in the file so they can be argued
+with:** slowest certified p50 per key (not fastest — replicate agreement here is 0.8-2.7%
+against a 3% budget, and a lock that cries wolf gets switched off), and thread-capped rows
+excluded (a capped row would lock in a baseline the engine beats by 3.74x for free).
+
+**VERIFIED ON GENERATED OUTPUT, not just on the two I assembled by hand:**
+
+```
++5% on `hypot` in standing_thinkstation1_669547f601ff  -> BLOCK
+      hypot (1M): p50 regressed +5.0% slower (budget: +3.0%)
+standing_thinkstation1_3002dd69c8a2 vs itself          -> ALLOW
+```
+
+**THAT SECOND LINE IS THE ONE THAT MATTERS: `3002dd69c8a2` IS THE CURRENT HARNESS.** One
+workload (`cumsum @10k`, 1.172x) was measured after this morning's `like_for_like` edit, so
+it is the only standing row in the repo that is defended *right now* rather than defended
+as of some earlier instrument. Every other baseline becomes live again the moment its rows
+are re-measured — which is now `python3 scripts/assemble_standing_locks.py --apply` plus a
+measurement window, not a research project.
+
+**DUPLICATES KEPT, NOT DELETED.** The generator's systematic names supersede the two
+baselines I hand-assembled earlier today (`standing_math_binary_10m.json` and
+`standing_thinkstation1_6d884360.json`), whose content it reproduces. Standing orders say
+delete nothing, so they stay; the generated files are canonical and the hand-made pair are
+now redundant copies. Recording that here so the next reader does not have to work out why
+one identity has two files.
+
+**WHAT THIS DOES NOT DO, stated plainly:** it does not measure anything, it cannot make a
+regression pass, and it does not run in CI. `perf_ratchet.py` is still the only thing that
+can BLOCK, and nothing currently invokes it on a schedule. A lock that no one runs is a
+record, not a defence — wiring it into a gate is a decision with a blast radius across every
+pane, so it is proposed here rather than imposed.
