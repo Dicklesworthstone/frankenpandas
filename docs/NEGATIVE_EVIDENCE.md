@@ -33140,3 +33140,48 @@ CONDITIONS   BUILD HOLD in force; no build, no benchmark, no measurement window 
 ARTIFACT     the disassembly is regenerable in one command from the preserved ELF; not banked
              (2.8M lines) on a disk that has fallen 88G to 65G under an external cargo loop.
 ```
+
+
+### 2026-08-17 CrimsonPine (harness review, build freeze) — I WENT LOOKING FOR THE VACUOUS-PASS HOLE IN THE THREE-CLAUSE GATE AND IT IS NOT THERE. The reason it is not there is a design principle worth stating
+
+Under a build freeze (disk 19G, 100% used) with source reading and harness review the only
+permitted work, I audited `corrected_null_gate` for the exact defect class I had just fixed in
+`fixture_differ.py` that morning — a comparison that returns PASS when it compared nothing.
+**The gate does not have it, and reporting a clean audit is worth as much as reporting a dirty
+one.** I would rather record that I looked and found nothing than manufacture a finding.
+
+**WHAT I CHECKED, AND WHY EACH ONE COULD HAVE BEEN A HOLE:**
+
+| candidate hole | verdict |
+|---|---|
+| `effect_exceeds_null_margin` is `claim >= required`, so `required == 0` passes ANY claim | requires a null CI of exactly `[1.0, 1.0]`, i.e. every null ratio exactly 1.0 — unreachable with float timings |
+| empty null sample would make the CI degenerate | `bootstrap_median_ci` **raises** `ValueError("cannot bootstrap an empty null-control sample")` — fails CLOSED, explicitly guarded |
+| a row could be gated without having measured anything | `is_valid` blocks it, and both arms must pass before the gate runs |
+| `ratio > 1.0` while the CI sits entirely below unity would certify a contradiction | unreachable: `ratio` is `median(round_ratios)` and the CI is the bootstrap CI **of that same statistic**, so the median is inside its own interval by construction |
+
+**THE PRINCIPLE, which is the transferable part.** `is_valid` does not ask "did anything fail?".
+It demands **positive evidence that work happened** — non-empty `times_us`, non-empty
+`null_ratios`, `len(null_arm_a) == len(null_arm_b) == len(null_ratios)`, a checksum, an ELF
+sha256, a thread count, and a detected-ISA list, all truthy, before a row may be gated at all.
+
+**That is exactly why the harness fails closed and the differ failed open.** `compare_expected`
+asked "is there a mismatch?" and answered no when there was nothing to compare — 87 error-
+expecting fixtures and 16 structural-block fixtures reported as MATCHING. `is_valid` asks "is
+there a measurement?" and refuses when there is not. **Same codebase, same authors, opposite
+outcomes, and the difference is entirely which question the check asks.**
+
+Stated so the next tool inherits it: **a check that looks for the ABSENCE OF A PROBLEM passes
+vacuously on absent input; a check that requires the PRESENCE OF EVIDENCE cannot.** This
+campaign's ledger has nine sightings of the first shape and this gate is a working instance of
+the second.
+
+**SCOPE.** This is a read of `corrected_null_gate`, `bootstrap_median_ci`, `null_log_half_width`
+and `TimingResult::is_valid` only. It says nothing about whether the 2% null limit or the 2x
+margin are the RIGHT thresholds — this ledger already has a separate finding that the 2% limit
+sits near the median null deviation — and nothing about the balanced-square design itself. It
+says the gate cannot be satisfied by an absence.
+
+```
+CONDITIONS  BUILD FREEZE, disk 19G / 100% used. No cargo, no bench, no target writes, no files
+            created under any target dir. uptime 7.18 / 11.56 / 16.79. Reading only.
+```
