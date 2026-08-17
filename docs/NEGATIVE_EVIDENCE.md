@@ -31688,3 +31688,53 @@ previous entry and re-measuring them is the next step, not a conclusion of this 
 
 Gates: `cargo test -p fp-columnar` **648 passed / 0 failed / 0 filtered out**,
 `clippy -D warnings` clean, `fmt --check` clean.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the output-only witness fold is a WASH: 1.000x on `div`, 1.007x on `add`. My hypothesis was wrong and `div`'s 1.8x gap is still unexplained
+
+`7c91094e9` removed the per-element `input_nan` fold from the six propagating ops on
+the hypothesis that two compares and an OR per element were what put `div` at
+12 GB/s against pandas' 17.7. **Measured, and it buys nothing.**
+
+Paired ABBA, two ELFs (`1dde689f` before, `9eeeb1c8` after), interleaved with order
+reversed on alternate rounds, load 21.97, whole-binary checksums IDENTICAL, in-binary
+A/A nulls 0.9986 and 1.0057:
+
+| op | before p50 | after p50 | ratio | best-vs-best |
+|---|---|---|---|---|
+| `div @1M` | 749.3us | 749.3us | **1.000x** | 1.021x |
+| `add @1M` | 411.3us | 408.3us | **1.007x** | 1.114x |
+
+**Both sit inside the ±16% envelope I measured for two-ELF comparisons in this same
+ledger, so neither is distinguishable from nothing.** The two extra compares were
+free — they read operands already in registers on a loop whose cost is elsewhere.
+
+**The change stays**, because it is strictly less work, bit-identical, and covered by
+a test that pins the per-op propagation claim including `pow`'s exception. But it is
+recorded as a wash, not as a win, and the entry that proposed it should be read with
+this one attached.
+
+**WHAT IS NOW RULED OUT FOR `div`'s 1.8x DEFICIT**, each by measurement or by
+reading rather than by assumption:
+
+  * **The `1 << 20` threshold** — crossing it by size moved `div` only 0.473x →
+    0.640x, against `pow`'s 0.928x → 3.965x on the identical crossing.
+  * **The input witness fold** — measured above at 1.000x.
+  * **The input accessor** — `float64_binary_data` returns `Cow::Borrowed` whenever
+    the column has cached f64 data, so the common path copies nothing.
+  * **Four-pass memory traffic** — already fused into one sweep by
+    br-frankenpandas-9houf, and dropping the input scans outright is a PARITY break
+    already rejected under br-frankenpandas-d3mfh. My version derives rather than
+    drops, which is why its triple is identical.
+
+**THE REMAINING CANDIDATE, named with its precedent and NOT implemented here.**
+`apply_f64_slices_nan_tracked` opens with `let mut data = vec![0.0_f64; a.len()]` —
+an 8 MB `alloc_zeroed` at 1M that every element then overwrites. **This bead has
+already measured that exact cost once**: the parallel `floor` arm was rejected
+because its `vec![0.0; n]` was worth ~8 ms at 10M, and the unary witness-free arm's
+**2.4x** came precisely from building the output with `collect` instead. The binary
+path never got that treatment.
+
+I am not implementing it in the same breath as being wrong about the last one. It is
+recorded with the measurement that motivates it so the next attempt starts from
+evidence, and whoever takes it should measure the memset directly before rewriting
+the buffer strategy.
