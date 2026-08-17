@@ -161,6 +161,30 @@ def adaptive_dispersion_for_p50(p50_us: float) -> float:
     return ADAPTIVE_DISPERSION_BY_P50_US[-1][1]
 
 
+def rounds_after_first_round(
+    incumbent_slot_p50s: list[float],
+    current_rounds: int,
+    *,
+    enabled: bool = True,
+) -> int:
+    """Total rounds to run, decided from the FIRST round's incumbent slots.
+
+    Called once, at the end of round 0, so no separate pilot slot is paid and the
+    decision uses real measured slots rather than a guess. The INCUMBENT arm is the
+    yardstick because `ADAPTIVE_DISPERSION_BY_P50_US` is bucketed by incumbent p50.
+
+    Returns `current_rounds` unchanged when disabled or when round 0 produced
+    nothing usable, so the caller's loop bound only ever grows.
+    """
+    if not enabled or not incumbent_slot_p50s:
+        return current_rounds
+    usable = [p for p in incumbent_slot_p50s if isinstance(p, (int, float)) and p > 0]
+    if not usable:
+        return current_rounds
+    observed = sorted(usable)[len(usable) // 2]
+    return max(current_rounds, adaptive_balanced_square_rounds(observed))
+
+
 def adaptive_balanced_square_rounds(
     observed_p50_us: float,
     *,
@@ -3762,6 +3786,7 @@ def run_balanced_square_cell(
     fingerprint: dict[str, Any],
     fp_binary: Path | None,
     rounds: int,
+    adaptive_rounds: bool = False,
 ) -> tuple[TimingResult, TimingResult, dict[str, Any]]:
     """Interleave incumbent and subject according to the sanctioned ABBA square."""
     pandas_slots: list[TimingResult] = []
@@ -3771,7 +3796,11 @@ def run_balanced_square_cell(
     # br-frankenpandas-633fb: sampled BETWEEN slots, never inside a timed region.
     host_state_samples: list[tuple[str, dict[str, Any]]] = []
     busy_by_arm: dict[str, dict[int, int]] = {"frankenpandas": {}, "pandas": {}}
-    for round_index in range(rounds):
+    # `while`, not `range(rounds)`: with --adaptive-rounds the bound is recomputed
+    # once at the end of round 0 from the incumbent slots just measured, and
+    # `range` would have frozen it. The bound only ever GROWS.
+    round_index = 0
+    while round_index < rounds:
         pandas_round: list[TimingResult] = []
         fp_round: list[TimingResult] = []
         for slot_index, arm in enumerate(BALANCED_SQUARE):
@@ -3853,6 +3882,13 @@ def run_balanced_square_cell(
                 "ratio_pandas_over_frankenpandas": round_ratios[-1],
             }
         )
+        if round_index == 0:
+            rounds = rounds_after_first_round(
+                [result.p50_us for result in pandas_round],
+                rounds,
+                enabled=adaptive_rounds,
+            )
+        round_index += 1
     fp_aggregate = _balanced_square_aggregate(fp_slots, engine="frankenpandas")
     pandas_aggregate = _balanced_square_aggregate(pandas_slots, engine="pandas")
     observed_threads = {
@@ -4745,6 +4781,7 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                  exclusivity_gate: HostWideExclusivityGate | None,
                  measurement_mode: str,
                  balanced_square_rounds: int,
+                 adaptive_rounds: bool = False,
                  fp_binary: Path | None = None,
                  fp_reference_binary: Path | None = None,
                  workload_filter: set[str] | None = None,
@@ -4783,6 +4820,7 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                         fingerprint,
                         fp_binary,
                         balanced_square_rounds,
+                        adaptive_rounds,
                     )
                     comparison = compute_comparison(
                         fp_result,
@@ -5102,6 +5140,18 @@ def main():
             "Comparison design: balanced-square interleaves pandas and FP on "
             "a shared host; host-wide-exclusive retains the legacy all-CPU "
             "quiescence gate for a booked machine"
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-rounds",
+        action="store_true",
+        help=(
+            "Recompute the balanced-square round count once, at the end of round 0, "
+            "from the incumbent slot p50s just measured, so a noisy workload gets "
+            "the same null-median precision as a quiet one. Default OFF: this "
+            "changes how many samples a row is built from, so no previously banked "
+            "row's methodology moves unless it is asked for. The round count can "
+            "only GROW (br-frankenpandas-flicz)."
         ),
     )
     parser.add_argument(
@@ -5463,6 +5513,7 @@ def main():
                     exclusivity_gate,
                     args.measurement_mode,
                     args.balanced_square_rounds,
+                    args.adaptive_rounds,
                     args.frankenpandas_binary,
                     args.frankenpandas_reference_binary,
                     workload_filter,

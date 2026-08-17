@@ -95,3 +95,63 @@ def test_the_bucket_lookup_covers_every_duration():
     for p50 in (0.001, 1.0, 299.999, 300.0, 5_000.0, 1e12):
         d = m.adaptive_dispersion_for_p50(p50)
         assert 0.0 < d < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Wiring: rounds_after_first_round is what run_balanced_square_cell calls at the
+# end of round 0. It decides from slots ALREADY measured, so no pilot slot is paid.
+# ---------------------------------------------------------------------------
+
+
+def test_disabled_is_a_no_op_so_the_default_path_is_untouched():
+    """--adaptive-rounds defaults OFF; every banked row's methodology must stand."""
+    m = _load()
+    for p50s in ([177.7] * 4, [10_473.0] * 4, [], [0.0], [float("nan")]):
+        assert m.rounds_after_first_round(p50s, 9, enabled=False) == 9
+
+
+def test_a_useless_first_round_leaves_the_bound_alone():
+    """Round 0 giving nothing usable means 'I do not know', not 'run forever'."""
+    m = _load()
+    for p50s in ([], [0.0, -1.0], [float("nan"), float("inf")], [None]):  # type: ignore[list-item]
+        assert m.rounds_after_first_round(p50s, 9, enabled=True) == 9
+
+
+def test_the_bound_can_only_grow():
+    """THE LOOP-SAFETY INVARIANT.
+
+    run_balanced_square_cell now runs `while round_index < rounds` and recomputes
+    `rounds` mid-loop. If this could ever RETURN LESS than the current bound, a run
+    already past that point would exit early and silently produce a row built from
+    fewer samples than requested — a shorter measurement wearing the requested
+    round count. It must never shrink.
+    """
+    m = _load()
+    for current in (9, 15, 32, 120, 500):
+        for p50s in ([177.7] * 4, [598.0] * 4, [10_473.0] * 4, [30_268.0] * 4):
+            assert m.rounds_after_first_round(p50s, current, enabled=True) >= current
+
+
+def test_a_fast_incumbent_grows_the_bound_and_a_quiet_one_does_not():
+    m = _load()
+    fast = m.rounds_after_first_round([177.7] * 4, m.BALANCED_SQUARE_ROUNDS, enabled=True)
+    quiet = m.rounds_after_first_round([10_473.0] * 4, m.BALANCED_SQUARE_ROUNDS, enabled=True)
+    assert fast > m.BALANCED_SQUARE_ROUNDS
+    assert quiet == m.BALANCED_SQUARE_ROUNDS
+    assert fast == m.adaptive_balanced_square_rounds(177.7)
+
+
+def test_it_uses_the_median_slot_not_the_first_or_the_mean():
+    """One slow outlier slot in round 0 must not drag the decision.
+
+    Three sub-300us slots and one 40ms straggler: the median is still sub-300us, so
+    the op is still classified noisy. Taking the mean (10.6ms) or slots[0] would
+    misclassify it, and a straggler in round 0 is exactly what a loaded host
+    produces.
+    """
+    m = _load()
+    with_straggler = m.rounds_after_first_round(
+        [180.0, 185.0, 40_000.0, 179.0], m.BALANCED_SQUARE_ROUNDS, enabled=True
+    )
+    clean = m.rounds_after_first_round([180.0] * 4, m.BALANCED_SQUARE_ROUNDS, enabled=True)
+    assert with_straggler == clean
