@@ -30686,3 +30686,65 @@ pinned fixtures red on my own authority, and this ledger already records what
 happens when I decide a rule from one measurement and generalise it. **The measured
 evidence is banked so whoever owns the decision has it; the decision is not mine to
 take.**
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `pow @10M` CERTIFIES at **4.278x** and `round2 @10M` at **2.417x on its FIFTH attempt**; the two procedure changes are what closed them
+
+Both on ELF `4491fd06`, rebuilt because a peer's `7ddda1d93` (floor/ceil/trunc via
+the std intrinsic under `+sse4.1`) touched this file — a name-only diff caught it,
+and measuring the older binary would have described code that no longer exists.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=4491fd06d7619c503a8f2ebf9a1879aed1ea01a52e46051208627274be707a8f (82163776 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-sse`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T090237.144472Z-pid2707733 , giving
+measured_ratio=4.278x for the `pow` row.
+
+| row | FP p50 | pandas p50 | ratio | 95% CI | best-vs-best | FP cv |
+|---|---|---|---|---|---|---|
+| `pow @10M` | **25629.68us** | 109529.20us | **4.278x** | [4.17867, 4.33243] | 4.3079 | **1.72%** |
+| `round2 @10M` | **9267.04us** | 21637.89us | **2.417x** | [2.27116, 2.49291] | 2.5631 | 8.11% |
+
+**A/A null control (same invocation):** `pow` FrankenPandas median ratio 1.002647
+and pandas median ratio 1.005580; `round2` FrankenPandas 1.003488 and pandas
+1.000947. All four inside the 2% limit.
+
+**Median-CI decision:** `pow` effect median 4.278x with claimed log effect
+1.45357961 against a required threshold of 0.0420405, cleared by 34x; `round2`
+2.417x with 0.88244252 against 0.26196101, cleared by 3.4x. All three clauses true
+on both.
+
+**CV role:** provenance only, no vote — `pow` FP 1.72% / pandas 1.44%, `round2` FP
+8.11% / pandas 4.74%.
+
+```
+pow     LOADAVG 10.90 → 9.23 (in-run 8.69–14.46)  MHz FP 4299.8 / pandas 4294.8
+round2  LOADAVG  8.67 → 7.75 (in-run 7.64– 8.86)  MHz FP 4294.2 / pandas 4298.0
+```
+
+**`round2` WAS 0-FOR-4 AND THE FIFTH ATTEMPT WAS NOT LUCK.** Its five point estimates
+are 2.444x, 2.404x, 2.562x, 2.654x, 2.417x — the engine was never in doubt. What
+changed is procedure, and both changes came out of this ledger:
+
+  1. **`host_is_quiet_now.py` ran first.** Loadavg alone said quiet on the attempts
+     that failed too; the check that reads live build-process CPU is what
+     distinguishes a genuine window from one where a storm has started and the
+     average has not caught up.
+  2. **One row per invocation.** The previous attempt put `round2` in the same
+     invocation as `pow`, inside the storm `pow` had already met, with no chance to
+     re-check between them. Taken alone, `round2` ran at in-run load 7.64–8.86 —
+     the quietest conditions of the session — and its null came back at 1.003488.
+
+**Four attempts were spent on a row that was always a 2.4x win.** That is the cost
+of the 57% null base rate measured earlier, and it is the concrete case for the
+peer's adaptive-rounds lever: `round2` sits at 8.11% cv, in the band where more
+rounds buy the null precision that four re-runs did not.
+
+**Also worth recording: the peer's `+sse4.1` work has moved `floor @1M` from the
+≈0.127x this bead started with to a CERTIFIED 1.544x.** The ISA route I documented
+as blocked on a workspace decision is now landed and paying, which retires the
+largest open item in my own summary of this family.
