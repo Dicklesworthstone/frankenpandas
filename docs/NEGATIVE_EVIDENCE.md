@@ -27825,3 +27825,69 @@ at 1.043486 (pandas' passed at 1.005561), FP's cv was 31.28%, and the in-run
 any reading. The point estimate happens to sit right beside `cbrt`'s certified
 3.736x, which is precisely why it must not be quoted: an unbanked number that looks
 plausible is more dangerous than one that looks wrong. Owed a re-run.
+
+### 2026-08-17 CrimsonPine — LEDGER AUDIT (build-free, under the I/O hard stop): 54 figures re-checked against the raw artifacts, two omissions in my OWN entries, and one CERTIFIED row that nobody ever banked
+
+With builds, benchmarks and measurements all forbidden by the disk/IO stop, I
+re-read what I have already written against the JSON the harness actually emitted.
+No new measurement was taken and none could have been.
+
+**METHOD.** For every `math_unary` row in `artifacts/bench/*.json`, pull the
+authoritative values and require each to appear VERBATIM in this ledger: FP and
+pandas p50, both CVs, both A/A null medians, both CI bounds, the executing ELF
+prefix, and the invocation id. 54 discrete figures across the four rows I
+certified.
+
+**RESULT: every ratio and verdict reconciles.** All eight artifact rows
+(`log10` 3.385x, `log1p` 3.921x, `cbrt` 3.736x, `sin` 4.953x certified; `log2`
+2.148x and 2.109x, `expm1` 1.532x, `atan` 3.894x not banked) appear here with the
+verdict the artifact records, and no ratio is quoted that no artifact supports.
+That is the check I most wanted to pass, because I retracted two claims earlier
+today and needed to know whether anything else had drifted.
+
+**OMISSION 1 — my `log10` and `log1p` entries lack their best-vs-best figure.**
+`br-frankenpandas-mti15` made reporting best-vs-best beside the gated median a
+CODE-enforced requirement precisely so a median-only row cannot hide a dispersion
+inversion. My later entries (`cbrt`, `sin`) carry it; the first two do not.
+Supplying them now from the artifacts:
+
+| row | gated median | **best-vs-best** | FP min | pandas min | direction |
+|---|---|---|---|---|---|
+| `log10 @10M` | 3.385x | **3.4827** | 20710.6us | 72129.7us | agrees |
+| `log1p @10M` | 3.921x | **3.9922** | 23519.3us | 93893.7us | agrees |
+
+Both exceed their medians and agree in direction, so neither row's conclusion
+changes — but "the omission was harmless this time" is not a reason to leave it
+unrecorded, and a reader checking my rows against mti15's contract would have
+found two that failed it.
+
+**OMISSION 2, AND IT IS NOT MINE — a CERTIFIED `log @1M` row is banked NOWHERE.**
+`artifacts/bench/bench_2026-08-16T05-30-56.814037+00-00.json` holds a complete,
+passing row that no ledger entry references:
+
+```
+workload     math_unary/log @1M, balanced-square, host thinkstation1
+verdict      FASTER, ratio 2.036
+clauses      effect_ci_excludes_unity TRUE · effect_exceeds_two_x_null_margin TRUE
+             · null_medians_within_2pct_unity TRUE
+required     0.16664219   claim 0.71090838
+FrankenPandas p50 1732.75us  cv 4.59%  A/A null 0.984929 PASS  threads 10
+pandas        p50 3435.29us  cv 1.47%  A/A null 0.996605 PASS  threads 66
+ELF          750c0b1588528c55… (24797400 bytes) target/release/fp-bench
+incumbent    pandas 2.2.3, artifact c10b13e6…
+```
+
+**This is not my run** — it predates my session by twelve hours and was built from
+the `release` profile rather than `release-perf`, so I can attest only to what the
+artifact itself contains, which is a full three-clause pass with both nulls clean.
+I am recording its existence rather than claiming it: whoever ran it owns the
+banking decision, and if it went unbanked because they judged it unsound, that
+reasoning belongs here too.
+
+**WHY THIS MATTERS BEYOND ONE ROW.** The campaign's binding constraint has been
+described as measurement capacity — the host, the windows, the queue. Here is a
+certified 2.036x sitting in the artifacts directory, produced, gated, and then
+lost because nobody wrote it down. **An unbanked certified row costs exactly as
+much to produce as a banked one and is worth nothing.** The artifacts directory
+should be swept for others; this audit only covered `math_unary`, which is one
+category of eleven.
