@@ -95,12 +95,33 @@ def build_cpu_percent() -> tuple[float, list[tuple[str, float]]]:
     return sum(pct for _, pct in hits), hits[:5]
 
 
-def loadavg_1min() -> float:
+def loadavg_triple() -> tuple[float, float, float]:
+    """The 1/5/15-minute averages, because the TREND decides, not the level.
+
+    br-frankenpandas-4kig1, MEASURED 2026-08-17: a candidate/control pair was
+    launched when this script said quiet (0% build CPU, loadavg 17.73) and it
+    collapsed anyway -- loadavg reached 26.20 during the two runs and pandas' OWN
+    arm moved 509.51us to 355.06us, a 43% swing between invocations eleven
+    seconds apart. Both rows came back NULL_UNDECIDABLE with cv 44-46%.
+
+    A single instantaneous reading cannot distinguish "the host is idle because
+    the storm ended" from "the host is idle because the storm has not spun up
+    yet". The 1-minute average against the 15-minute one can: if the short
+    average is BELOW the long one the host is draining, and if it is above, load
+    is arriving and a multi-minute measurement is being started into a rising
+    tide.
+    """
     try:
         with open("/proc/loadavg", encoding="utf-8") as handle:
-            return float(handle.read().split()[0])
-    except (OSError, ValueError):
-        return float("nan")
+            parts = handle.read().split()
+            return float(parts[0]), float(parts[1]), float(parts[2])
+    except (OSError, ValueError, IndexError):
+        nan = float("nan")
+        return nan, nan, nan
+
+
+def loadavg_1min() -> float:
+    return loadavg_triple()[0]
 
 
 def main() -> int:
@@ -111,16 +132,43 @@ def main() -> int:
         default=DEFAULT_BUSY_CPU_PERCENT,
         help="build CPU%% at or above which the host is called busy (default: 200)",
     )
+    parser.add_argument(
+        "--rising-tolerance",
+        type=float,
+        default=0.05,
+        help=(
+            "how far the 1-minute average may exceed the 15-minute one before the "
+            "window is called CLOSING (default: 0.05, i.e. 5%%)"
+        ),
+    )
     args = parser.parse_args()
 
     total, top = build_cpu_percent()
-    load = loadavg_1min()
+    load, load5, load15 = loadavg_triple()
     busy = total >= args.max_build_cpu
+    # RISING, not merely high. A tolerance keeps ordinary jitter from refusing an
+    # otherwise good window; the failure this catches was 17.73 against 19.93 and
+    # climbing, not a 2% wobble.
+    rising = (
+        load == load and load15 == load15  # not NaN
+        and load15 > 0.0
+        and load > load15 * (1.0 + args.rising_tolerance)
+    )
 
-    print(f"loadavg 1-min      : {load:.2f}")
+    print(f"loadavg 1/5/15     : {load:.2f} / {load5:.2f} / {load15:.2f}")
     print(f"build CPU right now: {total:.0f}%  (threshold {args.max_build_cpu:.0f}%)")
     for comm, pct in top:
         print(f"    {comm:>8}  {pct:.0f}%")
+    if not busy and rising:
+        print(
+            f"\nVERDICT: quiet RIGHT NOW but the window is CLOSING -- the 1-minute "
+            f"average ({load:.2f}) is above the 15-minute ({load15:.2f}).\n"
+            "Load is ARRIVING, not draining. A multi-minute measurement started here\n"
+            "finishes under conditions it did not start in, which is how this campaign\n"
+            "produced a pair whose incumbent arm swung 43% between two invocations\n"
+            "eleven seconds apart. Wait for the short average to fall below the long one."
+        )
+        return 1
     if busy and load < 30.0:
         print(
             "\nVERDICT: BUSY, and loadavg does NOT show it yet.\n"
@@ -130,7 +178,21 @@ def main() -> int:
     elif busy:
         print("\nVERDICT: BUSY. Defer the run.")
     else:
-        print("\nVERDICT: quiet by both readings. A row started now is not entering a storm.")
+        # Say what is TRUE, not what is convenient: inside the tolerance the
+        # short average can still sit slightly ABOVE the long one, and calling
+        # that "draining" would be the same misleading-message defect this
+        # script exists to catch elsewhere.
+        if load == load and load15 == load15 and load15 > 0.0:
+            trend = (
+                f"draining ({load:.2f} 1-min under {load15:.2f} 15-min)"
+                if load < load15
+                else f"flat within tolerance ({load:.2f} 1-min vs {load15:.2f} 15-min)"
+            )
+        else:
+            trend = "trend UNAVAILABLE (loadavg unreadable)"
+        print(
+            f"\nVERDICT: quiet, {trend}. A row started now is not\nentering a storm."
+        )
     return 1 if busy else 0
 
 
