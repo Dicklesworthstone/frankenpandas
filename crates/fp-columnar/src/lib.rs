@@ -26408,6 +26408,32 @@ impl Column {
         None
     }
 
+    /// Ties-to-even rounding, choosing the kernel the BUILD can execute.
+    ///
+    /// br-frankenpandas-3qpj4, fourth op in the family. `round_ties_even_fast`
+    /// carries a documented negative result: swapping it for the intrinsic
+    /// REGRESSED `round(2)` 3.4→11.9ms on 2026-07-02. That result is CORRECT and
+    /// it is CONDITIONAL — its own comment names the condition, "without
+    /// `+sse4.1` the intrinsic lowers to a libm `roundeven` CALL per element". WITH
+    /// the flag it lowers to a single `roundsd` instead, which is the same
+    /// inversion already measured on `floor`/`ceil`/`trunc`: certified 0.343x
+    /// SLOWER on the default target, certified 1.329x FASTER once the flag and the
+    /// intrinsic are combined.
+    ///
+    /// So the prior revert is preserved, not overturned: without the flag this
+    /// still selects the magic-number trick and the 3.4ms path is untouched.
+    #[inline]
+    fn round_ties_even_kernel(value: f64) -> f64 {
+        #[cfg(target_feature = "sse4.1")]
+        {
+            value.round_ties_even()
+        }
+        #[cfg(not(target_feature = "sse4.1"))]
+        {
+            Self::round_ties_even_fast(value)
+        }
+    }
+
     #[inline]
     fn round_ties_even_fast(value: f64) -> f64 {
         // Magic-number ties-to-even: `(|x|+2^52)-2^52` uses only SSE2
@@ -26432,7 +26458,7 @@ impl Column {
 
     #[inline]
     fn round_scaled_ties_even_fast(value: f64, factor: f64) -> f64 {
-        Self::round_ties_even_fast(value * factor) / factor
+        Self::round_ties_even_kernel(value * factor) / factor
     }
 
     /// `(|x| + 2^52) - 2^52` — the magnitude of `x` rounded to the nearest even
@@ -26499,6 +26525,7 @@ impl Column {
     ///   * `floor` never needs a zero-sign fixup: for `x > 0` the result is `+0.0`
     ///     or positive, for `x < 0` it is `-0.0` (only at `x == -0.0`, where
     ///     `nearest` is already `-0.0`) or ≤ -1. `ceil` DOES — see there.
+    ///
     /// Pick the rounding kernel the BUILD can actually execute.
     ///
     /// br-frankenpandas-3qpj4. `floor_fast` and its siblings are hand-rolled bit
@@ -49070,6 +49097,64 @@ mod tests {
                         "flags differ at workers={workers} par_min={par_min}"
                     );
                 }
+            }
+        }
+
+        /// br-frankenpandas-3qpj4, round sibling. Whichever cfg arm compiled,
+        /// `round_ties_even_kernel` must equal `f64::round_ties_even` bit-for-bit.
+        ///
+        /// The corpus targets ties specifically, because ties-to-EVEN is where a
+        /// magic-number trick and the hardware instruction are most likely to
+        /// disagree: 0.5 rounds to 0 and 1.5 to 2, not 1 and 2. A corpus of
+        /// non-ties would pass against an implementation that rounds half away
+        /// from zero, which is the classic wrong answer here.
+        #[test]
+        fn the_round_kernel_matches_std_on_both_cfg_arms_3qpj4() {
+            let ties: Vec<f64> = vec![
+                0.5,
+                -0.5,
+                1.5,
+                -1.5,
+                2.5,
+                -2.5,
+                3.5,
+                -3.5,
+                4.5,
+                -4.5,
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+                2.0,
+                -2.0,
+                0.49999999999999994,
+                -0.49999999999999994,
+                2.4999999999999996,
+                -2.4999999999999996,
+                4_503_599_627_370_495.5,
+                -4_503_599_627_370_495.5,
+                4_503_599_627_370_496.0,
+                9_007_199_254_740_992.0,
+                f64::MAX,
+                f64::MIN,
+                f64::MIN_POSITIVE,
+                -f64::MIN_POSITIVE,
+                1e16,
+                -1e16,
+                1e-16,
+                -1e-16,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ];
+            for &x in &ties {
+                assert_eq!(
+                    Column::round_ties_even_kernel(x).to_bits(),
+                    x.round_ties_even().to_bits(),
+                    "round_ties_even_kernel disagrees with std at {x:?}"
+                );
+            }
+            for x in [f64::NAN, -f64::NAN] {
+                assert!(Column::round_ties_even_kernel(x).is_nan());
             }
         }
 

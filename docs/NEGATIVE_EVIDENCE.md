@@ -31091,3 +31091,58 @@ none. The correct form takes the exit status BEFORE any pipe:
 ```
   python3 scripts/host_is_quiet_now.py > /tmp/q.txt || { tail -2 /tmp/q.txt; exit 1; }
 ```
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-3qpj4) — AUDIT: `round_ties_even_fast` is the FOURTH intrinsic bypass, and its documented 2026-07-02 negative result is FLAG-CONDITIONAL. Routed behind the same `cfg`; no measurement taken
+
+Audited the rest of the family for the pattern that produced the floor/ceil/trunc
+wins — a hand-rolled kernel that never asks for the instruction a target feature
+provides. Done by symbol counting and source reading, with a peer build running and
+no measurement window needed.
+
+**Counted: exactly five hand-rolled `*_fast` kernels exist in fp-columnar** —
+`round_ties_even_fast`, `round_scaled_ties_even_fast`, and the
+`floor_fast`/`ceil_fast`/`trunc_fast` trio already routed. So the audit surface is
+one op, not a family: **`round`**. The transcendentals are unaffected because
+`log`/`exp`/`sin` have no hardware instruction to bypass — they are libm calls
+either way — and `sqrt` already calls `f64::sqrt` and duly gets `sqrtpd`.
+
+**AND `round_ties_even_fast` DOCUMENTS THE TRAP IN ITS OWN COMMENT:**
+
+> "NOTE (negative result 2026-07-02): swapping this for the
+> `f64::round_ties_even()` intrinsic REGRESSED round(2) 3.4→11.9ms — **without
+> `+sse4.1`** the intrinsic lowers to a libm `roundeven` CALL per element (no
+> `roundpd`), un-vectorizable. Keep the magic trick."
+
+That negative result is **correct and conditional**, and its own text names the
+condition. It is the same inversion this ledger has now measured twice: on the
+default target the intrinsic is a function call and the trick wins; with `+sse4.1`
+the intrinsic is ONE instruction and the trick becomes a dozen. `floor` went
+certified 0.343x SLOWER → certified 1.329x FASTER across exactly that boundary.
+
+**A NEGATIVE RESULT THAT NAMES ITS PRECONDITION IS NOT A DEAD END — it is a
+conditional.** This one was written well: it said "without `+sse4.1`" rather than
+"the intrinsic is slower". A reader who stops at "keep the magic trick" inherits a
+conclusion whose premise may no longer hold, and the campaign's own habit of
+recording preconditions is what made this recoverable.
+
+**Landed:** `round_ties_even_kernel` selects `f64::round_ties_even()` under
+`cfg(target_feature = "sse4.1")` and `round_ties_even_fast` otherwise, with
+`round_scaled_ties_even_fast` routed through it so the `round(decimals)` hot path
+inherits the choice. **The prior revert is preserved, not overturned:** without the
+flag the magic trick is still selected and the 3.4ms path is untouched.
+
+**Gates:** `cargo test -p fp-columnar --lib` 647 passed / 0 failed / 0 FILTERED OUT
+on BOTH cfg arms; `clippy --all-targets -D warnings` clean; `fmt --check` clean.
+The new test pins ties specifically — 0.5→0 and 1.5→2, not 1 and 2 — because a
+corpus of non-ties would pass against an implementation that rounds half away from
+zero, which is the classic wrong answer for this op.
+
+**NO TIMING WAS TAKEN and no ratio is claimed.** A peer build was running throughout,
+and the orchestrator's standing instruction is to prefer a no-build window. The
+`round(decimals) @1M` row under the flag is OWED, and the prediction on record is
+that it inverts the 2026-07-02 regression the way `floor` did. If it does not, the
+intrinsic-bypass account has a boundary I have not found yet.
+
+**Counted mechanism:** 5 `*_fast` kernels total, 4 now behind the `cfg`, 1
+(`round_scaled_ties_even_fast`) inheriting via its caller; `f64::abs` used 0 times
+against 174 `.abs()` calls, which is the same std method and needs no change.
