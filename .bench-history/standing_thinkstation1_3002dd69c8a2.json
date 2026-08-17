@@ -1,7 +1,7 @@
 {
   "schema_version": "v4",
-  "timestamp": "2026-08-17T12:37:41.964683+00:00",
-  "invocation_id": "vs-pandas-20260817T123741.964702Z-pid1282974",
+  "timestamp": "2026-08-17T16:59:07.276056+00:00",
+  "invocation_id": "vs-pandas-20260817T165907.276071Z-pid3227880",
   "engine_identity": {
     "frankenpandas": {
       "version": "0.1.2",
@@ -55,7 +55,7 @@
     "ram_bytes": 231692279808,
     "numa_nodes": 1,
     "kernel": "6.17.0-41-generic",
-    "git_sha": "1d7dce2f1d672467852d0cc0171c8e54fcf685e3",
+    "git_sha": "57cdd3202dbc8e578be8eeeb8a344355f48734f6",
     "cpu_governors": [
       "powersave"
     ],
@@ -173,7 +173,7 @@
     "gate": "corrected_three_clause_median_bootstrap_ci",
     "null_median_maximum_absolute_deviation": 0.02,
     "cv_role": "provenance_only",
-    "frankenpandas_binary_requested": "/data/projects/.scratch/crimsonpine/fp-bench-BASELINE-4c1adb6c6",
+    "frankenpandas_binary_requested": "/data/projects/.scratch/crimsonpine/fp-bench-AVX2-4c1adb6c6",
     "frankenpandas_reference_binary_requested": null,
     "whole_binary_order_policy": null,
     "host_wide_exclusivity_contract": {
@@ -199,7 +199,7 @@
         "frankenpandas_mimalloc_purge_delay_ms": 0
       }
     },
-    "shared_invocation_id": "vs-pandas-20260817T123741.964702Z-pid1282974",
+    "shared_invocation_id": "vs-pandas-20260817T165907.276071Z-pid3227880",
     "thread_provenance_contract": {
       "thread_count_requested": null,
       "expected_hostname": null,

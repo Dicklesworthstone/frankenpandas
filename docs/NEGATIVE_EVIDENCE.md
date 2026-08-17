@@ -34291,3 +34291,79 @@ every row. I simply never looked at it.
 0.878x) IS internally sound — both carry harness `60ed3c58fdd5` and the same ELF pair, measured
 minutes apart. The 1.7353x width gain stands. What does not stand is my implicit treatment of the
 0.515x and 0.496x rows as interchangeable measurements of the same thing.
+
+## br-frankenpandas-kko5z — PREDICTION CONFIRMED TO 0.2us, AND THE ARTIFACTS ALREADY CONTAINED THE ANSWER I "PREDICTED"
+
+**Campaign result class:** verification-of-peer-lever (no lever of mine; two rows banked as locks)
+
+Last turn I pre-registered a falsifiable prediction and deferred it for want of a clean window:
+sqrt @10k had been measured at FP 78.57us / 0.518x, the kko5z fit put a **66.5us constant** in
+every elementwise call, and q1evw had independently measured the `available_parallelism` cgroup
+walk at **66-68us per call**. Predicted: FP 12-25us, ratio 1.6x-3.4x, i.e. a LOSS becomes a WIN.
+
+Measured this window (loadavg 16.00 draining from 24.55, idle 84.6%/82.8%, iowait 0.3%/1.2%,
+**build CPU 0%**, CPU MHz 2794 before / 3711 after):
+
+| workload | FP p50 | pandas p50 | ratio | verdict | cv | A/A nulls |
+|---|---|---|---|---|---|---|
+| sqrt @10k  | **11.65us** | 42.93us | **3.73x**  | FASTER | 8.03% | 0.99852 / 1.00801 |
+| sqrt @100k | **125.25us** | 144.51us | **1.157x** | FASTER | 6.44% | 0.99035 / 1.01551 |
+
+**Executing ELF SHA-256 (self-reported by process):** bench_elf_sha256=a802073cf042 (fp-bench,
+MAIN-8b263954b, preserved; no build taken this turn)
+**Harness sha256:** 60ed3c58fdd5 — recorded BEFORE the runs, per the correction one entry above.
+**Legacy incumbent arm (same invocation):** name=pandas, version=2.2.3, measured_ratio=3.73x and
+1.157x, both arms in the same invocation on this host.
+**A/A null control (same invocation):** see table; all four nulls inside the 2% band.
+**Median-CI decision:** @10k CI [3.6805, 3.9268]; @100k CI [1.1449, 1.1705]. All three clauses
+true on both rows.
+**CV role:** 8.03% / 6.44% — descriptive; the gate is the CI and the null margin, not the cv.
+**Counted mechanism:** syscalls/page-faults eliminated per call — a cgroup-hierarchy walk removed
+by caching, not an arithmetic change.
+
+### THE MECHANISM IS CONFIRMED TO 0.2us, AND IT IS NOT MINE
+
+The FP deltas are **-66.92us @10k** and **-66.74us @100k**. Those agree with each other to 0.2us
+and with the fitted 66.5us and the measured 66-68us. A *fixed per-call cost*, invariant in the
+input size, is exactly what a constant predicts and what no arithmetic explanation would produce.
+
+The removal landed in **2a2aa6905** — `cache available_parallelism - it was walking the cgroup
+hierarchy on EVERY elementwise call` — which is already an ancestor of my ELF's commit. **The
+lever is a peer's.** Under the standing orders my contribution here is the pre-registered
+prediction and its confirmation, not a win; I am recording it as verification and banking the two
+rows as regression locks so the peer's win is defended.
+
+### ⚠️ AND THE NUMBER I "PREDICTED" WAS ALREADY SITTING IN artifacts/bench/
+
+Reading the sqrt corpus to attribute the fix, I found:
+
+    3qpj4_ref_sqrt_10k_r0.json   fp=11.46us  ratio=3.673x   elf=d370a302d5
+    3qpj4_ref_sqrt_10k_r1.json   fp=11.40us  ratio=4.024x   elf=d370a302d5
+    3qpj4_ref_sqrt_10k_r2.json   fp=79.01us  ratio=0.518x   elf=1dde689fa4
+
+My 11.65us / 3.73x is a **reproduction of r0/r1**, not a discovery. I predicted "12-25us" while
+two banked rows already read 11.4us — and my bracket was wrong on both ends in the same direction
+(actual 11.65us is below the 12us floor, 3.73x above the 3.4x ceiling), because I estimated
+against pandas' old p50 rather than re-measuring it; pandas itself came in 4.3% slower this window
+(42.93us vs 41.15us). The ratio is sound because both arms ran in one invocation. The
+*cross-window* comparison to 0.518x is not a same-invocation claim and is not offered as one.
+
+**The recurring failure is that I model instead of searching what I already have.** This is the
+same lesson a prior turn recorded verbatim as "Search your own artifacts". A prediction is only
+worth registering when the answer is genuinely unbanked, and one grep would have told me.
+
+### A DEFECT IN THAT REFERENCE SERIES, WORTH MORE THAN MY PREDICTION
+
+The three rows above are all labelled `ref` — the *reference* arm of one experiment — yet **r0/r1
+ran ELF d370a302d5 and r2 ran 1dde689fa4.** The reference arm was not a fixed binary, and the
+67.6us that separates them is precisely this constant. Any conclusion that 3qpj4 drew by comparing
+its `cand` rows against a `ref` set spanning two ELFs is comparing across the cgroup fix. The
+`cand` rows (ded4edcb2b) all still carry the constant: sqrt @100 190.79us/0.152x, @1k
+189.02us/0.162x, @10k 77.20us/0.625x.
+
+**Scope of the staleness, stated narrowly.** Only 4 banked rows sit at size <=1k with p50 > 60us,
+so this is not a corpus-wide invalidation and I am not claiming one. What it does mean: at @100
+and @1k the constant WAS ~99.8% of the measurement (190us vs the post-fix 0.30us and 1.26us), and
+it inverts the verdict as far up as @100k (0.709x -> 1.157x). **A pre-2a2aa6905 row at size
+<=100k is not comparable to a post-fix row**, in the same way and for the same reason that rows
+across a harness sha are not comparable.
