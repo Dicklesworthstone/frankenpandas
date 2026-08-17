@@ -31738,3 +31738,119 @@ I am not implementing it in the same breath as being wrong about the last one. I
 recorded with the measurement that motivates it so the next attempt starts from
 evidence, and whoever takes it should measure the memset directly before rewriting
 the buffer strategy.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-kko5z) — the `sqrt` constant is now DIRECTLY OBSERVED at 66.1us, matching the fitted 66.5us to 1%; and getting there exposed a ratio forger in `fp-bench` that silently ran a DIFFERENT ROW COUNT than the incumbent
+
+The previous entry fitted `sqrt`'s fixed per-call cost from four sizes and said the
+next step was a profile. Before profiling I tried to OBSERVE the intercept instead of
+inheriting it, by adding sizes below 10k where a 66.5us constant would be ~99% of the
+runtime. That is what turned up the defect below, and only after fixing it did the
+confirmation become real.
+
+**THE DEFECT, and it is the exact failure class this campaign's law is written
+against.** `fp-bench`'s `size_rows_cols` ended in `_ => (100_000, 10)`. The Python
+harness owns its OWN `SIZE_CONFIGS` and builds the pandas fixture from it, so adding
+a size to the harness and not to Rust made the incumbent arm run at the new size
+while FrankenPandas quietly ran at 100_000 rows. My first `100` and `1k` rows:
+
+| forged row | FP p50 | pandas p50 | ratio |
+|---|---:|---:|---:|
+| `sqrt @100` | 194.49us | 30.57us | 0.156x |
+| `sqrt @1k` | 190.34us | 34.77us | 0.179x |
+
+FrankenPandas' arm is FLAT across a 10x change in row count because it was running
+100_000 rows in both — which is why both readings equal the true `sqrt @100k` of
+191.99us. **Every one of those rows carried a passing A/A null, a real self-reported
+ELF SHA-256, a pinned live-pandas incumbent and a valid invocation id.** Nothing in
+the provenance chain could catch it. The only thing that caught it was the arithmetic
+refusing to make sense: `sqrt @1k` came out SLOWER than `sqrt @10k`.
+
+**Counted mechanism, and it is a free control:** the `+sse4.1` binary in these runs
+was built BEFORE the fix and still carries the old fallback, so it kept reporting the
+forged plateau (188.21 / 189.02us at `1k`, 190.79 / 195.68us at `100`) in the same
+invocations where the fixed binary reported 67.25 / 67.32us and 66.10 / 67.39us. One
+window, two binaries, defect present in one and absent in the other — 2.8x apart at
+`@1k`.
+
+Fixed by making the label table FAIL CLOSED: `size_rows_cols_checked` returns
+`Option`, unknown labels print what is known and `exit(2)`, verified directly —
+`--size 500k` exits 2, `--size 1k` exits 0. Two tests pin it, including the negative
+case the old code passed: `size_rows_cols_checked("500k")` must be `None` and not
+`Some((100_000, 10))`, plus a table that asserts every harness label resolves to the
+same row count on both sides. `cargo test -p fp-bench`: **10 passed, 0 failed, 0
+filtered out**; `cargo clippy --all-targets -- -D warnings` clean.
+
+**NOW THE CONFIRMATION, all on ONE post-fix ELF `47a4cfee`, one window, load 11.3-17.0.**
+
+| default build | `@100` | `@1k` | `@10k` | `@1M` |
+|---|---:|---:|---:|---:|
+| `sqrt` FP p50 | 66.75us | 67.29us | 77.94us | 1274.06us |
+| `floor` FP p50 | 0.195us | 0.695us | 5.775us | 578.35us |
+
+Fitting each on `1k`→`1M` and predicting the ends:
+
+```
+sqrt    t(n) = 66.08us  + 1.2080 ns/element    predicts @10k 78.16 (obs 77.94, 0.3%)
+                                               predicts @100  66.20 (obs 66.75, 0.8%)
+floor   t(n) =  0.117us + 0.5782 ns/element    predicts @10k  5.90 (obs  5.775, 2%)
+                                               predicts @100  0.175 (obs  0.195)
+```
+
+**`sqrt` carries a 66.1us per-call constant and `floor` carries 0.117us — a factor of
+565, on the same binary, the same fixture, the same `Series`/`Column` construction and
+the same timed region.** The fitted 66.5us from the earlier four-size entry and the
+directly observed 66.1us plateau agree to 1%, and the model now spans four orders of
+magnitude in `n` and predicts every point within 2%. This is no longer an inference
+from a regression; at `@100` the constant IS 99.1% of the arm.
+
+pandas' own constant on the same op is ~30us, so the 66.1us is not the price of being
+a dataframe library — FrankenPandas' own `floor` pays 0.117us for the same wrapper.
+
+**VERDICT: the ISA-width and worker-count direction for `sqrt` stays REJECTED**, and
+this row remains a certified LOSS against the live incumbent, not a win.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=47a4cfee4771550a4907575e838ae251387fda8ea5016ecfadd79d5e4319fe2a (82305024 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T114750.870293Z-pid374593 , giving
+measured_ratio=0.873x for this row.
+
+| `sqrt @1M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **1280.20us** | 4.06% | 1.018273 — PASSES |
+| pandas | 1119.49us | 4.35% | 1.008499 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.018273 and
+pandas median ratio 1.008499, both inside the 2% limit.
+
+**Median-CI decision:** effect median 0.873x, 95% CI [0.85239252, 0.87994080],
+excluding unity; claimed log effect 0.13605144 against a required threshold of
+0.08862555, cleared by 1.54x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 4.06%, pandas 4.35%.
+
+```
+LOADAVG      11.27 → 17.77 across the post-fix sequence (1-min, sampled per run)
+OBSERVED MHz host-wide mean 2924-3723 per run, cross-core min 1429.0 max 4298.3
+THREADS      FP 1 · pandas 1 on every sqrt and floor row at every size
+```
+Best-vs-best 0.8892, direction agrees with the median.
+
+**WHAT THIS HANDS THE NEXT UNIT OF WORK.** Profile `Column::sqrt` at **`@100`**, not
+`@10k`. At 100 rows the arithmetic is ~0.12us of a 66.75us call, so 99.1% of every
+sample is the thing being hunted and it cannot hide behind the kernel; `Column::floor`
+at the same size is the control at 0.195us. 66.1us is ~230k cycles at 3.5GHz for work
+that does not scale with `n`, on a path (`typed_float_domain_fused_unary_with_finiteness`)
+that `floor` does not take. Grep-level candidates were checked and eliminated:
+`elementwise_witness_policy_from_env` is behind a `OnceLock`,
+`elementwise_write_once_enabled` reads a thread-local, and `f64_finite_witness` would
+scale with `n` if it scanned. It needs a profiler, not another hypothesis.
+
+**AND A STANDING WARNING FOR EVERY BENCH LANE, not just this one.** Two tables
+describing the same fixture in two languages, with one of them defaulting instead of
+failing, produced fully provenanced rows comparing different problem sizes. Any lane
+where the harness and the engine each own a copy of a fixture parameter has this
+shape. The fix is not vigilance, it is that the engine must refuse to guess.

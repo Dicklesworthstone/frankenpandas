@@ -312,17 +312,61 @@ fn arg<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-fn size_rows_cols(size: &str) -> (usize, usize) {
+/// Rows and columns for a size label.
+///
+/// FAILS CLOSED ON AN UNKNOWN LABEL, and that is the whole point of this
+/// function's shape. br-frankenpandas-kko5z, CrimsonPine 2026-08-17.
+///
+/// This used to end in `_ => (100_000, 10)`. A silent default here is not a
+/// convenience, it is a ratio forger: the Python harness owns its own
+/// `SIZE_CONFIGS` and generates the pandas fixture from it, so adding a size
+/// there and not here made the incumbent arm run at the new size while
+/// FrankenPandas quietly ran at 100_000. OBSERVED, not hypothesised — adding
+/// `100` and `1k` to the harness produced these fully provenanced rows:
+///
+///   sqrt @100   FP 194.49us   pandas 30.57us   0.156x
+///   sqrt @1k    FP 190.34us   pandas 34.77us   0.179x
+///
+/// FrankenPandas' arm is flat because it was measuring 100_000 rows in both,
+/// which is also why both readings equal the real `sqrt @100k` of 191.99us.
+/// Every one of those rows carried a passing A/A null, a real ELF SHA and a
+/// live pandas incumbent, and every one of them was comparing two different
+/// problem sizes. Nothing in the provenance could have caught it; only the
+/// arithmetic not making sense did.
+///
+/// So an unknown label must stop the process, not pick a number. The caller
+/// prints and exits non-zero rather than panicking, so the harness sees an
+/// ordinary failed invocation instead of a stack trace.
+fn size_rows_cols_checked(size: &str) -> Option<(usize, usize)> {
     match size {
-        "10k" => (10_000, 10),
-        "100k" => (100_000, 10),
-        "1M" => (1_000_000, 10),
-        "2M" => (2_000_000, 10),
-        "4M" => (4_000_000, 10),
-        "6M" => (6_000_000, 10),
-        "8M" => (8_000_000, 10),
-        "10M" => (10_000_000, 10),
-        _ => (100_000, 10),
+        // Sub-10k lanes exist to separate a FIXED per-call cost from a
+        // per-element one; see the matching note in the harness's SIZE_CONFIGS.
+        "100" => Some((100, 10)),
+        "1k" => Some((1_000, 10)),
+        "10k" => Some((10_000, 10)),
+        "100k" => Some((100_000, 10)),
+        "1M" => Some((1_000_000, 10)),
+        "2M" => Some((2_000_000, 10)),
+        "4M" => Some((4_000_000, 10)),
+        "6M" => Some((6_000_000, 10)),
+        "8M" => Some((8_000_000, 10)),
+        "10M" => Some((10_000_000, 10)),
+        _ => None,
+    }
+}
+
+fn size_rows_cols(size: &str) -> (usize, usize) {
+    match size_rows_cols_checked(size) {
+        Some(pair) => pair,
+        None => {
+            eprintln!(
+                "fp-bench: unknown --size {size:?}. Known sizes: 100, 1k, 10k, 100k, 1M, 2M, 4M, \
+                 6M, 8M, 10M. Refusing to guess: a default here would run FrankenPandas at one \
+                 row count while the harness ran pandas at another, and the resulting ratio would \
+                 look fully provenanced (br-frankenpandas-kko5z)."
+            );
+            std::process::exit(2);
+        }
     }
 }
 
@@ -3714,8 +3758,8 @@ mod harness_contract_tests {
 
     use super::{
         ITERS, TELEMETRY_STRING_BATCH_ROWS, paired_time_us, runtime_isa_features, self_identity,
-        size_rows_cols, stateful_apply_step, stateful_expanding_step, stateful_rolling_step,
-        telemetry_string_batch_ranges,
+        size_rows_cols, size_rows_cols_checked, stateful_apply_step, stateful_expanding_step,
+        stateful_rolling_step, telemetry_string_batch_ranges,
     };
 
     #[test]
@@ -3773,6 +3817,49 @@ mod harness_contract_tests {
         assert_eq!(size_rows_cols("6M"), (6_000_000, 10));
         assert_eq!(size_rows_cols("8M"), (8_000_000, 10));
         assert_eq!(size_rows_cols("10M"), (10_000_000, 10));
+    }
+
+    /// br-frankenpandas-kko5z. THE NEGATIVE CASE, and it is the one a naive
+    /// implementation fails: the old `_ => (100_000, 10)` arm passes every
+    /// positive assertion above and still silently ran FrankenPandas at 100_000
+    /// rows whenever the Python harness knew a size Rust did not. It cannot be
+    /// asserted through `size_rows_cols`, which now exits the process, so the
+    /// checked form is what the test pins.
+    #[test]
+    fn an_unknown_size_label_must_not_resolve_to_a_row_count_kko5z() {
+        assert_eq!(size_rows_cols_checked("1k"), Some((1_000, 10)));
+        assert_eq!(size_rows_cols_checked("100"), Some((100, 10)));
+        // The exact value the old default returned: if this ever comes back as
+        // `Some((100_000, 10))` the forger is back.
+        assert_eq!(size_rows_cols_checked("500k"), None);
+        assert_eq!(size_rows_cols_checked(""), None);
+        assert_eq!(size_rows_cols_checked("1000"), None);
+        assert_eq!(size_rows_cols_checked("1M "), None);
+    }
+
+    /// Every label the Python harness's `SIZE_CONFIGS` knows must resolve here
+    /// to the SAME row count, because a disagreement between the two tables is
+    /// exactly the defect above wearing different clothes.
+    #[test]
+    fn rust_and_harness_size_tables_agree_kko5z() {
+        for (label, rows) in [
+            ("100", 100_usize),
+            ("1k", 1_000),
+            ("10k", 10_000),
+            ("100k", 100_000),
+            ("1M", 1_000_000),
+            ("2M", 2_000_000),
+            ("4M", 4_000_000),
+            ("6M", 6_000_000),
+            ("8M", 8_000_000),
+            ("10M", 10_000_000),
+        ] {
+            assert_eq!(
+                size_rows_cols_checked(label),
+                Some((rows, 10)),
+                "size label {label:?} disagrees with benches/vs_pandas_harness.py SIZE_CONFIGS"
+            );
+        }
     }
 
     #[test]

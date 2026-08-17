@@ -90,6 +90,23 @@ EXTRA_CATEGORIES = {
 }
 
 SIZE_CONFIGS = {
+    # SUB-10k LANES. br-frankenpandas-kko5z, CrimsonPine.
+    #
+    # The corpus had no size below 10k, so no lane could separate a FIXED
+    # per-call cost from a per-element one — and that is exactly the open
+    # question on `sqrt`, whose ratio climbs 0.518x -> 0.709x -> 0.869x ->
+    # 0.895x from 10k to 10M. A four-size fit says FrankenPandas pays
+    # `66.5us + 1.204 ns/element` against pandas' `30.4us + 1.079`, but 10k is
+    # the smallest point available and the constant is still only 85% of the
+    # arm there. At 1k a 66.5us constant would be ~98% of the runtime and at
+    # 100 rows ~99%, so these two lanes turn a fitted intercept into a directly
+    # observed one: if the constant is real, `sqrt @100` and `sqrt @1k` cost
+    # essentially the same as each other, and `floor` at the same sizes does
+    # not. Nothing else in the harness changes — these are opt-in via `--sizes`
+    # and `--all` does not reach them, so every existing baseline stays
+    # comparable.
+    "100": {"rows": 100, "cols": 10},
+    "1k": {"rows": 1_000, "cols": 10},
     "10k": {"rows": 10_000, "cols": 10},
     "100k": {"rows": 100_000, "cols": 10},
     "1M": {"rows": 1_000_000, "cols": 10},
