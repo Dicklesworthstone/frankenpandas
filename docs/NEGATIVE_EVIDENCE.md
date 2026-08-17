@@ -28547,3 +28547,87 @@ a quoted 28.0).
 Gates on the reverted state: `cargo test -p fp-columnar --lib` 641 passed / 0
 failed / 58 ignored / 0 FILTERED OUT; `clippy --all-targets -D warnings` clean;
 `fmt --check` clean.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-284ul) — `sqrt @1M` CERTIFIES for the first time in this campaign, and it certifies SLOWER at 0.877x. All three gate clauses true, both nulls clean, best-vs-best AGREEING with the median
+
+Every previous attempt on this workload was refused. This one decides, and the
+thing that changed was the WINDOW, not the code.
+
+| arm | p50 | min | cv | observed threads |
+|---|---:|---:|---:|---:|
+| FrankenPandas | 1231.42us | 1204.05us | **5.91%** | see caveat |
+| pandas 2.2.3 | 1082.19us | 1060.25us | **5.44%** | 1 |
+
+**Verdict SLOWER, measured_ratio 0.877x**, effect CI [0.86881, 0.90524].
+
+**A/A null control (same invocation):** 9 balanced-square ABBAABBA rounds per arm —
+FrankenPandas median ratio 0.99169833 (CI [0.94138, 1.011159]) and pandas median
+ratio 1.00063623 (CI [0.950746, 1.034527]), both inside the 2% limit.
+
+**Median-CI decision:** claim log effect 0.131391 against a required 0.12081726 —
+it clears the two-times-null margin by only 8.8%, so this is a NARROW pass and
+should be re-run before anyone leans on the exact figure. All three clauses:
+`effect_ci_excludes_unity` true, `effect_exceeds_two_x_null_margin` true,
+`null_medians_within_2pct_unity` true.
+
+**BEST-VS-BEST AGREES WITH THE MEDIAN FOR THE FIRST TIME: 0.8806 against 0.877.**
+Every earlier row on this workload straddled — 0.965 vs 1.0693 on df_dot, 0.773 vs
+0.9976 here, 0.719 vs 1.1671 two hours ago. When the two statistics agree there is
+no dispersion artefact left to argue about: FrankenPandas is 12% slower at `sqrt
+@1M`, at the median AND at the minimum.
+
+**WHAT THIS CORRECTS IN MY OWN ENTRIES ABOVE.** Earlier today I wrote that `sqrt
+@1M` "may be uncertifiable on this host while the fleet is busy". Half right. It
+was uncertifiable in a RISING window, and the reason is now measured rather than
+inferred: FrankenPandas' cv collapses from 38.70% (load 28→33 rising) and 14.97%
+(load 20.78 falling) to **5.91%** here (load 13.68/15.91/20.73, converging
+downward), while pandas moves 4.06% → 11.65% → 5.44%. FP's dispersion is
+load-coupled and pandas' is roughly not, exactly as banked — but the consequence is
+NOT that the row cannot be taken, only that it must be taken in a settled window.
+I was too pessimistic and the correction is cheap: wait for 1/5/15 to converge
+DOWNWARD, then measure.
+
+**Against the previously banked figure.** The standing number was 0.805x (CalmMink,
+2026-07-31, fp p50 1338.84us). This row is 0.877x with fp p50 1231.42us. I am NOT
+claiming an improvement from that comparison — different binary, different session,
+different host state, and the cross-binary null in this ledger swings 0.960x-1.161x
+on byte-identical code. What I claim is only that 0.877x is the first `sqrt @1M`
+figure that passed the gate, and it is the one to quote from now on.
+
+```
+CLASS        vs-incumbent row, live pandas 2.2.3 in the SAME invocation
+ELF          36e7c6fb7d9439bf120edc4f9c48a64be398bd5488bc288552056863393e5134
+             target/release-perf/fp-bench, built locally from git a8a29b93b,
+             no [RCH] line, 0 warnings, sha re-checked AFTER the run and unchanged
+INCUMBENT    pandas 2.2.3, artifact_sha256 c10b13e6b6bec9a38bef8a24062c35f84c343a6
+             7973eec708b0c523302a5845f (2922 files), same process as the subject
+INVOCATION   vs-pandas-20260817T061413.517594Z-pid3747939
+LOADAVG      13.68 / 15.91 / 20.73 at launch → 13.42 / 15.78 / 20.64 at the end —
+             CONVERGING DOWNWARD, the first settled window I have had
+OBSERVED MHz host mean 2779.1 before → 3474.1 after (min 1429.0, max 4295.4).
+             Host-level, NOT per-arm; this harness does not sample per-arm
+             frequency and I am not pretending otherwise
+GOVERNOR     powersave, frequency_boost 1
+RUNTIME ISA  sse2 avx avx2 fma bmi1 bmi2 aes vaes (avx512f absent)
+ARTIFACT     artifacts/bench/sqrt_1m_cert3_thinkstation1_2026-08-17.json
+```
+
+**CV role:** provenance only, no vote — FP 5.91%, pandas 5.44%.
+
+⚠ **THREAD PROVENANCE IS UNRELIABLE IN THIS ROW AND I WILL NOT LAUNDER IT.** The
+harness reports `thread_count_actually_used: 1` for FrankenPandas, from
+`peak_process_threads: 2` against `process_threads_before_probe: 1` — i.e. the
+sampler saw the probe's own monitor thread and no workers at all. Earlier rows on
+this same code path reported 8. The 20us `/proc/self/status` sampler is known to
+UNDER-report `thread::scope` kernels (six floor/ceil/trunc runs read 1 on a
+provably parallel path), and it cannot distinguish "ran serial" from "workers were
+invisible". So this row does NOT establish the worker count either way. Nothing in
+the verdict depends on it, and the ratio stands regardless — but anyone quoting
+`fp_threads=1` off this row would be quoting the instrument, not the kernel.
+
+**WHAT THE 12% IS NOT.** It is not scheduling policy (284ul: serial loses 0.57-0.67x,
+every raised cap loses monotonically, 4 workers ≡ 8). It is not the finiteness
+witness (yx692: -12 instructions per iteration, no decidable clock change). It is
+not the pre-zeroed buffer (tyiss: the write-once route is 0.72-0.86x SLOWER once the
+consumer is inside the clock). Three named mechanisms are now excluded by
+measurement, which is the value of having run them.
