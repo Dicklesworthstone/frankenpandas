@@ -34486,3 +34486,84 @@ for comparing two rows, applied now to the lock set itself.
 **The honest cost of repair** is 53 re-measurements in certifiable windows. I am not claiming that
 as work done; I am re-measuring the two the standing orders name (floordiv/mod @10M) and reporting
 the rest as a known, quantified debt.
+
+## br-frankenpandas-h67zz — floordiv @10M RE-CERTIFIED ON THE LIVE HARNESS AT 8.787x AND ACTUALLY LOCKED; mod @10M KILLED MID-RUN WHEN THE WINDOW COLLAPSED TO 0.9% IDLE
+
+**Campaign result class:** maintenance-relock (defending a standing row, not claiming a new lever)
+
+The entry above found floordiv/mod @10M locked against a DEAD harness (`4aa484cde23f`) while the
+live one is `60ed3c58fdd5`, so the two rows the standing orders name were defending nothing. This
+is the repair for one of them.
+
+**Executing ELF SHA-256 (self-reported by process):** bench_elf_sha256=a802073cf042 (fp-bench,
+MAIN-8b263954b, preserved; **no build taken** — the freeze on building in a window you intend to
+measure in applies, and none was needed).
+**Harness sha256:** 60ed3c58fdd5 — the live instrument, checked before the run.
+**Legacy incumbent arm (same invocation):** name=pandas, version=2.2.3, measured_ratio=8.787x,
+both arms in the same invocation on thinkstation1.
+**A/A null control (same invocation):** FP 1.01451, pandas 1.00220 — both inside the 2% band.
+**Median-CI decision:** ratio 8.787x, CI [8.5415, 8.9246], **all three clauses true**.
+**CV role:** FP 14.11%, pandas 1.77% — descriptive only; the decision is the CI and null margin.
+**Counted mechanism:** none counted this run; this is a relock of an existing kernel, not a new
+lever, so no mechanism claim is made.
+
+| | FP | pandas |
+|---|---|---|
+| p50 | 15,815.6us | 138,782.5us |
+| cv | 14.11% | 1.77% |
+| A/A null | 1.01451 | 1.00220 |
+| busy-core MHz | **4292.3** | **4293.1** |
+
+### THE FREQUENCY CONFOUND IS CONTROLLED THIS TIME, AND THAT IS THE POINT OF THE INSTRUMENT
+
+An earlier entry in this ledger failed its own instrument audit: none of 13 banked rows recorded
+CPU MHz, on a powersave host whose cores span 2.70x at one instant. The per-arm recorder added in
+`5c362abb2` is why this row can answer the question. From the artifact:
+
+    busy_core_mhz_by_arm    frankenpandas 4292.3   pandas 4293.1     <- 0.02% apart
+    arm_core_mhz_top_k      FP k=8 median 4288.9 (slowest 4282.3, fastest 4292.3)
+    observed_cpu_mhz        min 1429.0  median 3257.3  max 4262.0  (137 samples)
+    loadavg_1min            first 10.62  last 21.39  min 10.62  max 25.37
+
+**The two arms ran at the same clock to within 0.02%**, so the 8.787x is not a frequency artefact.
+Note the host-wide median (3257 MHz) is far below either arm's busy-core figure — on a powersave
+governor the idle cores drag the average down, which is exactly why a host-wide MHz number would
+have been the wrong control and the per-arm one is the right one.
+
+### THE WINDOW COLLAPSED DURING THE RUN, AND I AM RECORDING IT RATHER THAN HIDING IT
+
+`loadavg_1min` went **10.62 -> 21.39 (max 25.37)** across the run. It started in the clean window I
+verified (idle 81-88%, iowait 0.0%, build CPU 0-164%) and ended as the host filled up. Minutes
+after it finished the host was at **loadavg 34.86 and 0.9% idle**.
+
+**A neighbouring measurement was in flight: frankenfs's mounted-kernel bench**, reported by the
+orchestrator. That is recorded here per the standing instruction to note a neighbouring
+measurement when certifying.
+
+What makes the row defensible despite the rise is not my judgement of the window — it is that the
+controls designed to catch exactly this all held: both A/A nulls inside 2%, the incumbent's cv at
+1.77%, and the two arms clock-matched to 0.02%. The balanced-square ABBAABBA interleave exists so
+that a monotone drift hits both arms alike. **If I had only the loadavg I would discard this row;
+the instrument is what lets me keep it.**
+
+### mod @10M: KILLED, NOT MEASURED, NOT ESTIMATED
+
+`mod` started at 16:54:17, seconds before the collapse, and would have run its whole length at
+0.9% idle. I killed it. **No artifact was written and no number is offered for mod @10M.** Its
+old 6.064x lock remains quarantined on the dead harness, so mod is still undefended and I am
+saying so rather than letting the pair read as repaired.
+
+Killing it also returned ~1 core to the neighbouring frankenfs bench, which mattered more than
+salvaging a row I would have thrown away.
+
+### WHAT IS AND IS NOT COMPARABLE HERE
+
+The old lock reads 6.649x and this one reads 8.787x. **These are not comparable and I am not
+claiming a 32% improvement.** They were measured on different instruments (`4aa484cde23f` vs
+`60ed3c58fdd5`), which is the entire reason the old lock was quarantined in the first place. The
+only sound statement is: on the live harness, in this window, floordiv @10M certifies at 8.787x,
+and that row is now banked and defending.
+
+**Live baseline `standing_thinkstation1_60ed3c58fdd5.json` goes 3 -> 4 workloads:** floordiv @10M
+8.787x, groupby_rolling_mean_w10 @1M 7.592x, sqrt @10k 3.73x, sqrt @100k 1.157x. Of 56 unique
+locked workloads, 4 now defend anything. Still 7%.
