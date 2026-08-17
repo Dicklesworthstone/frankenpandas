@@ -33066,3 +33066,77 @@ ELFs         avx2 3314b1a61352c47febd00109144222326bb6a221d2fda1ae0c915da237b40d
              sse2 31c630ba9b385fe834bb10592a7111dad536c83e5451e42320fce8843369ae81
 ARTIFACTS    artifacts/bench/4kig1_div_{AVX2,SSE2_control}_2026-08-17.json
 ```
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1 / h67zz / uza04) — THE ENTIRE ENGINE IS COMPILED TO 128-BIT. 1160 FrankenPandas symbols carry vector ops, 95,920 `%xmm` operands, and **ZERO** `%ymm`. Measured by disassembly, no build and no benchmark
+
+The `div` diagnosis found one kernel at half the host's vector width. This is the same
+measurement applied to every symbol in the shipped binary, and the answer is not "one kernel".
+
+**METHOD, and it costs nothing:** `objdump -d` the preserved default ELF
+(`31c630ba9b385fe834bb10592a7111dad536c83e5451e42320fce8843369ae81`, 82305392 bytes, built from
+a detached worktree at `4c1adb6c6` with `git status --porcelain` empty), attribute every
+instruction to its enclosing symbol, and count `%xmm` against `%ymm`. 2,825,721 lines of
+disassembly, one pass. **Run under a BUILD HOLD — this is reading a binary that already
+existed, not producing one.**
+
+```
+FrankenPandas symbols containing vector ops : 1160
+total %xmm operands                         : 95,920
+total %ymm operands                         : 0
+symbols using any 256-bit register          : 0
+symbols with >=40 %xmm and zero %ymm        : 563
+```
+
+**THE HYPOTHESIS WAS ALREADY INSTRUMENTED; THE EXTENT WAS NOT.** `fp-columnar`'s
+`isa_baseline_probe_ccfp` (an `#[ignore]`d diagnostic) already computes
+`gap = !cfg!(target_feature="avx2") && is_x86_feature_detected!("avx2")` and its doc says a gap
+"means a whole class of hot loops is leaving 256-bit width on the table". That is a prediction.
+**This is the count: the class is every vector operation in the engine.** Credit for the
+hypothesis belongs there; what is new here is the number.
+
+**AND THE ENGINE REPORTS THE FEATURES IT DOES NOT USE.** `is_x86_feature_detected!` appears in
+exactly two files: `fp-bench/src/main.rs`, where it populates the
+`runtime_detected_isa_features` field printed in **every banked row** (`sse2, avx, avx2, fma,
+bmi1, bmi2, aes, vaes`), and the ignored probe above. There is no runtime dispatch anywhere in
+`fp-columnar`, `fp-frame`, `fp-join`, `fp-index` or `fp-io`. So every artifact this campaign has
+produced states that the host has AVX2, and no FrankenPandas instruction has ever used it. The
+only AVX2 in the process is libc's — `__memset_avx2_unaligned_erms` showed up at 5.39% of the
+`div` profile, which is the allocator zeroing our buffers faster than we fill them.
+
+**WHAT THIS DOES NOT SAY, because the temptation is large.** It does NOT say the engine is 2x
+slow. Width only pays where a loop is throughput-bound on vector arithmetic; many of those 1160
+symbols are cold, branch-bound, allocation-bound or string work where 256-bit changes nothing.
+The one place it has been TIMED, `div @1M`, moved 0.557x → 0.756x against pandas — a 1.36x
+relative improvement, and **that row did not certify** (both A/A nulls failed in a window that
+closed). One uncertified measurement is not a basis for extrapolating to 563 symbols, and I am
+not extrapolating.
+
+**WHAT IT DOES SAY** is that the *upper bound* of this lever is repo-wide rather than local, and
+that the question `h67zz` is scoped to answer — v3-vs-default on six math_unary ops — is a
+sample of a much larger surface. Also that `oxv4u`'s "df.dot runs SSE2 `mulpd`" is not a df.dot
+property: **there is no other kind of code in the binary.**
+
+**THE TWO FP-BENCH ENTRIES IN THE TOP LIST ARE THE HARNESS, NOT TARGETS.**
+`fp_bench::build_frame` (1394) and `fp_bench::run` (991) are benchmark scaffolding; they measure
+nothing about the engine and should be ignored when reading the ranking. The real head of the
+list is `SeriesGroupBy::agg_numeric` instantiated for `min`/`max`/`std`/`var` (1090/1090/920/888),
+`DataFrame::pivot_table_with_dropna` (1053), `DataFrameGroupBy::aggregate_named_func` (824),
+`cut` (806), `DataFrame::max_axis1` (704) and `median_axis1` (568), and the
+`typed_float_unary_nullable_owned_par` instantiations for `trunc`/`floor`/`ceil` (664/658/646) —
+which is the rounding family this ledger already took from 0.343x to 1.329x by giving it ONE
+missing instruction.
+
+**NEXT, and it is cheap because both ELFs already exist:** the `+avx2` ELF
+(`3314b1a61352c47febd00109144222326bb6a221d2fda1ae0c915da237b40d31`) can be disassembled the same
+way to produce the per-symbol *delta* — which symbols actually gained 256-bit code and which the
+compiler left alone. That is the difference between "the flag is set" and "the flag reached this
+kernel", and it needs no measurement window at all. I have not run it this turn; the disassembly
+of the default ELF was the deliverable and the second one is the obvious follow-on.
+
+```
+CONDITIONS   BUILD HOLD in force; no build, no benchmark, no measurement window consumed.
+             uptime 10.90 / 13.90 / 19.72, host_is_quiet_now.py "quiet, draining". Disk 65G.
+ARTIFACT     the disassembly is regenerable in one command from the preserved ELF; not banked
+             (2.8M lines) on a disk that has fallen 88G to 65G under an external cargo loop.
+```
