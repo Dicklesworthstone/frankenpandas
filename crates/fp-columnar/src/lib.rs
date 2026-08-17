@@ -25280,6 +25280,12 @@ impl Column {
 
     /// Compute element-wise cosine.
     pub fn cos(&self) -> Result<Self, ColumnError> {
+        // `cos(±inf)` is NaN — there is no limit to return; every finite input is in.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.is_finite(), f64::cos) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::cos) {
             return Ok(out);
         }
@@ -25305,6 +25311,12 @@ impl Column {
 
     /// Compute element-wise tangent.
     pub fn tan(&self) -> Result<Self, ColumnError> {
+        // `tan(±inf)` is NaN. Finite inputs near a pole give a huge finite value, not NaN.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.is_finite(), f64::tan) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::tan) {
             return Ok(out);
         }
@@ -25330,6 +25342,12 @@ impl Column {
 
     /// Compute element-wise arcsine.
     pub fn asin(&self) -> Result<Self, ColumnError> {
+        // NaN outside [-1, 1], and `abs(±inf) > 1` so the infinities are excluded by the same test.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.abs() <= 1.0, f64::asin) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::asin) {
             return Ok(out);
         }
@@ -25355,6 +25373,12 @@ impl Column {
 
     /// Compute element-wise arccosine.
     pub fn acos(&self) -> Result<Self, ColumnError> {
+        // Same domain as `asin`.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.abs() <= 1.0, f64::acos) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::acos) {
             return Ok(out);
         }
@@ -25410,6 +25434,12 @@ impl Column {
 
     /// Compute element-wise hyperbolic sine.
     pub fn sinh(&self) -> Result<Self, ColumnError> {
+        // TOTAL: `sinh(±inf)` = `±inf`, and a finite overflow gives `±inf` — present, not NaN.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::sinh) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::sinh) {
             return Ok(out);
         }
@@ -25435,6 +25465,12 @@ impl Column {
 
     /// Compute element-wise hyperbolic cosine.
     pub fn cosh(&self) -> Result<Self, ColumnError> {
+        // TOTAL: `cosh(±inf)` = `+inf`, finite overflow gives `+inf`.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::cosh) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::cosh) {
             return Ok(out);
         }
@@ -25460,6 +25496,12 @@ impl Column {
 
     /// Compute element-wise hyperbolic tangent.
     pub fn tanh(&self) -> Result<Self, ColumnError> {
+        // TOTAL and bounded: `tanh(±inf)` = `±1.0`.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::tanh) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::tanh) {
             return Ok(out);
         }
@@ -25485,6 +25527,12 @@ impl Column {
 
     /// Compute element-wise inverse hyperbolic sine.
     pub fn asinh(&self) -> Result<Self, ColumnError> {
+        // TOTAL: defined on all reals, `asinh(±inf)` = `±inf`.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::asinh) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::asinh) {
             return Ok(out);
         }
@@ -25510,6 +25558,12 @@ impl Column {
 
     /// Compute element-wise inverse hyperbolic cosine.
     pub fn acosh(&self) -> Result<Self, ColumnError> {
+        // NaN below 1. `acosh(1.0)` = `0.0` and `acosh(+inf)` = `+inf`, both present.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= 1.0, f64::acosh) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::acosh) {
             return Ok(out);
         }
@@ -25535,6 +25589,12 @@ impl Column {
 
     /// Compute element-wise inverse hyperbolic tangent.
     pub fn atanh(&self) -> Result<Self, ColumnError> {
+        // NaN outside [-1, 1]. The ENDPOINTS are `±inf`, which are PRESENT values, so the bound is inclusive.
+        // Domain transcribed from a std probe, not from memory; asserted by
+        // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.abs() <= 1.0, f64::atanh) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::atanh) {
             return Ok(out);
         }
@@ -37207,6 +37267,144 @@ mod tests {
                             out.validity().get(i),
                             "{name}: finite slot {i} must stay present"
                         );
+                    }
+                }
+            }
+        }
+
+        /// br-frankenpandas-4kig1. Ten trig ops now declare a domain to the fused
+        /// arm, and every one of those declarations is a chance to mark a NaN slot
+        /// PRESENT — which is silent, not a crash.
+        ///
+        /// So this test does not encode my belief about each domain. It RE-DERIVES
+        /// the domain from std at runtime: for a probe value, whatever `f(x)`
+        /// actually returns decides whether the column is required to keep the slot
+        /// present or mark it missing. If a libm update moved any boundary, the
+        /// mismatch surfaces here instead of in a silently wrong validity mask.
+        #[test]
+        fn trig_family_domains_match_std_4kig1() {
+            type Op = (
+                &'static str,
+                fn(&Column) -> Result<Column, ColumnError>,
+                fn(f64) -> f64,
+            );
+            let ops: [Op; 10] = [
+                ("cos", Column::cos, f64::cos),
+                ("tan", Column::tan, f64::tan),
+                ("asin", Column::asin, f64::asin),
+                ("acos", Column::acos, f64::acos),
+                ("sinh", Column::sinh, f64::sinh),
+                ("cosh", Column::cosh, f64::cosh),
+                ("tanh", Column::tanh, f64::tanh),
+                ("asinh", Column::asinh, f64::asinh),
+                ("acosh", Column::acosh, f64::acosh),
+                ("atanh", Column::atanh, f64::atanh),
+            ];
+
+            // Boundary probes: the infinities, both sides of +/-1, and a few
+            // ordinary magnitudes. Between them these straddle every boundary the
+            // ten ops have.
+            let probes: Vec<f64> = vec![
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                1.0,
+                -1.0,
+                1.0 + f64::EPSILON,
+                -1.0 - f64::EPSILON,
+                1.0 - f64::EPSILON / 2.0,
+                0.0,
+                -0.0,
+                0.5,
+                -0.5,
+                2.0,
+                -2.0,
+                1e300,
+                -1e300,
+                f64::MIN_POSITIVE,
+                5e-324,
+            ];
+
+            for (name, op, oracle) in ops {
+                let out = op(&Column::from_f64_values(probes.clone())).expect(name);
+                assert_eq!(out.len(), probes.len(), "{name} length drift");
+                for (i, &x) in probes.iter().enumerate() {
+                    let expected = oracle(x);
+                    if expected.is_nan() {
+                        // std says NaN here, so the column must report MISSING.
+                        assert!(
+                            !out.validity().get(i),
+                            "{name}({x:e}) is NaN in std, so slot {i} must be \
+                             MISSING — a domain predicate that lets it through \
+                             marks a NaN slot PRESENT"
+                        );
+                    } else {
+                        // std says a real value — including +/-inf, which is a
+                        // PRESENT value and must not be mistaken for missing.
+                        assert!(
+                            out.validity().get(i),
+                            "{name}({x:e}) = {expected:e} in std, so slot {i} must \
+                             be PRESENT — the predicate is too strict"
+                        );
+                    }
+                }
+
+                // Bit-identity on a corpus that stays inside every op's domain
+                // (|x| <= 1 and >= ... is the intersection: acosh needs x >= 1, so
+                // it is checked separately below).
+                let mut inside: Vec<f64> = vec![0.0, -0.0, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0];
+                let mut seed: u64 = 0x2c31_fe67_9abc_1234;
+                for _ in 0..10_000 {
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let unit = ((seed >> 11) as f64) / ((1u64 << 53) as f64);
+                    let sign = if seed & 1 == 0 { 1.0 } else { -1.0 };
+                    inside.push(sign * unit);
+                }
+                if name == "acosh" {
+                    inside = inside.iter().map(|x| 1.0 + x.abs() * 10.0).collect();
+                }
+                let out = op(&Column::from_f64_values(inside.clone())).expect(name);
+                assert!(
+                    out.validity().all(),
+                    "{name}: in-domain corpus must be all present"
+                );
+                let got = out.as_f64_slice().expect("all-valid typed slice");
+                for (i, (&g, &x)) in got.iter().zip(inside.iter()).enumerate() {
+                    assert_eq!(
+                        g.to_bits(),
+                        oracle(x).to_bits(),
+                        "{name} at {i}: input {x:e}"
+                    );
+                }
+
+                // NEGATIVE CASE: one out-of-domain element among many in-domain
+                // ones must come back missing at exactly that index. Skip the ops
+                // std says are total — for those there IS no out-of-domain value.
+                let out_of_domain = [f64::INFINITY, 2.5, -2.5, -3.0]
+                    .into_iter()
+                    .find(|&x| oracle(x).is_nan());
+                if let Some(bad) = out_of_domain {
+                    for bad_at in [0_usize, 1, 2047] {
+                        let mut mixed = inside.clone();
+                        mixed.truncate(2048);
+                        while mixed.len() < 2048 {
+                            mixed.push(inside[0]);
+                        }
+                        mixed[bad_at] = bad;
+                        let out = op(&Column::from_f64_values(mixed.clone())).expect(name);
+                        assert!(
+                            !out.validity().get(bad_at),
+                            "{name}: out-of-domain {bad:e} at {bad_at} must be MISSING"
+                        );
+                        for i in 0..mixed.len() {
+                            if i != bad_at {
+                                assert!(
+                                    out.validity().get(i),
+                                    "{name}: in-domain slot {i} must stay present"
+                                );
+                            }
+                        }
                     }
                 }
             }
