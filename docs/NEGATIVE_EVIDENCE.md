@@ -35308,3 +35308,71 @@ handlers and differential cases for the timezone family comes FIRST — that is 
 that made `f2mlr` obvious — and only then the carrier. Changing the representation now
 would just re-bank the four `dt_tz_*` unit tests to whatever I picked, on my own
 authority, which is the shape this campaign exists to prevent.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-t2n6i) — the oracle carries TWO CONTRADICTORY datetime contracts, and one of them was written to agree with FrankenPandas. A family of "conformance-green" ops is green against pandas' opposite
+
+I set out to write the `tz_localize` oracle handler this bead asks for, on a saturated
+host where no measurement is admissible. It cannot be written neutrally, and finding out
+why is worth more than the handler.
+
+**Counted mechanism — both contracts are in `crates/fp-conformance/oracle/pandas_oracle.py`:**
+
+| contract | where | value kind emitted |
+|---|---|---|
+| (a) typed | `op_series_to_datetime`'s OWN local `datetime_scalar_to_json` | `{"kind":"datetime64","value": <epoch nanos>}` |
+| (b) stringly | everything else, via `series_to_expected` → `scalar_to_json` | `{"kind":"utf8","value": str(...)}` |
+
+Contract (a)'s comment: *"to match FrankenPandas' typed Datetime64 output
+(br-frankenpandas-0ezw7), rather than the legacy str() form."* Contract (b)'s comment:
+*"`Timestamp`/datetime64 are deliberately NOT intercepted here — the established
+(conformance-green) contract for datetime-producing ops (dt.floor/ceil/round,
+to_timestamp, csv parse_dates) is the utf8 string representation … Routing them through
+the typed branch regresses those ops."*
+
+**So (b) is an oracle encoded to agree with FrankenPandas, and it says so in its own
+comment.** That is also why `f2mlr` was catchable at all: `to_datetime` happens to sit
+on contract (a).
+
+**MEASURED, live pandas 2.2.3 — every op named in (b)'s comment returns datetime64, not
+a string:**
+
+| op | pandas dtype |
+|---|---|
+| `dt.floor('h')` | `datetime64[ns]` |
+| `dt.ceil('h')` | `datetime64[ns]` |
+| `dt.round('h')` | `datetime64[ns]` |
+| `dt.normalize()` | `datetime64[ns]` |
+| `to_timestamp()` | `datetime64[ns]` |
+| `read_csv(parse_dates=…)` | `datetime64[ns]` |
+| `dt.tz_localize('UTC')` | `datetime64[ns, UTC]` |
+
+**THE CONSEQUENCE IS BIGGER THAN THE BEAD.** That family is "conformance-green" against
+a contract that contradicts pandas' actual dtype, so green there certifies agreement
+with an adapted oracle rather than with pandas. This is the Oracle-Adapted-to-FP masking
+pattern the corpus has hit before (`hzayc`, `oxodo`, `6bqfr`) — but at FAMILY scale
+rather than one packet, and pre-declared in a comment rather than discovered.
+
+**WHY I WROTE NOTHING.** Whichever encoder I pick for `tz_localize` decides the answer
+before any measurement: `series_to_expected` blesses FrankenPandas' current `Utf8`, a
+local typed encoder demands `Datetime64`. Writing it either way is the representation
+decision wearing a test's clothing — which is precisely what `t2n6i` was filed to avoid.
+Adding a handler here would have looked like progress and would have silently settled a
+question nobody has answered.
+
+**A/A null control (same invocation):** not applicable — this entry reports dtypes from
+a live-pandas probe and two source comments. No timing was taken and nothing was
+certified.
+
+```
+LOADAVG   24.47 / 27.03 / 23.69 ;  CPU IDLE 73.04%, iowait 0.19%, by mpstat.
+          Reported to me as "CPU idle 1 pct, load 51, three builds" with an explicit
+          DO-NOT-CERTIFY. My own reading was far quieter, and I honoured the directive
+          anyway — no build was started and no ratio was taken.
+```
+
+**REVISED SCOPE, replacing "add a handler":** decide the datetime VALUE contract once,
+for all datetime-producing ops, against pandas rather than against FrankenPandas; unify
+`scalar_to_json` or document each per-op encoder with a stated reason; then add the
+tz-family handlers under the decided contract; then move `dt_tz_localize_utc` and the
+other `dt_tz_*` unit tests. Expect (b)'s ops to move when it lands — its own comment
+predicts "regresses those ops", which on this evidence means *exposes* them.
