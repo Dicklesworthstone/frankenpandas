@@ -33611,3 +33611,70 @@ collapsed after being blessed at "quiet" on a weaker criterion.
 null-failed at 6.496x and 6.604x in noisy windows — and it is a DIFFERENT SIZE from the standing
 `mod @10M`, so it is new evidence rather than a re-measure of a win. It is also the first row
 that would describe current main rather than a two-hour-old tree.
+
+
+### 2026-08-17 CrimsonPine — ⚠️ RETRACTION, AND IT IS THE SERIOUS KIND: **I HAVE NO BIT-IDENTITY EVIDENCE FOR THE `+avx2` BUILD.** `fp-bench`'s `checksum` folds `size_of_val`, not the data — it is a compile-time constant
+
+This morning I retracted the HARNESS `checksum` as proof of bit-identity, having found it
+identical across `div` and `add`. In the same breath I wrote: *"What still stands: the
+ENGINE-level check ... fp-bench's own `checksum` gave `e700f53534db5c6d` from both, and that
+field IS derived from the computed column."*
+
+**I never tested that. It is false.**
+
+```
+  fp-bench-MAIN-8b263954b   div 1M   e700f53534db5c6d      mod 1M   e700f53534db5c6d
+                            div 100k e700f53534db5c6d      mod 100k e700f53534db5c6d
+                            add 1M   e700f53534db5c6d      sqrt 1M  e700f53534db5c6d
+                            log 1M   e700f53534db5c6d
+```
+
+**Five different workloads, two sizes, one constant.** And the source says why —
+`crates/fp-bench/src/main.rs:790`:
+
+```rust
+*checksum =
+    checksum.rotate_left(9) ^ (std::mem::size_of_val(&result) as u64) ^ 0x9e37_79b9_7f4a_7c15;
+```
+
+`size_of_val(&result)` is the size of the RESULT HANDLE — a compile-time constant for a given
+type. The fold never touches a computed element. So the value is a function of the iteration
+count and the type only. **A field named `checksum` that cannot distinguish `sqrt` from `div` is
+not a checksum.**
+
+**WHAT THIS INVALIDATES, stated plainly and without hedging:**
+
+* The claim "`+avx2` is BIT-IDENTICAL, SETTLED" in the AVX2 enablement entry — **WITHDRAWN.**
+* The same claim repeated to `br-frankenpandas-h67zz` when I handed over the ELFs — **WITHDRAWN**,
+  and it matters most there, because that bead is deciding a build-flag policy and I told them
+  the width half was empirically safe.
+* The same claim repeated to `br-frankenpandas-oxv4u` — **WITHDRAWN.**
+* This morning's retraction of the harness checksum stands, but its consolation prize ("the
+  engine-level check IS valid") was itself wrong.
+
+**WHAT IS STILL TRUE, and it is an argument rather than a measurement:** widening a divide cannot
+change its result — `vdivpd` on four lanes computes exactly what two `divpd` on two lanes
+compute, IEEE division being exactly rounded per element with no cross-lane interaction. Both
+builds were made WITHOUT `+fma`, which is the transform that WOULD change bits. I believe the
+builds are bit-identical. **I have not measured it, and I said I had.**
+
+**HOW TO ACTUALLY MEASURE IT, since the instrument cannot:** build the test suite with
+`-C target-feature=+avx2` and run `cargo test -p fp-columnar`. The corpus already contains real
+value assertions — including `round_typed_branch_never_mints_nan_and_stays_bit_identical_o57rj`
+and the drift test landed today — so a green suite under the flag is genuine evidence about
+values, unlike any `checksum` field in this system. That is one build and no measurement window,
+and it is the honest way to restore the claim.
+
+**THE INSTRUMENT DEFECT IS WORTH FIXING ON ITS OWN.** Folding `size_of_val` was presumably meant
+to keep the optimiser from eliminating the result, and `black_box(result)` on the next line
+already does that. Folding a cheap function OF THE DATA — say the first and last element's bits,
+or a wrapping sum of a strided sample — would cost nothing measurable and would make the field
+mean what its name promises. Until then, **no row's `checksum` is evidence of anything about
+values, and two entries in this ledger cited it as though it were.**
+
+**FIFTH PROXY FAILURE TODAY, AND THE PATTERN IS NOW UNAMBIGUOUS.** `%xmm` operands proxied for
+128-bit work. `%ymm` presence proxied for "the flag reached this kernel". Static instruction
+counts proxied for hotness. The harness `checksum` proxied for value equality. Now the engine
+`checksum` proxied for value equality. **Every one was a field whose NAME described what I
+wanted, and in every case the real quantity was one cheap step further on.** The step I skipped
+here was: run it on two different workloads and see whether the number moves.
