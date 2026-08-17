@@ -1891,14 +1891,8 @@ fn apply_f64_slices_nan_tracked(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<
     // The compute-bound threshold is `elementwise_witness_policy()`'s `par_min`,
     // not a number invented here: it is the campaign's existing constant for
     // exactly this decision on the unary side, so the two families now agree.
-    const PARALLEL_MIN_LEN: usize = 1 << 20;
     const PARALLEL_MAX_CHUNKS: usize = 8;
-    let parallel_min_len = match op {
-        ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => {
-            elementwise_witness_policy().1
-        }
-        _ => PARALLEL_MIN_LEN,
-    };
+    let parallel_min_len = binary_parallel_min_len(op);
 
     let mut data = vec![0.0_f64; a.len()];
 
@@ -8391,6 +8385,46 @@ fn par_map_slice_f64_with_witness<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
 ) -> (Vec<f64>, Vec<u64>, bool, bool) {
     let (max_workers, par_min) = elementwise_witness_policy();
     par_map_slice_f64_with_witness_with_policy(input, f, max_workers, par_min)
+}
+
+/// The bandwidth-bound parallel threshold: `add`/`sub`/`mul`/`div` only go parallel
+/// at or above this length. See [`binary_parallel_min_len`].
+const BINARY_BANDWIDTH_PARALLEL_MIN_LEN: usize = 1 << 20;
+
+/// The length at or above which `op`'s binary f64 kernel takes the PARALLEL arm.
+///
+/// **THIS FUNCTION IS LOAD-BEARING FOR TWO STANDING CLAIMS AND IS NOT A TUNING
+/// KNOB.** br-frankenpandas-4kig1. The two arms are a measured distinction, not a
+/// stylistic one, and collapsing them in either direction silently destroys a
+/// certified result that no unit test would otherwise notice:
+///
+/// | standing, vs live pandas | worst bound | point | FP p50 | pandas p50 |
+/// |---|---|---|---|---|
+/// | `floordiv @10M` | **≥ 6.504x** | 6.649x | 20752.35us | 138685.95us |
+/// | `mod @10M` | **≥ 5.651x** | 6.064x | 20095.26us | 119382.73us |
+///
+/// `pow`, `mod` and `floordiv` are libm-class calls where threads were measured
+/// worth 2.6-5x; `add`/`sub`/`mul`/`div` are bandwidth-bound, LLVM autovectorizes
+/// them, and parallelism was measured NOT to pay for them five separate times. The
+/// compute-bound threshold is deliberately `elementwise_witness_policy()`'s
+/// `par_min` rather than a number invented here — it is the campaign's existing
+/// constant for exactly this decision on the unary side, so the two families agree.
+///
+/// THE REGRESSION THIS EXISTS TO CATCH is not hypothetical: `pow`, `mod` and
+/// `floordiv` all sat on `1 << 20` = 1_048_576, which is **4.9% ABOVE the corpus's
+/// canonical "1M" of 1_000_000**, so every 1M-row row in the corpus fell just short
+/// of the parallel arm and ran single-threaded against a pandas arm using 67
+/// threads. `pow` was a certified LOSS at 0.928x because of it. A change that
+/// collapses these two arms to one constant — in EITHER direction — reproduces that
+/// bug or throws away the bandwidth measurement, and is caught by
+/// `mod_and_floordiv_must_stay_on_the_compute_bound_threshold_4kig1`.
+fn binary_parallel_min_len(op: ArithmeticOp) -> usize {
+    match op {
+        ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => {
+            elementwise_witness_policy().1
+        }
+        _ => BINARY_BANDWIDTH_PARALLEL_MIN_LEN,
+    }
 }
 
 /// `std::thread::available_parallelism()`, resolved ONCE per process.
@@ -29541,6 +29575,94 @@ impl CrackIndex {
         }
 
         start + write
+    }
+}
+
+/// REGRESSION LOCK for the two standing `@10M` claims — `floordiv` ≥ 6.504x and
+/// `mod` ≥ 5.651x vs live pandas. br-frankenpandas-4kig1.
+///
+/// These assert ROUTING, not timing. A timing assertion cannot live in a unit test
+/// on this host, and the thing that would actually regress is the threshold
+/// decision: the win came entirely from moving `pow`/`mod`/`floordiv` off the
+/// bandwidth-bound `1 << 20` and onto the compute-bound policy threshold.
+#[cfg(test)]
+mod standing_claim_locks {
+    use super::{
+        ArithmeticOp, BINARY_BANDWIDTH_PARALLEL_MIN_LEN, binary_parallel_min_len,
+        elementwise_witness_policy,
+    };
+
+    const COMPUTE_BOUND: [ArithmeticOp; 3] =
+        [ArithmeticOp::Pow, ArithmeticOp::Mod, ArithmeticOp::FloorDiv];
+    const BANDWIDTH_BOUND: [ArithmeticOp; 4] = [
+        ArithmeticOp::Add,
+        ArithmeticOp::Sub,
+        ArithmeticOp::Mul,
+        ArithmeticOp::Div,
+    ];
+
+    /// The two thresholds must stay DISTINCT, and each op must stay on its own one.
+    ///
+    /// The negative case is the whole point: a "simplification" that gives every op
+    /// one threshold passes any correctness test — the values are identical either
+    /// way — and silently either reinstates the `pow` 0.928x loss or discards the
+    /// five measurements saying threads do not pay for `add`/`sub`/`mul`/`div`.
+    #[test]
+    fn mod_and_floordiv_must_stay_on_the_compute_bound_threshold_4kig1() {
+        let compute = elementwise_witness_policy().1;
+        assert!(
+            compute < BINARY_BANDWIDTH_PARALLEL_MIN_LEN,
+            "the compute-bound threshold ({compute}) must be STRICTLY below the \
+             bandwidth-bound one ({BINARY_BANDWIDTH_PARALLEL_MIN_LEN}); if they are \
+             equal the routing distinction has been collapsed and both standing \
+             @10M claims (floordiv >= 6.504x, mod >= 5.651x) are unfounded"
+        );
+
+        for op in COMPUTE_BOUND {
+            assert_eq!(
+                binary_parallel_min_len(op),
+                compute,
+                "{op:?} must route on the compute-bound threshold; it is a libm-class \
+                 call where threads were measured worth 2.6-5x"
+            );
+        }
+        for op in BANDWIDTH_BOUND {
+            assert_eq!(
+                binary_parallel_min_len(op),
+                BINARY_BANDWIDTH_PARALLEL_MIN_LEN,
+                "{op:?} must stay on the bandwidth-bound threshold; parallelism was \
+                 measured NOT to pay for it five separate times"
+            );
+        }
+    }
+
+    /// The exact size that was the bug: the corpus's canonical "1M" is 1_000_000,
+    /// which is 4.9% BELOW `1 << 20`. Every 1M-row `pow`/`mod`/`floordiv` row ran
+    /// single-threaded against a 67-thread pandas arm, and `pow` certified a 0.928x
+    /// LOSS because of it. This pins the fix at the size that exposed it.
+    #[test]
+    fn the_corpus_canonical_1m_must_reach_the_parallel_arm_for_mod_and_floordiv_4kig1() {
+        const CORPUS_1M: usize = 1_000_000;
+        // Both operands are constants, so this is a COMPILE-time guard rather than a
+        // runtime one — which is stronger for a lock, and is what clippy's
+        // `assertions_on_constants` was pointing at. It pins the premise the whole
+        // test rests on: the corpus's 1M sits BELOW the bandwidth threshold, and that
+        // 4.9% gap is exactly what made the original bug invisible.
+        const _: () = assert!(CORPUS_1M < BINARY_BANDWIDTH_PARALLEL_MIN_LEN);
+        for op in COMPUTE_BOUND {
+            assert!(
+                CORPUS_1M >= binary_parallel_min_len(op),
+                "{op:?} at the corpus's canonical 1M ({CORPUS_1M}) must take the \
+                 PARALLEL arm; it did not before e7d87c811 and pow certified 0.928x"
+            );
+        }
+        for op in BANDWIDTH_BOUND {
+            assert!(
+                CORPUS_1M < binary_parallel_min_len(op),
+                "{op:?} at 1M must stay SERIAL — that is the measured half of this \
+                 distinction, not an oversight"
+            );
+        }
     }
 }
 
