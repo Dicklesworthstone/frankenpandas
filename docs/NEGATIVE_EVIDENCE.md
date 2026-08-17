@@ -30884,3 +30884,54 @@ LOADAVG      8.69 / 9.81 / 16.72 at launch → 9.86 / 9.88 / 16.30 at the end, z
 OBSERVED MHz host mean 2535.1 → 3821.2 (min 1429.0, max 4292.2), host-level not per-arm
 ARTIFACTS    artifacts/bench/3qpj4c_{floor,trunc}_r{1,2}.json
 ```
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — TWO CORRECTIONS: I measured a `+sse4.1` feature my build had compiled OUT, and I ran a row my own storm check had told me to defer
+
+**PROCESS FAILURE FIRST, because it is the more embarrassing one.** I put
+`host_is_quiet_now.py` and the certification in the SAME shell invocation. The check
+printed **"VERDICT: BUSY … Defer the run"** and the certification ran anyway,
+because printing is not gating — both commands were already queued. **A check that
+only prints is decoration.** The `floor @1M` row below was taken against my own
+tool's explicit instruction, and its FP null duly failed at 1.039583.
+
+The fix is trivial and I am recording it rather than just doing it: the check exits
+1 when busy, so it must be `python3 scripts/host_is_quiet_now.py && <certify>`, not
+two statements in sequence. Every certification I take from here uses `&&`.
+
+**SECOND, AND IT INVALIDATES THIS TURN'S `floor` FRAMING.** I described ELF
+`4491fd06` as "the new `+sse4.1` binary" after rebuilding on the peer's
+`7ddda1d93`. It is not. That commit guards the intrinsic with
+`#[cfg(target_feature = "sse4.1")]` — a COMPILE-TIME cfg — and my build used default
+flags, so the fast path was **compiled out of my binary entirely**. I had the source
+and none of the capability, and the 5.4G `target-sse41/` directory I flagged as an
+unexplained disk consumer two turns ago is precisely the flagged build I needed.
+
+So the two rows I took measure the BASELINE kernel, not the intrinsic:
+
+| row | ratio | nulls | what it actually measures |
+|---|---|---|---|
+| `floor @10M` | 1.17x | both PASS (0.996633 / 0.999145) | baseline magic-number kernel |
+| `floor @1M` | 0.33x | FP 1.039583 **FAIL** | baseline, and taken against the check |
+
+**AND THAT KILLS AN IMPROVEMENT I WAS ABOUT TO CLAIM.** `floor @10M` read 1.056x
+before the peer's commit and 1.17x after, which looks like progress. With the
+intrinsic compiled out, **the two binaries run the same floor kernel**, so that
+difference is run-to-run variation and nothing else. Had I not checked how the
+feature was enabled, I would have banked a 1.056→1.17 "improvement" produced by a
+code path that was never in my binary.
+
+`floor @1M` at 0.33x is likewise consistent with every baseline measurement in this
+bead (≈0.30x), and is NOT a refutation of the peer's certified 1.544x — **it is a
+measurement of a different build.** Their number stands; mine was never a
+replication of it, and I should not have framed it as one.
+
+**WHAT A REPLICATION WOULD ACTUALLY REQUIRE**, recorded so the next attempt is
+right: build with `RUSTFLAGS="-C target-feature=+sse4.1"` into a separate target
+directory — which is what `target-sse41/` is — and confirm the ELF differs from the
+default build before believing any ratio. A cfg-gated fast path is invisible in the
+source diff at the call site: `git diff` shows the code arriving, `--stat` shows the
+file changed, and the drift check I have been running all session reports `.rs`
+touched. **None of that distinguishes "the code is here" from "the code is
+enabled".** That is a new failure shape for this ledger, and it is adjacent to the
+one it has recorded four times: reasoning about a quantity next to the one that
+decides.
