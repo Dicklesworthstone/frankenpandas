@@ -42437,7 +42437,9 @@ mod str_worker_pool {
         /// first that blocked the lint gate for EVERY agent in this checkout,
         /// not just fp-frame's. `#[allow(dead_code)]` would silence it too, but
         /// it would equally silence a future accessor that really had gone dead.
-        #[cfg(test)]
+        /// NO LONGER `#[cfg(test)]` (br-frankenpandas-03fp5): `DataFrame::dot`
+        /// now chunks its columns to the pool's width, so a non-test caller
+        /// exists and the accessor is no longer dead code in a normal build.
         pub fn threads(&self) -> usize {
             self.threads
         }
@@ -42452,7 +42454,10 @@ mod str_worker_pool {
         /// non-test caller exists, so it is dead code in a normal build.
         #[cfg(test)]
         pub fn live_workers(&self) -> usize {
-            self.job_txs.iter().filter(|slot| slot.get().is_some()).count()
+            self.job_txs
+                .iter()
+                .filter(|slot| slot.get().is_some())
+                .count()
         }
 
         /// Run `jobs` on the pool and return their results **in submission
@@ -67838,6 +67843,7 @@ impl DataFrame {
         if let Some(a_views) = collect_finite_float64_views(self, m) {
             let mut result_cols = BTreeMap::new();
             let mut col_order = Vec::with_capacity(n);
+            let mut b_values_by_column: Vec<Arc<[f64]>> = Vec::with_capacity(n);
             let mut all_b_finite = true;
             // Build the shared left (A) panel ONCE and clone its inner Arc per
             // output column, instead of rebuilding the k Float64DotInputs +
@@ -67863,12 +67869,57 @@ impl DataFrame {
                 } else {
                     Arc::from(slice.to_vec())
                 };
-                let column = Column::from_f64_all_valid_dot_product_shared(&a_panel, b_values, m);
-                result_cols.insert(name.clone(), column);
+                b_values_by_column.push(b_values);
                 col_order.push(name.clone());
             }
 
             if all_b_finite {
+                // PERSISTENT POOL, NOT A SCOPE PER CALL (br-frankenpandas-03fp5).
+                // The scoped path spawned one thread per worker on EVERY `dot`
+                // — 63 of them per call at `dim = 1000` — and the mid-slot clock
+                // sampler measured the consequence directly: FrankenPandas' own
+                // cores span 2.8892x mid-flight against the incumbent's 1.0463x,
+                // because at any instant some are between scopes. `str_worker_pool`
+                // already solves this safely for the string kernels, with
+                // per-worker channels and threads spawned once per process.
+                //
+                // Everything a column needs is `Arc`-backed, so each job clones
+                // handles and is `'static`. Bit-identical: every column runs the
+                // same `materialize_float64_dot` over the same operands in the
+                // same `j = 0..k` order; only which thread calls it changes, and
+                // the result is assembled in `col_order` order regardless of
+                // completion order.
+                // ONE JOB PER WORKER, NOT ONE PER COLUMN. The pool dispatches
+                // job i to worker i and documents that a caller exceeding its
+                // width degrades to caller-side execution — handing it 1000
+                // column-jobs for 64 workers ran 936 of them serially and
+                // measured 175 ms against the scoped path's 21 ms. Chunking to
+                // the pool's width is how the scoped path already grouped
+                // columns; only the thread mechanism changes.
+                let width = str_worker_pool::pool().threads().max(1);
+                let chunk = b_values_by_column.len().div_ceil(width).max(1);
+                let jobs: Vec<_> = b_values_by_column
+                    .chunks(chunk)
+                    .map(|group| {
+                        let panel = a_panel.clone();
+                        let group: Vec<Arc<[f64]>> = group.to_vec();
+                        move || {
+                            group
+                                .iter()
+                                .map(|b_values| Column::dot_column_data(&panel, b_values, m))
+                                .collect::<Vec<Vec<f64>>>()
+                        }
+                    })
+                    .collect();
+                let produced: Vec<Vec<f64>> = str_worker_pool::pool()
+                    .run(jobs)
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                for (name, data) in col_order.iter().zip(produced) {
+                    result_cols.insert(name.clone(), Column::from_f64_values(data));
+                }
+
                 // Materialize the n output columns in ONE scope, parallel
                 // across columns (br-frankenpandas-1hjgz).
                 //
