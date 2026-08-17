@@ -30630,3 +30630,59 @@ questions remain open and are not mine.
 
 **`trunc` is owed a re-run** in a settled window; its effect is the smallest of the
 three and its FP null missed by 0.55 percentage points.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-09ygw) — `compare`'s dtype promotion is NOT a blanket int64→float64, and pandas REFUSES a non-identical index where FrankenPandas answers
+
+Host was busy (`host_is_quiet_now.py` reporting BUSY with two local builds running,
+loadavg 26.71 lagging as usual), so this turn went to parity work, which is gated by
+tests rather than by a quiet window. Probed live pandas 2.2.3 rather than reasoning
+from the bead.
+
+**THE PROMOTION IS DTYPE-SPECIFIC.** `Series.compare` of two IDENTICALLY-labeled
+series, with no NaN introduced anywhere:
+
+| input | result | promoted? |
+|---|---|---|
+| `int64` | `float64` | **yes** |
+| `float64` | `float64` | no |
+| `object` | `object` | no |
+| `bool` | **`object`** | **yes, to object — not float** |
+| `Int64` (nullable) | `Int64` | **no** |
+| `datetime64` | `datetime64` | no |
+
+The rule is *what this dtype becomes when a missing value is inserted*: numpy
+`int64` cannot hold NaN so it goes float64, numpy `bool` cannot so it goes object,
+while nullable `Int64` holds `pd.NA` and `datetime64` holds `NaT`, so both are
+exempt. **That is br-frankenpandas-nywa8's Rule 1 exactly** — and it means the
+blanket "int64 → float64" reading of this bead would be WRONG for the nullable and
+temporal cases.
+
+**And it bears on whether we should adopt it at all.** FrankenPandas columns are
+nullable-capable by construction — every `Column` carries a validity mask — so the
+forcing function that makes pandas promote does not apply to us the same way.
+Adopting the promotion is a deliberate parity choice, not a bug fix, and it shares
+its rule with nywa8's 81 fixtures. **It should be decided once for both, not
+separately here.**
+
+**A DIVERGENCE THIS BEAD DOES NOT RECORD:** pandas refuses a non-identical index
+outright.
+
+```
+pd.Series([1,2], index=[0,1]).compare(pd.Series([1,9], index=[0,2]))
+  -> ValueError: Can only compare identically-labeled Series objects
+```
+
+`Series::compare_with` opens with `self.align(other, AlignMode::Outer)` and produces
+a result, so **FrankenPandas silently answers a question pandas refuses**. For
+identically-labeled inputs the outer align is a no-op and behaviour matches, so this
+only bites on mismatched labels — which is exactly why nothing had noticed.
+
+**NO BEHAVIOUR CHANGE LANDED, AND THAT IS THE POINT OF THIS ENTRY.** Both items are
+parity-vs-design decisions with blast radius beyond this bead: the first shares
+nywa8's rule across 81 fixtures, the second is the same shape as
+br-frankenpandas-fyr1z, whose sanctioned answer is a STRICT mode whose policy
+carrier (fyr1z.2) does not exist yet. Implementing either unilaterally would turn
+pinned fixtures red on my own authority, and this ledger already records what
+happens when I decide a rule from one measurement and generalise it. **The measured
+evidence is banked so whoever owns the decision has it; the decision is not mine to
+take.**
