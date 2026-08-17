@@ -4048,6 +4048,29 @@ def like_for_like(comparison: dict[str, Any]) -> dict[str, Any]:
             f"median says {detail.get('median_ratio')}x but best-vs-best says "
             f"{detail.get('ratio')}x — they disagree in DIRECTION"
         )
+    # THIRD REASON: the subject was denied cores the incumbent never needed.
+    # br-frankenpandas-4kig1, and the fixture is again a real row rather than an
+    # invented one. `str_startswith_arrow @1M` certified 3/3 clauses at 1.275x
+    # under `affinity_cpus=[0]` and, 27 minutes later on the same host with no
+    # source change, at 4.824x unconstrained. pandas is single-threaded on that
+    # workload so its arm moved 0.6%; FrankenPandas' moved 3.74x. The entire 3.8x
+    # spread between two certified ratios was our own parallelism being taken away
+    # and given back, and NOTHING in the row said so -- the capped run had the
+    # CLEANEST A/A nulls of its batch (0.99960/0.99997) and a cv of 0.28% against
+    # 17.54%, because one busy core on a 64-thread host is a quiet host. Null
+    # quality measures how still the machine was, not how representative the row
+    # is, and here the stillest row understated the subject by 3.74x.
+    provenance = comparison.get("thread_provenance", {})
+    available = provenance.get("runtime_available_parallelism")
+    host_threads = provenance.get("logical_threads")
+    if isinstance(available, dict) and isinstance(host_threads, int):
+        subject_saw = available.get("frankenpandas")
+        if isinstance(subject_saw, int) and 0 < subject_saw < host_threads:
+            reasons.append(
+                f"FrankenPandas saw {subject_saw} of the host's {host_threads} logical "
+                "CPUs; the ratio measures a THREAD CAP as much as the two engines, and "
+                "must not be tabulated beside unconstrained rows"
+            )
     return {"ok": not reasons, "reasons": reasons, "gate_input": False}
 
 
@@ -4260,6 +4283,55 @@ def _like_for_like_self_test() -> None:
     # A row missing the diagnostics entirely must not be flagged on absence.
     if not like_for_like({"verdict": "SLOWER"})["ok"]:
         raise RuntimeError("absent diagnostics must not be read as a failure")
+
+    # br-frankenpandas-4kig1: the thread-capped row, as it actually appeared on
+    # disk. Everything else about it is immaculate -- clean clocks, agreeing
+    # minima, the batch's best nulls -- and it is still not a comparison of the
+    # two engines.
+    capped = {
+        "verdict": "FASTER",
+        "ratio": 1.275,
+        "balanced_square": {
+            "host_state": {"arms_saw_same_clock": True, "arm_clock_ratio": 1.0004}
+        },
+        "best_vs_best": {"ratio": 1.27, "median_ratio": 1.275,
+                         "direction_agrees_with_median": True},
+        "thread_provenance": {
+            "logical_threads": 64,
+            "runtime_available_parallelism": {"frankenpandas": 1, "pandas": 1},
+        },
+    }
+    verdict = like_for_like(capped)
+    if verdict["ok"]:
+        raise RuntimeError("a row measured under a thread cap is not like-for-like")
+    if len(verdict["reasons"]) != 1:
+        raise RuntimeError(f"the cap must be the only reason, got {verdict['reasons']}")
+    if "THREAD CAP" not in verdict["reasons"][0]:
+        raise RuntimeError("the cap reason must name what it is")
+
+    # The SAME workload unconstrained, which certified at 4.824x. Must pass clean,
+    # or the check would flag every row on a busy host and be worthless.
+    uncapped = dict(capped) | {
+        "ratio": 4.824,
+        "thread_provenance": {
+            "logical_threads": 64,
+            "runtime_available_parallelism": {"frankenpandas": 64, "pandas": 64},
+        },
+    }
+    if not like_for_like(uncapped)["ok"]:
+        raise RuntimeError("an unconstrained row must not be flagged as capped")
+
+    # A row whose provenance is absent or malformed must not be flagged on
+    # absence -- the same rule the clock and minima checks already follow.
+    for missing in (
+        {"thread_provenance": {}},
+        {"thread_provenance": {"logical_threads": 64}},
+        {"thread_provenance": {"runtime_available_parallelism": {"frankenpandas": 1}}},
+        {"thread_provenance": {"logical_threads": 64,
+                               "runtime_available_parallelism": {"frankenpandas": None}}},
+    ):
+        if not like_for_like(missing)["ok"]:
+            raise RuntimeError(f"absent thread provenance must not flag: {missing}")
 
 
 def _host_state_self_test() -> None:
@@ -4902,6 +4974,12 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                         fp_result,
                         pd_result,
                     )
+                    # RECOMPUTED, because `like_for_like` runs inside the gate and
+                    # `thread_provenance` is only attached here -- so the thread-cap
+                    # reason would be permanently invisible if it were left as the
+                    # gate computed it. Idempotent: same inputs, same answer, plus
+                    # the one field that was not populated yet.
+                    comparison["like_for_like"] = like_for_like(comparison)
                     if not comparison["thread_provenance"]["valid"]:
                         comparison["verdict"] = "CONTRACT_INVALID"
                         comparison["ratio"] = None

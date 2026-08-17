@@ -32228,3 +32228,52 @@ forever. Fine in production, a live hazard in the bench binary.
 the entry above (commit `e6c697839`). It runs when the tree is attributable. Waiting
 costs a window; measuring an unattributable tree costs a wrong number that looks
 exactly like a right one.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the thread-cap blindspot is now closed AT THE SOURCE: `like_for_like` gains a third reason, so a capped row announces itself when it is measured
+
+Earlier today I recorded that `str_startswith_arrow @1M` certified 3/3 clauses at
+1.275x on one core and 4.824x on sixty-four, same host, no source change, and that
+nothing in the row said so. I fixed the worklist script then, which is where I was
+about to make the mistake. **That was the downstream fix; this is the upstream one.**
+
+`like_for_like` already existed for exactly this class — "is this a comparison of the
+two ENGINES, or of their circumstances?" — and already carried two reasons (skewed
+arm clocks, inverted best-vs-best). The thread cap is the same shape and is now its
+third: when FrankenPandas saw fewer logical CPUs than the host has, the row says
+
+```
+    NOT LIKE-FOR-LIKE: FrankenPandas saw 1 of the host's 64 logical CPUs; the ratio
+    measures a THREAD CAP as much as the two engines, and must not be tabulated
+    beside unconstrained rows
+```
+
+at the terminal, next to the verdict, at the moment it is measured — not two days
+later when someone reads the artifact.
+
+**ONE SUBTLETY THAT WOULD HAVE MADE IT INERT.** `like_for_like` runs inside
+`apply_balanced_square_gate`, and `thread_provenance` is not attached to the row until
+after that returns. Written naively the new reason could never fire — the field it
+reads is always absent at the moment it looks. So the diagnostic is recomputed once
+`thread_provenance` lands, which is idempotent for the two existing reasons. **A check
+that cannot fire is worse than no check, because it reads as coverage.**
+
+**DIAGNOSTIC ONLY, and deliberately so.** `gate_input` stays false, no clause moves,
+and a capped row still certifies. The three-clause contract is shared across the
+campaign and is not one agent's to rewrite — and the capped row is not *invalid*, it
+answers a different question. What changes is that a reader can no longer miss which
+question it answered.
+
+**PINNED WITH THE REAL FIXTURE, and proved able to fail.** The self-test uses the row
+as it appeared on disk — clean clocks, agreeing minima, the batch's best A/A nulls
+(0.99960 / 0.99997), cv 0.28% — because that is the point: everything else about it is
+immaculate. Its unconstrained twin at 4.824x must pass unflagged, or the check would
+flag every row on a busy host and be worthless, and four malformed-provenance shapes
+must not flag on absence, the same rule the clock and minima reasons already follow.
+Verified by direct call that the capped fixture returns `ok: False` with exactly one
+reason and the uncapped one returns `ok: True` with none. All eight harness self-tests
+pass: host-exclusivity, corrected-null-gate, balanced-square, best-vs-best, host-state,
+like-for-like, slot-sampler, row-persistence.
+
+No build and no measurement — this is Python, and the tree still carries another
+pane's uncommitted `fp-columnar` migration, so my A/B remains held.
