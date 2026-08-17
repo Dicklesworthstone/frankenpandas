@@ -32872,3 +32872,70 @@ bandwidth-bound `1 << 20`; the ledger already records that a single shared thres
 48576 elements. A unit test pinning that routing decision costs no measurement window,
 cannot quarantine, and fails deterministically in CI the moment someone re-routes those
 ops. **That is the lock that survives an instrument change.**
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the certified corpus is 76 WINS ACROSS 14 IDENTITIES AND ONLY 2 WERE LOCKED. Seventeen more workloads are now locked, and the reason all of them currently REFUSE is worth more than the lock itself
+
+Having locked `mod`/`floordiv @10M`, I checked whether the same ELF and harness had certified
+anything else that was also undefended. It had not — that baseline was already complete for
+its identity. **But the sweep across every artifact found 76 certified FASTER rows, all three
+gate clauses passing, spread over 14 distinct comparability identities, of which exactly 2
+were locked: the two I locked an hour ago.**
+
+**NOW LOCKED** in `.bench-history/standing_thinkstation1_6d884360.json`, the largest identity
+(harness `6d884360e4df` on `thinkstation1`), 17 distinct workloads deduped from 34 certified
+rows:
+
+| row | ratio | FP p50 |
+|---|---:|---:|
+| `loc_labels @1M` | 14.817x | 2162.7us |
+| `join_inner @1M` | 10.356x | 2690.8us |
+| `dt_strftime @1M` | 10.192x | 38046.2us |
+| `str_contains_arrow @1M` | 9.53x | 1927.8us |
+| `join_inner_str @1M` | 7.789x | 16718.2us |
+| `df_dot @100k` | 7.255x | 1656.8us |
+| `groupby_sum_int64 @1M` | 5.957x | 1626.8us |
+| `str_startswith_arrow @1M` | 4.824x | 797.4us |
+| …and 9 more | | |
+
+**SELECTION RULE, chosen against my own interest and stated so it can be argued with:** where
+a workload certified more than once, the baseline banks the **SLOWEST** certified p50, not the
+fastest. Banking the best number would make ordinary run-to-run noise trip a 3% budget — this
+ledger measured replicate agreement at 0.8-2.7%, which is uncomfortably close to it. A lock
+that cries wolf gets disabled, and a disabled lock defends nothing.
+
+**THREAD-CAPPED ROWS ARE EXCLUDED**, using the check added to `like_for_like` this morning.
+`str_startswith_arrow @1M` therefore enters at **4.824x, not 1.275x** — the capped twin was
+filtered automatically rather than by me remembering. That is the first time today one of these
+mechanisms caught something without being asked.
+
+**PROVED IT CAN FAIL, AND PROVED IT DOES NOT OVER-FIRE** — both halves, because only the pair
+is evidence:
+
+```
+self-comparison          -> ALLOW    Workloads: 17/17 passed, Categories: 4/4
++5% on loc_labels ALONE  -> BLOCK    loc_labels (1M): p50 regressed +5.0% (budget: +3.0%)
++2% on EVERY workload    -> ALLOW    inside budget, correctly silent
+```
+
+**AND HERE IS THE STRUCTURAL FINDING, WHICH MATTERS MORE THAN THE LOCK.** Both of my baselines
+— and every one of the 14 identities — sit on harnesses that are **not** the current one. The
+harness sha is part of the comparability identity, so **every banked baseline in this repo
+QUARANTINES the moment the harness is edited**, and `artifacts/bench` holds **18 distinct
+harness shas**. A baseline is therefore comparable only until the next instrument change, and
+this campaign changes its instrument often — I changed it myself this morning.
+
+That is not an argument for weakening the rule. The rule is right: a cross-harness delta
+measures a different instrument, and the fleet has the 5.9459x-vs-12.385414x measurement to
+prove it. **It is an argument that re-baselining is part of the cost of touching the harness,
+and nobody has been paying it.** Concretely, and this is the process change I am proposing
+rather than making unilaterally: **an agent who edits `benches/vs_pandas_harness.py` owns
+re-measuring the standing rows under the new instrument, or the corpus silently loses its
+defence at the moment of the edit.** I incurred exactly that debt this morning and am recording
+it against my own work.
+
+**WHAT IS STILL UNDEFENDED, named so it is not mistaken for done:** 12 identities and ~57
+certified rows, including the `+sse4.1` rounding family (`floor` 1.544x, `ceil` 1.516x), the
+libm family (`hypot` 4.979x, `atan2` 4.864x, `pow @10M` 4.278x), `df_transpose_materialize
+@100k` at 389.358x, and `str_sort @1M` at 10.5x. They are each a JSON assembly away, and none
+of them is defended today.
