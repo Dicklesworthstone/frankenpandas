@@ -207,6 +207,53 @@ def untracked_citations(bucket: dict[str, Any]) -> list[str]:
     )
 
 
+def live_harness_sha() -> str:
+    """The sha256 of the harness AS IT EXISTS RIGHT NOW, not as any run recorded it."""
+    import hashlib
+
+    harness = REPO / "benches" / "vs_pandas_harness.py"
+    return hashlib.sha256(harness.read_bytes()).hexdigest()
+
+
+def report_orphans(groups: dict[str, dict[str, Any]]) -> int:
+    """Certified rows banked against a harness that is no longer the live one.
+
+    MEASURED 2026-08-17: 3 of 56 unique locked workloads sat on the live harness
+    — the lock set looked 56 strong and was 3. A lock banked against a superseded
+    harness is not a weaker lock, it is NO lock: `comparability_identity` refuses
+    the comparison outright, so a regression in those workloads is silent.
+
+    This exists because the assembler already tells you to "re-measure the rows it
+    can no longer place" and never said WHICH. It prints nothing once the debt is
+    zero, which is also its deletion condition.
+    """
+    live = live_harness_sha()[:12]
+    best: dict[tuple[Any, Any, str], tuple[float, str]] = {}
+    for bucket in groups.values():
+        identity = bucket["identity"]
+        harness = str(identity.get("harness_sha256") or "")[:12]
+        if harness == live:
+            continue
+        host = str(identity.get("host_identity") or "unknown-host")
+        for result in bucket["best"].values():
+            key = (result.get("workload"), result.get("size"), host)
+            ratio = float(result.get("ratio") or 0.0)
+            if key not in best or ratio > best[key][0]:
+                best[key] = (ratio, harness)
+
+    if not best:
+        print(f"no orphaned locks — every certified row sits on the live harness ({live}).")
+        return 0
+
+    print(f"live harness is {live}; {len(best)} unique certified workload(s) are locked elsewhere.")
+    print("Re-measuring these in a clean window is what turns them back into defences:\n")
+    for (workload, size, host), (ratio, harness) in sorted(best.items(), key=lambda kv: -kv[1][0]):
+        print(f"  {ratio:>10.3f}x  {str(workload):<38} @{str(size):<6} {host:<16} harness={harness}")
+    big = sum(1 for ratio, _ in best.values() if ratio >= 2.0)
+    print(f"\n{big} of {len(best)} are >=2x wins — a regression there is what would actually hurt.")
+    return len(best)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -220,11 +267,20 @@ def main() -> int:
         default=1,
         help="only emit identities carrying at least this many certified workloads",
     )
+    parser.add_argument(
+        "--orphans",
+        action="store_true",
+        help="list certified workloads locked against a superseded harness, and exit",
+    )
     args = parser.parse_args()
 
     groups = collect()
     if not groups:
         print("no certified rows found — nothing to lock")
+        return 0
+
+    if args.orphans:
+        report_orphans(groups)
         return 0
 
     emitted = total = 0
