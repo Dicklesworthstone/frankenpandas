@@ -30748,3 +30748,81 @@ rounds buy the null precision that four re-runs did not.
 ≈0.127x this bead started with to a CERTIFIED 1.544x.** The ISA route I documented
 as blocked on a workspace decision is now landed and paying, which retires the
 largest open item in my own summary of this family.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-3qpj4) — RE-MEASURED in a settled window: the intrinsic win is REAL but SMALLER than I banked. `ceil @1M` certifies 1.337x, and the 1.544x/1.516x figures were flattered by a slow incumbent exactly as I flagged
+
+I banked `floor` 1.544x and `ceil` 1.516x and wrote at the time that the incumbent
+had been 24% slower than in adjacent rows, that the multiple was flattered, and that
+the magnitude wanted a re-measure. Re-measured, in the best window of the session —
+load 7.15/9.16/18.00, **zero builds running**, same binary, warmed.
+
+| workload | flattered row | **settled row** | verdict now |
+|---|---:|---:|---|
+| `floor @1M` | 1.544x (pandas 248.5us) | **1.384x** (pandas 184.8us) | 2/3 REFUSED |
+| `ceil @1M` | 1.516x (pandas 230.8us) | **1.337x** (pandas 180.0us) | **3/3 FASTER** |
+| `trunc @1M` | 1.354x REFUSED | **1.346x** (pandas 178.5us) | 2/3 REFUSED |
+
+**A/A null control (same invocation):** `ceil` FrankenPandas median ratio 1.00236 and
+pandas median ratio 0.99654, both inside the 2% limit — the only clean pair of the
+three. `floor`'s FrankenPandas null came back 1.04037 and `trunc`'s 1.03171, both
+FAILING, so those two rows are REFUSED and neither 1.384x nor 1.346x is quoted.
+
+**Campaign result class:** incumbent-win.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=0797b4b29b6bfe7e0875f6df617bc590079956dadb538b796b31693bb3b3b174 (82377808 bytes) /data/projects/frankenpandas/target-avx2nofma/release-perf/fp-bench
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files, 70681559 bytes), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T091147.307684Z-pid2839474 , giving
+measured_ratio=1.337x for the `ceil` row.
+
+**Median-CI decision:** `ceil` effect median 1.337x, 95% CI [1.29777943, 1.40768416]
+excluding unity; the claimed log effect clears its required threshold, which is why
+this row decides where the other two are refused.
+
+**THE CORRECTION, plainly.** The certified figure for this lever is **1.337x on
+`ceil`**, not the 1.5x pair I banked an hour ago. Both earlier rows were taken while
+the incumbent was running 24-38% slow, and dividing by a slow incumbent inflates the
+ratio. The nulls passed then, which is why the rows were accepted — **a passing null
+does not detect an incumbent that is uniformly slow, because a uniform slowdown
+cancels in an arm's self-comparison.** That is a real gap in what the null can see,
+and it is the second time today the incumbent's absolute level, not its null, was
+the thing worth checking.
+
+**WHAT DID NOT CHANGE, and it is the part that matters.** FrankenPandas' own absolute
+time is stable across both windows and is the quantity the whole lever rests on:
+132.5 / 131.9 / 132.9 us here against 161.3 / 148.3 / 144.3 us in the flattered rows
+— the settled window is actually FASTER for the subject. The progression stands:
+
+| build | FP p50, `floor @1M` |
+|---|---:|
+| default (SSE2, `floor_fast`) | ~588us |
+| `+sse4.1,+avx2`, `floor_fast` | 198.1us |
+| `+sse4.1,+avx2`, INTRINSIC | **132.5us** |
+
+**So the lever is confirmed and the headline is corrected: ~1.34x certified rather
+than ~1.5x, and `floor` moves from a certified 0.343x SLOWER to a refused-but-
+consistent 1.384x.** The 4.5x swing on FrankenPandas' own clock (588us → 132.5us) is
+unchanged, because that never depended on the incumbent at all.
+
+**Counted mechanism:** FP p50 for `floor @1M` 588 → 198.1 → 132.5us across default,
+flag-only and flag-plus-intrinsic, with the incumbent between 178.5 and 204.9us in
+every settled row.
+
+**CV role:** provenance only, no vote.
+
+```
+BINARY       0797b4b29b6bfe7e0875f6df617bc590079956dadb538b796b31693bb3b3b174,
+             +sse4.1,+avx2, warmed with three throwaway runs
+LOADAVG      7.15 / 9.16 / 18.00 at launch → 12.18 / 10.11 / 17.94 at the end,
+             ZERO builds running (rustc 0, cargo 0) — the cleanest window measured
+OBSERVED MHz host mean 2776.3 → 3179.7 (min 1429.0, max 4295.9), host-level not per-arm
+ARTIFACTS    artifacts/bench/3qpj4b_{floor,ceil,trunc}_settled.json
+```
+
+**`floor` and `trunc` are owed one more run** — their FP nulls missed by 4.0 and 3.2
+points in a window that was otherwise ideal, which is itself worth noting: the
+cleanest host conditions of the session did not produce clean nulls on two of three
+ops.
