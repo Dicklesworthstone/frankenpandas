@@ -32735,3 +32735,58 @@ the walk costs nothing. Sweeping them would have been wrong in principle and wor
 nothing in practice. Of the 62 rewritten sites, exactly three workloads are shown here
 to benefit; the rest are correctness-of-shape changes with no measured effect, and I am
 not claiming one.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the `+avx2` build EXISTS and is VERIFIED ENABLED: 274 `%ymm` operands where the default build had 0, and `vdivpd %ymm` in the hot loop. No ratio yet
+
+Follow-on to the diagnosis above, and deliberately separated from it: **this entry
+claims only that the code is present and executing, not that it is faster.** Those are
+different claims and this campaign has already confused them once — a `+sse4.1` path was
+measured that the compiler had removed, and a phantom 1.056 → 1.17 "improvement" was
+nearly banked off it. So the enablement check now happens BEFORE the stopwatch, every
+time.
+
+| build | `%xmm` operands | `%ymm` operands | divide instruction |
+|---|---:|---:|---|
+| default (`31c630ba…`) | 139 | **0** | `divpd %xmm` — 2 f64/instr |
+| `+avx2` (`3314b1a6…`) | 515 | **274** | `vdivpd …,%ymm7,%ymm7` — 4 f64/instr |
+
+The hot loop changed shape as predicted, and is now unrolled over 256-bit loads:
+
+```
+  10.07%   vmovupd 0x60(%r14,%r9,1),%ymm8
+   7.38%   vmovupd 0x40(%r14,%r9,1),%ymm7
+   7.25%   vmovupd %ymm6,0x20(%rbp,%r9,1)
+   5.37%   vdivpd  0x40(%rbx,%r9,1),%ymm7,%ymm7
+```
+
+**Counted mechanism:** the `+avx2` build issues `vdivpd` on 256-bit `%ymm` operands, 4
+f64 lanes per instruction, against the default build's `divpd` on 128-bit `%xmm`, 2 lanes
+— 274 `%ymm` operands in the kernel where the default has 0.
+
+**BUILT WITHOUT `+fma`, ON PURPOSE.** FMA fuses multiply-add and changes rounding, so it
+cannot be assumed bit-identical; the campaign's existing flag build is named
+`target-avx2nofma` for what is presumably the same reason. Width is free of that problem
+— `vdivpd` on four lanes computes the same four quotients as two `divpd` on two — but
+that is an argument, not a proof, and **bit-identity must be measured, not assumed**: the
+harness compares whole-column checksums and any row from this ELF must show them matching
+the default build's before it is banked.
+
+**NO RATIO, BECAUSE THE HOST SAID NO.** The build finished at 08:50 and
+`host_is_quiet_now.py` immediately returned BUSY against a 1-minute loadavg of 22.24 that
+did not yet show it, at 2892.0 MHz. Measuring in the window you built in is how frankenfs
+closed its own measurement window; measuring under someone else's storm is how this bead
+produced five uncertifiable `trunc` rows that later resolved as pure host noise. The ELF
+is preserved at `/data/projects/.scratch/crimsonpine/fp-bench-AVX2-4c1adb6c6`, so the row
+costs a window and no rebuild.
+
+**A NEAR-MISS WORTH RECORDING, because the check that caught it was written this
+morning.** The first attempt at this build ran against a worktree that still carried the
+REFUTED `collect` patch — it would have measured the flag and the rejected lever together
+and attributed the result to the flag. Nothing flagged it except the literal
+`worktree dirty: N` echo I had put inside the build command hours earlier, after a 0.12s
+`Finished` handed me a peer's binary. **It printed `1`.** I killed the build, saved the
+diff to `.scratch/crimsonpine/4kig1_collect_REFUTED.diff`, reverse-applied it, and
+restarted only after the same command printed `tracked-source diff lines: 0`. The lesson
+generalises past this campaign: **put the cleanliness assertion INSIDE the build command,
+because that is the only place it is read at the moment it matters.**
