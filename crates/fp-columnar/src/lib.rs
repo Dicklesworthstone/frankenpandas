@@ -25294,7 +25294,16 @@ impl Column {
         // fold is dropped from the loop body. `log` does NOT get this — see the
         // note on `typed_float_domain_fused_unary_with_finiteness`.
         if let Some(out) =
-            self.typed_float_domain_fused_unary_with_finiteness(|x| x >= 0.0, f64::sqrt, true)
+            // SERIAL BY MEASUREMENT, not by default: `usize::MAX` means the
+            // parallel arm is never taken. See the note on `par_min_override`
+            // above for the numbers — parallelism is inside the noise for this
+            // op and costs it the A/A null it needs to certify.
+            self.typed_float_domain_fused_unary_with_finiteness(
+                |x| x >= 0.0,
+                f64::sqrt,
+                true,
+                Some(usize::MAX),
+            )
         {
             return Ok(out);
         }
@@ -26539,7 +26548,7 @@ impl Column {
         in_domain: D,
         f: F,
     ) -> Option<Self> {
-        self.typed_float_domain_fused_unary_with_finiteness(in_domain, f, false)
+        self.typed_float_domain_fused_unary_with_finiteness(in_domain, f, false, None)
     }
 
     /// As [`Self::typed_float_domain_fused_unary`], but the caller states whether
@@ -26574,8 +26583,32 @@ impl Column {
         in_domain: D,
         f: F,
         preserves_finiteness: bool,
+        par_min_override: Option<usize>,
     ) -> Option<Self> {
-        let (max_workers, par_min) = elementwise_witness_policy();
+        // `par_min_override` lets ONE op decide the length at which the parallel
+        // arm is taken, instead of inheriting a single shared number that was set
+        // for every elementwise map at once. br-frankenpandas-4kig1.
+        //
+        // MEASURED, one ELF (`fcc8dee4`, which already contains the yx692
+        // finiteness work), both arms selected in-process, interleaved with the
+        // order reversed on alternate rounds, load 24.65, CPU MHz 3233:
+        //
+        //   sqrt @10M   serial 20308.1us   parallel 19568.1us   parallel 1.038x
+        //   sqrt @1M    serial  1339.8us   parallel  1371.2us   parallel 0.977x
+        //   log  @10M   serial 50824.8us   parallel 19807.3us   parallel 2.566x
+        //
+        // `log` needs the threads; `sqrt` does not — 3.8% at 10M and a 2.3% LOSS
+        // at 1M, neither outside the run-to-run spread (cv 3.8-13.8%). And it is
+        // not free: the per-call `thread::scope` is what makes FrankenPandas' A/A
+        // null unstable, `sqrt_int64 @10M` has failed that null twice (1.020485,
+        // 0.975023), and every op moved off `thread::scope` in this bead passes
+        // routinely. `sqrt` was paying its certification for nothing.
+        //
+        // `None` keeps the shared policy, which is what the other sixteen ops do.
+        // Bit-identical either way: the arms differ only in where block boundaries
+        // fall, and every output element is written once by one worker.
+        let (max_workers, policy_par_min) = elementwise_witness_policy();
+        let par_min = par_min_override.unwrap_or(policy_par_min);
 
         if let Some(data) = self.as_f64_slice() {
             // `None` here means "fold it per element", which is the behaviour
@@ -38174,6 +38207,72 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// br-frankenpandas-4kig1. `sqrt` now pins its own parallel threshold to
+        /// `usize::MAX`, so a column that used to cross the shared 200_000 default
+        /// and run parallel now runs serial.
+        ///
+        /// That is a ROUTING change, and the risk it carries is that the serial
+        /// and parallel arms are not actually interchangeable — different block
+        /// boundaries, a different constructor, a witness derived rather than
+        /// folded. So this exercises the changed path at a length that used to be
+        /// parallel and asserts bit-identity against the scalar oracle, plus the
+        /// domain behaviour that the fused arm is responsible for.
+        #[test]
+        fn sqrt_stays_bit_identical_above_the_old_parallel_threshold_4kig1() {
+            // 300_000 > the shared par_min of 200_000, so before this change the
+            // column took the parallel arm. A smaller fixture would not touch the
+            // routing this test exists for.
+            const LEN: usize = 300_000;
+
+            let mut values: Vec<f64> = Vec::with_capacity(LEN);
+            let mut state: u64 = 0x51ed_4c19_0f0f_1234;
+            for i in 0..LEN {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let unit = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                // Include exact squares and zero so the easy cases are covered
+                // alongside the random ones.
+                values.push(match i % 1000 {
+                    0 => 0.0,
+                    1 => 4.0,
+                    2 => f64::INFINITY,
+                    _ => unit * 1e6,
+                });
+            }
+
+            let out = Column::from_f64_values(values.clone())
+                .sqrt()
+                .expect("sqrt");
+            assert_eq!(out.len(), LEN, "length drift");
+            assert!(
+                out.validity().all(),
+                "every input is non-negative, so no slot may be missing"
+            );
+            let got = out.as_f64_slice().expect("all-valid typed slice");
+            for (i, (&g, &x)) in got.iter().zip(values.iter()).enumerate() {
+                assert_eq!(g.to_bits(), x.sqrt().to_bits(), "sqrt at {i}: input {x:e}");
+            }
+
+            // The domain still has to bite at this length: one negative among
+            // 300_000 must leave the fused arm and come back MISSING at exactly
+            // that index. A routing change that accidentally bypassed the domain
+            // check would pass every assertion above and fail this one.
+            let mut with_negative = values;
+            with_negative[LEN / 2] = -1.0;
+            let out = Column::from_f64_values(with_negative.clone())
+                .sqrt()
+                .expect("sqrt");
+            assert!(
+                !out.validity().get(LEN / 2),
+                "sqrt(-1.0) is NaN and must be MISSING"
+            );
+            assert!(
+                out.validity().get(0) && out.validity().get(LEN - 1),
+                "the surrounding non-negative slots must stay present"
+            );
         }
 
         #[test]
