@@ -35376,3 +35376,73 @@ for all datetime-producing ops, against pandas rather than against FrankenPandas
 tz-family handlers under the decided contract; then move `dt_tz_localize_utc` and the
 other `dt_tz_*` unit tests. Expect (b)'s ops to move when it lands — its own comment
 predicts "regresses those ops", which on this evidence means *exposes* them.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-oxv4u) — the +avx2 flag DOES reach the dot kernel and doubles its vector width (4 xmm packed ops -> 10 ymm), verified by disassembly with zero timing; and the "TARGETED, not blanket" the bead asks for appears unreachable in safe Rust
+
+**THIS ENTRY CARRIES NO PERF VERDICT AND IS DELIBERATELY NOT VERDICT-BEARING.** No ratio is claimed,
+no incumbent arm ran, no A/A null was taken, nothing is banked. It is static analysis plus a source
+reading, chosen because the host was saturated (build CPU 584%, three builds in flight) and the
+orchestrator explicitly barred certification this turn. **A disassembly is load-immune, which is
+precisely why it was the right work for this window.**
+
+**Counted mechanism:** instructions, `objdump -d --disassemble=<mangled materialize_float64_dot>`,
+packed FP arithmetic classified by register width, two ELFs from the SAME kernel source:
+
+| build | packed `mulpd`/`addpd` | width | scalar `sd` tail | `vfmadd` |
+|---|---|---|---|---|
+| default | **4** | all `%xmm`, 128-bit, 2 doubles | 6 | **0** |
+| `-C target-feature=+avx2` | **10** | all `%ymm`, 256-bit, 4 doubles | 6 | **0** |
+
+**FMA is ZERO in both, by design.** `+avx2` was chosen WITHOUT `+fma` because fusing changes
+rounding; keeping mul and add separate means the two arms remain bit-identical in arithmetic form,
+so any timing difference measured later is width and not a different computation. That was the
+whole point of not using a blanket `x86-64-v3`, which would have pulled FMA in.
+
+⚠️ **I counted this the careful way because I have miscounted it before.** An earlier entry of mine
+read `%xmm` as "128-bit vector work" when 87.7% of the FP arithmetic in that region was SCALAR
+(`sd`/`ss` also live in `%xmm`). Here scalar and packed are separated explicitly, and the packed
+ops are unambiguously `%ymm` in the AVX2 build and unambiguously `%xmm` in the default one. The 6
+scalar ops are the loop tail and are identical in both, as expected.
+
+**ELFs.** AVX2:
+`bench_elf_sha256=162f821c9c094a16ee97a9f29aa7986f89753b0012208452e8f5b37659f7d2f4 (82851952 bytes) /data/projects/.scratch/crimsonpine/fp-bench-AVX2-fc793a3b7`,
+built from CLEAN HEAD `fc793a3b7` (the in-build `git status --porcelain -- crates` assertion printed
+empty, so unlike my previous ELF this one is reproducible). Default arm:
+`fp-bench-KERNELLANE-dirty`, sha `038855bf697c`. Those two differ by a peer's fp-frame datetime
+commit as well as by the flag — **irrelevant for this static comparison, because
+`materialize_float64_dot` lives in fp-columnar and its source is byte-identical between them**, but
+it does mean the pair is NOT yet suitable for a timing A/B. The matching default-flags build from
+`fc793a3b7` is the missing arm and I did not start it: the orchestrator barred a fourth build.
+
+**WHY THE KERNEL IS WORTH THIS AT ALL.** br-frankenpandas-03fp5 established by measurement that the
+GEMM is ~84-95% of the serial 10k `df.dot` call and construction is the minority term, reversing
+that bead's stated hypothesis. The kernel is an AXPY loop — `out[row] += a_col[row] * b_j`, outer
+over k columns, inner unit-stride over len rows — sustaining ~5,816 MAC/us, i.e. **~1.94 MAC/cycle
+at ~3 GHz**, which is what 128-bit packed (2 doubles) with no FMA looks like. Doubling the lane
+count is the obvious headroom and the disassembly confirms the flag delivers it.
+
+**THE BEAD'S FRAMING MAY BE UNSATISFIABLE, AND THAT IS THE FINDING TO ACT ON.** oxv4u asks for "a
+TARGETED way to give it AVX2 without a blanket v3 policy". Searching the codebase for the
+machinery that would allow it:
+
+  * `crates/fp-columnar/src/lib.rs:1` is `#![forbid(unsafe_code)]`.
+  * The only ISA specialization in the crates is **compile-time** `#[cfg(target_feature = "sse4.1")]`
+    (6 sites). There is no runtime multiversioning anywhere.
+  * `is_x86_feature_detected!` appears ONLY in `fp-bench/src/main.rs`, and only to REPORT
+    `runtime_detected_isa_features` into the JSON. It is never used to dispatch a kernel.
+
+Runtime dispatch to an AVX2 specialization requires either calling a `#[target_feature]` function
+(which the caller cannot do without `unsafe` unless it carries the feature itself) or a
+multiversioning dependency. **Both are barred here — the first by `forbid(unsafe_code)`, the second
+by the standing ban on dependency smuggling.** So the reachable options are only: (a) a blanket
+build-policy change, (b) `#[cfg(target_feature = "avx2")]` variants, which still need the blanket
+flag to activate and therefore are not targeted either, or (c) restructuring the loop for better
+codegen at 128 bits, which does not change width at all.
+
+**I am not proposing (a).** What I am recording is that the bead's premise needs revisiting: the
+honest next step is to MEASURE what blanket `+avx2` buys on this kernel alone — now possible with
+the `df_dot_kernel` lane, which removes the construction and pool confounds that made every prior
+whole-call AVX2 row ambiguous — and let that number decide whether a build-policy discussion is
+worth having at all. **If the width does not convert to throughput, the targeted-versus-blanket
+question is moot and the bead can close.** That measurement needs one more build (default flags
+from `fc793a3b7`) and a quiet window, and this window had neither.
