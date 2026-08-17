@@ -565,9 +565,25 @@ impl PyDataFrame {
     }
 
     /// Return the column names.
+    ///
+    /// Positional, via `column_name_at`, NOT `column_names()`.
+    /// br-frankenpandas-r18qs.
+    ///
+    /// `column_names()` returns `Vec<&String>`, and a transposed frame's column
+    /// axis is a lazy `Int64UnitRange` that owns no `String`s — so handing out
+    /// references forces it to materialize every label, and with it the whole
+    /// store. That is precisely what this getter must not do: it converts the
+    /// borrowed names to OWNED ones on the very next line, so the references
+    /// were never needed. `column_name_at` formats just the requested label.
+    ///
+    /// This was measured, not reasoned: with `column_names()` here,
+    /// `dataframe_observers_preserve_lazy_transpose_storage` fails its
+    /// post-observer `is_lazy_transpose_storage()` assertion.
     #[getter]
     fn columns(&self) -> Vec<String> {
-        self.inner.column_names().into_iter().cloned().collect()
+        (0..self.inner.num_columns())
+            .filter_map(|position| self.inner.column_name_at(position))
+            .collect()
     }
 
     /// Return the number of rows.

@@ -32,6 +32,21 @@ pyo3 = { workspace = true }
 [features]
 default = ["lazy-transpose-view"]
 lazy-transpose-view = ["fp-frame/lazy-transpose-view"]
+# OPT-IN, and deliberately NOT in `default`. br-frankenpandas-r18qs.
+#
+# `pyo3/extension-module` tells PyO3 to omit libpython linkage. That is correct
+# when the cdylib is loaded INTO a Python process, and fatal for `cargo test`:
+# with it on unconditionally, every fp-python test binary failed to link with
+# `rust-lld: error: undefined symbol: PyGILState_Ensure` (and Py_InitializeEx,
+# PyEval_SaveThread, ...). The whole crate's suite was therefore DARK — including
+# `dataframe_observers_preserve_lazy_transpose_storage`, which is the only proof
+# that shape/columns/__getitem__ do not force the terminal BTreeMap.
+#
+# Nothing in this repository builds a wheel today (there is no pyproject.toml and
+# no maturin config), so the flag was costing an entire test suite for a
+# packaging path that does not exist here. When a wheel build is added, it must
+# pass `--features extension-module`.
+extension-module = ["pyo3/extension-module"]
 
 [package.metadata.docs.rs]
 all-features = true
