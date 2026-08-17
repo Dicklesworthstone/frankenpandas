@@ -30218,3 +30218,61 @@ What is worth noting either way: the loss was real and correctly certified. The 
 did its job — it recorded a genuine defeat with both nulls passing at cv 1.60%, and
 that clean loss is what made the thread count worth reading and the constant worth
 finding. **A gate that only ever confirms wins would have shown me nothing here.**
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-cu22b / jawxr) — COUNTED: `x86-64-v3` produces ZERO FMA contraction in FrankenPandas code, so the stated objection to v3 does not bite. The two `vfmadd` in every build are `compiler_builtins`' own `fma_with_fma`
+
+`cu22b` declines `x86-64-v3` on one specific ground: v3 enables FMA and would
+re-open br-frankenpandas-jawxr, where `+fma,+avx2` was reverted after FMA
+contraction proved neutral-to-worse for the corr/cov/spearman Gram. I built the
+flag combination nobody had measured — `+sse4.1,+avx2` WITHOUT `+fma` — to separate
+width from contraction, and the instruction counts answered a different and better
+question first.
+
+**Counted over four whole binaries, all from the same source tree:**
+
+| build | vfmadd | vfmsub | vroundpd | vmulpd | vaddpd |
+|---|---:|---:|---:|---:|---:|
+| default (SSE2) | **2** | 0 | 0 | 0 | 0 |
+| `+sse4.1` | **2** | 0 | 0 | 0 | 0 |
+| `+sse4.1,+avx2` (no fma) | **2** | 0 | 3 | 80 | 226 |
+| `x86-64-v3` (fma enabled) | **2** | 0 | 2 | 73 | 242 |
+
+**The FMA count is IDENTICAL — two — in all four, including the plain default build
+that contains no AVX instruction of any kind.** Disassembling by symbol shows both
+occurrences live in
+`compiler_builtins::math::libm_math::arch::x86::fma::fma_with_fma`, i.e. the
+runtime-dispatched implementation of the `fma()` intrinsic that ships in every Rust
+binary regardless of target features. `vfmsub` is zero everywhere.
+
+**So enabling `+fma` via v3 adds no fused multiply-add to FrankenPandas code at
+all.** The mechanism is not mysterious: Rust is IEEE-strict and does NOT contract
+`a * b + c` into an FMA — contraction requires an explicit `f64::mul_add` or a
+fast-math relaxation that this project does not use. `-C target-feature=+fma` makes
+the instruction AVAILABLE; it does not make LLVM emit it for ordinary arithmetic.
+
+**WHAT THIS MEANS FOR THE ADOPTION DECISION, stated carefully.** The named reason for
+preferring `+sse4.1` over v3 is that v3 risks changing corr/cov/spearman results
+through contraction. On this binary — which links fp-frame, so the Gram kernels are
+in it — that risk is counted at ZERO added FMA instructions. The objection as stated
+does not apply. That does not automatically make v3 the right choice: it enables
+more than FMA, `+sse4.1,+avx2` reaches the same width without the question, and a
+bit-identity gate is still owed for whichever flag is adopted. But the decision
+should no longer be made on a contraction risk that is not present.
+
+**It also invites a re-read of jawxr itself.** If `+fma,+avx2` could not have
+introduced contraction into that Gram kernel either, then whatever made that
+experiment neutral-to-worse was NOT FMA, and the revert was attributed to the wrong
+cause. I have not re-run jawxr and am not claiming its measurement was wrong — only
+that its stated mechanism cannot be what the counts show, and its owner should
+re-read it.
+
+**Counted mechanism:** vfmadd 2/2/2/2 and vfmsub 0/0/0/0 across default, `+sse4.1`,
+`+sse4.1,+avx2` and `x86-64-v3`; both vfmadd sites resolve to
+`compiler_builtins ... fma_with_fma`; vroundpd 0/0/3/2 and vmulpd 0/0/80/73 confirm
+the width flags themselves took effect.
+
+**A/A null control (same invocation):** not applicable — no timing was taken. This is
+disassembly of four binaries. The timed comparison of the no-fma build is OWED and
+was NOT run: my own build put the 1-minute loadavg at 74.85 and it was still 43.76
+when I stopped, well above the threshold, so certifying into it would have produced
+the refused rows this ledger already has too many of.
