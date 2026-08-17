@@ -175,6 +175,38 @@ def write_baseline(bucket: dict[str, Any], apply: bool) -> tuple[str, int]:
     return slug, len(rows)
 
 
+def untracked_citations(bucket: dict[str, Any]) -> list[str]:
+    """Cited artifacts that git does not track.
+
+    br-frankenpandas-4kig1, 2026-08-17: the two artifacts proving the STANDING
+    `mod`/`floordiv @10M` wins sat UNTRACKED for hours while the lock citing them
+    was committed and being defended every turn. A baseline whose evidence exists
+    only on one machine's disk defends nothing the moment that disk is lost -- and
+    that disk was at 100% and falling when this was found.
+
+    Cheap and advisory: it prints, it does not refuse. Assembling a lock from a
+    run you have not committed yet is a normal intermediate state; shipping one
+    and forgetting is the failure.
+    """
+    import subprocess
+
+    try:
+        tracked = set(
+            subprocess.run(
+                ["git", "ls-files", "artifacts/bench"],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=REPO,
+            ).stdout.split("\n")
+        )
+    except OSError:
+        return []  # no git available: say nothing rather than cry wolf
+    return sorted(
+        s for s in bucket["sources"] if s and s not in tracked
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -204,6 +236,17 @@ def main() -> int:
         total += count
         verb = "wrote" if args.apply else "would write"
         print(f"{verb} {slug}.json  ({count} workloads)")
+        loose = untracked_citations(bucket)
+        if loose:
+            print(
+                f"    !! {len(loose)} cited artifact(s) are NOT TRACKED BY GIT. This "
+                f"baseline's evidence\n       exists only on this disk. Commit them "
+                f"or the lock is undefendable:"
+            )
+            for path in loose[:5]:
+                print(f"         {path}")
+            if len(loose) > 5:
+                print(f"         ... and {len(loose) - 5} more")
     print(
         f"\n{emitted} baseline(s), {total} locked workloads."
         + ("" if args.apply else "  Re-run with --apply to write them.")
