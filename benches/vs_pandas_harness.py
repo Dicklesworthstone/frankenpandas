@@ -133,32 +133,59 @@ BOOTSTRAP_RESAMPLES = 10_000
 # records a 2.7x phantom that a clean null was the only thing standing against. Null
 # deviation is a SAMPLING property and shrinks with samples, so the measurement is
 # scaled to the op instead of the threshold to the failures.
-ADAPTIVE_TARGET_TIMED_US = 40_000.0
+# MEASURED relative between-slot dispersion by incumbent p50, over 463 arm-rows
+# carrying per-slot `samples_us` in artifacts/bench/. This REPLACED a duration-based
+# rule: I first justified adaptive rounds by "a slot is short for a fast op", which
+# is false (fp-bench does WARMUP=3 + ITERS=25 => 50 timed calls per slot at EVERY
+# size), and then by fixed per-slot cost, which the data also refutes -- absolute
+# spread scales 222x across a 170x p50 range rather than staying flat. The noise is
+# MULTIPLICATIVE, and the only surviving fact is that the fastest ops sit at roughly
+# twice the relative dispersion of the rest.
+ADAPTIVE_DISPERSION_BY_P50_US: tuple[tuple[float, float], ...] = (
+    (300.0, 0.1127),
+    (1_000.0, 0.0781),
+    (3_000.0, 0.0863),
+    (20_000.0, 0.0607),
+    (float("inf"), 0.0820),
+)
+# The quietest bucket, used as the yardstick every other bucket is brought up to.
+ADAPTIVE_REFERENCE_DISPERSION = 0.0607
 ADAPTIVE_MAX_ROUNDS = 120
 
 
+def adaptive_dispersion_for_p50(p50_us: float) -> float:
+    """Measured relative between-slot dispersion for an op of this duration."""
+    for upper, dispersion in ADAPTIVE_DISPERSION_BY_P50_US:
+        if p50_us < upper:
+            return dispersion
+    return ADAPTIVE_DISPERSION_BY_P50_US[-1][1]
+
+
 def adaptive_balanced_square_rounds(
-    observed_slot_us: float,
+    observed_p50_us: float,
     *,
     base_rounds: int = BALANCED_SQUARE_ROUNDS,
-    target_timed_us: float = ADAPTIVE_TARGET_TIMED_US,
+    reference_dispersion: float = ADAPTIVE_REFERENCE_DISPERSION,
     max_rounds: int = ADAPTIVE_MAX_ROUNDS,
 ) -> int:
-    """Rounds needed so ONE arm's timed region reaches `target_timed_us`.
+    """Rounds that give this op the same null-median precision as a quiet one.
 
-    Each round contributes `BALANCED_SQUARE.count("A")` timed slots per arm, so the
-    timed region per arm is `rounds * slots * observed_slot_us`.
+    The A/A null is a median over per-round ratios, so its standard error goes as
+    `cv / sqrt(rounds)`. Equalising that across ops means `rounds` proportional to
+    `cv**2`, and the `cv` per duration bucket is measured, not assumed.
 
-    ⚠ THE INVARIANT THAT MAKES THIS NOT GATE-WEAKENING: the result is NEVER below
-    `base_rounds`. This function can only ADD samples, never remove them, so no
-    workload is measured less carefully than it is today and no previously-banked
-    methodology is loosened. A non-finite or non-positive input returns
-    `base_rounds` rather than guessing.
+    ⚠ THE INVARIANT THAT MAKES THIS A STRENGTHENING AND NOT A GATE CHANGE: the result
+    is NEVER below `base_rounds`, for any input including 0, negative, NaN and inf.
+    It can only ADD samples. The 2% null limit is untouched -- loosening it to 3%
+    would lift both-arm pass from 48.7% to 65.5% and that is gate self-weakening,
+    which docs/NEGATIVE_EVIDENCE.md records a 2.7x phantom being caught by.
     """
-    slots = BALANCED_SQUARE.count("A")
-    if not math.isfinite(observed_slot_us) or observed_slot_us <= 0.0 or slots <= 0:
+    if not math.isfinite(observed_p50_us) or observed_p50_us <= 0.0:
         return base_rounds
-    needed = math.ceil(target_timed_us / (slots * observed_slot_us))
+    if not math.isfinite(reference_dispersion) or reference_dispersion <= 0.0:
+        return base_rounds
+    ratio = adaptive_dispersion_for_p50(observed_p50_us) / reference_dispersion
+    needed = math.ceil(base_rounds * ratio * ratio)
     return max(base_rounds, min(max_rounds, needed))
 
 
