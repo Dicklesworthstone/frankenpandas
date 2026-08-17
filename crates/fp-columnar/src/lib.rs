@@ -39205,6 +39205,60 @@ mod tests {
             }
         }
 
+        /// The wrapper and the `_into` form must agree bit-for-bit.
+        /// br-frankenpandas-4kig1.
+        ///
+        /// TODAY `apply_f64_slices_nan_tracked` DELEGATES its serial path to
+        /// `apply_f64_slices_nan_tracked_into`, so this agreement is structural
+        /// and the test looks trivial. It is not: an attempt to build the serial
+        /// output by `collect` instead of writing into a pre-zeroed buffer was
+        /// made and REVERTED (it measured 0.919x on `div @1M` and 0.934x on
+        /// `add @1M`, recorded in docs/NEGATIVE_EVIDENCE.md). The lever is
+        /// attractive enough to be tried again, and the moment the wrapper stops
+        /// delegating, the two become independent implementations of one contract
+        /// with nothing but this test holding them together.
+        ///
+        /// Five NaN arrangements, because they exercise different parts of the
+        /// witness logic: none, lhs-only, rhs-only, both, and — the one that
+        /// matters — a NaN PRODUCED by the operation from finite inputs (`0.0/0.0`),
+        /// which is the only case where `output_nan` is true while `input_nan` is
+        /// false. A rewrite that conflates the two witnesses passes the first four
+        /// and fails this one.
+        #[test]
+        fn wrapper_and_into_agree_bit_for_bit_across_ops_and_nan_patterns_4kig1() {
+            use ArithmeticOp::{Add, Div, FloorDiv, Mod, Mul, Pow, Sub};
+
+            let patterns: [(&[f64], &[f64]); 5] = [
+                (&[1.0, 2.0, 3.0, 4.0], &[2.0, 4.0, 8.0, 16.0]),
+                (&[f64::NAN, 2.0, 3.0, 4.0], &[2.0, 4.0, 8.0, 16.0]),
+                (&[1.0, 2.0, 3.0, 4.0], &[f64::NAN, 4.0, 8.0, 16.0]),
+                (&[f64::NAN, 2.0, 3.0, 4.0], &[f64::NAN, 4.0, 8.0, 16.0]),
+                (&[0.0, 2.0, 3.0, 4.0], &[0.0, 4.0, 8.0, 16.0]),
+            ];
+            for op in [Add, Sub, Mul, Div, Mod, Pow, FloorDiv] {
+                for (lhs, rhs) in patterns {
+                    let (via_wrapper, in_w, out_w) =
+                        crate::apply_f64_slices_nan_tracked(op, lhs, rhs);
+                    let mut buffer = vec![0.0_f64; lhs.len()];
+                    let (in_i, out_i) =
+                        crate::apply_f64_slices_nan_tracked_into(op, lhs, rhs, &mut buffer);
+                    assert_eq!(in_w, in_i, "input witness drifted for {op:?} on {lhs:?}");
+                    assert_eq!(out_w, out_i, "output witness drifted for {op:?} on {lhs:?}");
+                    for (w, i) in via_wrapper.iter().zip(&buffer) {
+                        // `to_bits`, not `==`: NaN != NaN would make every NaN slot
+                        // compare unequal, and -0.0 == 0.0 would HIDE a sign error of
+                        // exactly the kind `ceil_fast` was written with and caught by
+                        // a bit-identity probe before it ever compiled in-tree.
+                        assert_eq!(
+                            w.to_bits(),
+                            i.to_bits(),
+                            "value drifted for {op:?} on {lhs:?} / {rhs:?}"
+                        );
+                    }
+                }
+            }
+        }
+
         /// br-frankenpandas-4kig1. Six of the seven binary ops stopped folding
         /// `input_nan` per element and now derive it only when `output_nan` fired.
         ///
