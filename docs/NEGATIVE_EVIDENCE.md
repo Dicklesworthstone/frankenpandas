@@ -33375,3 +33375,60 @@ for whoever owns the numerics contract, not a lever I can take.**
 minutes, zero measurement windows. The instruction-count design meant a rising-load host
 (loadavg 16.15 over an 8.65 fifteen-minute) could not corrupt the answer, and the wrong
 hypothesis cost nothing but the compile.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — BOTH div ARMS CERTIFY AT LAST, AND BOTH ARE LOSSES: `+avx2` moves `div @1M` from 0.447x to 0.721x against live pandas, 3/3 clauses on each row. **div is still a certified LOSS on both builds**
+
+The earlier attempt at this pair came back NULL_UNDECIDABLE on both rows in a window that closed
+mid-run (pandas' own arm swung 43% between invocations). This is the same experiment in the
+first genuinely quiet window since the build freeze lifted, and it decides.
+
+**A/A null control (same invocation):** `+avx2` FrankenPandas median ratio 0.98078 with pandas
+1.00128; default-build FrankenPandas 1.01376 with pandas 0.99932. All four inside the 2% limit,
+and **all three clauses pass on BOTH rows** — the first time this pair has been decidable.
+
+**Median-CI decision:** `+avx2` effect median 0.721x, 95% CI [0.70429, 0.72872] excluding unity
+and clearing its required threshold; default build 0.447x, CI [0.43971, 0.45477]. Both certify,
+and both certify a LOSS.
+
+**CV role:** provenance only, no vote — 8.76% (`+avx2`) and 6.77% (default).
+
+| arm | ELF | FP p50 | pandas p50 | ratio | verdict |
+|---|---|---:|---:|---:|---|
+| default (SSE2) | `31c630ba…` | 697.16us | 311.31us | **0.447x** | SLOWER, 3/3 |
+| `+avx2` | `3314b1a6…` | 434.20us | 314.05us | **0.721x** | SLOWER, 3/3 |
+
+**WHAT THE FLAG IS WORTH, now measured rather than indicated: 1.613x.** The pandas arm sat at
+311.31us and 314.05us across the two invocations — **0.9% apart**, against 43% in the failed
+window — so the cross-invocation comparison is sound this time and FP's own arm moving 697.16 →
+434.20us (1.606x) is trustworthy. My earlier uncertified estimate was 1.36x and it was low.
+
+**AND div REMAINS A LOSS. 0.721x means pandas is still 39% ahead** on the flag build. The width
+lever is real, certified, and insufficient — exactly what the instruction count predicted when
+it showed `div`'s kernel is one of the few genuinely packed ones (12.3% of FP arithmetic) rather
+than representative.
+
+**BIT-IDENTITY CONFIRMED IN-BAND THIS TIME.** Both rows report the same harness checksum
+`a25ae7e31fa6dd355740ac584b51038d`. That field is a sha256 over the joined per-slot tokens and
+is only comparable when the round counts match — they did here (15 and 15), which is why it
+works now and did not in the failed window. The engine-level check (`e700f53534db5c6d` from both
+ELFs run directly) already established this; this is independent corroboration.
+
+**⚠ THE ELFs ARE STALE AGAINST MAIN, AND I CHECKED BEFORE SPENDING THE WINDOW.** Both were built
+at `4c1adb6c6`; since then the `cached_available_parallelism` migration landed in
+`apply_f64_slices_nan_tracked`, and the bead that shipped it (`q1evw`) measures the old
+`available_parallelism()` at 66-68us per call — roughly 8% of an 800us div. So **the vs-pandas
+absolutes here are dated and current main should be faster than both rows.** The FLAG DELTA is
+unaffected, because both arms share identical pre-migration code and differ only by
+`-C target-feature=+avx2`. The 1.613x is the claim; 0.447x and 0.721x are historical.
+
+```
+LOADAVG      6.83 / 10.18 / 9.38 at launch — quiet AND DRAINING by host_is_quiet_now.py, the
+             criterion added to that script today after the previous attempt was blessed at
+             "quiet" and collapsed anyway; 7.20 / 9.60 / 9.22 at the end. 0% build CPU
+             throughout, no build started in this window.
+OBSERVED MHz host mean 2686.8 before → 3475.0 after; harness recorded arms_saw_same_clock=true
+             with arm_clock_ratio 1.0013 (+avx2) and 1.0000 (default)
+LIKE-FOR-LIKE both rows ok=true, no reasons (par=64, no thread cap)
+ARTIFACTS    artifacts/bench/4kig1_div_{AVX2,SSE2}_quiet_2026-08-17.json
+```
