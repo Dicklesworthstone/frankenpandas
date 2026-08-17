@@ -24931,6 +24931,12 @@ impl Column {
 
     /// Square root of numeric values. Matches numpy's sqrt ufunc.
     pub fn sqrt(&self) -> Result<Self, ColumnError> {
+        // All-valid f64 with no negative element: `sqrt` cannot mint a NaN, so the
+        // validity mask needs no per-element derivation. Falls through to the
+        // shared arm the moment a negative appears. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= 0.0, f64::sqrt) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::sqrt) {
             return Ok(out);
         }
@@ -24985,6 +24991,12 @@ impl Column {
 
     /// Natural logarithm of numeric values. Matches numpy's log ufunc.
     pub fn log(&self) -> Result<Self, ColumnError> {
+        // Same as `sqrt`: NaN only from a negative input. `ln(0.0)` is `-inf`,
+        // which is PRESENT, so zero stays in the domain and the `all_finite`
+        // witness folded alongside is what records it. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= 0.0, f64::ln) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::ln) {
             return Ok(out);
         }
@@ -26036,6 +26048,61 @@ impl Column {
     /// out `chunks_mut` in safe Rust — 80 MB of `alloc_zeroed` at 10M. That
     /// memset costs more than the parallelism buys, which is also the number
     /// br-frankenpandas-284ul's write-once hypothesis was missing.
+    /// The witness-free arm for maps that CAN mint NaN, where a cheap predicate
+    /// on the INPUT decides whether they actually did.
+    ///
+    /// br-frankenpandas-4kig1. `sqrt` and `ln` cannot use
+    /// [`Self::typed_float_witness_free_unary`] — `sqrt(x<0)` and `ln(x<0)` are
+    /// genuinely NaN, so their output mask is data-dependent and cannot be assumed
+    /// all-valid. But the dependence is on ONE predicate over the input
+    /// (`x >= 0.0`), not on inspecting every output: an all-valid input slice is
+    /// NaN-free, and for both ops the result is NaN if and only if the input was
+    /// negative. `ln(0.0)` is `-inf`, which is a PRESENT value, not a missing one —
+    /// so zero is in the domain for both.
+    ///
+    /// So this folds two booleans through the same pass that computes the values —
+    /// `in_domain` and `all_finite`, both plain reductions with no memory traffic —
+    /// instead of the shared arm's per-element `is_nan()`, its validity word per 64
+    /// elements, and its bit-scatter into that buffer. Same information, no word
+    /// buffer, no `thread::scope`.
+    ///
+    /// Returns `None` when the input leaves the domain, and the caller falls
+    /// through to the shared NaN-aware arm unchanged. That path recomputes, which
+    /// is deliberate: it keeps the exact existing semantics for the rare mixed-sign
+    /// column rather than reimplementing validity derivation a second time here.
+    /// A workload that really is half-negative pays one extra pass and should stay
+    /// on the shared arm.
+    /// Generic over the predicate, NOT `fn(f64) -> bool`: a fn POINTER would be
+    /// called per element and would defeat the inlining this whole arm exists for.
+    /// That is not hypothetical — a `fn`-pointer probe inflated an earlier reading
+    /// of the `copysign` lever from 1.08x to 1.647x for exactly this reason
+    /// (docs/NEGATIVE_EVIDENCE.md, 2026-08-16).
+    fn typed_float_domain_fused_unary<D: Fn(f64) -> bool, F: Fn(f64) -> f64>(
+        &self,
+        in_domain: D,
+        f: F,
+    ) -> Option<Self> {
+        let data = self.as_f64_slice()?;
+        let mut domain_held = true;
+        let mut all_finite = true;
+        let out: Vec<f64> = data
+            .iter()
+            .map(|&x| {
+                domain_held &= in_domain(x);
+                let y = f(x);
+                all_finite &= y.is_finite();
+                y
+            })
+            .collect();
+        if !domain_held {
+            return None;
+        }
+        Some(Self::from_f64_all_valid_with_finite_opt(
+            out,
+            Some(all_finite),
+        ))
+    }
+
     fn typed_float_witness_free_unary<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
         let data = self.as_f64_slice()?;
         let witness = self.f64_finite_witness();
@@ -36634,6 +36701,111 @@ mod tests {
             assert!(
                 !underflowed.validity().get(0),
                 "inf rounded with a zero factor must stay missing"
+            );
+        }
+
+        /// br-frankenpandas-4kig1. `sqrt`/`log` now take a domain-fused arm that
+        /// declares the output all-valid when no input is negative. If that
+        /// predicate is ever wrong the column reports a NaN slot as PRESENT, which
+        /// is a silent parity break rather than a crash — so the predicate is a
+        /// test, not a comment.
+        ///
+        /// THE NEGATIVE CASE THE BEAD SPECIFIED: a column carrying a SINGLE
+        /// negative element among many positives must still come back with that
+        /// slot MISSING. A kernel that assumed all-valid because the bench fixture
+        /// is strictly positive would pass every benchmark and be wrong on one
+        /// element in a million.
+        #[test]
+        fn sqrt_log_domain_fused_arm_matches_the_shared_arm_4kig1() {
+            // 1. All-positive: takes the fused arm. Values must equal the scalar
+            //    oracle bit for bit and every slot must be present.
+            let mut values: Vec<f64> = vec![0.0, 1.0, 4.0, 2.25, 1e-300, 1e300, f64::INFINITY];
+            let mut state: u64 = 0x4c19_1000_0000_0001_u64;
+            for _ in 0..20_000 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let unit = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                values.push(unit * 1e6);
+            }
+            for (name, out, oracle) in [
+                (
+                    "sqrt",
+                    Column::from_f64_values(values.clone())
+                        .sqrt()
+                        .expect("sqrt"),
+                    f64::sqrt as fn(f64) -> f64,
+                ),
+                (
+                    "log",
+                    Column::from_f64_values(values.clone()).log().expect("log"),
+                    f64::ln as fn(f64) -> f64,
+                ),
+            ] {
+                assert!(
+                    out.validity().all(),
+                    "{name}: a non-negative input can never produce a missing slot"
+                );
+                let got = out
+                    .as_f64_slice()
+                    .expect("all-valid output stays a contiguous typed slice");
+                for (i, (&g, &x)) in got.iter().zip(values.iter()).enumerate() {
+                    assert_eq!(
+                        g.to_bits(),
+                        oracle(x).to_bits(),
+                        "{name} at {i}: input {x:e}"
+                    );
+                }
+            }
+
+            // `ln(0.0)` is -inf and PRESENT — zero is inside the domain, and the
+            // slot must NOT be marked missing.
+            let with_zero = Column::from_f64_values(vec![0.0, 1.0, 4.0]);
+            let logged = with_zero.log().expect("log");
+            assert!(logged.validity().all(), "ln(0) is -inf, a present value");
+            assert_eq!(
+                logged.as_f64_slice().expect("typed")[0].to_bits(),
+                f64::NEG_INFINITY.to_bits()
+            );
+
+            // 2. THE NEGATIVE CASE: one negative among many positives must leave
+            //    the fused arm and come back with exactly that slot missing.
+            for bad_at in [0_usize, 1, 511, 4095] {
+                let mut mixed: Vec<f64> = (0..4096).map(|i| 1.0 + i as f64).collect();
+                mixed[bad_at] = -2.0;
+                for (name, out) in [
+                    (
+                        "sqrt",
+                        Column::from_f64_values(mixed.clone()).sqrt().expect("sqrt"),
+                    ),
+                    (
+                        "log",
+                        Column::from_f64_values(mixed.clone()).log().expect("log"),
+                    ),
+                ] {
+                    assert_eq!(out.len(), mixed.len(), "{name} length drift");
+                    assert!(
+                        !out.validity().get(bad_at),
+                        "{name}: the negative element at {bad_at} must be MISSING, \
+                         not silently present"
+                    );
+                    for (i, _) in mixed.iter().enumerate() {
+                        if i != bad_at {
+                            assert!(
+                                out.validity().get(i),
+                                "{name}: slot {i} was positive and must stay present"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // 3. An ALL-negative column must also route to the shared arm.
+            let all_negative = Column::from_f64_values(vec![-1.0, -2.0, -3.0]);
+            let rooted = all_negative.sqrt().expect("sqrt");
+            assert!(
+                (0..3).all(|i| !rooted.validity().get(i)),
+                "every negative sqrt is NaN and therefore missing"
             );
         }
 
