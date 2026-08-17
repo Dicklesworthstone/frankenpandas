@@ -31180,3 +31180,61 @@ other 4, and 93 direct std-intrinsic call sites in fp-frame that need no change.
 **What remains owed on this bead is one measurement, not more auditing:**
 `round(decimals) @1M` under `+sse4.1`, with the prediction on record that it inverts
 the 2026-07-02 regression.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `mod @10M` CERTIFIES at **6.064x**, the largest in this family, and it certified because I picked the SIZE from the dispersion model instead of retrying the same one
+
+`e7d87c811` moved `mod` and `floordiv` onto the compute-bound threshold alongside
+`pow`, and neither had a workload — so two thirds of that change was unmeasurable.
+Lanes added and verified to emit (`mod` n=50 p50 3986.4us, `floordiv` n=50 p50
+4007.5us) before any row was trusted.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=e40c18de5e5122482db93a3e1f5f0cce9d2d703325b91c64947db5b87f80c38e (82230440 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-mod`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T105150.695762Z-pid3652971 , giving
+measured_ratio=6.064x for this row.
+
+| `mod @10M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **20095.26us** | 6.76% | 0.987415 — PASSES |
+| pandas | 119382.73us | 1.78% | 0.998432 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.987415 and
+pandas median ratio 0.998432, both inside the 2% limit.
+
+**Median-CI decision:** effect median 6.064x, 95% CI [5.65072, 6.19467], excluding
+unity; claimed log effect 1.80231147 against a required threshold of 0.20949874,
+cleared by 8.6x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 6.76%, pandas 1.78%.
+
+```
+LOADAVG      16.72 → 11.57 (in-run 1-min min 11.57, max 16.72)
+OBSERVED MHz busy-core BY ARM: FP 4294.0 / pandas 4294.9, arm clock ratio 1.0002
+THREADS      FP peak 10 · pandas peak 67
+```
+Best-vs-best 7.134 (FP min 16393.8us vs pandas min 116952.4us), direction agrees.
+
+**THE SIZE WAS CHOSEN, NOT STUMBLED INTO, AND THAT IS THE REUSABLE PART.** `mod @1M`
+failed its null twice — 6.496x then 6.604x, nulls 1.021401 and 1.057538 — with
+FrankenPandas' arm at just **1.7ms**. The dispersion-by-duration table measured
+earlier in this bead puts a sub-3ms arm at **5.97%** between-slot dispersion against
+**2.12%** for arms over 20ms. Rather than take a third swing at 1M, I moved to 10M,
+where FP's arm is 20ms — and the null passed on the FIRST attempt at that size.
+**Six attempts bought `log2 @10M`; one attempt bought `mod @10M`, because this time
+the model chose the shape of the measurement.**
+
+**`floordiv @10M` is NOT banked:** 6.869x, CI [6.72236, 7.22976], best-vs-best
+7.6202, but FP's null failed at 0.977035 with cv 15.61% and the in-run load spiked
+from 10.92 to **41.15** — a storm arriving after the gate had passed at entry. That
+is the limit of a pre-flight check, stated again: it answers "is a storm running
+now", never "will one start in the next three minutes".
+
+**`mod @1M` at 6.496x/6.604x and `floordiv @10M` at 6.869x are the largest ratios
+this family has produced, and none of the three is banked.** Recorded as point
+estimates so the next attempt knows what to expect, not as results.

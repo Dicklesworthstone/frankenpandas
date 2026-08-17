@@ -1063,7 +1063,7 @@ fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
     // `pow` finite (a negative base with a fractional exponent is NaN) so the lane
     // measures arithmetic and not the missing-value path — the same reasoning the
     // unary fixture uses.
-    if matches!(workload, "pow" | "atan2" | "hypot") {
+    if matches!(workload, "pow" | "atan2" | "hypot" | "mod" | "floordiv") {
         let mut rhs_rng = SplitMix64(0x0FED_CBA9_8765_4321);
         let rhs: Vec<f64> = (0..rows).map(|_| 1.0 + rhs_rng.unit() * 9.0).collect();
         let rhs_index = Index::new_known_unique_int64_unit_range(0, rows);
@@ -1073,6 +1073,14 @@ fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
             "pow" => Some(time_us(|| series.pow(&rhs_series).expect("pow"))),
             "atan2" => Some(time_us(|| series.atan2(&rhs_series).expect("atan2"))),
             "hypot" => Some(time_us(|| series.hypot(&rhs_series).expect("hypot"))),
+            // br-frankenpandas-4kig1. `e7d87c811` moved mod/floordiv onto the
+            // compute-bound threshold alongside `pow`, and neither had a workload,
+            // so two thirds of that change landed unmeasurable. The right-hand
+            // series is strictly positive and bounded away from zero by the same
+            // generator, so neither op takes a divide-by-zero path and the lane
+            // measures arithmetic rather than the promotion-to-float rule.
+            "mod" => Some(time_us(|| series.r#mod(&rhs_series).expect("mod"))),
+            "floordiv" => Some(time_us(|| series.floordiv(&rhs_series).expect("floordiv"))),
             _ => None,
         };
     }

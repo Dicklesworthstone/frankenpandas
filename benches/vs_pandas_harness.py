@@ -1845,6 +1845,17 @@ def bench_math_hypot_pandas(df: pd.DataFrame) -> PairedSamples:
     return _bench_math_binary(df, np.hypot)
 
 
+def bench_math_mod_pandas(df: pd.DataFrame) -> PairedSamples:
+    # Series.mod, not np.mod: pandas' own operator is the incumbent surface
+    # FrankenPandas claims parity with, and it carries pandas' sign convention
+    # for negative operands rather than numpy's.
+    return _bench_math_binary(df, lambda a, b: a.mod(b))
+
+
+def bench_math_floordiv_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_binary(df, lambda a, b: a.floordiv(b))
+
+
 def _bench_math_unary(df: pd.DataFrame, op) -> PairedSamples:
     s = _math_unary_input(len(df))
     return time_operation(partial(op, s))
@@ -2844,6 +2855,8 @@ PANDAS_WORKLOADS = {
         "pow": bench_math_pow_pandas,
         "atan2": bench_math_atan2_pandas,
         "hypot": bench_math_hypot_pandas,
+        "mod": bench_math_mod_pandas,
+        "floordiv": bench_math_floordiv_pandas,
         "sqrt_int64": bench_math_sqrt_int64_pandas,
         "log_int64": bench_math_log_int64_pandas,
         "expm1": bench_math_expm1_pandas,
