@@ -29309,3 +29309,71 @@ shape and cannot affect the shape where the domain holds.
 
 Gates: `cargo test -p fp-columnar` **643 passed / 0 failed / 0 filtered out**,
 `clippy -D warnings` clean, `fmt --check` clean.
+
+### 2026-08-17 CrimsonPine — MEASURED MY OWN NULL DISTRIBUTION over 226 rows, and I get a DIFFERENT answer from the one relayed to me: the median deviation is 0.94%, not 1.75%, and the gate does not sit at the median. But half the rows do fail, for a different reason, and the failures are CONCENTRATED IN EXACTLY THE OPS WHERE WE LOSE
+
+The cross-project note said frankenpandas' 2% A/A limit "sits exactly at its MEDIAN
+null deviation (1.75%), so half its runs fail by construction". That claim came from
+this project, so I measured it myself over every row in `artifacts/bench/` rather
+than accept it. **The observable reproduces. The diagnosis does not.**
+
+**Counted, 226 rows carrying both nulls:**
+
+| | median \|dev\| | p75 | p90 | pass @2% |
+|---|---:|---:|---:|---:|
+| FrankenPandas arm | **0.94%** | 2.57% | 4.50% | 67.7% |
+| pandas arm | **1.04%** | 2.36% | 4.92% | 68.6% |
+| **both arms** | — | — | — | **48.7%** |
+
+**The gate is NOT at the median.** 2.00% sits at roughly the 68th percentile of each
+arm — a per-arm gate that two thirds of rows clear. The 1.75% figure is not what my
+corpus shows.
+
+**But 48.7% of rows fail, and the arithmetic explains it exactly:** the gate is an
+AND over two independent arms, and 0.677 × 0.686 = 0.464 against an observed 0.487.
+So "half the runs fail" is TRUE as an outcome and FALSE as a description of where
+the threshold sits. That distinction decides the fix, which is why it is worth the
+paragraph: if the gate sat at the median you would move the gate, and it does not.
+
+**THE FAILURES ARE NOT UNIFORM, AND THIS IS THE PART THAT MATTERS.** Bucketing by
+how long the incumbent's call actually takes:
+
+| incumbent p50 | rows | median worst-arm \|dev\| | both-pass @2% |
+|---|---:|---:|---:|
+| 0–200us | 54 | **2.27%** | **40.7%** |
+| 200us–1ms | 21 | **3.45%** | **33.3%** |
+| 1–5ms | 24 | 1.78% | 50.0% |
+| >5ms | 127 | 1.61% | 54.3% |
+
+**A fast operation is far less likely to certify than a slow one, at the same 2%
+limit.** Sub-millisecond rows pass at 33-41% against 54% for multi-millisecond ones.
+That is not a property of the code being measured; it is that nine balanced-square
+rounds of a 186us call is under 7 ms of actual work, so per-call overhead and
+scheduler jitter are a much larger fraction of it.
+
+**AND THAT BIAS POINTS THE WRONG WAY FOR THIS CAMPAIGN.** FrankenPandas' worst
+ratios live precisely in the fast ops — `floor`/`ceil`/`trunc @1M` certify at
+0.29-0.31x with the incumbent at ~180us, deep in the 40.7% bucket. The gate is
+hardest exactly where the losses are biggest, so the rows we most need are the ones
+most often thrown away. My own evidence tonight: the `x86-64-v3` A/B on `floor @1M`
+has now produced SIX rows across two windows and not one of them certified, while
+reproducing a 2.8-3.2x effect every single time (SSE2 0.32x/0.35x/0.36x, v3
+0.93x/0.99x/1.15x).
+
+**THE FIX IS NOT TO LOOSEN THE LIMIT.** Raising 2% to 3% would lift both-pass from
+48.7% to 65.5% and to 73.5% at 4%, and that is gate self-weakening — it buys pass
+rate by accepting noisier instruments, and this ledger already records a 2.7x
+phantom that a clean null was the only thing standing against. The null deviation is
+a SAMPLING property: it shrinks with more samples. The correct change is to scale
+the measurement to the op, not the threshold to the failures — give a 186us call
+enough rounds (or enough inner repetitions per timed slot) that its timed region is
+comparable to a 10ms call's, and its null will tighten on its own. That is
+strengthening the instrument, and it is the opposite of moving the gate.
+
+**A/A null control (same invocation):** not applicable — this entry measures the
+DISTRIBUTION of 452 recorded null values rather than taking a new timing. No ratio
+is claimed and no build was run for it.
+
+**Counted mechanism:** 226 rows, 452 null values, median FP deviation 0.0094 and
+median pandas deviation 0.0104 against a 0.02 limit; joint pass 48.7% versus the
+0.464 predicted by independence; sub-1ms rows pass at 33-41% against 54% above 5ms.
