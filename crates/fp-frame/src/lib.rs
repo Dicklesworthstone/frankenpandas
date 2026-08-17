@@ -40641,6 +40641,57 @@ impl SeriesGroupByExpanding<'_, '_> {
     }
 }
 
+thread_local! {
+    /// Workers the last `SeriesGroupBy` grouped rolling on THIS THREAD used.
+    static SGBROLL_LAST_WORKERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Per-thread worker-count override; `None` means "decide from group count".
+    static SGBROLL_MAX_WORKERS_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn record_sgb_rolling_workers(workers: usize) {
+    SGBROLL_LAST_WORKERS.with(|cell| cell.set(workers));
+}
+
+fn sgb_rolling_max_workers_override() -> Option<usize> {
+    SGBROLL_MAX_WORKERS_OVERRIDE.with(std::cell::Cell::get)
+}
+
+/// The split the last grouped rolling on this thread actually took.
+///
+/// br-frankenpandas-u5cg4. THIS EXISTS BECAUSE ITS ABSENCE COST A WHOLE BEAD.
+/// The July group-parallel attempt measured 0.9x and nothing could tell whether
+/// its parallel arm had ever been entered — the bench harness's `thread_count`
+/// field cannot see `thread::scope` workers — so "the arm never ran" survived as
+/// an unfalsifiable explanation until the arm itself was found to have been
+/// reverted. A worker count recorded on the calling thread before any spawn is
+/// exact, race-free, and cannot leak between concurrent calls.
+///
+/// PROVENANCE ONLY. Nothing branches on it; deleting it changes no result. Its
+/// deletion condition is a harness that can observe `thread::scope` worker counts
+/// by other means.
+#[must_use]
+#[doc(hidden)]
+pub fn sgb_rolling_last_worker_count() -> usize {
+    SGBROLL_LAST_WORKERS.with(std::cell::Cell::get)
+}
+
+/// Force a worker count for grouped rolling on THIS THREAD; `None` restores the
+/// group-count-derived default.
+///
+/// br-frankenpandas-u5cg4. A thread-local rather than the July experiment's
+/// `FP_SGBROLL_SERIAL` environment variable, deliberately: an env toggle is
+/// process-global, so it cannot be used to compare both arms inside one test
+/// without racing every other test in the binary, and a leaked one silently
+/// re-labels a measurement (see the `FP_DOT_SERIAL` incident on `6df71eae2`).
+///
+/// Passing `Some(1)` forces the serial arm, which is what makes bit-identity
+/// between the two arms testable on the SAME input.
+#[doc(hidden)]
+pub fn set_sgb_rolling_max_workers(workers: Option<usize>) {
+    SGBROLL_MAX_WORKERS_OVERRIDE.with(|cell| cell.set(workers));
+}
+
 /// Grouped rolling window over a `SeriesGroupBy`.
 ///
 /// Created by `SeriesGroupBy::rolling()`. Applies existing Series rolling
@@ -40655,7 +40706,7 @@ pub struct SeriesGroupByRolling<'grouped, 'data> {
 impl SeriesGroupByRolling<'_, '_> {
     fn apply_grouped_rolling<F>(&self, agg: F) -> Result<Series, FrameError>
     where
-        F: Fn(&Series, usize, usize) -> Result<Series, FrameError>,
+        F: Fn(&Series, usize, usize) -> Result<Series, FrameError> + Sync,
     {
         let (_order, order_keys, groups) = self.groupby.build_groups();
 
@@ -40742,14 +40793,108 @@ impl SeriesGroupByRolling<'_, '_> {
         let n = self.groupby.series.len();
         let mut out_f64 = vec![0.0_f64; n];
         let mut out_valid = fp_columnar::ValidityMask::all_invalid(n);
-        for key in &order_keys {
+
+        // GROUP-PARALLEL ARM. br-frankenpandas-u5cg4.
+        //
+        // The per-group rolling is 79-90% of this call, measured three ways
+        // (instructions release 20.65% / debug 15.69% / wall 10.18% for
+        // build_groups, which is therefore the MINORITY — do not re-attack it).
+        // It is COMPUTE-bound, not bandwidth-bound: IPC 2.742 with 5.07
+        // cache-misses per 1k instructions, and that IPC is a LOWER bound because
+        // it was counted at load ~50.
+        //
+        // A July attempt at this measured 0.9x and was reverted; when u5cg4 tried
+        // to explain that number, all four candidate causes were eliminated and
+        // the arm itself turned out to no longer exist, so the 0.9x has no
+        // surviving mechanism and cannot be re-measured. This is the
+        // re-implementation that must precede any further measurement — and,
+        // unlike the July one, it is OBSERVABLE: `sgb_rolling_last_worker_count`
+        // reports the split actually taken, which is exactly what made candidate
+        // (4) ("the parallel arm never ran") untestable last time.
+        //
+        // ONLY the rolling is parallel; the scatter stays SERIAL and is the same
+        // code the serial arm runs, in the same key order. Groups are disjoint by
+        // construction, but a disjoint scatter by arbitrary index is not
+        // expressible in safe Rust without a partition proof, and the scatter is
+        // O(n) against a compute-bound O(n*window) rolling — so buying it back
+        // would be the wrong trade even if it were expressible.
+        //
+        // Thresholds mirror `value_counts`' group-parallel arm, which is this
+        // crate's existing sanctioned shape for exactly this decision.
+        const SGBROLL_PAR_MIN_GROUPS: usize = 64;
+        const SGBROLL_PAR_MIN_PER_WORKER: usize = 16;
+        let n_groups = order_keys.len();
+        let workers = match sgb_rolling_max_workers_override() {
+            Some(forced) => forced.max(1),
+            None if n_groups >= SGBROLL_PAR_MIN_GROUPS => {
+                fp_columnar::cached_available_parallelism()
+                    .min(16)
+                    .min(n_groups / SGBROLL_PAR_MIN_PER_WORKER)
+                    .max(1)
+            }
+            None => 1,
+        };
+        record_sgb_rolling_workers(workers);
+
+        // Roll every group first when parallel, then fall into the identical
+        // scatter below. `None` means "the serial arm computed it inline".
+        let prerolled: Option<Vec<Series>> = if workers >= 2 {
+            let build_group_series = &build_group_series;
+            let agg = &agg;
+            let order_keys = &order_keys;
+            let groups = &groups;
+            let window = self.window;
+            let min_periods = self.min_periods;
+            let compute_range =
+                move |start: usize, end: usize| -> Result<Vec<Series>, FrameError> {
+                    let mut rolled_groups = Vec::with_capacity(end - start);
+                    for key in &order_keys[start..end] {
+                        let row_indices = groups.get(key).ok_or_else(|| {
+                            FrameError::CompatibilityRejected(
+                                "group key missing from SeriesGroupBy rolling state".to_owned(),
+                            )
+                        })?;
+                        let group_series = build_group_series(row_indices)?;
+                        rolled_groups.push(agg(&group_series, window, min_periods)?);
+                    }
+                    Ok(rolled_groups)
+                };
+            let chunk = n_groups.div_ceil(workers);
+            let parts: Vec<Result<Vec<Series>, FrameError>> = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(workers);
+                let mut start = 0;
+                while start < n_groups {
+                    let end = (start + chunk).min(n_groups);
+                    handles.push(scope.spawn(move || compute_range(start, end)));
+                    start = end;
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("SeriesGroupBy rolling worker panicked"))
+                    .collect()
+            });
+            let mut all = Vec::with_capacity(n_groups);
+            for part in parts {
+                all.extend(part?);
+            }
+            Some(all)
+        } else {
+            None
+        };
+
+        for (key_position, key) in order_keys.iter().enumerate() {
             let row_indices = groups.get(key).ok_or_else(|| {
                 FrameError::CompatibilityRejected(
                     "group key missing from SeriesGroupBy rolling state".to_owned(),
                 )
             })?;
-            let group_series = build_group_series(row_indices)?;
-            let rolled = agg(&group_series, self.window, self.min_periods)?;
+            let rolled = match &prerolled {
+                Some(all) => all[key_position].clone(),
+                None => {
+                    let group_series = build_group_series(row_indices)?;
+                    agg(&group_series, self.window, self.min_periods)?
+                }
+            };
             if rolled.len() != row_indices.len() {
                 return Err(FrameError::LengthMismatch {
                     index_len: row_indices.len(),
@@ -193479,6 +193624,151 @@ mod columns_view_u387a {
 /// `COUNTED_METRIC` accepts instructions / cycles / syscalls / allocations /
 /// cache-and-branch misses / IPC and NOT nanoseconds. The `instr_*` probes were
 /// added for that reason; prefer them when banking.
+/// The group-parallel arm for `SeriesGroupBy` rolling: it must produce
+/// BIT-IDENTICAL output to the serial arm, and it must actually RUN.
+///
+/// br-frankenpandas-u5cg4. The second half is not padding. The July attempt at
+/// this measured 0.9x, and when the bead tried to explain that number one of the
+/// four candidate causes was "the parallel arm never ran" — which could not be
+/// tested, because nothing could observe a `thread::scope` split and the arm had
+/// since been reverted. So the 0.9x is unexplainable forever. These tests make
+/// that class of doubt impossible for the replacement: they assert the observed
+/// worker count on both arms, on the same input, in the same process.
+#[cfg(test)]
+mod sgb_rolling_group_parallel_u5cg4 {
+    use fp_columnar::Column;
+    use fp_index::{Index, IndexLabel};
+
+    use super::{Series, set_sgb_rolling_max_workers, sgb_rolling_last_worker_count};
+
+    // Enough groups to clear SGBROLL_PAR_MIN_GROUPS (64) and to give
+    // n_groups / SGBROLL_PAR_MIN_PER_WORKER (16) at least two workers.
+    const ROWS: usize = 20_000;
+    const GROUPS: i64 = 200;
+    const WINDOW: usize = 10;
+
+    fn fixture() -> (Series, Series) {
+        let index = Index::new((0..ROWS).map(|r| IndexLabel::Int64(r as i64)).collect());
+        // Deliberately NOT a flat ramp: rolling min/max and std must see real
+        // variation, or a broken window would still compare equal.
+        let values: Vec<i64> = (0..ROWS)
+            .map(|r| ((r as i64 * 7919) % 1_009) - 504)
+            .collect();
+        let keys: Vec<i64> = (0..ROWS).map(|r| (r as i64) % GROUPS).collect();
+        let values =
+            Series::new("v", index.clone(), Column::from_i64_values(values)).expect("value series");
+        let keys = Series::new("k", index, Column::from_i64_values(keys)).expect("key series");
+        (values, keys)
+    }
+
+    /// Raw bits + validity, so `NaN` slots compare EQUAL to themselves.
+    ///
+    /// `Scalar::Float64(NaN) == Scalar::Float64(NaN)` is false under float
+    /// semantics, and `std`/`var` over a short window legitimately produces NaN —
+    /// so a values() comparison would fail on correct output.
+    fn bits_and_validity(series: &Series) -> (Vec<u64>, Vec<bool>) {
+        let column = series.column();
+        if let Some((data, valid)) = column.as_f64_slice_with_validity() {
+            (
+                data.iter().map(|v| v.to_bits()).collect(),
+                (0..data.len()).map(|i| valid.get(i)).collect(),
+            )
+        } else {
+            let data = column.as_f64_slice().expect("grouped rolling emits f64");
+            (
+                data.iter().map(|v| v.to_bits()).collect(),
+                vec![true; data.len()],
+            )
+        }
+    }
+
+    #[test]
+    fn group_parallel_rolling_is_bit_identical_to_serial_and_actually_runs_u5cg4() {
+        let (values, keys) = fixture();
+        let grouped = values.groupby(&keys).expect("groupby");
+        let available = fp_columnar::cached_available_parallelism();
+
+        // Every agg the grouped-rolling surface exposes, not just `sum`: the
+        // parallel arm hands each worker a different closure instantiation, and
+        // min/max (monotonic deque) and std/var (borrow-per-window) carry more
+        // per-group state than sum/mean do.
+        let aggs: [(&str, fn(&super::SeriesGroupByRolling<'_, '_>) -> Series); 6] = [
+            ("sum", |r| r.sum().expect("sum")),
+            ("mean", |r| r.mean().expect("mean")),
+            ("min", |r| r.min().expect("min")),
+            ("max", |r| r.max().expect("max")),
+            ("std", |r| r.std().expect("std")),
+            ("count", |r| r.count().expect("count")),
+        ];
+
+        for (name, run) in aggs {
+            set_sgb_rolling_max_workers(Some(1));
+            let serial = run(&grouped.rolling(WINDOW));
+            let serial_workers = sgb_rolling_last_worker_count();
+
+            set_sgb_rolling_max_workers(None);
+            let parallel = run(&grouped.rolling(WINDOW));
+            let parallel_workers = sgb_rolling_last_worker_count();
+
+            assert_eq!(
+                serial_workers, 1,
+                "{name}: forced-serial arm must report 1 worker"
+            );
+            if available >= 2 {
+                assert!(
+                    parallel_workers >= 2,
+                    "{name}: the parallel arm did not run ({parallel_workers} workers on a \
+                     {available}-way host) — this is exactly the unfalsifiable state that \
+                     made the July 0.9x impossible to explain"
+                );
+            }
+
+            assert_eq!(
+                bits_and_validity(&serial),
+                bits_and_validity(&parallel),
+                "{name}: group-parallel output differs from serial BIT-FOR-BIT"
+            );
+            assert_eq!(serial.len(), ROWS, "{name}: length changed");
+            assert_eq!(
+                serial.index().labels(),
+                parallel.index().labels(),
+                "{name}: index differs"
+            );
+            assert_eq!(serial.name(), parallel.name(), "{name}: name differs");
+        }
+        set_sgb_rolling_max_workers(None);
+    }
+
+    /// Below the group-count threshold the arm must stay serial — the negative
+    /// half of the routing, and the one a "just parallelise everything" change
+    /// would break. 8 groups is under SGBROLL_PAR_MIN_GROUPS (64).
+    #[test]
+    fn few_groups_must_not_spawn_workers_u5cg4() {
+        let index = Index::new((0..64).map(|r| IndexLabel::Int64(r as i64)).collect());
+        let values = Series::new(
+            "v",
+            index.clone(),
+            Column::from_i64_values((0..64).map(|r| (r as i64 * 13) % 7).collect()),
+        )
+        .expect("value series");
+        let keys = Series::new(
+            "k",
+            index,
+            Column::from_i64_values((0..64).map(|r| (r as i64) % 8).collect()),
+        )
+        .expect("key series");
+
+        set_sgb_rolling_max_workers(None);
+        let grouped = values.groupby(&keys).expect("groupby");
+        let _ = grouped.rolling(4).sum().expect("sum");
+        assert_eq!(
+            sgb_rolling_last_worker_count(),
+            1,
+            "8 groups is below the 64-group threshold and must stay serial"
+        );
+    }
+}
+
 #[cfg(test)]
 mod sgb_rolling_build_groups_share_lyaqi {
     use std::time::Instant;
