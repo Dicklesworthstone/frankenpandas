@@ -27891,3 +27891,65 @@ lost because nobody wrote it down. **An unbanked certified row costs exactly as
 much to produce as a banked one and is worth nothing.** The artifacts directory
 should be swept for others; this audit only covered `math_unary`, which is one
 category of eleven.
+
+### 2026-08-17 CrimsonPine — INVENTORY: **28 fully-passing CERTIFIED rows across 13 workloads exist in `artifacts/bench/` and are recorded in NO ledger or report**
+
+Follow-on from the audit above, done build-free under the halt. That audit found one
+unbanked certified row in `math_unary` and I said the artifacts directory deserved a
+sweep. It does. This is the sweep, across all eleven categories.
+
+**METHOD, because the first two attempts at this were unreliable and I discarded
+them.** Matching on ratios does not work — `14.8` matches incidental digits all over
+a 27,000-line ledger and reported false hits everywhere. Matching on workload names
+does not work either — the names appear in unrelated prose. What DOES work is the
+row's own non-colliding figures: a two-decimal microsecond p50 and a six-decimal
+null median cannot coincide by chance. **The method validates itself: every row I
+banked scores 4/4, including `log @1M` which flipped from 0/4 to 4/4 the moment I
+banked it an hour ago.** Rows below score **0/4** against 3 MB of text spanning all
+23 markdown files in `docs/`, `artifacts/optimization/` and `reports/`.
+
+Only rows where ALL THREE gate clauses passed are listed. Nothing marginal, nothing
+NULL_UNDECIDABLE.
+
+| workload | category | best ratio | FP p50 | pandas p50 | A/A nulls (FP / pandas) | runs | artifact |
+|---|---|---|---|---|---|---|---|
+| `loc_labels` | indexing | **14.817x** | 2163us | 31540us | 0.988017 / 0.999194 | 2 | `bench_2026-08-16T08-07…` |
+| `join_inner` | joins | **10.535x** | 2674us | 27919us | 1.003170 / 0.988507 | 2 | `…T07-49…` |
+| `dt_strftime` | datetime | **10.192x** | 38046us | 385429us | 1.001427 / 0.998773 | 1 | `…T08-19…` |
+| `str_contains_arrow` | strings | **10.052x** | 1849us | 18448us | 0.984499 / 0.994234 | 2 | `…T06-35…` |
+| `join_inner_str` | joins | **7.998x** | 16550us | 131493us | 0.994034 / 1.002878 | 2 | `…T07-51…` |
+| `groupby_sum_int64` | groupby | **5.957x** | 1627us | 9670us | 1.000177 / 1.001283 | 2 | `…T08-03…` |
+| `str_startswith_arrow` | strings | **4.959x** | 792us | 3862us | 1.008614 / 1.012817 | 3 | `…T06-44…` |
+| `str_len` | strings | **3.402x** | 3043us | 10351us | 1.015859 / 1.000062 | 3 | `…T06-36…` |
+| `str_groupby_sum_arrow` | strings | **3.022x** | 6334us | 19390us | 1.007010 / 0.995050 | 3 | `…T06-32…` |
+| `rolling_mean_w10` | rolling | **1.995x** | 7623us | 15937us | 1.002478 / 0.988617 | 2 | `…T11-12…` |
+| `reindex` | indexing | **1.508x** | 15414us | 23206us | 0.980312 / 0.997123 | 2 | `…T08-09…` |
+| `to_datetime` | datetime | **1.451x** | 41671us | 60216us | 1.002590 / 0.990027 | 2 | `…T08-12…` |
+| `str_value_counts_arrow` | strings | **1.442x** | 8762us | 12709us | 0.998236 / 1.000916 | 3 | `…T06-40…` |
+
+**MOST OF THESE ARE INDEPENDENTLY REPLICATED.** The `runs` column counts separate
+fully-passing invocations of the same workload: `loc_labels` twice at 14.817x and
+14.688x, `join_inner` twice at 10.535x and 10.356x, `str_len` three times at 3.402x,
+3.377x and 3.287x. Replication at that tightness is stronger evidence than any single
+row in this ledger, and it is sitting in a directory nobody reads.
+
+**I AM NOT BANKING THESE AND THEY ARE NOT MINE.** Every one predates my session —
+they were run between 05:00 and 13:00 on 2026-08-16 while I was working on
+`math_unary`. I can attest only to what the artifacts contain: three-clause passes
+with both A/A nulls inside 2%, pinned incumbent, same-invocation subject and
+incumbent arms. Whoever ran them owns the banking decision, and if any went
+unrecorded deliberately — a known-bad fixture, a shape that flatters us — that
+reasoning is worth more than the row and belongs here.
+
+**THE POINT, and it outweighs anything I measured this session.** The campaign's
+binding constraint is described as measurement capacity: the host, the windows, the
+rch queue, the load. I spent this session fighting for four rows and lost three
+windows to build storms. Meanwhile **thirteen distinct certified wins — including a
+14.8x, a 10.5x and a 10.2x — were already paid for and then dropped on the floor.**
+The expensive part of a row is producing it; writing it down is free. A row that
+exists only as JSON in `artifacts/bench/` has cost the campaign a full measurement
+window and returns nothing.
+
+Concrete follow-up for whoever holds these beads: read each artifact, decide bank or
+reject, and write the reason either way. That work needs no host, no build and no
+quiet window — it can be done flat out during exactly the kind of halt we are in now.
