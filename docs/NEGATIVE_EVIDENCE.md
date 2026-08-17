@@ -27005,3 +27005,56 @@ The three-clause gate is necessary and it is not sufficient — a like-for-like
 comparison also requires the arms to have run at the same clock and the median
 to agree in direction with the minima. Both checks now ride on every row
 automatically.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-o57rj) — `copysign`→OR landed for floor/ceil/trunc: `ceil` 1.168x, `floor` 1.061x in-repo, bit-identical; `trunc` is a WASH and is said so
+
+The lever from the two corrected entries above, now measured IN THE REPO rather
+than in a probe, and landed. `copysign(r, x)` is `(r & !signbit) | (x & signbit)`;
+when `r` is a known non-negative magnitude the first half is a no-op and the OR
+alone is exact, in two operations instead of three. `ceil_fast` paid it twice.
+
+**Paired ABBA, two ELFs (`7f302919` baseline = HEAD 2243aec2b, `a1de1376`
+candidate), one host, load 19.71, per-arm CPU MHz recorded, `@1M`:**
+
+| op | baseline p50 | candidate p50 | p50 ratio | best-vs-best | MHz base/cand | checksums |
+|---|---|---|---|---|---|---|
+| `ceil` | 722.5us | **618.8us** | **1.168x** | 1.166x | 3305.1 / 3337.6 | IDENTICAL |
+| `floor` | 616.6us | **581.2us** | **1.061x** | 1.084x | 3268.6 / 3238.5 | IDENTICAL |
+| `trunc` | 607.8us | 627.4us | **0.969x** | 1.080x | 3282.2 / 3182.6 | IDENTICAL |
+
+In-binary A/A nulls 0.9994 / 1.0005 / 1.0015 (n=300 each).
+
+**`trunc` IS A WASH AND IS RECORDED AS ONE.** Its median says 0.969x — SLOWER —
+while its minima say 1.080x. Two statistics in opposite directions on the same
+pair is the dispersion signature the harness warns about, and the honest reading
+is "no measurable effect", not the 1.063x the probe suggested. It ships anyway
+because it is bit-identical and shares the helper with the two ops that do gain;
+nobody should quote a `trunc` number from this.
+
+**The in-repo figures MATCH the corrected probe** (predicted `floor` 1.080x, `ceil`
+1.145x; measured 1.061/1.084x and 1.168/1.166x) and DO NOT match the
+function-pointer probe that claimed 1.647x/1.425x. That is the second independent
+confirmation that the fn-pointer form was measuring the wrong calling convention.
+
+**VS LIVE PANDAS @10M — MEASURED, NOT GATED, AND NOT CLAIMED.** Both rows were
+taken as the host went from loadavg 23.63 to 34.25 and their A/A nulls FAILED:
+
+| workload | ratio | 95% CI | best-vs-best | FP null | pandas null |
+|---|---|---|---|---|---|
+| `ceil @10M` | 1.145x | 1.020–1.202 | 1.2071 | 1.020541 FAIL | 1.031717 FAIL |
+| `floor @10M` | 1.080x | 1.030–1.106 | 1.1945 | 0.958454 FAIL | 1.008459 PASS |
+
+Per-arm busy-core MHz 4042.7/4034.4 and 4140.9/4142.4, arm clock ratios 1.0021 and
+1.0004; FP peak threads 2 against pandas' 66. **No verdict is banked from these.**
+The gated `ceil @10M` figure on the PREVIOUS build is 1.132x with both nulls clean,
+and the gated `floor @10M` is 1.056x, CI [1.01676, 1.10917], both nulls clean — the
+candidate should be re-run against those in a quiet window before anyone quotes a
+new 10M number.
+
+**Pinned in CI so the refutation cannot be re-derived:**
+`floor_ceil_trunc_fast_are_bit_identical_o57rj` now also asserts that the SIGNED-magic
+form — the one that measured 1.279x faster and was wrong on every negative input —
+still disagrees with `f64::floor` on >1000 corpus values. If that assertion ever
+stops holding, the magic-number argument has changed and all three kernels need
+re-deriving. The corpus itself is unchanged: 3,066,760 values, `to_bits()`
+comparison, exhaustive exponent walk, and the naive int-cast negative case.
