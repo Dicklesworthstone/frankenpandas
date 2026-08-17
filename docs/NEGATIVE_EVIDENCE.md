@@ -28922,3 +28922,92 @@ measuring it, I turned a certified 1.203x win into a certified 0.771x loss withi
 the hour. What can be said precisely: `log2` is the only op in this family whose
 null fails in a window where its arm-mates pass, and the next person should compare
 `log2`'s kernel against `log`'s directly rather than re-running it a fifth time.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `log @1M` CERTIFIES FASTER at 1.963x, all three clauses true. The parallel arm pays where the serial one does not
+
+**Campaign result class:** incumbent-win.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=4c50f09ba713bb8373b57ee658675d7bc16ebb7a5815902d068e75230d98ec62 (81044200 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files, 70681559 bytes), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T063942.626794Z-pid4162377 , giving
+measured_ratio=1.963x for this row.
+
+| arm | p50 | min | cv | observed threads |
+|---|---:|---:|---:|---:|
+| FrankenPandas | **1764.39us** | 1539.85us | 6.69% | 8 |
+| pandas 2.2.3 | 3421.76us | 3360.66us | 1.65% | 1 (peak 67, BLAS threads a ufunc never uses) |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.985572 and
+pandas median ratio 0.992924, both inside the 2% limit, 9 balanced-square ABBAABBA
+rounds per arm.
+
+**Median-CI decision:** effect median 1.963x, 95% CI [1.87329344, 1.99542141]
+excluding unity; claim log effect 0.6746 against a required 0.2135 — cleared by
+3.2x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 6.69%, pandas 1.65%.
+
+**MECHANISM, and it is the direct contrast with `sqrt`.** `log` is a libm call per
+element and FP spreads it across 8 workers while numpy evaluates its ufunc on one
+thread — the compute-bound-parallelism vein. `sqrt` sits at 0.867x in the same
+family on the same binary BECAUSE it was deliberately forced serial
+(`par_min_override = Some(usize::MAX)`). Same helper, same domain-fused kernel, two
+routing decisions, and the routing is worth 2.3x between them. That is the
+strongest evidence yet that the serial override is the wrong default for
+compute-heavy unaries, and it is a measured contrast rather than an argument.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `floor`/`ceil`/`trunc @1M` CERTIFY SLOWER at 0.31x / 0.29x / 0.30x — the WORST ratios in this campaign, and they contradict the banked `floor @10M` 1.056x
+
+Three rows, one invocation each, all on ELF `4c50f09b…`, all with 3/3 gate clauses
+true and best-vs-best AGREEING with the median:
+
+| workload | ratio | 95% CI | best-vs-best | FP p50 | pandas p50 | FP threads |
+|---|---:|---|---:|---:|---:|---:|
+| `floor @1M` | **0.314x** | [0.31243, 0.33731] | 0.3066 | 552.90us | 172.85us | 1 |
+| `ceil @1M` | **0.294x** | [0.27962, 0.31443] | 0.2803 | 598.21us | 173.60us | 1 |
+| `trunc @1M` | **0.303x** | [0.30060, 0.32186] | 0.3011 | 557.68us | 169.08us | 1 |
+
+**A/A null control (same invocation):** FrankenPandas median ratios 0.995642,
+1.007489 and 0.984925 and pandas median ratios 0.996941, 0.996089 and 0.994331
+across the three rows — all six inside the 2% limit.
+
+**Median-CI decision:** claim log effects 1.1595, 1.2255 and 1.1931 against required
+0.2448, 0.2283 and 0.2142 — every one clears its two-times-null margin by roughly
+5x, so these are not marginal.
+
+**CV role:** provenance only, no vote — FP 7.32%/7.58%/6.42%, pandas
+7.17%/7.89%/7.51%.
+
+**THIS IS NOW THE WORST MEASURED RATIO IN THE CAMPAIGN, by a wide margin.** `sqrt
+@1M` at 0.867x was the standing worst; these are 3.2-3.4x slower than the incumbent.
+pandas does `floor` on 1M float64 in 172.85us — a numpy vectorized floor — and
+FrankenPandas takes 552.90us on ONE thread, because `Column::floor` reaches
+`typed_float_witness_free_unary`, which is a serial `data.iter().map(f)` with no
+parallel arm at all.
+
+**AND IT CONTRADICTS A BANKED ROW.** This ledger carries `floor @10M` CERTIFIED at
+**1.056x FASTER**, CI [1.01676, 1.10917], both nulls clean (2026-08-16). Same op,
+same host, opposite side of unity, one order of magnitude apart in size. Both rows
+passed the same gate. At least one of the following is true and I have not
+determined which:
+  * the ratio is strongly size-dependent and 1M and 10M take materially different
+    paths (the `typed_float_integral_identity` short-circuit and the nullable
+    parallel arm are both reachable in `floor` and neither fires here), or
+  * the op regressed between 2026-08-16 and today, in which case the @10M row needs
+    re-running on `4c50f09b…` before it is quoted again.
+**Nobody should quote either figure as "the" floor ratio until that is resolved.**
+The cheap discriminator is `floor @10M` on this binary, which is one invocation and
+needs no build; I did not run it because the family sweep already consumed this
+window and a rushed row is how the 1.056x/0.31x pair happened in the first place.
+
+**Filed rather than fixed.** The obvious lever — give `floor`/`ceil`/`trunc` the
+parallel arm that `log` has, which is worth 1.963x on the same binary — is exactly
+the change the ledger REJECTED on 2026-08-16 (parallel LOSES for these ops by
+1.7-3.1x at every worker count from 2 to 63, because the per-element work is too
+small for threads to pay). So the answer is not "parallelize it", and the 0.31x has
+to come from somewhere else: numpy is doing 1M floors in 172us, which is ~0.17ns per
+element, and that is a SIMD-width story, not a threading one.
