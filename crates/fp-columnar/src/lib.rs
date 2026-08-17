@@ -8589,6 +8589,68 @@ fn par_map_slice_f64_domain_fused_to_owned_chunks<
 /// Bit-identical to the shared arm at every worker count: `f` is unchanged and
 /// per-element, each output element is written once by one worker, and both flags
 /// are `all()` reductions over booleans, which are associative and commutative.
+/// Map a PAIR of equal-length all-valid `f64` slices, folding `saw_nan` through
+/// the same pass.
+///
+/// br-frankenpandas-4kig1. The binary sibling of
+/// [`par_map_slice_f64_with_witness`]. Each worker zips its own sub-slices, so the
+/// inner loop is a bounds-check-free zip rather than two indexed lookups, and `f`
+/// is monomorphised into it rather than called through a pointer.
+///
+/// `saw_nan` is an OR reduction over booleans, which is associative and
+/// commutative, so the flag does not depend on how the work is divided. Every
+/// output element is written exactly once by exactly one worker, so the values do
+/// not either: the result is bit-identical at every worker count.
+fn par_map_slice_pair_f64<F: Fn(f64, f64) -> f64 + Sync>(
+    a: &[f64],
+    b: &[f64],
+    f: &F,
+) -> (Vec<f64>, bool) {
+    fn block<F: Fn(f64, f64) -> f64>(out: &mut [f64], a: &[f64], b: &[f64], f: &F) -> bool {
+        let mut saw_nan = false;
+        for ((o, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+            let v = f(x, y);
+            saw_nan |= v.is_nan();
+            *o = v;
+        }
+        saw_nan
+    }
+
+    let n = a.len();
+    let mut out = vec![0.0_f64; n];
+    let (max_workers, par_min) = elementwise_witness_policy();
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let cap = if max_workers == 0 {
+        available
+    } else {
+        max_workers
+    };
+    let workers = available.min(cap);
+
+    if workers <= 1 || n < par_min {
+        let saw_nan = block(&mut out, a, b, f);
+        return (out, saw_nan);
+    }
+
+    let chunk = n.div_ceil(workers).max(1);
+    let mut flags = vec![false; n.div_ceil(chunk)];
+    std::thread::scope(|scope| {
+        for (((out_c, a_c), b_c), flag) in out
+            .chunks_mut(chunk)
+            .zip(a.chunks(chunk))
+            .zip(b.chunks(chunk))
+            .zip(flags.iter_mut())
+        {
+            scope.spawn(move || {
+                *flag = block(out_c, a_c, b_c, f);
+            });
+        }
+    });
+    (out, flags.iter().any(|&x| x))
+}
+
 fn par_map_slice_f64_domain_fused<
     T: Copy + Sync,
     D: Fn(T) -> bool + Sync,
@@ -26519,23 +26581,55 @@ impl Column {
     /// parallel (par_map_vec_f64), and MOVEs the result out. Bit-identical to
     /// `typed_float_binary` (same `f`, same order; from_f64_values_owned falls back
     /// to from_f64_values on an op-produced NaN, keeping Float64(NaN) identically).
-    fn typed_float_binary_par(&self, other: &Self, f: fn(f64, f64) -> f64) -> Option<Self> {
+    /// GENERIC over `F`, not `fn(f64, f64) -> f64`. br-frankenpandas-4kig1.
+    ///
+    /// This took a fn POINTER, so `pow`, `atan2` and `hypot` were CALLED through
+    /// it once per element and the loop could neither inline them nor vectorize
+    /// around them. That is not a theoretical cost: a `fn`-pointer probe inflated
+    /// an earlier reading of the `copysign` lever from 1.08x to 1.647x for exactly
+    /// this reason, and the correction is recorded in this ledger. The unary
+    /// family was moved off pointer dispatch earlier in this bead; the binary
+    /// family was left behind.
+    ///
+    /// Two other things came with it, both already fixed on the unary side:
+    ///   * the map reached its values BY INDEX (`|i| f(a[i], b[i])`), which is
+    ///     bounds-checked twice per element over two slices;
+    ///   * `from_f64_values_owned` then re-read the whole output asking
+    ///     `is_nan()` — a pass measured at 505.1us per 1M when it was removed
+    ///     from `round()`.
+    ///
+    /// A binary op CAN mint NaN from finite inputs (`0/0`, `inf - inf`,
+    /// `(-1).powf(0.5)`), so unlike the unary domain-fused arm this cannot assume
+    /// an all-valid output. It folds `saw_nan` through the SAME pass instead: no
+    /// NaN, and the all-valid constructor is exact; any NaN, and the already
+    /// computed buffer is handed to `from_f64_values`, which derives validity from
+    /// NaN — the same rule, without a second evaluation of `f`.
+    fn typed_float_binary_par<F: Fn(f64, f64) -> f64 + Sync>(
+        &self,
+        other: &Self,
+        f: F,
+    ) -> Option<Self> {
+        fn build(a: &[f64], b: &[f64], f: &(impl Fn(f64, f64) -> f64 + Sync)) -> Column {
+            let (out, saw_nan) = par_map_slice_pair_f64(a, b, f);
+            if saw_nan {
+                // Values are already correct; only the mask is unknown.
+                return Column::from_f64_values(out);
+            }
+            Column::from_f64_all_valid_with_finite_opt(out, None)
+        }
+
         if let (Some(a), Some(b)) = (self.as_f64_slice(), other.as_f64_slice()) {
             if a.len() != b.len() {
                 return None;
             }
-            return Some(Self::from_f64_values_owned(par_map_vec_f64(a.len(), |i| {
-                f(a[i], b[i])
-            })));
+            return Some(build(a, b, &f));
         }
         let a = self.all_valid_as_f64()?;
         let b = other.all_valid_as_f64()?;
         if a.len() != b.len() {
             return None;
         }
-        Some(Self::from_f64_values_owned(par_map_vec_f64(a.len(), |i| {
-            f(a[i], b[i])
-        })))
+        Some(build(&a, &b, &f))
     }
 
     /// All-valid `f64` → a witness-FREE single pass, exactly as [`Self::abs`]
@@ -38581,6 +38675,128 @@ mod tests {
             for (i, (&g, &x)) in got.iter().zip(good.iter()).enumerate() {
                 assert_eq!(g.to_bits(), x.sqrt().to_bits(), "sqrt at {i}");
             }
+        }
+
+        /// br-frankenpandas-4kig1. `pow`, `atan2` and `hypot` moved off fn-pointer
+        /// dispatch onto a monomorphised zip that folds `saw_nan` in the same pass.
+        ///
+        /// A binary op CAN mint NaN from finite inputs, so the risk is the NaN
+        /// half: if `saw_nan` is ever wrong, either a NaN slot is reported PRESENT
+        /// (flag missed) or a perfectly good column takes the slower derived-mask
+        /// path (flag spurious — harmless but worth knowing). This asserts values
+        /// and validity together, over inputs chosen so each op actually produces
+        /// NaN somewhere.
+        #[test]
+        fn binary_float_ops_fold_nan_and_stay_bit_identical_4kig1() {
+            // Chosen so every op has both ordinary and NaN-producing rows.
+            let left: Vec<f64> = vec![
+                2.0,
+                -1.0,
+                9.0,
+                0.0,
+                -0.0,
+                1.0,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                3.0,
+                -4.0,
+            ];
+            let right: Vec<f64> = vec![
+                3.0,
+                0.5,
+                0.5,
+                0.0,
+                2.0,
+                f64::INFINITY,
+                f64::INFINITY,
+                2.0,
+                4.0,
+                -0.5,
+            ];
+
+            type Bin = (
+                &'static str,
+                fn(&Column, &Column) -> Result<Column, ColumnError>,
+                fn(f64, f64) -> f64,
+            );
+            let ops: [Bin; 3] = [
+                ("pow", Column::pow, |b: f64, e: f64| b.powf(e)),
+                ("atan2", Column::atan2, |y: f64, x: f64| y.atan2(x)),
+                ("hypot", Column::hypot, |a: f64, b: f64| a.hypot(b)),
+            ];
+
+            for (name, op, oracle) in ops {
+                let out = op(
+                    &Column::from_f64_values(left.clone()),
+                    &Column::from_f64_values(right.clone()),
+                )
+                .expect(name);
+                assert_eq!(out.len(), left.len(), "{name}: length drift");
+
+                for (i, (&x, &y)) in left.iter().zip(right.iter()).enumerate() {
+                    let expected = oracle(x, y);
+                    if expected.is_nan() {
+                        assert!(
+                            !out.validity().get(i),
+                            "{name}({x:e}, {y:e}) is NaN, so slot {i} must be MISSING — \
+                             a missed saw_nan reports a NaN as PRESENT"
+                        );
+                    } else {
+                        assert!(
+                            out.validity().get(i),
+                            "{name}({x:e}, {y:e}) = {expected:e}, so slot {i} must be PRESENT"
+                        );
+                        match &out.values()[i] {
+                            Scalar::Float64(got) => assert_eq!(
+                                got.to_bits(),
+                                expected.to_bits(),
+                                "{name} at {i}: inputs {x:e}, {y:e}"
+                            ),
+                            other => panic!("{name} at {i}: expected Float64, got {other:?}"),
+                        }
+                    }
+                }
+            }
+
+            // A wholly NaN-free pair must take the all-valid constructor and come
+            // back as a contiguous typed slice — the fast path this change exists
+            // to preserve. Sized above the parallel threshold so the chunked arm
+            // and its OR-reduction are exercised, not just the serial one.
+            const LEN: usize = 300_000;
+            let a: Vec<f64> = (0..LEN).map(|i| 1.0 + (i % 97) as f64).collect();
+            let b: Vec<f64> = (0..LEN).map(|i| 1.0 + (i % 13) as f64).collect();
+            let out = Column::from_f64_values(a.clone())
+                .hypot(&Column::from_f64_values(b.clone()))
+                .expect("hypot");
+            assert!(
+                out.validity().all(),
+                "no NaN is possible here, so all-valid"
+            );
+            let got = out
+                .as_f64_slice()
+                .expect("a NaN-free binary result must stay a contiguous typed slice");
+            for (i, (&g, (&x, &y))) in got.iter().zip(a.iter().zip(b.iter())).enumerate() {
+                assert_eq!(g.to_bits(), x.hypot(y).to_bits(), "hypot at {i}");
+            }
+
+            // And one NaN in 300_000 must still be caught by the OR-reduction
+            // across chunks — a per-chunk flag that failed to combine would pass
+            // every assertion above.
+            let mut a_bad = a;
+            let mut b_bad = b;
+            a_bad[200_000] = -1.0;
+            b_bad[200_000] = 0.5;
+            let out = Column::from_f64_values(a_bad)
+                .pow(&Column::from_f64_values(b_bad))
+                .expect("pow");
+            assert!(
+                !out.validity().get(200_000),
+                "(-1).powf(0.5) is NaN and must be MISSING even at 300_000 rows"
+            );
+            assert!(
+                out.validity().get(0) && out.validity().get(LEN - 1),
+                "the surrounding rows must stay present"
+            );
         }
 
         #[test]
