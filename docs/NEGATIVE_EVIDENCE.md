@@ -28759,3 +28759,69 @@ ONLY because I wrote down what should happen before running it, and one half of 
 did not.** A prediction recorded afterwards would have been fitted to 0.771x as
 "parallelism mattered after all"; recorded beforehand, it was falsifiable and it
 falsified.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-284ul) — `sqrt @1M` CONFIRMED SLOWER at 0.867x on a second binary in a second window. The narrow pass was real, and the margin is now 47% rather than 8.8%
+
+The row banked earlier today cleared its decidability margin by only 8.8%, and I
+said in the entry that it should be re-run before anyone leaned on the figure. Done.
+
+| | first row | confirmation |
+|---|---:|---:|
+| ELF | `36e7c6fb…` (git a8a29b93b) | `4c50f09b…` (git 0ef2d12aa) |
+| FP p50 | 1231.42us | 1248.62us |
+| pandas p50 | 1082.19us | 1080.49us |
+| **ratio** | **0.877x** | **0.867x** |
+| effect CI | [0.86881, 0.90524] | [0.84942, 0.88336] |
+| margin cleared by | 8.8% | **47%** (claim 0.142537 vs required 0.096923) |
+| best-vs-best | 0.8806 | 0.8863 |
+| FP cv / pandas cv | 5.91% / 5.44% | 6.95% / 6.24% |
+| FP A/A null | 0.99169833 | 0.99773568 |
+| pandas A/A null | 1.00063623 | 1.00124916 |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.99773568 and
+pandas median ratio 1.00124916, both inside the 2% limit, 9 balanced-square
+ABBAABBA rounds per arm.
+
+**Median-CI decision:** effect median 0.867x, CI [0.84942025, 0.88336375] excluding
+unity; claim log effect 0.142537 against a required 0.096923 — cleared by 47%,
+where the first row managed 8.8%. All three clauses true.
+
+**TWO BINARIES, TWO WINDOWS, SAME ANSWER.** Different ELFs built from different
+commits, load 13.68/15.91/20.73 then 10.57/12.43/15.33, and best-vs-best agrees
+with the median in both (0.8806/0.877 and 0.8863/0.867). `sqrt @1M` is a
+reproduced 12-13% loss, not a narrow-pass artefact.
+
+**The subject was checked, not assumed, before measuring** — the practice the
+correction above established. HEAD had moved twice since the first row, including
+`0ef2d12aa`, which rescoped `sqrt`'s serial override to the FLOAT path after a peer
+measured that applying it to the int path turned a certified `sqrt_int64 @10M`
+1.203x win into a 0.771x loss. I read `Column::sqrt` at HEAD and confirmed the
+float arm still carries `Some(usize::MAX)`, so this row and the first measure the
+same serial float kernel and are comparable. Had I skipped that check, a 1.56x
+routing swing sat between the two rows.
+
+**Build discipline, following frankenfs' warning:** the binary was built BEFORE the
+measurement window, not inside it, and the build moved loadavg only 13.05 → 12.37
+(it was near-incremental). The window was then re-checked immediately before the
+run.
+
+```
+CLASS        vs-incumbent row, live pandas 2.2.3 in the SAME invocation
+ELF          4c50f09ba713bb8373b57ee658675d7bc16ebb7a5815902d068e75230d98ec62
+             built locally from git 0ef2d12aa, no [RCH] line, 0 warnings
+INVOCATION   vs-pandas-20260817T063453.381956Z-pid4096702
+LOADAVG      10.57 / 12.43 / 15.33 at launch → 10.57 / 12.37 / 15.28 at the end
+OBSERVED MHz host mean 2583.9 before → 3295.6 after (min 1429.0, max 4290.1);
+             host-level, NOT per-arm — this harness does not sample per-arm
+THREADS      FP 1 (peak 2) — CORRECT, not a sampler artefact: `Column::sqrt`
+             forces serial on the float path, verified this turn by the kernel's
+             own worker counter, which reports 4 for `log` under the same cap
+ARTIFACT     artifacts/bench/sqrt_1m_cert4_thinkstation1_2026-08-17.json
+```
+
+**CV role:** provenance only, no vote — FP 6.95%, pandas 6.24%.
+
+**Quote 0.867x, with 0.877x as its replicate.** The remaining gap is a serial
+FrankenPandas float `sqrt` against a single-threaded numpy ufunc, ~13%, with three
+candidate mechanisms already excluded by measurement (scheduling policy, the
+finiteness witness, the pre-zeroed buffer).
