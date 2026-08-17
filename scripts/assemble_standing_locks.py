@@ -228,6 +228,21 @@ def report_orphans(groups: dict[str, dict[str, Any]]) -> int:
     zero, which is also its deletion condition.
     """
     live = live_harness_sha()[:12]
+
+    # A row that has ALREADY been re-measured on the live harness is defended and
+    # must not be reported as debt. Without this the list keeps naming rows whose
+    # repair is finished — sending the next agent to re-measure work already done,
+    # which is the same "absence of work rendered as work" shape this ledger keeps
+    # catching. Caught immediately by re-running --orphans after re-locking
+    # floordiv/mod @10M and seeing both still listed.
+    defended: set[tuple[Any, Any, str]] = set()
+    for bucket in groups.values():
+        if str(bucket["identity"].get("harness_sha256") or "")[:12] != live:
+            continue
+        host = str(bucket["identity"].get("host_identity") or "unknown-host")
+        for result in bucket["best"].values():
+            defended.add((result.get("workload"), result.get("size"), host))
+
     best: dict[tuple[Any, Any, str], tuple[float, str]] = {}
     for bucket in groups.values():
         identity = bucket["identity"]
@@ -237,6 +252,8 @@ def report_orphans(groups: dict[str, dict[str, Any]]) -> int:
         host = str(identity.get("host_identity") or "unknown-host")
         for result in bucket["best"].values():
             key = (result.get("workload"), result.get("size"), host)
+            if key in defended:
+                continue
             ratio = float(result.get("ratio") or 0.0)
             if key not in best or ratio > best[key][0]:
                 best[key] = (ratio, harness)

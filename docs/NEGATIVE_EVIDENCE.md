@@ -34662,3 +34662,80 @@ divisor's effect cannot be demonstrated.
 shape at or above 64 groups profits, and nothing below 64 was measured because the arm
 refuses to engage there. The floor, unlike the divisor, has never been measured on this
 kernel either.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-h67zz) — mod @10M certified at 7.509x, completing the standing pair on the live harness; and re-running --orphans across the state change exposed a bug in the tool I shipped an hour earlier
+
+**Campaign result class:** `incumbent-win`.
+
+A relock rather than a new lever — the kernel is unchanged and nothing here is claimed as an
+optimisation — but the ratio is measured against pandas running in the same invocation, so by
+section 1 it is an incumbent-win and carries that contract, not the maintenance one.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=a802073cf042d28d9807347acee416505a0af97e7e2c0e344877405ea1ef80c5 (82346192 bytes) /data/projects/.scratch/crimsonpine/fp-bench-MAIN-8b263954b`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260817T205739.248980Z-pid541866 measured_ratio=7.509x — the incumbent
+ran in this same invocation, arm A of the balanced square.
+
+**A/A null control (same invocation):** null median ratio frankenpandas=0.99892321 and null median
+ratio pandas=0.99957437 maximum_absolute_deviation=0.02 — both medians inside the band, the
+tightest pair in this campaign.
+
+**Median-CI decision:** median effect ratio 7.509x with CI [7.43742679, 7.72176647];
+claim_log_effect=2.01609773 cleared the required threshold required_log_effect=0.05814951 at
+margin_multiplier=2.0; decidable=true and all three clauses true.
+
+**CV role:** provenance-only, no vote in the decision (`cv_is_provenance_only=true`). FP 4.56%,
+pandas 1.71% are recorded as descriptive dispersion, and the verdict rests on the CI and the null
+margin above.
+
+**Harness sha256:** `60ed3c58fdd5` — the live instrument.
+**Counted mechanism:** none counted; a relock, not a lever.
+
+| | FP | pandas |
+|---|---|---|
+| p50 | 16,073.0us | 120,944.1us |
+| cv | 4.56% | 1.71% |
+| A/A null | 0.99892 | 0.99957 |
+| busy-core MHz | **4293.8** | **4292.5** |
+
+    loadavg_1min      first 10.91  last 13.45  min 7.25  max 15.1
+    observed_cpu_mhz  min 1429.0  median 2999.7  max 4261.3  (137 samples)
+
+**This is the clean counterpart to floordiv's row.** floordiv ran through a window that collapsed
+(loadavg 10.62 -> 21.39, max 25.37, host later at 0.9% idle); mod ran 10.91 -> 13.45 with a max of
+15.1 and no collapse. Both arms clock-matched to 0.03%. That the two rows agree in character —
+same ELF, same harness, both certified, incumbent cv 1.77% and 1.71% — is the useful cross-check:
+the floordiv row was not rescued by luck, and the mod row confirms the pair.
+
+**The standing pair is now defended on the live harness.** `standing_thinkstation1_60ed3c58fdd5`
+goes 3 -> 5 workloads: floordiv @10M 8.787x, groupby_rolling_mean_w10 @1M 7.592x, mod @10M 7.509x,
+sqrt @10k 3.73x, sqrt @100k 1.157x.
+
+Neither 8.787x nor 7.509x is comparable to the old 6.649x/6.064x locks: different instruments,
+which is why those were quarantined. No improvement is claimed.
+
+**⚠️ AND THE TOOL I SHIPPED AN HOUR AGO REPORTED FINISHED WORK AS OUTSTANDING.**
+
+After banking mod I re-ran `--orphans` expecting the count to fall, and it did not — it still read
+46, and floordiv @10M and mod @10M were both still in the list at their OLD dead-harness ratios
+(6.649x, 6.064x) minutes after being re-locked on the live one.
+
+The bug: I filtered rows by "banked against a harness that is not live" and never subtracted the
+rows that had SINCE been re-measured onto the live harness. The old orphaned copy does not
+disappear when a new lock is written — both files coexist by design — so a repaired row kept
+appearing as debt.
+
+**That is the "absence of work rendered as the success of work" pattern inverted: the PRESENCE of
+finished work rendered as outstanding work.** It would have sent the next agent to re-measure two
+rows that were already defended — the exact waste the list exists to prevent. Fixed by computing
+the set of (workload, size, host) present on the live harness first and excluding it; the count
+falls 46 -> 44 and both rows drop out.
+
+**What made it catchable was re-running the tool across a state change I had just caused.** A
+report that only ever runs against a static corpus cannot show this class of error. Worth applying
+to the next reporting script: change the state, re-run, and check the number MOVED in the
+direction you expect — I would not have found this by reading the code, because the code does
+exactly what I wrote.
