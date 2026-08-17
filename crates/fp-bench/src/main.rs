@@ -1050,6 +1050,33 @@ fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
 
     let series = Series::new("s", index, Column::from_f64_values(data)).expect("math series");
 
+    // BINARY LANES. br-frankenpandas-4kig1.
+    //
+    // `342cd07f6` took pow/atan2/hypot off fn-pointer dispatch, and they had no
+    // workload, so the change landed unmeasurable — the same gap that left
+    // log10/log2/log1p unmeasurable until they got lanes, after which they
+    // certified on first use.
+    //
+    // The right-hand series is the SAME generator advanced by one draw, so both
+    // operands come from one distribution and the lane measures the op rather than
+    // a difference between two fixtures. Both are strictly positive, which keeps
+    // `pow` finite (a negative base with a fractional exponent is NaN) so the lane
+    // measures arithmetic and not the missing-value path — the same reasoning the
+    // unary fixture uses.
+    if matches!(workload, "pow" | "atan2" | "hypot") {
+        let mut rhs_rng = SplitMix64(0x0FED_CBA9_8765_4321);
+        let rhs: Vec<f64> = (0..rows).map(|_| 1.0 + rhs_rng.unit() * 9.0).collect();
+        let rhs_index = Index::new_known_unique_int64_unit_range(0, rows);
+        let rhs_series =
+            Series::new("rhs", rhs_index, Column::from_f64_values(rhs)).expect("rhs series");
+        return match workload {
+            "pow" => Some(time_us(|| series.pow(&rhs_series).expect("pow"))),
+            "atan2" => Some(time_us(|| series.atan2(&rhs_series).expect("atan2"))),
+            "hypot" => Some(time_us(|| series.hypot(&rhs_series).expect("hypot"))),
+            _ => None,
+        };
+    }
+
     let samples = match workload {
         "floor" => time_us(|| series.floor().expect("floor")),
         "ceil" => time_us(|| series.ceil().expect("ceil")),

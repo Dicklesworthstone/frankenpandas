@@ -1757,6 +1757,43 @@ def bench_math_log_int64_pandas(df: pd.DataFrame) -> PairedSamples:
     return _bench_math_unary_int(df, np.log)
 
 
+def _math_unary_rhs_input(rows: int) -> pd.Series:
+    """Right-hand operand for the binary lanes.
+
+    br-frankenpandas-4kig1. Same generator family as the unary fixture, advanced
+    by one draw and narrowed to [1, 10] so `pow` stays finite — a large exponent
+    would overflow to inf and turn the lane into an infinity benchmark. Strictly
+    positive for the same reason the unary fixture is: a negative base with a
+    fractional exponent is NaN, and the lane should measure arithmetic rather than
+    the missing-value path.
+    """
+    steps = np.arange(1, rows + 1, dtype=np.uint64)
+    z = np.uint64(0x0FEDCBA987654321) + steps * np.uint64(SPLITMIX64_GAMMA)
+    z = (z ^ (z >> np.uint64(30))) * np.uint64(SPLITMIX64_MUL1)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(SPLITMIX64_MUL2)
+    z ^= z >> np.uint64(31)
+    units = (z >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+    return pd.Series(1.0 + units * 9.0, copy=False)
+
+
+def _bench_math_binary(df: pd.DataFrame, op) -> PairedSamples:
+    left = _math_unary_input(len(df))
+    right = _math_unary_rhs_input(len(df))
+    return time_operation(partial(op, left, right))
+
+
+def bench_math_pow_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_binary(df, np.power)
+
+
+def bench_math_atan2_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_binary(df, np.arctan2)
+
+
+def bench_math_hypot_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_binary(df, np.hypot)
+
+
 def _bench_math_unary(df: pd.DataFrame, op) -> PairedSamples:
     s = _math_unary_input(len(df))
     return time_operation(partial(op, s))
@@ -2753,6 +2790,9 @@ PANDAS_WORKLOADS = {
         "log10": bench_math_log10_pandas,
         "log2": bench_math_log2_pandas,
         "log1p": bench_math_log1p_pandas,
+        "pow": bench_math_pow_pandas,
+        "atan2": bench_math_atan2_pandas,
+        "hypot": bench_math_hypot_pandas,
         "sqrt_int64": bench_math_sqrt_int64_pandas,
         "log_int64": bench_math_log_int64_pandas,
         "expm1": bench_math_expm1_pandas,
