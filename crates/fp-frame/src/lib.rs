@@ -111748,7 +111748,11 @@ mod tests {
     #[test]
     fn str_worker_pool_grows_to_demand_not_core_count_att6b() {
         let pool = super::str_worker_pool::Pool::new();
-        assert_eq!(pool.live_workers(), 0, "constructing a pool must spawn nothing");
+        assert_eq!(
+            pool.live_workers(),
+            0,
+            "constructing a pool must spawn nothing"
+        );
         assert!(pool.threads() >= 1);
 
         if pool.threads() < 3 {
@@ -111768,7 +111772,11 @@ mod tests {
         // Same width again: reuse, do not grow.
         let three: Vec<_> = (0..3usize).map(|i| move || i * 10).collect();
         assert_eq!(pool.run(three), vec![0, 10, 20]);
-        assert_eq!(pool.live_workers(), 2, "re-running the same width must reuse workers");
+        assert_eq!(
+            pool.live_workers(),
+            2,
+            "re-running the same width must reuse workers"
+        );
 
         // Wider call grows by exactly the extra slots it needs.
         let wide = pool.threads().min(5);
@@ -193591,7 +193599,10 @@ mod sgb_rolling_build_groups_share_lyaqi {
     #[ignore = "instruction-count probe: perf stat cargo test -- --ignored --exact"]
     fn instr_group_size_skew_u5cg4() {
         let groups = skew_groups();
-        assert!(groups > 0 && (groups as usize) <= ROWS, "groups must divide ROWS sensibly");
+        assert!(
+            groups > 0 && (groups as usize) <= ROWS,
+            "groups must divide ROWS sensibly"
+        );
         let index = Index::new((0..ROWS).map(|r| IndexLabel::Int64(r as i64)).collect());
         let values: Vec<i64> = (0..ROWS).map(|r| (r as i64 * 7) % 1_000).collect();
         let keys: Vec<i64> = (0..ROWS).map(|r| (r as i64) % groups).collect();
@@ -193985,12 +193996,11 @@ mod clip_nullable_int64_77x9g {
         .expect("series");
         assert_eq!(s.column().dtype(), DType::Int64);
 
-        let out = s.clip(Some(2.5), Some(7.5)).expect("numpy int64 must promote");
+        let out = s
+            .clip(Some(2.5), Some(7.5))
+            .expect("numpy int64 must promote");
         assert_eq!(out.column().dtype(), DType::Float64);
-        assert_eq!(
-            out.values(),
-            &[Scalar::Float64(2.5), Scalar::Float64(7.5)]
-        );
+        assert_eq!(out.values(), &[Scalar::Float64(2.5), Scalar::Float64(7.5)]);
     }
 
     /// An INTEGER-VALUED float bound still works on the nullable lane, and a
@@ -194007,7 +194017,9 @@ mod clip_nullable_int64_77x9g {
             Scalar::Int64(10),
         ]);
 
-        let clipped = s.clip(Some(2.0), Some(8.0)).expect("integral bounds are storable");
+        let clipped = s
+            .clip(Some(2.0), Some(8.0))
+            .expect("integral bounds are storable");
         assert_eq!(clipped.column().dtype(), DType::Int64Nullable);
         assert_eq!(int64_values(&clipped), vec![Some(2), None, Some(8)]);
 
@@ -194207,13 +194219,9 @@ mod clip_nullable_int64_77x9g {
         // [1,2,3] with the SAME bound: 3 is replaced BY 2.5, which Int64
         // cannot hold, so pandas raises.
         assert!(
-            nullable_int64_series(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3)
-            ])
-            .clip(None, Some(2.5))
-            .is_err(),
+            nullable_int64_series(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .clip(None, Some(2.5))
+                .is_err(),
             "a fractional bound that IS stored must still raise"
         );
     }
@@ -194531,10 +194539,7 @@ mod dot_column_parallel_materialization_1hjgz {
             let values: Vec<f64> = (0..rows)
                 .map(|r| ((r * 7 + c * 13) as f64).mul_add(0.1, seed) / 3.0)
                 .collect();
-            columns.insert(
-                format!("{name_prefix}{c}"),
-                Column::from_f64_values(values),
-            );
+            columns.insert(format!("{name_prefix}{c}"), Column::from_f64_values(values));
         }
         DataFrame::new(index, columns).expect("frame")
     }
@@ -194612,10 +194617,7 @@ mod dot_column_parallel_materialization_1hjgz {
                     for (l, a_col) in a_cols.iter().enumerate() {
                         expected += a_col[i] * b_cols[j][l];
                     }
-                    assert_eq!(
-                        value, expected,
-                        "cell ({i},{j}) with {cols} output columns"
-                    );
+                    assert_eq!(value, expected, "cell ({i},{j}) with {cols} output columns");
                 }
             }
         }

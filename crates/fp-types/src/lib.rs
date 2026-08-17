@@ -15772,7 +15772,10 @@ mod sparse_dtype_pandas_name_3gxc6 {
     /// Python capitalisation, not Rust's `false`.
     #[test]
     fn bool_fill_uses_python_capitalisation() {
-        assert_eq!(name(DType::Bool, Scalar::Bool(false)), "Sparse[bool, False]");
+        assert_eq!(
+            name(DType::Bool, Scalar::Bool(false)),
+            "Sparse[bool, False]"
+        );
         assert_eq!(name(DType::Bool, Scalar::Bool(true)), "Sparse[bool, True]");
     }
 
