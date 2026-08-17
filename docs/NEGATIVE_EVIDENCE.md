@@ -27058,3 +27058,51 @@ still disagrees with `f64::floor` on >1000 corpus values. If that assertion ever
 stops holding, the magic-number argument has changed and all three kernels need
 re-deriving. The corpus itself is unchanged: 3,066,760 values, `to_bits()`
 comparison, exhaustive exponent walk, and the naive int-cast negative case.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-o57rj) — the ungated `@10M` rows from the `or_sign` commit, re-run: `ceil` comes back CLEAN at 1.113x with both nulls passing; `floor` does NOT and stays unquotable
+
+The `or_sign` commit (`f825f6f0c`/`ea1ab1e55`) landed with its `@10M` vs-pandas
+rows explicitly marked NOT GATED — taken while the host climbed from loadavg 23.63
+to 34.25, both nulls failing — and said they must be re-run before anyone quoted
+them. Re-run here on the same ELF at loadavg 14.71.
+
+```
+workload        math_unary/{ceil,floor} @10M, balanced-square ABBAABBA, ONE invocation each
+fp-bench ELF    sha256 a1de13762f48ebee… (the landed or_sign build)
+incumbent       pandas 2.2.3, artifact c10b13e6 · thinkstation1, governor powersave
+THREADS         FP peak 2 · pandas peak 66
+```
+
+**`ceil @10M` — CLEAN:**
+
+| arm | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **8582.39us** | 5.62% | **0.995029 — PASSES** |
+| pandas | 9614.23us | 2.90% | **0.992051 — PASSES** |
+
+Effect median **1.113x**, 95% CI **[1.05907, 1.17706]** — EXCLUDES UNITY.
+Best-vs-best 1.183, direction agrees (FP min 7584.7us vs pandas min 8972.5us).
+LOADAVG 14.71 → 16.64, in-run 1-min 12.17–17.04. Per-arm busy-core MHz
+**FP 4232.2 / pandas 4234.1, arm clock ratio 1.0004**; host median 1429.0.
+
+**A/A null control (same invocation):** FrankenPandas 0.995029, pandas 0.992051 —
+both inside the 2% limit.
+**Median-CI decision:** 1.113x, CI [1.05907, 1.17706], excludes unity but does NOT
+clear the gate's ≈1.28x decidability margin, so the verdict remains
+NULL_UNDECIDABLE and this is **not** banked as a certified win.
+**CV role:** provenance only, no vote — FP 5.62%, pandas 2.90%.
+
+**`floor @10M` — NOT CLEAN, and therefore not quotable.** Point ratio 1.224x with
+CI [1.20633, 1.25406] and best-vs-best 1.1844 — the highest `floor` figure of the
+session — but **FP's A/A null FAILED at 1.028094** (pandas' passed at 1.017838).
+A row whose own null misses by 2.8% is not evidence, and the attractive number is
+exactly the reason to say so out loud. `floor @10M`'s quotable figure stays the
+earlier gated 1.056x, CI [1.01676, 1.10917], both nulls clean.
+
+**Net for the `or_sign` lever against the live incumbent:** `ceil @10M` moves from
+the previous build's gated 1.132x to a gated 1.113x — i.e. **within noise of each
+other, and NOT the ~1.17x the in-repo paired A/B suggested.** The paired
+FP-vs-FP comparison and the vs-incumbent ratio are answering different questions:
+the paired one is tight (both arms same binary, same allocator state, interleaved)
+while the incumbent ratio carries pandas' own dispersion. The 1.168x paired figure
+stands as the self-speedup; nobody should add it to a vs-pandas number.
