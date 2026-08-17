@@ -3459,14 +3459,42 @@ def summarize_host_state(
         summary["host_median_mhz_after_arm"] = host
     if topk:
         summary["arm_core_mhz_top_k"] = topk
-    # Prefer the top-k medians for the same-window judgement; fall back to the
-    # single busy core only when thread counts were unavailable.
-    basis = ({arm: v["median"] for arm, v in topk.items()} if len(topk) == 2 else busy)
-    if len(basis) == 2:
-        low, high = sorted(basis.values())
+    # ⚠ THE SAME-WINDOW JUDGEMENT USES THE BUSY-CORE FIGURE, NOT THE TOP-K MEDIAN,
+    # and the reason is a sampling artifact I measured on my own rows.
+    #
+    # Sampling happens AFTER each slot. An arm whose threads EXIT at the end of a
+    # call — FrankenPandas spawns a `thread::scope` per `df.dot` — leaves cores
+    # already ramping down when the sample is taken, while an incumbent with a
+    # persistent pool (OpenBLAS) keeps its cores hot. Measured on
+    # `oxv4u_1M_pair_*`: FrankenPandas' top-58 spanned 2508.4-3730.8 MHz
+    # (median 3014.5) against pandas' top-64 at 3844.0-3868.0 (median 3857.5) —
+    # k nearly equal, so it is not a k mismatch. Keying the flag on those medians
+    # called the row 1.2796x apart and would disqualify essentially every
+    # parallel row for TEARDOWN rather than for a real frequency difference.
+    #
+    # The fastest cores at sample time are the ones that were still working, so
+    # `busy` is the better estimate of what the arm RAN at: the same pair reads
+    # 3730.8 against 3868.0, a ratio of 1.037, inside the 5% band. The top-k
+    # detail is still recorded — it is what exposed the artifact — but it does
+    # not drive the verdict.
+    if len(busy) == 2:
+        low, high = sorted(busy.values())
         summary["arms_saw_same_clock"] = bool(high <= low * 1.05)
         summary["arm_clock_ratio"] = round(high / low, 4) if low else None
-        summary["same_clock_basis"] = "top_k_median" if len(topk) == 2 else "busy_core_max"
+        summary["same_clock_basis"] = "busy_core_max"
+        # The busy core cannot see a WIDE arm whose own threads straddle fast and
+        # slow cores, so record that separately rather than pretending one number
+        # covers both. `arm_core_spread_ratio` is fastest/slowest within an arm's
+        # own top-k: ~1.0 when its cores agree, large when they do not.
+        for arm, detail in topk.items():
+            if detail.get("slowest"):
+                summary.setdefault("arm_core_spread_ratio", {})[arm] = round(
+                    detail["fastest"] / detail["slowest"], 4
+                )
+        summary["same_clock_note"] = (
+            "sampled after each slot; an arm whose threads exit leaves cores "
+            "ramping down, so the top-k median understates it"
+        )
     every = [s["cpu_mhz"]["median"] for _, s in samples if s.get("cpu_mhz")]
     if every:
         summary["observed_cpu_mhz"] = {
@@ -3953,6 +3981,49 @@ def _host_state_self_test() -> None:
     if collided["arms_shared_logical_cpus"] != [0]:
         raise RuntimeError("the shared logical CPU must be named")
 
+    # TEARDOWN ARTIFACT, measured on artifacts/bench/oxv4u_1M_pair_*: an arm whose
+    # threads exit has cores ramping down at sample time, so its top-k MEDIAN
+    # collapses while its busy cores were fine. Keying the same-window flag on the
+    # median disqualified a row for teardown; keying it on the busy core does not.
+    teardown = summarize_host_state(
+        [
+            ("frankenpandas", {"loadavg": [1.0, 1, 1],
+                               "cpu_mhz": {"min": 1429.0, "median": 3014.5, "max": 3730.8,
+                                           "cpus_sampled": 64},
+                               "_sorted_mhz_desc": [3730.8] * 8 + [3014.5] * 28 + [1429.0] * 28}),
+            ("pandas", {"loadavg": [1.0, 1, 1],
+                        "cpu_mhz": {"min": 3844.0, "median": 3857.5, "max": 3868.0,
+                                    "cpus_sampled": 64},
+                        "_sorted_mhz_desc": [3868.0] * 8 + [3857.5] * 56}),
+        ] * 3,
+        {"frankenpandas": 58, "pandas": 64},
+    )
+    if not teardown["arms_saw_same_clock"]:
+        raise RuntimeError("busy cores 3730.8 vs 3868.0 are one window; teardown is not skew")
+    if teardown["same_clock_basis"] != "busy_core_max":
+        raise RuntimeError("the same-window flag must key on the busy core")
+    if round(teardown["arm_clock_ratio"], 3) != 1.037:
+        raise RuntimeError(f"busy-core ratio mis-computed: {teardown['arm_clock_ratio']}")
+    if "arm_core_mhz_top_k" not in teardown:
+        raise RuntimeError("the top-k detail must still be recorded — it exposed the artifact")
+
+    # A REAL skew must still be caught: busy cores far apart.
+    real_skew = summarize_host_state(
+        [
+            ("frankenpandas", {"loadavg": [1.0, 1, 1],
+                               "cpu_mhz": {"min": 2000.0, "median": 2000.0, "max": 2000.0,
+                                           "cpus_sampled": 8},
+                               "_sorted_mhz_desc": [2000.0] * 8}),
+            ("pandas", {"loadavg": [1.0, 1, 1],
+                        "cpu_mhz": {"min": 4000.0, "median": 4000.0, "max": 4000.0,
+                                    "cpus_sampled": 8},
+                        "_sorted_mhz_desc": [4000.0] * 8}),
+        ] * 3,
+        {"frankenpandas": 8, "pandas": 8},
+    )
+    if real_skew["arms_saw_same_clock"]:
+        raise RuntimeError("2000MHz against 4000MHz busy cores is a real skew")
+
     # NEGATIVE CASE from a real failure: a busy CPU OUTSIDE the mask must never
     # be attributed to an arm. A --pin-cpus 0-31 run reported cpus 51 and 39 —
     # other tenants — before this constraint existed.
@@ -4017,10 +4088,21 @@ def _host_state_self_test() -> None:
         raise RuntimeError("a 1-thread arm must be credited with its one fast core")
     if mixed["arm_core_mhz_top_k"]["pandas"]["median"] != 2000.0:
         raise RuntimeError("a 64-thread arm's cores must include its slow tail")
-    if mixed["arms_saw_same_clock"]:
-        raise RuntimeError("arms on 4000MHz and 2000MHz cores are not one window")
-    if mixed["same_clock_basis"] != "top_k_median":
-        raise RuntimeError("the judgement must be based on top-k when threads are known")
+    # The busy-core basis reads these arms as one window — both peak at 4000 —
+    # and that is CORRECT for the teardown case it exists to survive. What it
+    # cannot see is that the wide arm's own cores straddle 4000 and 2000, so that
+    # is carried separately and asserted here: a reader gets both facts.
+    if not mixed["arms_saw_same_clock"]:
+        raise RuntimeError("equal busy cores are one window on the busy-core basis")
+    if mixed["same_clock_basis"] != "busy_core_max":
+        raise RuntimeError("the same-window flag must key on the busy core")
+    # NOTE: not named `spread` — that name holds the frequency vector these
+    # fixtures are built from, and shadowing it fed a dict to the next builder.
+    spread_ratio = mixed["arm_core_spread_ratio"]
+    if round(spread_ratio["pandas"], 2) != 2.0:
+        raise RuntimeError(f"the wide arm's 4000/2000 spread must be reported: {spread_ratio}")
+    if round(spread_ratio["frankenpandas"], 2) != 1.0:
+        raise RuntimeError("a 1-thread arm's own spread is 1.0 by construction")
     if mixed["arm_core_mhz_top_k"]["pandas"]["slowest"] != 2000.0:
         raise RuntimeError("the slow tail must be reported, not averaged away")
 
