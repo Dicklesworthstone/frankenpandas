@@ -8175,8 +8175,9 @@ const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 /// Harness invocations not deliberately varying these should pass
 /// `env -u FP_ELEMENTWISE_MAX_WORKERS -u FP_ELEMENTWISE_PAR_MIN`.
 ///
-/// Read once and cached: this sits on every elementwise float map.
-fn elementwise_witness_policy() -> (usize, usize) {
+/// The environment-derived base policy. Read once and cached: this sits on every
+/// elementwise float map.
+fn elementwise_witness_policy_from_env() -> (usize, usize) {
     static POLICY: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
     *POLICY.get_or_init(|| {
         let workers = std::env::var("FP_ELEMENTWISE_MAX_WORKERS")
@@ -8189,6 +8190,54 @@ fn elementwise_witness_policy() -> (usize, usize) {
             .unwrap_or(ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN);
         (workers, par_min)
     })
+}
+
+thread_local! {
+    /// Per-thread override of the environment base, installed by
+    /// [`set_elementwise_witness_policy`]. `None` means "use the environment".
+    static ELEMENTWISE_WITNESS_OVERRIDE: std::cell::Cell<Option<(usize, usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Install a policy override for THIS THREAD, replacing the environment base
+/// until [`clear_elementwise_witness_policy`] is called.
+///
+/// br-frankenpandas-284ul. The bead's protocol is "ONE process, sqrt @1M,
+/// sweeping `FP_ELEMENTWISE_MAX_WORKERS` × `FP_ELEMENTWISE_PAR_MIN`", because the
+/// ledger's 2026-08-16 A/A control showed a cross-BINARY null swinging 0.960x to
+/// 1.161x on byte-identical code — four times the same-binary null — so any effect
+/// smaller than that must be measured with both arms in one process. The shipped
+/// instrument could not do that: the environment was read through a `OnceLock`, so
+/// the FIRST map in the process froze the policy and every later setting was
+/// silently ignored. A sweep across settings would have measured one setting seven
+/// times and reported six null results as data.
+///
+/// THREAD-LOCAL, not a global atomic, for two reasons. The policy is read on the
+/// CALLING thread before any worker is spawned, so a thread-local reaches the
+/// kernel exactly the same way. And the crate's own test binary runs tests
+/// concurrently: a global override would leak out of the sweep test into every
+/// other test's elementwise map, which is the same invisible-toggle hazard the
+/// `6df71eae2` row records for `FP_DOT_SERIAL`.
+pub fn set_elementwise_witness_policy(max_workers: usize, par_min: usize) {
+    ELEMENTWISE_WITNESS_OVERRIDE.with(|cell| cell.set(Some((max_workers, par_min))));
+}
+
+/// Drop this thread's policy override and fall back to the environment base.
+pub fn clear_elementwise_witness_policy() {
+    ELEMENTWISE_WITNESS_OVERRIDE.with(|cell| cell.set(None));
+}
+
+/// The `(max_workers, par_min)` an elementwise float map on this thread would use
+/// right now. Provenance for a bench row: the setting an arm actually ran under,
+/// read from the same place the kernel reads it.
+pub fn elementwise_witness_policy_in_effect() -> (usize, usize) {
+    elementwise_witness_policy()
+}
+
+fn elementwise_witness_policy() -> (usize, usize) {
+    ELEMENTWISE_WITNESS_OVERRIDE
+        .with(std::cell::Cell::get)
+        .unwrap_or_else(elementwise_witness_policy_from_env)
 }
 
 /// Is the write-once chunked elementwise path enabled? From
@@ -47109,6 +47158,84 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// NEGATIVE CASE: the SECOND policy installed in a process must reach the
+        /// kernel, not be swallowed by a cache of the first.
+        ///
+        /// br-frankenpandas-284ul. The bead's protocol is one process sweeping both
+        /// knobs, because the ledger's cross-binary A/A null swings 0.960x–1.161x on
+        /// byte-identical code and no effect that size can be resolved across two
+        /// builds. The shipped instrument silently could not run that protocol: the
+        /// env pair went through a `OnceLock`, so the first elementwise map in the
+        /// process froze the policy and every later setting was ignored. That is
+        /// invisible from the outside — the OUTPUT is identical at every setting
+        /// (the test above pins exactly that), so a sweep would have timed ONE
+        /// setting seven times and banked six of the rows as data.
+        ///
+        /// The observation therefore has to be of the SPLIT, not of the answer:
+        /// count the distinct threads the mapped closure runs on. Under the cached
+        /// implementation both arms below report 1 thread and the parallel assert
+        /// fails.
+        #[test]
+        fn a_policy_override_reaches_the_map_after_it_not_only_the_first_map() {
+            use std::{collections::HashSet, sync::Mutex};
+
+            // 4096 with a 4-worker cap cuts into four 1024-value chunks, so a live
+            // parallel arm must show four distinct thread ids.
+            let input: Vec<f64> = (0..4096_usize).map(|i| 1.0 + i as f64).collect();
+
+            let observe = |max_workers: usize, par_min: usize| {
+                crate::set_elementwise_witness_policy(max_workers, par_min);
+                assert_eq!(
+                    crate::elementwise_witness_policy_in_effect(),
+                    (max_workers, par_min),
+                    "the override is not what the kernel would read"
+                );
+                let seen: Mutex<HashSet<std::thread::ThreadId>> = Mutex::new(HashSet::new());
+                let (out, _words, valid, finite) =
+                    crate::par_map_slice_f64_with_witness(&input, |x: f64| {
+                        seen.lock()
+                            .expect("thread-id set is not poisoned")
+                            .insert(std::thread::current().id());
+                        x.sqrt()
+                    });
+                assert!(valid, "the fixture is strictly positive");
+                assert!(finite, "the fixture is strictly finite");
+                let threads = seen
+                    .into_inner()
+                    .expect("thread-id set is not poisoned")
+                    .len();
+                (out, threads)
+            };
+
+            let (serial_out, serial_threads) = observe(1, 1);
+            let (parallel_out, parallel_threads) = observe(4, 1);
+            crate::clear_elementwise_witness_policy();
+
+            assert_eq!(
+                serial_threads, 1,
+                "a one-worker cap must map on the calling thread alone"
+            );
+            assert!(
+                parallel_threads > 1,
+                "the SECOND override never reached the kernel: a 4-worker cap still \
+                 mapped on {parallel_threads} thread(s), which is the OnceLock-cached \
+                 policy that makes this bead's one-process sweep unmeasurable"
+            );
+            assert_eq!(
+                parallel_out
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<u64>>(),
+                serial_out.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                "changing the policy must move block boundaries, never bits"
+            );
+            assert_eq!(
+                crate::elementwise_witness_policy_in_effect(),
+                crate::elementwise_witness_policy_from_env(),
+                "clearing must hand the thread back to the environment base"
+            );
         }
 
         /// NEGATIVE CASE: a short input under an aggressive `par_min` must not panic.

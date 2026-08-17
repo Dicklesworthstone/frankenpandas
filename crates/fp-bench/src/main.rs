@@ -1038,9 +1038,196 @@ fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
         "log10" => time_us(|| series.log10().expect("log10")),
         "log2" => time_us(|| series.log2().expect("log2")),
         "log1p" => time_us(|| series.log1p().expect("log1p")),
+        // The remaining `typed_float_unary_par` residents. Four, not seventeen:
+        // one representative per cost class, because the point is to learn where
+        // the family sits, not to grow the matrix. expm1 and cbrt are the two
+        // non-trig residents; sin is the cheapest trig and the one numpy is most
+        // likely to have vectorised; atan is among the most expensive. All are
+        // total on the strictly-positive fixture, so no arm drifts onto a NaN
+        // path. br-frankenpandas-4kig1.
+        "expm1" => time_us(|| series.expm1().expect("expm1")),
+        "cbrt" => time_us(|| series.cbrt().expect("cbrt")),
+        "sin" => time_us(|| series.sin().expect("sin")),
+        "atan" => time_us(|| series.atan().expect("atan")),
         _ => return None,
     };
     Some(samples)
+}
+
+/// Rounds per candidate in the elementwise-policy sweep. Predeclared, not chosen
+/// after looking at the numbers: MagentaFortress' note on br-frankenpandas-284ul
+/// records FP's CV going 2.07% → 14.53% when a worker cap was raised to 64, so the
+/// raised-cap arms are expected to be the noisy ones and the round count has to be
+/// fixed in the source before the run rather than grown until an arm certifies.
+const POLICY_SWEEP_ROUNDS: usize = 15;
+
+/// The setting every candidate is compared against: today's shipped defaults.
+const POLICY_SWEEP_BASELINE: (usize, usize) = (8, 200_000);
+
+/// `(max_workers, par_min)` arms, in the order they are measured.
+///
+/// `par_min = 1` forces the parallel arm so the worker cap is the only variable;
+/// `(8, 2_000_000)` is above the row count and therefore forces the SERIAL arm,
+/// which is the direct test of the bead's question (1). `(1, 1)` reaches serial by
+/// the other door — through the `workers <= 1` guard — and the two must agree, or
+/// the instrument is not measuring what it says.
+const POLICY_SWEEP_ARMS: [(usize, usize); 8] = [
+    (8, 200_000),
+    (1, 1),
+    (2, 1),
+    (4, 1),
+    (16, 1),
+    (32, 1),
+    (64, 1),
+    (8, 2_000_000),
+];
+
+/// br-frankenpandas-284ul: ONE process, ONE binary, both knobs varied, arms
+/// interleaved ABBA against the shipped default.
+///
+/// This exists because the alternatives are all known to be unsound here. Separate
+/// BUILDS are out: the 2026-08-16 A/A control in `docs/NEGATIVE_EVIDENCE.md` found
+/// a cross-binary null swinging 0.960x–1.161x on byte-identical code, four times
+/// the same-binary null, so anything under ~16% measured across two ELFs is code
+/// layout. Separate PROCESSES of one ELF drop that hazard but still hand each arm
+/// its own allocator and page-cache history, and they cannot interleave, so a load
+/// swing lands entirely on whichever arm ran during it — this host moved 6.56 →
+/// 28.64 loadavg in about forty seconds while this bead was being scoped.
+///
+/// The candidate list includes the baseline itself as its first entry. That row is
+/// the A/A NULL: identical settings on both arms, same interleave, same rounds. A
+/// candidate whose effect does not clear that null's spread has not been measured.
+///
+/// Every arm's output is checksummed over the raw bits and compared to the
+/// baseline's. An A/B between settings that disagree on the answer is meaningless,
+/// and the settings CAN disagree in principle — they move the block boundaries the
+/// validity words and the `all_valid`/`all_finite` reductions are computed over.
+fn run_elementwise_policy_sweep(workload: &str, rows: usize) -> bool {
+    let apply: fn(&Series) -> Series = match workload {
+        "sqrt" => |s: &Series| s.sqrt().expect("policy sweep: sqrt"),
+        "log" => |s: &Series| s.log().expect("policy sweep: log"),
+        _ => return false,
+    };
+
+    // Same fixture as `run_math_unary`: strictly positive so `sqrt`/`log` stay in
+    // domain and both engines keep the all-valid arm, non-integral so no
+    // semantic-identity guard short-circuits the kernel.
+    let mut rng = SplitMix64(0x1234_5678_9ABC_DEF0);
+    let data: Vec<f64> = (0..rows).map(|_| 1.0 + rng.unit() * 99_999.0).collect();
+    let index = Index::new_known_unique_int64_unit_range(0, rows);
+    let series =
+        Series::new("s", index, Column::from_f64_values(data)).expect("policy sweep series");
+
+    let bits_checksum = |s: &Series| -> u64 {
+        let values = s
+            .column()
+            .as_f64_slice()
+            .expect("policy sweep output is an all-valid Float64 column");
+        values.iter().fold(0_u64, |acc, v| {
+            acc.rotate_left(7) ^ v.to_bits() ^ 0x9e37_79b9_7f4a_7c15
+        })
+    };
+
+    let time_arm = |policy: (usize, usize)| -> f64 {
+        // Installed OUTSIDE the clock; the kernel reads it on this thread at call
+        // time, so the arm that follows is the arm that was requested.
+        fp_columnar::set_elementwise_witness_policy(policy.0, policy.1);
+        let started = Instant::now();
+        let out = apply(black_box(&series));
+        let elapsed_us = started.elapsed().as_secs_f64() * 1e6;
+        black_box(out);
+        elapsed_us
+    };
+
+    let mut rows_json: Vec<String> = Vec::with_capacity(POLICY_SWEEP_ARMS.len());
+    for candidate in POLICY_SWEEP_ARMS {
+        fp_columnar::set_elementwise_witness_policy(candidate.0, candidate.1);
+        let in_effect = fp_columnar::elementwise_witness_policy_in_effect();
+        let candidate_checksum = bits_checksum(&apply(&series));
+        // OBSERVED, not requested. `operation_threads_used` is a 20us sampler over
+        // /proc/self/status and it UNDER-reports short `thread::scope` kernels, so
+        // it is provenance and not proof — but a raised cap that never widens the
+        // peak is a raised cap that never arrived, and that is worth seeing.
+        let candidate_probe = probe_operation_threads(&mut || apply(black_box(&series)));
+        fp_columnar::set_elementwise_witness_policy(
+            POLICY_SWEEP_BASELINE.0,
+            POLICY_SWEEP_BASELINE.1,
+        );
+        let baseline_checksum = bits_checksum(&apply(&series));
+        let baseline_probe = probe_operation_threads(&mut || apply(black_box(&series)));
+
+        for _ in 0..WARMUP {
+            black_box(time_arm(POLICY_SWEEP_BASELINE));
+            black_box(time_arm(candidate));
+        }
+
+        let mut baseline_us = Vec::with_capacity(POLICY_SWEEP_ROUNDS);
+        let mut candidate_us = Vec::with_capacity(POLICY_SWEEP_ROUNDS);
+        for round in 0..POLICY_SWEEP_ROUNDS {
+            if round % 2 == 0 {
+                let b = time_arm(POLICY_SWEEP_BASELINE);
+                let c = time_arm(candidate);
+                baseline_us.push(b);
+                candidate_us.push(c);
+            } else {
+                let c = time_arm(candidate);
+                let b = time_arm(POLICY_SWEEP_BASELINE);
+                candidate_us.push(c);
+                baseline_us.push(b);
+            }
+        }
+
+        let fmt = |xs: &[f64]| -> String {
+            xs.iter()
+                .map(|x| format!("{x}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        rows_json.push(format!(
+            concat!(
+                "{{\"max_workers\":{},\"par_min\":{},",
+                "\"in_effect\":[{},{}],",
+                "\"baseline_checksum\":\"{:016x}\",\"candidate_checksum\":\"{:016x}\",",
+                "\"bit_identical_to_baseline\":{},",
+                "\"candidate_peak_threads\":{},\"candidate_operation_threads\":{},",
+                "\"baseline_peak_threads\":{},\"baseline_operation_threads\":{},",
+                "\"baseline_us\":[{}],\"candidate_us\":[{}]}}"
+            ),
+            candidate.0,
+            candidate.1,
+            in_effect.0,
+            in_effect.1,
+            baseline_checksum,
+            candidate_checksum,
+            baseline_checksum == candidate_checksum,
+            candidate_probe.peak_process_threads,
+            candidate_probe.operation_threads_used,
+            baseline_probe.peak_process_threads,
+            baseline_probe.operation_threads_used,
+            fmt(&baseline_us),
+            fmt(&candidate_us),
+        ));
+    }
+    fp_columnar::clear_elementwise_witness_policy();
+
+    println!(
+        concat!(
+            "{{\"sweep\":\"elementwise_policy\",\"workload\":\"{}\",\"rows\":{},",
+            "\"rounds_per_arm\":{},\"warmup\":{},",
+            "\"baseline\":[{},{}],",
+            "\"runtime_available_parallelism\":{},",
+            "\"arms\":[{}]}}"
+        ),
+        workload,
+        rows,
+        POLICY_SWEEP_ROUNDS,
+        WARMUP,
+        POLICY_SWEEP_BASELINE.0,
+        POLICY_SWEEP_BASELINE.1,
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+        rows_json.join(","),
+    );
+    true
 }
 
 fn run(
@@ -3345,6 +3532,18 @@ fn main() {
     // Only the pipeline category consumes this: the driver materializes the
     // job's input CSVs there so both engines read byte-identical inputs.
     let data_dir = arg(&args, "--data-dir").map(Path::new);
+
+    // br-frankenpandas-284ul. FP-vs-FP, not vs-pandas: this lane picks the
+    // elementwise worker cap and parallel threshold, and it prints its own
+    // schema rather than the `times_us` the Python driver parses.
+    if category == "elementwise_policy" {
+        let (rows, _cols) = size_rows_cols(size);
+        if !run_elementwise_policy_sweep(workload, rows) {
+            eprintln!("fp-bench: unsupported elementwise_policy/{workload} (sqrt, log)");
+            std::process::exit(2);
+        }
+        return;
+    }
 
     match run(category, workload, size, dtype, data_dir) {
         Some(samples) => {
