@@ -8426,6 +8426,7 @@ fn par_map_slice_f64_domain_fused<
     f: &F,
     max_workers: usize,
     par_min: usize,
+    known_all_finite: Option<bool>,
 ) -> (Vec<f64>, bool, bool) {
     fn block<T: Copy, D: Fn(T) -> bool, F: Fn(T) -> f64>(
         out: &mut [f64],
@@ -8443,6 +8444,34 @@ fn par_map_slice_f64_domain_fused<
         (domain_held, all_finite)
     }
 
+    /// [`block`] without the finiteness fold, for callers that can DERIVE the
+    /// output witness instead of measuring it.
+    ///
+    /// br-frankenpandas-yx692. Counted on the shipped `sqrt` worker: one
+    /// iteration handles 4 doubles in ~30 instructions, of which the finiteness
+    /// fold is 12 — `andpd` to strip the sign, `cmpneqpd` against infinity,
+    /// `cmpordpd` for NaN, and two `andpd` to combine and accumulate, twice.
+    /// That is more than the domain test (6) and six times the `sqrtpd` itself
+    /// (2). Dropping it is the largest single reduction available in this body.
+    ///
+    /// A SEPARATE FUNCTION, not a runtime `if` inside the loop, on purpose: a
+    /// per-element branch on a flag would cost more than the fold it skips and
+    /// would likely block vectorization outright. The choice is made once, above
+    /// the loop, so each arm monomorphizes into a clean packed loop.
+    fn block_domain_only<T: Copy, D: Fn(T) -> bool, F: Fn(T) -> f64>(
+        out: &mut [f64],
+        input: &[T],
+        in_domain: &D,
+        f: &F,
+    ) -> bool {
+        let mut domain_held = true;
+        for (o, &x) in out.iter_mut().zip(input.iter()) {
+            domain_held &= in_domain(x);
+            *o = f(x);
+        }
+        domain_held
+    }
+
     let n = input.len();
     let mut out = vec![0.0_f64; n];
     let available = std::thread::available_parallelism()
@@ -8456,7 +8485,10 @@ fn par_map_slice_f64_domain_fused<
     let workers = available.min(cap);
 
     if workers <= 1 || n < par_min {
-        let (domain_held, all_finite) = block(&mut out, input, in_domain, f);
+        let (domain_held, all_finite) = match known_all_finite {
+            Some(known) => (block_domain_only(&mut out, input, in_domain, f), known),
+            None => block(&mut out, input, in_domain, f),
+        };
         return (out, domain_held, all_finite);
     }
 
@@ -8469,7 +8501,10 @@ fn par_map_slice_f64_domain_fused<
             .zip(flags.iter_mut())
         {
             scope.spawn(move || {
-                *flag = block(out_c, in_c, in_domain, f);
+                *flag = match known_all_finite {
+                    Some(known) => (block_domain_only(out_c, in_c, in_domain, f), known),
+                    None => block(out_c, in_c, in_domain, f),
+                };
             });
         }
     });
@@ -25110,7 +25145,15 @@ impl Column {
         // All-valid f64 with no negative element: `sqrt` cannot mint a NaN, so the
         // validity mask needs no per-element derivation. Falls through to the
         // shared arm the moment a negative appears. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= 0.0, f64::sqrt) {
+        //
+        // `preserves_finiteness = true` (br-frankenpandas-yx692): over `x >= 0.0`,
+        // `sqrt` maps finite to finite and `+inf` to `+inf`, so the output witness
+        // IS the input witness and the 12-instruction-per-iteration finiteness
+        // fold is dropped from the loop body. `log` does NOT get this — see the
+        // note on `typed_float_domain_fused_unary_with_finiteness`.
+        if let Some(out) =
+            self.typed_float_domain_fused_unary_with_finiteness(|x| x >= 0.0, f64::sqrt, true)
+        {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::sqrt) {
@@ -26354,11 +26397,54 @@ impl Column {
         in_domain: D,
         f: F,
     ) -> Option<Self> {
+        self.typed_float_domain_fused_unary_with_finiteness(in_domain, f, false)
+    }
+
+    /// As [`Self::typed_float_domain_fused_unary`], but the caller states whether
+    /// the op PRESERVES FINITENESS over its domain, letting the output witness be
+    /// derived instead of folded per element.
+    ///
+    /// br-frankenpandas-yx692. The theorem, for a finiteness-preserving op whose
+    /// domain arm held:
+    ///
+    ///   `all_finite(out) == all_finite(in)`
+    ///
+    /// in BOTH directions, which is why an unknown input witness is the only case
+    /// that still has to measure. Forward: a finite in-domain input maps to a
+    /// finite output. Backward — the half worth spelling out, because it is the
+    /// one an implementation gets wrong — if the input is NOT all-finite then
+    /// under a held domain every non-finite element must be `+inf`, since `-inf`
+    /// and `NaN` both fail `x >= 0.0` and would have taken the fallback path
+    /// instead; and `sqrt(+inf)` is `+inf`, so the output is not all-finite
+    /// either. The witness therefore transfers exactly, not just optimistically.
+    ///
+    /// ⚠ PER-OP, NEVER BLANKET. `log` is excluded and must keep folding:
+    /// `ln(0.0)` is `-inf`, a NON-finite output from an in-domain finite input,
+    /// so its witness genuinely depends on the values. Generalising a
+    /// finiteness result past its domain is exactly how the 4kig1 `log`
+    /// regression (2.3x slower) happened, and the same mistake here would be
+    /// silent — it produces a WRONG WITNESS, not a slow one.
+    fn typed_float_domain_fused_unary_with_finiteness<
+        D: Fn(f64) -> bool + Sync,
+        F: Fn(f64) -> f64 + Sync,
+    >(
+        &self,
+        in_domain: D,
+        f: F,
+        preserves_finiteness: bool,
+    ) -> Option<Self> {
         let (max_workers, par_min) = elementwise_witness_policy();
 
         if let Some(data) = self.as_f64_slice() {
+            // `None` here means "fold it per element", which is the behaviour
+            // every op had before this bead and still has unless it opts in.
+            let derived = if preserves_finiteness {
+                self.f64_finite_witness()
+            } else {
+                None
+            };
             let (out, domain_held, all_finite) =
-                par_map_slice_f64_domain_fused(data, &in_domain, &f, max_workers, par_min);
+                par_map_slice_f64_domain_fused(data, &in_domain, &f, max_workers, par_min, derived);
             if !domain_held {
                 return None;
             }
@@ -26386,12 +26472,18 @@ impl Column {
         if let Some(data) = self.as_i64_slice() {
             let widened_domain = |x: i64| in_domain(x as f64);
             let widened_f = |x: i64| f(x as f64);
+            // An i64 widens to a FINITE f64 without exception, so a
+            // finiteness-preserving op over a held domain cannot produce a
+            // non-finite output from an integer column. The witness is `true` by
+            // construction here rather than read off the column.
+            let derived = preserves_finiteness.then_some(true);
             let (out, domain_held, all_finite) = par_map_slice_f64_domain_fused(
                 data,
                 &widened_domain,
                 &widened_f,
                 max_workers,
                 par_min,
+                derived,
             );
             if !domain_held {
                 return None;
@@ -30618,6 +30710,82 @@ mod tests {
         assert_eq!(zeros.values()[0], Scalar::Bool(false));
         let ones = Column::ones(2, DType::BoolNullable).expect("bool-nullable ones");
         assert_eq!(ones.values()[0], Scalar::Bool(true));
+    }
+
+    /// br-frankenpandas-yx692. `sqrt` derives its output all-finite witness from
+    /// the INPUT witness instead of folding `is_finite()` per element, which
+    /// removes 12 of ~30 instructions from each iteration of the packed loop.
+    ///
+    /// The derivation is only sound because it transfers in both directions over
+    /// the `x >= 0.0` domain, so both directions are pinned here.
+    #[test]
+    fn sqrt_derives_its_finiteness_witness_from_the_input_witness_yx692() {
+        // The lever only engages when the input witness is KNOWN. Assert that
+        // rather than assume it: if this ever returns None the derived path is
+        // silently inert and the test must say so instead of passing.
+        let finite = Column::from_f64_values(vec![0.0, 1.0, 4.0, 9.0, 2.25]);
+        assert_eq!(
+            finite.f64_finite_witness(),
+            Some(true),
+            "input witness must be known for the derived arm to engage"
+        );
+
+        let out = finite.sqrt().expect("sqrt of a non-negative column");
+        assert_eq!(out.f64_finite_witness(), Some(true));
+        assert_eq!(out.values()[3], Scalar::Float64(3.0));
+        assert_eq!(out.values()[4], Scalar::Float64(1.5));
+    }
+
+    /// NEGATIVE CASE: `+inf` is in `sqrt`'s domain and `sqrt(+inf)` is `+inf`.
+    ///
+    /// This is the assertion that separates the correct derivation from the
+    /// tempting wrong one. An implementation that concludes "the domain held,
+    /// therefore the output is finite" reports a FINITE witness for a column that
+    /// contains an infinity — a wrong answer, not a slow one, and invisible in
+    /// the values. The witness must follow the INPUT, which is not all-finite
+    /// here.
+    ///
+    /// `-inf` and `NaN` are the other half: both fail `x >= 0.0`, so they take
+    /// the fallback path and never reach the derived arm at all.
+    #[test]
+    fn a_positive_infinity_input_must_not_be_reported_as_a_finite_sqrt_yx692() {
+        let with_inf = Column::from_f64_values(vec![1.0, f64::INFINITY, 4.0]);
+        assert_eq!(
+            with_inf.f64_finite_witness(),
+            Some(false),
+            "an input carrying +inf is not all-finite"
+        );
+
+        let out = with_inf.sqrt().expect("+inf is in sqrt's domain");
+        assert_ne!(
+            out.f64_finite_witness(),
+            Some(true),
+            "sqrt(+inf) is +inf — deriving the witness from 'the domain held' \
+             rather than from the input witness reports a finite column that \
+             contains an infinity"
+        );
+        assert_eq!(out.values()[0], Scalar::Float64(1.0));
+        assert_eq!(out.values()[1], Scalar::Float64(f64::INFINITY));
+        assert_eq!(out.values()[2], Scalar::Float64(2.0));
+    }
+
+    /// The derived arm and the folding arm must agree on the VALUES, at a length
+    /// that crosses the parallel threshold so both the chunked and serial blocks
+    /// run. `log` still folds, so it doubles as the control that the opt-in did
+    /// not leak to an op whose witness genuinely depends on its values.
+    #[test]
+    fn the_derived_and_folded_arms_agree_on_values_yx692() {
+        let data: Vec<f64> = (0..5_000_u32).map(|i| 0.25 + f64::from(i)).collect();
+        let col = Column::from_f64_values(data.clone());
+
+        let rooted = col.sqrt().expect("sqrt");
+        let logged = col.log().expect("log");
+        for (i, &x) in data.iter().enumerate() {
+            assert_eq!(rooted.values()[i], Scalar::Float64(x.sqrt()), "sqrt at {i}");
+            assert_eq!(logged.values()[i], Scalar::Float64(x.ln()), "log at {i}");
+        }
+        assert_eq!(rooted.f64_finite_witness(), Some(true));
+        assert_eq!(logged.f64_finite_witness(), Some(true));
     }
 
     #[test]
