@@ -1678,6 +1678,31 @@ def _math_unary_input(rows: int) -> pd.Series:
     return pd.Series(_math_unary_values(rows), copy=False)
 
 
+def _math_unary_int_input(rows: int) -> pd.Series:
+    """The same value stream truncated to int64.
+
+    br-frankenpandas-4kig1. Keeping the values identical to the float fixture is
+    what makes the two dtypes comparable; a separately-seeded integer stream would
+    measure different numbers as well as a different dtype. pandas widens int64 to
+    float64 for sqrt/log exactly as FrankenPandas does, so both engines do the same
+    work on the same values.
+    """
+    return pd.Series(_math_unary_values(rows).astype("int64"), copy=False)
+
+
+def _bench_math_unary_int(df: pd.DataFrame, op) -> PairedSamples:
+    s = _math_unary_int_input(len(df))
+    return time_operation(partial(op, s))
+
+
+def bench_math_sqrt_int64_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary_int(df, np.sqrt)
+
+
+def bench_math_log_int64_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary_int(df, np.log)
+
+
 def _bench_math_unary(df: pd.DataFrame, op) -> PairedSamples:
     s = _math_unary_input(len(df))
     return time_operation(partial(op, s))
@@ -2674,6 +2699,8 @@ PANDAS_WORKLOADS = {
         "log10": bench_math_log10_pandas,
         "log2": bench_math_log2_pandas,
         "log1p": bench_math_log1p_pandas,
+        "sqrt_int64": bench_math_sqrt_int64_pandas,
+        "log_int64": bench_math_log_int64_pandas,
         "expm1": bench_math_expm1_pandas,
         "cbrt": bench_math_cbrt_pandas,
         "sin": bench_math_sin_pandas,

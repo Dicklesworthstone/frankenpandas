@@ -1023,6 +1023,31 @@ fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
     let mut rng = SplitMix64(0x1234_5678_9ABC_DEF0);
     let data: Vec<f64> = (0..rows).map(|_| 1.0 + rng.unit() * 99_999.0).collect();
     let index = Index::new_known_unique_int64_unit_range(0, rows);
+
+    // INT64-INPUT LANES. br-frankenpandas-4kig1.
+    //
+    // `2ce78044e` taught the domain-fused arm to accept Int64 input, and the whole
+    // math_unary fixture is Float64, so that change landed with no way to measure
+    // it — the same gap that left log10/log2/log1p unmeasurable until they got
+    // lanes. Two lanes, not seventeen: `sqrt` and `log` are the two ops on that arm
+    // whose predicate is non-trivial (`x >= 0.0`), so they exercise the widening
+    // AND the domain test, which a total op like `cbrt` would not.
+    //
+    // The values are the SAME stream truncated to integers, so the two dtypes are
+    // comparable rather than measuring different numbers. pandas widens int64 to
+    // float64 for these ops exactly as FrankenPandas does, so both engines are
+    // doing the same work.
+    if let Some(op) = workload.strip_suffix("_int64") {
+        let ints: Vec<i64> = data.iter().map(|&x| x as i64).collect();
+        let int_series =
+            Series::new("s", index, Column::from_i64_values_owned(ints)).expect("int math series");
+        return match op {
+            "sqrt" => Some(time_us(|| int_series.sqrt().expect("sqrt_int64"))),
+            "log" => Some(time_us(|| int_series.log().expect("log_int64"))),
+            _ => None,
+        };
+    }
+
     let series = Series::new("s", index, Column::from_f64_values(data)).expect("math series");
 
     let samples = match workload {

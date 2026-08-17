@@ -28060,3 +28060,43 @@ and treated the pair as covered. The replicate is not redundant. **Two independe
 invocations agreeing to within 1% is the strongest evidence shape in this ledger**,
 stronger than either row alone, and by recording only the better of each pair I
 recorded the weaker claim. Whoever banks these should bank the PAIR.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — Int64-input lanes wired, and the widening cost shows up exactly where the cost model says it should
+
+`2ce78044e` taught the domain-fused arm to accept Int64 input while the entire
+`math_unary` fixture was Float64, so that change landed unmeasurable — the same gap
+that left `log10`/`log2`/`log1p` unmeasurable until they got lanes, which then
+produced four certified wins on first use.
+
+Two lanes, not seventeen: `sqrt_int64` and `log_int64`. Those are the two ops on
+that arm whose predicate is non-trivial (`x >= 0.0`), so they exercise the widening
+AND the domain test, which a total op like `cbrt` would not. The integer values are
+the SAME stream truncated, so the lanes compare dtypes rather than comparing
+different numbers, and pandas widens int64 to float64 for these ops exactly as
+FrankenPandas does.
+
+**Verified the lanes emit (`19b16af2`), and an in-binary observation at 1M:**
+
+| lane | p50 | float sibling | delta |
+|---|---|---|---|
+| `sqrt_int64` | 1714.5us | `sqrt` 1282.8us | **+33.6%** |
+| `log_int64` | 1802.7us | `log` 1800.0us | **+0.15%** |
+
+**This is one binary on one fixture, NOT an interleaved A/B and not a vs-incumbent
+row** — no ratio against pandas is claimed here, and the host was at loadavg 44.8,
+which is not a certification window by this ledger's own standard.
+
+**But the SHAPE of the result is a prediction confirmed, and worth banking as
+such.** The i64 arm's only extra work per element is one widening `x as f64`. On
+`sqrt`, where the whole map is a couple of instructions, one extra op is a third of
+the cost and shows up as +33.6%. On `log`, where each element is a libm call of
+tens of nanoseconds, the same extra op is invisible at +0.15%. **The two lanes
+differ by more than 200x in relative cost of the identical added instruction**,
+which is the same cost model that explained why removing the validity witness paid
+2.4x on `floor` and nothing on `log`, and why parallelism paid on `log` and lost
+1.7-3.1x on `floor`. Three independent findings in this bead now agree: **on this
+family, whether a change matters is decided almost entirely by how expensive the
+per-element kernel already is.**
+
+Pending: the vs-pandas rows for both lanes, when the host is quiet enough to gate
+them.
