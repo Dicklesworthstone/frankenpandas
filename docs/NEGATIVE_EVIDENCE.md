@@ -34957,3 +34957,72 @@ redirect the search from "find the fixed setup" to "find the per-column cost", w
 claiming. The measurement that would settle it is the two pre-registered dims above, and I have
 NOT taken it — this window is at 504% build CPU and a 161us workload is exactly the size where
 that noise dominates.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-03fp5) — REJECTED, BOTH of my df_dot models including the one I committed 20 minutes ago; and RETRACTING the "88% of the 10k call is not the GEMM" claim, because every fit assumed a constant arithmetic rate and the rate moves 253x
+
+**NO INCUMBENT ARM RAN AND NO A/A NULL WAS TAKEN.** FP-vs-FP diagnostics on the preserved ELF
+`bench_elf_sha256=a802073cf042d28d9807347acee416505a0af97e7e2c0e344877405ea1ef80c5 (82346192 bytes) /data/projects/.scratch/crimsonpine/fp-bench-MAIN-8b263954b`,
+no build taken. Window: loadavg 12.54 draining from 18.94 and rising to 17.29 across the runs, idle
+80.4%, iowait 0.0%, CPU MHz 3124.0, build CPU 290% against a 200% threshold, disk 201G. Nothing is
+certified, nothing is banked, nothing is quotable against pandas.
+
+**Counted mechanism:** `perf stat` instructions / cycles / page-faults over the whole process, same
+ELF and workload: size=100 230,934,648 instructions 235,294,330 cycles 555 page-faults; size=10k
+468,376,543 instructions 339,081,198 cycles 576 page-faults; size=1M 179,538,847,091 instructions
+79,211,651,574 cycles 4,724 page-faults. Process IPC 0.981, 1.381, 2.266.
+
+⚠️ **THOSE COUNTS INCLUDE STARTUP AND DATA GENERATION AND I AM NOT ATTRIBUTING THEM TO THE TIMED
+REGION** — the same limitation that made `perf record` useless here, which I nearly walked into a
+second time. What they do show, subtracting the size=100 floor: instructions grow 755x from dim=100
+to dim=1000 while the arithmetic grows 1000x. **Instructions track the arithmetic rather than
+outpacing it**, which is what a large per-column construction term would NOT look like — another
+strike against the story I told earlier today, offered as a hint and not as a measurement, because
+the frame build inside these counts is itself O(dim²).
+
+**FIRST, A PROCESS FAILURE: I PRE-REGISTERED PREDICTIONS AT SIZES THAT DO NOT EXIST.** I registered
+dim=200 (size 40k) and dim=500 (size 250k). `size_rows_cols_checked` in `fp-bench/src/main.rs`
+accepts exactly 100, 1k, 10k, 100k, 1M, 2M, 4M, 6M, 8M, 10M and nothing else. A prediction I cannot
+execute is not falsifiable, and I did not check the size table before committing it. **Check the
+lane list before pre-registering a size.**
+
+The lanes I already had were better anyway, because the two models diverge most at small dim, and
+dim=10 and dim=31 were genuinely held out (neither model was fitted on them):
+
+| dim | measured | `a·dim + b·dim³` (mine, 20 min old) | `c + dim³/r` (mine, 80 min old) |
+|---|---|---|---|
+| 10 | **3.97us** | 14.32 (**+261%**) | 141.79 (**+3469%**) |
+| 31 | **15.47us** | 44.89 (**+190%**) | 142.35 (**+820%**) |
+| 1414 | **44338.42us** | 53005.61 (+19.5%) | 54768.39 (+23.5%) |
+
+**BOTH MODELS ARE REFUTED.** The linear one is the less wrong of two wrong things — it beats the
+constant everywhere — but over-predicting a held-out point by 2.6x is not a model, it is a
+coincidence that fitted two endpoints.
+
+**AND THE REASON KILLS THE HEADLINE CLAIM I COMMITTED EARLIER TODAY.** Both fits assumed the GEMM
+runs at ONE throughput `r` across all dim, with everything above it attributed to construction
+overhead. It does not. Dividing flops by measured time gives an upper bound on cost-per-flop at
+each size, and that bound moves **253x** from dim=10 to dim=1414 (252 -> 63,763 flops/us). Even at
+2M the measured 44,338us is BELOW the linear model's arithmetic-only term of 50,983us — the kernel
+there is faster per flop than the rate the fit assumed, which is impossible under the model and is
+the clearest proof it is misspecified.
+
+**So I am retracting "~88% of the 10k call is not the GEMM" (commits a4486285c, 78280e16e).** That
+number is `1 - (dim³/r)/t` with `r` taken from a large-dim fit, and small matrices have poor
+blocking and cache residency. **An unknown share of the 10k call's cost is the GEMM simply running
+inefficiently at dim=100, not construction at all.** The scaling gap I reported is real — 161
+us/Mflop at 10k against 19.5 at 1M is a fact about the totals — but attributing it to per-call
+construction was an inference from a model that this data refutes. What survives is the gap; what
+does not survive is my explanation of it.
+
+**WHY CURVE-FITTING CANNOT SETTLE THIS AND I SHOULD STOP TRYING.** Two unknowns vary together with
+dim — construction cost and arithmetic efficiency — and I have one observable, the total. Every fit
+I have run buys a fourth significant figure on a parameter whose meaning depends on an assumption I
+cannot check from the same data. Three models in three hours, each refuted by the next, is the
+signature of an under-determined problem, not of getting closer.
+
+**THE INSTRUMENT THAT WOULD SETTLE IT** is a direct measurement of the two terms separately:
+`materialize_float64_dot` timed alone across dim (giving `r(dim)` independently), with the
+difference from the total then being construction by subtraction rather than by assumption. That
+needs either a timed-region profile or a bench lane that calls the kernel without the frame
+plumbing — both a build, neither available in a window I am also measuring in. **I am recording
+that as the next step rather than fitting a fourth curve.**
