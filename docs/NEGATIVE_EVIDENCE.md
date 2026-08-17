@@ -32277,3 +32277,136 @@ like-for-like, slot-sampler, row-persistence.
 
 No build and no measurement — this is Python, and the tree still carries another
 pane's uncommitted `fp-columnar` migration, so my A/B remains held.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-kko5z) — FOUND AND FIXED: the 66-68us per-call constant was `available_parallelism()` WALKING THE CGROUP HIERARCHY ON EVERY ELEMENTWISE CALL. `sqrt @100` goes 0.483x SLOWER to 117x FASTER
+
+The previous entry located a 66.1us constant on the domain-fused arm and handed the
+next unit of work a profile at `@100`. It did not need a profiler. It needed
+`strace`.
+
+**FIRST, THE CONSTANT IS A PROPERTY OF THE ARM, NOT OF `sqrt`.** Measuring eight
+math_unary ops at `@100`, where the constant is ~99% of the call, splits them
+cleanly in two:
+
+| `@100`, FP p50 | ops |
+|---|---|
+| **67-71us** | `sqrt` 67.28 · `log` 68.12 · `cbrt` 70.43 · `sin` 68.81 · `expm1` 68.98 |
+| **~0.2us** | `floor` 0.20 · `ceil` 0.21 · `round2` 0.19 |
+
+Every op in the first group routes through `typed_float_domain_fused_unary`; every
+op in the second through `typed_float_witness_free_unary`. `cbrt` and `sin` pay it
+too, and their domain predicates are `|_| true` and `|x| x.is_finite()`, so it is
+not the domain test either. A 340x split that tracks the ARM and ignores both the
+kernel and the predicate is a structural cost, and that is what made it findable.
+
+**COUNTED MECHANISM — `strace -f -c`, shipped binary, `sqrt` vs `floor` over 100
+rows, the two ops on opposite sides of the split:**
+
+| `@100`, 55 timed calls | `read` | `openat` | `sched_getaffinity` |
+|---|---:|---:|---:|
+| `sqrt` BEFORE | 601 | 396 | 57 |
+| `floor` (control) | 45 | 16 | 3 |
+| `sqrt` AFTER | 63 | 24 | 4 |
+
+Naming the files is what closed it. Each of the 55 `sqrt` calls opened
+`/proc/self/cgroup` and then `cpu.max` at **all six levels** of this host's cgroup
+path — 7 opens and ~10 reads PER CALL, to map 100 doubles:
+
+```
+55  /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-.../cpu.max
+55  /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/cpu.max
+55  /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cpu.max
+55  /sys/fs/cgroup/user.slice/user-1000.slice/cpu.max
+55  /sys/fs/cgroup/user.slice/cpu.max
+55  /sys/fs/cgroup/cpu.max
+55  /proc/self/cgroup
+```
+
+`std::thread::available_parallelism()` honours cgroup CPU quota, and on Linux it
+does that by walking the hierarchy on the filesystem, every call. In
+`par_map_slice_f64_domain_fused` it was called **before** the
+`if workers <= 1 || n < par_min` early-out — so a call that had already decided to
+run SERIALLY paid a seven-file walk first. `typed_float_witness_free_unary` never
+calls it, which is precisely why `floor` sat at 0.2us.
+
+**THE FIX** is one `OnceLock` — `cached_available_parallelism()` — with all eight
+call sites in `fp-columnar` routed through it. This reports a MACHINE property;
+caching it deliberately will not notice an affinity change made from outside a
+running process, which is the right trade when the alternative is a seven-file walk
+per kernel invocation.
+
+**RESULT, one post-fix ELF `d370a302`, default build, `ref` arm, load 13.4-24.3:**
+
+| FP p50 | `sqrt` before | `sqrt` after | speedup |
+|---|---:|---:|---:|
+| `@100` | 67.28us | **0.28us** | **240x** |
+| `@1k` | 67.29us | **1.27us** | **53x** |
+| `@10k` | 77.94us | **11.43us** | **6.8x** |
+| `@1M` | 1274.06us | **1155.7us** | **1.10x** |
+
+and against live pandas, `sqrt` crosses unity at every size below 1M:
+
+| vs pandas | before | after |
+|---|---:|---:|
+| `sqrt @100` | 0.483x | **117.187x / 121.162x** |
+| `sqrt @1k` | 0.440x | **26.161x / 26.624x** |
+| `sqrt @10k` | 0.520x | **3.673x / 4.024x** |
+| `sqrt @1M` | 0.870x | **0.935x / 0.929x** (still a certified LOSS) |
+
+The four other ops move with it at `@100`: `log` 68.12→0.55us, `expm1` 68.98→0.47us,
+`sin` 68.81→1.03us, `cbrt` 70.43→1.68us.
+
+**THE CONTROL DID NOT MOVE, WHICH IS THE POINT.** `floor @100` was 0.20us before and
+0.21us after; `floor @1M` was 578.35us before and 569.4us after, still 0.322x/0.338x
+vs pandas. The fix touches only the arm that called `available_parallelism`, and
+`floor`'s loss is the `+sse4.1` question on br-frankenpandas-cu22b, untouched here.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=d370a302d507cb0cf2781635afeaf008712ba167ea17c09b046c3f8be922ae6c (82340288 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T120440.495907Z-pid592806 , giving
+measured_ratio=1.999x for this row.
+
+| `log @1M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **1758.10us** | 6.36% | 0.986630 — PASSES |
+| pandas | 3496.16us | 1.91% | 1.002233 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.986630 and
+pandas median ratio 1.002233, both inside the 2% limit.
+
+**Median-CI decision:** effect median 1.999x, 95% CI [1.89123359, 2.10248521],
+excluding unity; claimed log effect 0.69269655 against a required threshold of
+0.17944569, cleared by 3.9x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 6.36%, pandas 1.91%.
+
+```
+LOADAVG      13.37 → 24.33 across the post-fix sequence (1-min, sampled per run)
+OBSERVED MHz host-wide mean 2924-3888 per run, cross-core min 1429.0 max 4298.3
+THREADS      FP 8 (log @1M, parallel arm) · pandas 1 · sqrt stays FP 1 at every size
+```
+Best-vs-best 2.2486, direction agrees with the median.
+
+**`sqrt @1M` ALSO CERTIFIED, and it is still a LOSS:** 0.935x, CI [0.91874512,
+0.94084426], nulls 1.003473 / 1.001406, best-vs-best 0.9345 agreeing,
+invocation_id=vs-pandas-20260817T120431.899355Z-pid586711. It improved from 0.870x
+because the constant was 5.2% of that arm. What remains is the per-element term —
+FP 1.156 ns/element against pandas 1.077, about 7% — and THAT is the one an ISA or
+width lever could plausibly address. The earlier rejection stands for everything
+below 1M, where the constant was the whole story.
+
+**WHAT GENERALISES, because this is not really about `sqrt`.** `available_parallelism`
+is called **104 times across this workspace** — 8 in `fp-columnar` (now cached), 61 in
+`fp-frame`, 9 in `fp-bench`, and the rest in `fp-index`/`fp-io`/`fp-join`. Every one
+of those is a seven-file cgroup walk on this host, and the deeper the cgroup path the
+worse it gets — a tmux-spawned agent process is six levels down, which is why this
+cost 68us here and would cost less on a shallow path. Any hot function that sizes a
+worker pool per call has this defect. `cached_available_parallelism` is `pub` so the
+other crates can adopt it; I have not touched them, and that residue is recorded on
+the bead rather than claimed as done.

@@ -1133,10 +1133,7 @@ impl Float64PairwiseStatMatrixPlan {
             }
             (s, s2)
         };
-        let moment_workers = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .min(64)
-            .min(n.max(1));
+        let moment_workers = cached_available_parallelism().min(64).min(n.max(1));
         if moment_workers >= 2 && (len as u128) * (n as u128) >= (1u128 << 20) {
             let next_col = std::sync::atomic::AtomicUsize::new(0);
             let col_data_ref: &[&[f64]] = &col_data;
@@ -1188,10 +1185,7 @@ impl Float64PairwiseStatMatrixPlan {
                 .map(|b| (b * band, ((b + 1) * band).min(len)))
                 .filter(|&(a, b)| a < b)
                 .collect();
-            let worker_count = std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(64)
-                .min(bands.len());
+            let worker_count = cached_available_parallelism().min(64).min(bands.len());
             let next_band = std::sync::atomic::AtomicUsize::new(0);
             let bands_ref: &[(usize, usize)] = &bands;
             let cols_ref: &[&[f64]] = &col_data;
@@ -1908,8 +1902,7 @@ fn apply_f64_slices_nan_tracked(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<
 
     let mut data = vec![0.0_f64; a.len()];
 
-    let worker_count = std::thread::available_parallelism()
-        .map_or(1, usize::from)
+    let worker_count = cached_available_parallelism()
         .min(PARALLEL_MAX_CHUNKS)
         .min(a.len().max(1));
     if a.len() >= parallel_min_len && worker_count >= 2 {
@@ -3634,9 +3627,7 @@ impl ScalarValues {
         const PARALLEL_MAX_CHUNKS: usize = 16;
 
         debug_assert_eq!(run_values.len(), run_lens.len());
-        let thread_count = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(PARALLEL_MAX_CHUNKS);
+        let thread_count = cached_available_parallelism().min(PARALLEL_MAX_CHUNKS);
         if total_len < PARALLEL_MIN_VALUES || thread_count < 2 || run_values.is_empty() {
             let mut out = Vec::with_capacity(total_len);
             for (&value, &run_len) in run_values.iter().zip(run_lens.iter()) {
@@ -3714,9 +3705,7 @@ impl ScalarValues {
             return out;
         }
 
-        let thread_count = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(PARALLEL_MAX_CHUNKS);
+        let thread_count = cached_available_parallelism().min(PARALLEL_MAX_CHUNKS);
         if total_len < PARALLEL_MIN_VALUES || thread_count < 2 || segments.is_empty() {
             let mut out = Vec::with_capacity(total_len);
             for &(start, len) in segments {
@@ -3815,9 +3804,7 @@ impl ScalarValues {
         const PARALLEL_MIN_VALUES: usize = 1 << 18;
         const PARALLEL_MAX_CHUNKS: usize = 16;
 
-        let thread_count = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(PARALLEL_MAX_CHUNKS);
+        let thread_count = cached_available_parallelism().min(PARALLEL_MAX_CHUNKS);
         if total_len < PARALLEL_MIN_VALUES || thread_count < 2 || segments.is_empty() {
             let mut out = Vec::with_capacity(total_len);
             for &(start, len) in segments {
@@ -3896,9 +3883,7 @@ impl ScalarValues {
         {
             return Some(
                 data.get_or_init(|| {
-                    let thread_count = std::thread::available_parallelism()
-                        .map_or(1, usize::from)
-                        .min(PARALLEL_MAX_CHUNKS);
+                    let thread_count = cached_available_parallelism().min(PARALLEL_MAX_CHUNKS);
                     if *total_len < PARALLEL_MIN_VALUES || thread_count < 2 || runs.is_empty() {
                         let mut out = Vec::with_capacity(*total_len);
                         for &(value, run_len) in runs {
@@ -4421,7 +4406,7 @@ impl ScalarValues {
             return;
         }
 
-        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let available = cached_available_parallelism();
         let total_work: u128 = pending.iter().filter_map(|v| v.pending_dot_work()).sum();
         let workers = Self::dot_worker_count(
             total_work,
@@ -8043,10 +8028,7 @@ fn f64_radix_key(value: f64) -> u64 {
 fn par_map_vec_f64<G: Fn(usize) -> f64 + Sync>(n: usize, g: G) -> Vec<f64> {
     const PAR_MIN: usize = 200_000;
     let mut out = vec![0.0_f64; n];
-    let workers = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .min(8);
+    let workers = cached_available_parallelism().min(8);
     if workers <= 1 || n < PAR_MIN {
         for (i, o) in out.iter_mut().enumerate() {
             *o = g(i);
@@ -8094,10 +8076,7 @@ fn par_map_vec_f64_with_witness<G: Fn(usize) -> f64 + Sync>(
     const PAR_MIN: usize = 200_000;
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0_u64; n.div_ceil(64)];
-    let workers = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .min(8);
+    let workers = cached_available_parallelism().min(8);
 
     if workers <= 1 || n < PAR_MIN {
         let (mut all_valid, mut all_finite) = (true, true);
@@ -8414,6 +8393,37 @@ fn par_map_slice_f64_with_witness<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
     par_map_slice_f64_with_witness_with_policy(input, f, max_workers, par_min)
 }
 
+/// `std::thread::available_parallelism()`, resolved ONCE per process.
+///
+/// br-frankenpandas-kko5z, CrimsonPine 2026-08-17. MEASURED, not suspected:
+/// `std::thread::available_parallelism()` honours cgroup CPU quota, and on Linux
+/// it does that by WALKING THE CGROUP HIERARCHY ON THE FILESYSTEM — every call.
+/// Counted with `strace -f -c` on the shipped `fp-bench`, `sqrt` over 100 rows
+/// against `floor` over 100 rows in the same binary:
+///
+///   sqrt   601 read · 396 openat · 57 sched_getaffinity
+///   floor   45 read ·  16 openat ·  3 sched_getaffinity
+///
+/// The 55 timed `sqrt` calls opened `/proc/self/cgroup` plus `cpu.max` at all
+/// SIX levels of this host's cgroup path — 7 opens and ~10 reads PER CALL — for
+/// a 100-element map. That is the whole of the 66-68us per-call constant this
+/// bead measured across `sqrt`, `log`, `cbrt`, `sin` and `expm1`: every op on
+/// the domain-fused arm called this before deciding it was going to run SERIALLY
+/// anyway. `floor`/`ceil`/`round2` never touch it, which is exactly why their
+/// constant is 0.2us and not 68us.
+///
+/// Caching is sound because this reports a MACHINE property. A process's CPU
+/// affinity and cgroup quota can in principle be changed from outside while it
+/// runs, and this deliberately will not notice: every caller here uses the value
+/// to size a worker pool for one kernel, where re-reading a 7-file walk per call
+/// costs far more than tracking a change that does not happen. The env-derived
+/// policy beside it is cached the same way and for the same reason.
+pub fn cached_available_parallelism() -> usize {
+    static AVAILABLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *AVAILABLE
+        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+}
+
 /// As [`par_map_slice_f64_with_witness`], but with the worker cap and parallel
 /// threshold passed IN rather than read from the environment.
 ///
@@ -8437,9 +8447,7 @@ fn par_map_slice_f64_with_witness_with_policy<T: Copy + Sync, F: Fn(T) -> f64 + 
     let n = input.len();
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0_u64; n.div_ceil(64)];
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
+    let available = cached_available_parallelism();
     let cap = if max_workers == 0 {
         available
     } else {
@@ -8581,9 +8589,7 @@ fn par_map_slice_f64_domain_fused_to_owned_chunks<
     }
 
     let n = input.len();
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
+    let available = cached_available_parallelism();
     let cap = if max_workers == 0 {
         available
     } else {
@@ -8691,9 +8697,7 @@ fn par_map_slice_pair_f64<F: Fn(f64, f64) -> f64 + Sync>(
     let n = a.len();
     let mut out = vec![0.0_f64; n];
     let (max_workers, par_min) = elementwise_witness_policy();
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
+    let available = cached_available_parallelism();
     let cap = if max_workers == 0 {
         available
     } else {
@@ -8781,9 +8785,7 @@ fn par_map_slice_f64_domain_fused<
 
     let n = input.len();
     let mut out = vec![0.0_f64; n];
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
+    let available = cached_available_parallelism();
     let cap = if max_workers == 0 {
         available
     } else {
@@ -8831,9 +8833,7 @@ fn par_map_slice_f64_to_owned_chunks<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
 ) -> (OwnedFloat64Chunks, Vec<u64>, bool, bool) {
     let n = input.len();
     let mut words = vec![0_u64; n.div_ceil(64)];
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
+    let available = cached_available_parallelism();
     let cap = if max_workers == 0 {
         available
     } else {
@@ -8889,10 +8889,7 @@ fn par_map_slice_f64_to_owned_chunks<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
 fn par_map_vec_i64<G: Fn(usize) -> i64 + Sync>(n: usize, g: G) -> Vec<i64> {
     const PAR_MIN: usize = 200_000;
     let mut out = vec![0_i64; n];
-    let workers = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .min(8);
+    let workers = cached_available_parallelism().min(8);
     if workers <= 1 || n < PAR_MIN {
         for (i, o) in out.iter_mut().enumerate() {
             *o = g(i);
@@ -9110,8 +9107,7 @@ fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
     // remaining six passes run concurrently without changing the permutation.
     const PARALLEL_MIN_LEN: usize = 1 << 20;
     const PARALLEL_MAX_WORKERS: usize = 16;
-    let workers = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
+    let workers = cached_available_parallelism()
         .min(PARALLEL_MAX_WORKERS)
         .min(n);
     if n >= PARALLEL_MIN_LEN
@@ -9379,8 +9375,7 @@ pub fn radix_argsort_multi_u64(keys_by_col: &[Vec<u64>]) -> Vec<usize> {
     // the remaining lexsort independently across all available CPUs.
     const PARALLEL_MIN_LEN: usize = 1 << 19;
     const PARALLEL_MAX_WORKERS: usize = 64;
-    let workers = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
+    let workers = cached_available_parallelism()
         .min(PARALLEL_MAX_WORKERS)
         .min(n);
     if n >= PARALLEL_MIN_LEN
@@ -9448,7 +9443,7 @@ pub fn utf8_msd_argsort_bytes(spans: &[&[u8]], ascending: bool) -> Vec<usize> {
     }
     let mut aux: Vec<usize> = vec![0; n];
     const PAR_MIN: usize = 1 << 15;
-    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let workers = cached_available_parallelism();
     if n >= PAR_MIN && workers >= 2 {
         utf8_msd_sort_range_par(spans, &mut idx, &mut aux, 0, ascending, workers);
     } else {
@@ -23552,9 +23547,7 @@ impl Column {
             // arg-extrema axis=1 family.)
             const PAR_MIN_ROWS: usize = 200_000;
             let n = data.len();
-            let workers = std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(8);
+            let workers = cached_available_parallelism().min(8);
             if workers > 1 && n >= PAR_MIN_ROWS {
                 let chunk = n.div_ceil(workers);
                 let mut parts: Vec<(Vec<u8>, Vec<usize>)> = (0..n.div_ceil(chunk))
@@ -29548,6 +29541,41 @@ impl CrackIndex {
         }
 
         start + write
+    }
+}
+
+#[cfg(test)]
+mod cached_parallelism_tests {
+    use super::cached_available_parallelism;
+
+    /// br-frankenpandas-kko5z. THE NEGATIVE CASE: the cheap way to make the
+    /// cgroup walk disappear is to stop asking the OS at all and return a
+    /// constant. That would pass any timing test and silently serialise — or
+    /// over-subscribe — every parallel kernel in the crate, which no benchmark
+    /// in this repo would catch because they all report the thread count the
+    /// kernel CHOSE, not the one it should have had.
+    #[test]
+    fn cached_parallelism_reports_the_real_machine_not_a_constant_kko5z() {
+        let cached = cached_available_parallelism();
+        let live = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        assert_eq!(
+            cached, live,
+            "cached parallelism must equal what the OS reports, not a hardcoded value"
+        );
+        assert!(
+            cached >= 1,
+            "worker counts are sized from this; 0 would divide"
+        );
+    }
+
+    /// The cache must be a cache: same answer every time, so a kernel cannot
+    /// size two halves of one operation from two different worker counts.
+    #[test]
+    fn cached_parallelism_is_stable_across_calls_kko5z() {
+        let first = cached_available_parallelism();
+        for _ in 0..64 {
+            assert_eq!(cached_available_parallelism(), first);
+        }
     }
 }
 
