@@ -33576,3 +33576,38 @@ STALENESS    both ELFs predate the cached_available_parallelism migration; the w
              unaffected, the vs-pandas absolutes (0.514x / 0.542x) are dated
 ARTIFACTS    artifacts/bench/4kig1_div2M_{AVX2,SSE2}_2026-08-17.json
 ```
+
+
+### 2026-08-17 CrimsonPine — an ATTRIBUTABLE current-main ELF now exists, which lifts the staleness caveat on every div/add row banked today
+
+Every AVX2 row I banked today carries the same footnote: both ELFs were built at `4c1adb6c6`,
+and the `cached_available_parallelism` migration has since landed in
+`apply_f64_slices_nan_tracked`. The bead that shipped it (`q1evw`) measures the old
+`available_parallelism()` at 66-68us per CALL — roughly 8% of an 800us `div @1M`. So the width
+DELTAS are sound (both arms share pre-migration code) while the vs-pandas ABSOLUTES are dated.
+
+**Fixed at the source rather than re-caveated:**
+
+```
+  fp-bench-MAIN-8b263954b   a802073cf042d28d9807347a...  (82346192 bytes)
+  built from a detached worktree at 8b263954b == origin/main, `tracked-dirty 0` asserted
+  INSIDE the build command, own Cargo target dir, df 255G immediately before
+```
+
+Preserved at `/data/projects/.scratch/crimsonpine/fp-bench-MAIN-8b263954b`, so the next
+measurement costs a window and no rebuild. The sha MOVED from the old baseline's
+`31c630ba9b385fe8...`, checked explicitly — the stale-binary trap has caught me twice today, once
+where `ELF present` was true for three minutes while the file was the previous build.
+
+**NO ROW WAS TAKEN IN THIS WINDOW, AND THAT WAS THE RIGHT CALL.** The window was clean at launch
+(loadavg 8.82 falling against a 24.63 fifteen-minute) and I spent its first three minutes on the
+build, because certifying on a stale binary would have banked a number that does not describe
+`origin/main`. By the time the build finished, `host_is_quiet_now.py` read **250% build CPU from
+one rustc that is not mine** — a peer started compiling. Measuring through another pane's build
+is precisely what that check exists to refuse, and this ledger already records a pair that
+collapsed after being blessed at "quiet" on a weaker criterion.
+
+**QUEUED, needing one quiet window and no build:** `mod @1M`. It has never certified — twice
+null-failed at 6.496x and 6.604x in noisy windows — and it is a DIFFERENT SIZE from the standing
+`mod @10M`, so it is new evidence rather than a re-measure of a win. It is also the first row
+that would describe current main rather than a two-hour-old tree.
