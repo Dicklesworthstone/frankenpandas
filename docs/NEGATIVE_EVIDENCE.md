@@ -33838,3 +33838,68 @@ on.**
 row costs one window and no rebuild, so there is nothing to gain by forcing it into a storm; this
 ledger already holds a pair that collapsed exactly that way and a `mod @1M` row I pushed through
 a 400% window against my own instrument's advice.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `+avx2` is worth **1.6650x on current main**, confirming the gain is intrinsic to the kernel. And the faster row FAILS TO CERTIFY *because* it is faster — the gate is hardest exactly as you approach parity
+
+Both arms measured in one window on current-main ELFs, the flag arm first.
+
+| arm | ELF | FP p50 | pandas p50 | ratio | verdict |
+|---|---|---:|---:|---:|---|
+| main default | `a802073c…` | 642.63us | 351.67us | 0.553x | **SLOWER, 3/3 certified** |
+| main `+avx2` | `10468acf…` | **385.97us** | 333.10us | 0.846x | NULL_UNDECIDABLE |
+
+**WIDTH GAIN ON CURRENT MAIN = 1.6650x**, against 1.6056x measured on the pre-migration code.
+**The registered hypothesis is confirmed:** the flag's value belongs to the kernel, not to that
+particular build — I had said a gain materially below 1.4x would mean part of what I attributed
+to the flag was build-specific, and it came in slightly HIGHER instead.
+
+**PREDICTION SCORING, and the pattern is now three for three.** I registered FP p50 385-400us and
+ratio 0.78-0.83x. The p50 landed at **385.97us — inside, at the very bottom edge.** The ratio
+landed at **0.846x — outside, in the optimistic direction.** That is the third consecutive
+under-prediction (add's gain, div's p50 on main, now this), and the direction is always the same:
+**I under-estimate what these changes are worth.** Recorded as a calibration fact about me rather
+than as a footnote.
+
+**WHY THE BETTER ROW DID NOT CERTIFY, which is the finding worth keeping.** It failed exactly one
+clause:
+
+```
+  main +avx2     claim_log_effect 0.16725  <  required_log_effect 0.26344   -> clause 2 FAILS
+  main default   claim_log_effect 0.59243  >  required_log_effect 0.15758   -> clause 2 passes
+```
+
+Both nulls were inside the 2% limit (0.98560 / 1.01701) and the CI excluded unity. The row failed
+because **its effect is SMALL** — 0.846x is 15% from unity, while the slower control sits 45% away
+at 0.553x and clears the same gate four-fold.
+
+**So the gate is easiest to satisfy when you are losing badly and hardest as you approach
+parity.** That is not a defect — a small effect genuinely does need more evidence, and the gate is
+right to demand it — but it is a systematic property of what this campaign can PROVE, and it
+deserves naming: **as FrankenPandas converges on pandas, its rows become progressively harder to
+certify, and the failure looks identical to a noisy host.** The remedy for a near-parity row is
+more rounds, not a quieter window; this row's null MEDIANS were fine and its null CI was wide
+(2x-null interval [0.768406, 1.301395]).
+
+**WHERE `div @1M` ACTUALLY STANDS, all four numbers on one scale:**
+
+```
+  stale default    0.447x     (pre-migration binary, superseded)
+  main default     0.515x / 0.553x   CERTIFIED TWICE in different windows
+  main +avx2       0.846x     uncertified, effect too small for the margin clause
+```
+
+pandas is still ahead — **1.18x on the flag build** against 1.94x on the default. The flag closes
+most of the gap and does not close it.
+
+```
+LOADAVG      10.73 / 14.35 / 14.57 at launch (draining; 160% build CPU, one peer rustc, under the
+             200% threshold), 10.86 / 13.93 / 14.42 at the end
+OBSERVED MHz host mean 2833.5 before -> 3133.7 after; arms_saw_same_clock=true, arm_clock_ratio
+             1.0002 (+avx2) and 1.0000 (default)
+CONTROL      pandas across the two invocations 333.10 vs 351.67us = 5.3% apart — looser than the
+             0.9% of the cleanest window, tight enough to compare, and recorded rather than
+             glossed
+LIKE-FOR-LIKE ok on both; peak_process_threads=2 on both (SERIAL arm, as expected below 1<<20)
+ARTIFACTS    artifacts/bench/4kig1_div1M_{MAINAVX2,MAINctl}_2026-08-17.json
+```
