@@ -27106,3 +27106,63 @@ FP-vs-FP comparison and the vs-incumbent ratio are answering different questions
 the paired one is tight (both arms same binary, same allocator state, interleaved)
 while the incumbent ratio carries pandas' own dispersion. The 1.168x paired figure
 stands as the self-speedup; nobody should add it to a vs-pandas number.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-4kig1) — I generalised the `floor` result past its domain and pushed a 2.3x `log` regression; the fix is measured, and the lever's real value is 1.07x on `sqrt` and NOTHING on `log`
+
+**What I got wrong, plainly.** `floor`/`ceil`/`trunc`/`round` got faster by dropping
+the shared elementwise arm's per-element `is_nan()` and its validity-word buffer —
+AND its `thread::scope`, because those maps are trivial per element and the threads
+were not paying for themselves. I carried that whole conclusion to `sqrt`/`ln`.
+Only half of it transfers. Those are libm calls at ~10-30ns per element, genuinely
+compute-bound, and this campaign has already banked 4.4-10.3x for parallelising
+this exact family. Removing the mask is a real saving; removing the threads is a
+disaster.
+
+**Measured, paired ABBA, two ELFs (`a1de1376` pre-fused vs `9450966d` serial-fused),
+load 35.1, `@1M`, whole-binary checksums IDENTICAL, in-binary A/A nulls 1.0000 /
+1.0004:**
+
+| op | pre-fused p50 | SERIAL fused p50 | ratio |
+|---|---|---|---|
+| `log` | 1742.5us | 4024.5us | **0.433x — 2.3x SLOWER** (best-vs-best 0.374x) |
+| `sqrt` | 1442.3us | 1136.1us | 1.269x p50 but **0.894x best-vs-best — directions DISAGREE** |
+
+**AND IT WAS ALREADY ON MAIN WHEN I MEASURED IT.** The serial form was committed
+and pushed as `44700c04b` while my own gates were still running — this checkout
+commits work out from under an agent, which has now happened four times in this
+session. So the regression was live. Fixed in `40d27bee7`.
+
+**The fix, and its numbers.** `par_map_slice_f64_domain_fused` keeps the threads
+and drops only the mask: each worker folds two booleans (`domain_held`,
+`all_finite`) over its own chunk, combined with `all()`, which is associative and
+commutative — bit-identical to the shared arm at every worker count. Paired ABBA
+against the SAME pre-fused baseline `a1de1376`, ELF `0453bd8d`, load 16.73, per-arm
+MHz recorded:
+
+| op | pre-fused p50 | PARALLEL fused p50 | p50 ratio | best-vs-best |
+|---|---|---|---|---|
+| `log` | 1743.7us | 1754.7us | **0.994x** | 1.091x |
+| `sqrt` | 1360.4us | 1270.6us | **1.071x** | 1.077x |
+
+Checksums IDENTICAL; in-binary A/A nulls 1.0033 and 0.9995.
+
+**A/A null control (same invocation):** in-binary null median ratio 1.0033 (`log`)
+and 0.9995 (`sqrt`) on the fix, and median ratio 1.0000 and 1.0004 on the
+regression measurement — all four inside the 2% limit, so both the regression and
+its removal are the arms differing, not the instrument drifting.
+
+**SO THE HONEST NET FOR THIS BEAD IS SMALL.** `sqrt` gains **1.071x**; `log` gains
+**nothing measurable** (0.994x median against 1.091x minima is a wash). The mask
+the bead expected to be expensive is simply not a large fraction of a call whose
+per-element work is a libm evaluation — the exact opposite of `floor`, where it was
+two thirds. **The bead's premise was right for the family it was derived from and
+wrong for the family it was filed against**, and the real deliverable here is the
+removal of a regression I introduced, not a speedup.
+
+**Still open and NOT addressed:** the FP A/A null failures that motivated the bead
+(`sqrt` 0.913921, `log` 1.041860 in live vs-pandas rows) came from `thread::scope`,
+and this arm KEEPS `thread::scope` — deliberately, since that is where the
+performance is. So the nulls are expected to keep failing for these two ops, and
+the certification problem this bead was filed to solve remains unsolved. Anyone
+picking it up should attack the per-call spawn (a persistent pool, as
+br-frankenpandas-03fp5 sketches for `df.dot`) rather than the witness.
