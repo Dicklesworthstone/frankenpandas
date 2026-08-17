@@ -28681,3 +28681,81 @@ reachability fact and a git bisect of one string.
 
 Gates: `cargo test -p fp-columnar --lib` 642 passed / 0 failed / 58 ignored / 0
 FILTERED OUT; `clippy --all-targets -D warnings` clean; `fmt --check` clean.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — I BROKE A CERTIFIED WIN AND CAUGHT IT WITH MY OWN PREDICTION: `sqrt_int64 @10M` went 1.203x → 0.771x, and is now 1.193x again
+
+The previous entry recorded a falsifiable prediction before running it: after taking
+`sqrt` off the parallel arm, "`sqrt` and `sqrt_int64` should now pass their A/A
+nulls, and their vs-pandas ratios should not measurably drop." **The first half held.
+The second half was wrong, and it was wrong in the most expensive way available.**
+
+**All four rows below, same host, minutes apart, every one with BOTH A/A nulls
+passing except where noted:**
+
+| row | ELF | ratio | verdict | FP nulls |
+|---|---|---|---|---|
+| `sqrt_int64 @10M` BEFORE | `fcc8dee4` | **1.203x** | **FASTER** | 1.008448 PASS |
+| `sqrt_int64 @10M` after my change | `c13ad056` | **0.771x** | **SLOWER** | 1.001050 PASS |
+| `sqrt @10M` BEFORE | `fcc8dee4` | 0.925x | undecidable | 1.029291 **FAIL** |
+| `sqrt @10M` after my change | `c13ad056` | 0.901x | undecidable | 0.986170 PASS |
+
+**A certified win became a certified loss — a 1.56x swing, gated in both
+directions.** The null half of the prediction was right: FP's peak threads fell 10 →
+2, cv fell from 12.44% to 2.43%, and both ops' nulls passed for the first time. The
+diagnosis of `thread::scope` was correct. The routing decision built on it was not.
+
+**THE ERROR, NAMED PRECISELY, BECAUSE IT IS THE SAME ONE I RECORDED EARLIER TODAY.**
+I measured serial-vs-parallel on the FLOAT path (`sqrt @10M` 1.038x, `sqrt @1M`
+0.977x), concluded parallelism does not pay for `sqrt`, and pinned the override on
+the OP — which routes both dtypes. The integer path does a widening AND the kernel
+per element, so it is strictly more work than the float path and parallelism pays
+for it where it does not pay for f64. **Earlier in this bead I wrote "I generalised
+the floor result past its domain" about `sqrt`/`log`. I then did the identical thing
+one level down, from f64 to i64, within hours, having written the warning myself.**
+A cost model that explains five results is not a licence to skip the sixth
+measurement.
+
+**THE FIX, and it is dtype-scoped rather than a revert:** `par_min_override` now
+applies to the f64 arm only; the i64 arm keeps the shared policy threshold whatever
+the float path chose. Verified in the same window on ELF `d2ddc947`:
+
+| row | ratio | verdict | nulls | FP threads |
+|---|---|---|---|---|
+| `sqrt_int64 @10M` | **1.193x** | **FASTER** | 0.983915 / 0.989788 PASS | 10 |
+| `sqrt @10M` | 0.883x | undecidable | 1.000422 / 0.995904 PASS | 2 |
+
+The certified win is back at 1.193x against the 1.203x it started at, and the float
+path keeps its clean null — the thing it went serial for. Per-arm busy-core MHz
+4292.0 / 4292.2 (ratio 1.0000) and 4266.1 / 4267.2; loadavg 15.80 → 11.52 across
+both rows.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=d2ddc94799b2ccbf6995ea87ee5a5cc361332aa6fd3b3167b4db075ef4859bb8 (81044248 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-fix`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T062359.268265Z-pid3924117 , giving
+measured_ratio=1.193x for the restored row.
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.983915 and
+pandas median ratio 0.989788 on the restored `sqrt_int64` row, both inside the 2%
+limit.
+
+**Median-CI decision:** effect median 1.193x, 95% CI [1.11406, 1.22851], excluding
+unity; the claimed log effect is 0.17651146 against a required threshold of
+0.17129848 — it cleared by 3%, which is thin, and the row is reported as the
+RESTORATION of a 1.203x row rather than as a new result.
+
+**CV role:** provenance only, no vote — FP 6.73%, pandas 2.83%.
+
+**WHAT THIS SAYS ABOUT THE PREDICTION DISCIPLINE, which is the transferable part.**
+The regression was gated, reproducible and entirely invisible from the code — the
+change compiled, passed 640 tests including a bit-identity test written specifically
+for the changed path, and made every number I was watching better. **It was caught
+ONLY because I wrote down what should happen before running it, and one half of it
+did not.** A prediction recorded afterwards would have been fitted to 0.771x as
+"parallelism mattered after all"; recorded beforehand, it was falsifiable and it
+falsified.
