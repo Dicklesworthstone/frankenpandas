@@ -35026,3 +35026,83 @@ difference from the total then being construction by subtraction rather than by 
 needs either a timed-region profile or a bench lane that calls the kernel without the frame
 plumbing — both a build, neither available in a window I am also measuring in. **I am recording
 that as the next step rather than fitting a fourth curve.**
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-03fp5) — REJECTED, this bead's own hypothesis: construction is 26.7% of the 10k dot, not the dominant term. A direct kernel lane ends three hours of curve-fitting and says the GEMM IS the target
+
+**NO INCUMBENT ARM RAN AND NO A/A NULL WAS TAKEN. NOTHING HERE IS CERTIFIED OR BANKED.** These are
+FP-vs-FP diagnostics answering the question 03fp5 asks.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=038855bf697cf2ba9d10cfd2dd034834c4f77925b50122357785128729964621 (82635120 bytes) /data/projects/.scratch/crimsonpine/fp-bench-KERNELLANE-dirty`
+⚠️ **This ELF corresponds to NO CLEAN COMMIT.** The in-build `git status --porcelain -- crates`
+assertion fired on `crates/fp-frame/src/lib.rs`, which held a peer's uncommitted datetime-formatting
+work (`format_pydatetime_naive`, `format_timestamp_from_nanos`,
+`datetime64_scalar_from_parsed_datetime` + tests). I read it: **0 dot-related lines**, so it cannot
+reach this kernel — but the binary is not reproducible from any sha and I am naming it
+`-dirty` rather than pretending otherwise.
+
+**Counted mechanism:** instructions, `perf stat`, dim=100, serial both arms, startup floor measured
+and subtracted (229,602,245 instructions at size=100 where the workload is negligible): full serial
+dot 462,512,708 total = 232,910,463 workload; kernel alone 426,134,632 total = 196,532,387
+workload; **construction = 36,378,076 instructions = 15.6% of the workload**, i.e. 1,455,123 per
+call for dim²=10,000 outputs, or 145.5 instructions per output element. Serial kernel throughput
+for the same lane: dim=10 969 flops/us, dim=31 4,525, dim=100 5,816, dim=316 5,972, dim=1000 5,273.
+
+**TWO INSTRUMENTS, AND THEIR DISAGREEMENT IS ITSELF THE POINT.** The timing subtraction puts
+construction at 26.7% of the dim=100 call; the instruction subtraction puts it at 15.6%. Both
+refute the hypothesis under test, and the gap between them is coherent rather than troubling:
+construction is allocation-heavy and stall-bound while the GEMM is dense high-IPC arithmetic, so
+construction buys fewer instructions per unit time. **The instruction figure is the load-immune
+one** — it is a count, not a duration, so the loadavg-74 contamination described below cannot move
+it, and it is the number to trust if the two ever have to be reconciled to one.
+
+**THE INSTRUMENT.** Three fits in three hours, each refuted by the next, because two unknowns move
+with dim and the total is one observable. So I built the lane instead of fitting a fourth curve:
+`df_dot_kernel` constructs the same square frame, the same `Float64DotAPanel` and the same
+`Arc<[f64]>` B columns that `DataFrame::dot` builds, **all outside `time_us`**, and times only the
+n `Column::dot_column_data` calls. Those are the same public kernel entry points `dot` dispatches
+to the pool, so it is not a shadow reimplementation. It is deliberately serial, and the code
+comment says the resulting number must never be subtracted from a PARALLEL total — that was the
+error this entry exists to correct.
+
+**RESULT 1 — r(dim) IS FLAT, WHICH KILLS MY OWN RETRACTION'S ALTERNATIVE.** An hour ago I withdrew
+"88% of the 10k call is not the GEMM" on the grounds that the implied rate moves 253x and small
+matrices might simply block badly. **They do not.** Measured serial kernel throughput holds within
+1.3x from dim=31 to dim=1000 (4,525 -> 5,972 -> 5,273 flops/us). The 253x in the implied rate was
+never kernel inefficiency; it was construction plus parallelism, folded into one number by a model
+that could not see them separately. Only dim=10 is genuinely slow (969), which is loop-overhead at
+a 10x10 matrix and irrelevant to the bead.
+
+**RESULT 2 — THE CLEAN SUBTRACTION, SERIAL AGAINST SERIAL.** With `r(dim)` measured rather than
+assumed, `FP_DOT_MAX_WORKERS=1` makes both terms serial on one binary, so construction falls out by
+subtraction instead of by assumption:
+
+| dim | full dot, serial | kernel alone, serial | construction | share | per column |
+|---|---|---|---|---|---|
+| 31 | 16.18us | 11.49us | 4.69us | **29.0%** | 0.151us |
+| 100 | 221.83us | 162.69us | 59.14us | **26.7%** | 0.591us |
+| 316 | 6046.20us | 5485.89us | 560.31us | **9.3%** | 1.773us |
+
+**Construction is 26.7% of the dim=100 call. The GEMM is the other 73.3%.** This bead states "at
+this size FP's cost is NOT the GEMM: it is the per-call construction ... plus the frame/index
+rebuild", and instructs "profile the WHOLE 10k dot call before touching any kernel." **Measured,
+that is backwards: the kernel is the dominant term at 10k and the construction is a quarter of it.**
+
+Note also what construction is NOT: per-column. `construction / dim²` is 0.00488, 0.00591, 0.00561
+— near constant, so the term scales with **output elements** (n·m f64s produced), at ~5.6ns each.
+My "1.43us per column" from two hours ago is dead as well; per-column cost is not constant, it
+grows 0.151 -> 0.591 -> 1.773us precisely because the real driver is dim².
+
+**WHAT THIS MAKES THE TARGET.** FP's safe-Rust GEMM sustains ~5,800 flops/us on one thread, flat
+across dim. That is the number to beat, and construction cannot explain the vs-pandas gap at 10k
+because it is only a quarter of a call that is itself ~1.9x slower than the incumbent. **The kernel
+is the lever, which is the opposite of this bead's standing guidance.**
+
+⚠️ **WINDOW, AND IT IS BAD.** The subtraction ran as loadavg went to **74.36** (15-min 24.19), and
+the window around it read loadavg 49.21, idle 81.6%, iowait 0.0%, build CPU **412%** against a 200%
+threshold, MHz 3245.7, disk 197G. **The absolute microsecond figures above are not trustworthy.**
+What survives contamination is the SHARES, because each pair was measured seconds apart under the
+same conditions and the subtraction is a ratio of two neighbouring measurements. I am reporting the
+shares as the finding and the absolutes as provisional. **The 26.7% needs re-measuring in a quiet
+window before anyone acts on it**, and the same run should extend to dim=1000 and add the parallel
+arm, which I did not take here.

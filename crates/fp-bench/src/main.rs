@@ -3380,6 +3380,59 @@ fn run(
             }
         }
         // df.dot GEMM (br no-gaps flagship): square (dim x dim).(dim x dim) where
+        // THE GEMM KERNEL ALONE, WITH ALL CONSTRUCTION HOISTED OUT OF THE TIMED
+        // REGION (br-frankenpandas-03fp5).
+        //
+        // `df_dot` measures construction + GEMM together, and three successive
+        // attempts to split them by curve-fitting the total were each refuted by
+        // the next: every fit has to assume one arithmetic rate across dim, and
+        // the rate implied by the totals moves 253x from dim=10 to dim=1414. Two
+        // unknowns move together and the total is one observable, so the split
+        // is not recoverable from `df_dot` timings at all.
+        //
+        // This lane measures r(dim) DIRECTLY. It builds the same square frame,
+        // then the same `Float64DotAPanel` and the same `Arc<[f64]>` B columns
+        // that `DataFrame::dot` builds — all OUTSIDE `time_us` — and times only
+        // the n `Column::dot_column_data` calls. Those are the identical public
+        // kernel entry points `dot` itself dispatches to the worker pool, so this
+        // is not a shadow reimplementation: the arithmetic, the operand layout
+        // and the `j = 0..k` order are the same code.
+        //
+        // Deliberately SERIAL, one thread. The question is per-thread kernel
+        // efficiency versus dim, not how well the pool scales, and a serial lane
+        // answers it without the pool's dispatch confounding the small sizes.
+        // That also means this number must NOT be subtracted from a parallel
+        // `df_dot` total to get "construction" — it is a throughput curve, not a
+        // term in that sum.
+        ("linalg", "df_dot_kernel") => {
+            let dim = (rows as f64).sqrt() as usize;
+            let frame = build_square_f64_frame(dim);
+            let mut a_views: Vec<(std::sync::Arc<[f64]>, usize)> = Vec::with_capacity(dim);
+            let mut b_cols: Vec<std::sync::Arc<[f64]>> = Vec::with_capacity(dim);
+            for name in frame.column_names() {
+                let col = frame.column(name.as_str()).expect("col");
+                let values: Vec<f64> = col
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(f) => *f,
+                        other => panic!("square frame must be Float64, got {other:?}"),
+                    })
+                    .collect();
+                let arc: std::sync::Arc<[f64]> = std::sync::Arc::from(values);
+                a_views.push((std::sync::Arc::clone(&arc), 0));
+                b_cols.push(arc);
+            }
+            let panel = fp_columnar::Float64DotAPanel::new(a_views, dim);
+            time_us(|| {
+                let mut acc = 0usize;
+                for b in &b_cols {
+                    let out = Column::dot_column_data(&panel, b, dim);
+                    acc += out.len();
+                }
+                black_box(acc);
+            })
+        }
         // dim = isqrt(rows). pandas df.dot delegates to numpy/OpenBLAS; fp uses
         // its own safe-Rust kernel.
         ("linalg", "df_dot") => {
