@@ -28243,3 +28243,85 @@ that `ln` is expensive per element and `sqrt` is cheap, so FP's parallel arm has
 something to amortise in one case and almost nothing in the other. Predicted by the
 in-binary observation in the previous entry (+0.15% vs +33.6% for the identical
 cast), and consistent with every other result in this bead.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-tyiss) — REJECTED: the write-once owned-chunks route. It measures 2.2–2.9x FASTER with a producer-only clock and 0.72–0.86x SLOWER once the consumer is inside it. The speedup was DEFERRED WORK, not saved work
+
+The lever: route the domain-fused map through per-worker `Arc<Vec<f64>>` chunks
+instead of one `vec![0.0_f64; n]` shared buffer, killing the third 8 MB pass numpy
+does not make. The mechanism is real and the arithmetic in br-frankenpandas-yx692
+pointed straight at it. It still loses, and the way it loses is the point.
+
+**FIRST MEASUREMENT, producer-only clock (time `Column::sqrt`, drop the result):**
+
+| arm | ratio | best-vs-best | bit-identical |
+|---|---:|---:|---|
+| write-once `(8, 200_000)` | **2.2014x / 2.3701x / 2.6869x** | 2.74 / 2.43 / 2.85 | yes |
+| write-once `(4, 1)` | **2.1305x / 1.9548x / 2.8688x** | 2.40 / 1.82 / 2.02 | yes |
+
+Three runs, one of them with a clean A/A null (1.0125) certifying FASTER at
+2.6869x, CI [2.2594, 3.0361], twenty-seven times the null margin. Bit-identical
+output, checksummed inside the run. Every gate this campaign has said to apply,
+passed.
+
+**IT IS AN ARTEFACT, AND I ONLY CAUGHT IT BY DISBELIEVING THE SIZE.** The memset
+hypothesis predicts roughly 8 MB of avoided writes against a ~1060us call — call
+it 1.3x. It returned 2.7x. That gap between predicted and measured mechanism is
+what prompted the check, not any gate.
+`Column::from_f64_all_valid_owned_chunks_with_finite` does NOT produce a
+contiguous column; it stores chunk views and materializes them lazily inside a
+`OnceLock` that `as_f64_slice` drives — and that function's own doc comment prices
+the materialization at "~5.7ms/1M of page faults". The timed region built chunks
+and dropped them. The shared-buffer arm, meanwhile, hands back a finished
+contiguous `Vec<f64>`. The two arms were never producing the same thing.
+
+**SECOND MEASUREMENT, with the consumer inside the clock** (`as_f64_slice()`
+touched before the timer stops — what any caller needing a contiguous slice pays):
+
+| arm | run A | run B | run C |
+|---|---:|---:|---:|
+| A/A null | 1.0121 PASS | 0.9861 PASS | 0.9959 PASS |
+| write-once `(8, 200_000)` | **0.8287x** | **0.8577x** | **0.7250x** |
+| write-once `(4, 1)` | **0.7397x** | **0.7707x** | **0.8445x** |
+
+**All three nulls clean, all six candidate rows SLOWER.** The route costs 16–28%
+end-to-end. The direction did not merely shrink, it INVERTED — a 2.7x win became a
+0.73x loss from the same binary, the same interleave and the same rounds, with the
+only difference being whether the consumer was inside the clock.
+
+**A/A null control (same invocation):** the write-once-OFF arm run against itself,
+15 ABBA-interleaved rounds in one process — median ratios 1.0121, 0.9861 and
+0.9959 across the three consume runs, all inside the 2% limit, and 1.0125 on the
+producer-only run that certified the phantom. The instrument was clean in BOTH
+directions. A clean null does not tell you that you timed the right thing.
+
+```
+CLASS        FP-vs-FP route A/B; picks a default, not a vs-incumbent row
+ELF          6674588cc2ffb8c3160b435400d8b206f937fdc2b76ecc8ebdcad3cbac37ea9d
+             (81111736 bytes) target/release-perf/fp-bench, self-reported, local,
+             no [RCH] line, 0 warnings
+LOADAVG      producer-only 21.63/24.03/28.12 · consume 22.57/22.69/26.77
+OBSERVED MHz producer-only host mean 2447.7 → 3042-3148; consume 3065.1 → 3226.8
+             (min 1429.0, max 4188.5). Host-level, NOT per-arm — this lane does
+             not sample per-arm frequency, and I am not claiming it does
+ARTIFACT     artifacts/bench/tyiss_write_once_sqrt_1m_thinkstation1_2026-08-17.json
+             (6 runs, raw per-round samples, per-arm verdicts)
+```
+
+**THE GENERAL LESSON, which outlives this lever.** A producer-only harness cannot
+measure a LAZY producer. Any change that moves work behind a `OnceLock` will show
+an arbitrary speedup, bit-identical output, and a clean A/A null — every signal
+this campaign trusts — while saving nothing. `fp-columnar` has at least four such
+lazy constructors (`chunks_float64_data`, `dot_float64_data`,
+`pairwise_stat_float64_data`, `transpose_row_float64_data`), so this is a live trap
+and not a one-off. **The rule: when a candidate returns a different STORAGE SHAPE
+from the baseline, the timed region must include whatever forces both shapes to
+the same observable, or the row is measuring the deferral.** The `--consume` axis
+added to the sweep lane in `ffd8dafb4` exists for exactly that and should be the
+default posture for any storage-shape change.
+
+**DISPOSITION: the route stays, default OFF, and must not be switched on for a
+contiguous consumer.** It is bit-identical and tested, and there is a real niche —
+reductions that fold chunk-wise through `float64_chunks_ref` never materialize and
+would keep the producer-side saving. That niche is now a measured hypothesis
+rather than a hope, and nobody should enable this toggle without re-running the
+consume arm for their own consumer.
