@@ -29546,3 +29546,61 @@ failed / 0 filtered out**, `clippy -D warnings` clean, `fmt --check` clean.
 until they get some — the same gap that made the `log10`/`log2`/`log1p` work
 unmeasurable until lanes were added, after which it certified four times on first
 use.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1 / flicz) — CORRECTING MY OWN MECHANISM, second time today: the duration-vs-null correlation is real and MEASURED, but "nine rounds of a 186us call is under 7ms of timed work" is FALSE, and the fix I derived from it targets the wrong quantity
+
+Two turns ago I banked that fast ops fail the A/A null more often — 226 rows, sub-1ms
+passing 33-41% against 54% above 5ms — and explained it as too little timed work per
+row. **The correlation stands. The explanation does not, and I checked it before
+building anything else on it.**
+
+**Counted, from the code rather than from my recollection.** `fp-bench` runs
+`WARMUP = 3` then `ITERS = 25` paired rounds, i.e. **50 timed calls per slot**, and
+reports ONE p50 over them. The harness then takes one p50 per slot and computes the
+null from medians of PAIRS of slot-p50s, nine ratios per arm
+(`_balanced_square_aggregate`, `slot_p50s[offset:offset+2]` versus
+`[offset+2:offset+4]`). So the compute in a slot is:
+
+| workload | FP p50 | slot compute ≈ 50 × p50 |
+|---|---:|---:|
+| `floor @1M` | 552.9us | **27.6 ms** |
+| `sqrt @1M` | 1248.6us | 62.4 ms |
+| `log @1M` | 1764.4us | 88.2 ms |
+| `floor @10M` | 10227.3us | 511.4 ms |
+
+**A fast op's slot is not short, and its in-slot averaging is IDENTICAL — 50 reps
+either way.** My "under 7ms" figure treated a slot as one call. It is fifty. The
+number was wrong by roughly the factor you would expect from that mistake.
+
+**WHAT THE REAL MECHANISM MUST BE, stated as the constrained hypothesis it now is.**
+Within-slot averaging cannot explain the correlation because it does not vary with
+op speed. What does vary is the ratio of FIXED per-slot cost to timed work: every
+slot is a FRESH `fp-bench` subprocess, so each pays process startup, a cold
+allocator, cold pages and an unwarmed clock, and the same absolute perturbation is a
+larger fraction of a 27.6 ms slot than of a 511 ms one. That is a BETWEEN-slot
+variance story, not a within-slot sampling story, and the two have different fixes.
+
+**SO THE FIX I PROPOSED IS AIMED AT THE WRONG QUANTITY.** `adaptive_balanced_square_rounds`
+adds ROUNDS, which adds null samples and tightens the estimate of the null median —
+still useful, and its anti-weakening invariant still holds — but it does nothing
+about per-slot fixed cost, which is what the corrected mechanism says dominates for
+fast ops. If between-slot fixed cost is the driver, the higher-leverage change is to
+raise `fp-bench`'s in-process `ITERS` for fast workloads, or to stop paying a fresh
+process per slot, so each slot's p50 is less perturbed in the first place. Adding
+rounds treats the symptom; both of those treat the cause.
+
+**Counted mechanism:** `ITERS = 25` and `WARMUP = 3` in `crates/fp-bench/src/main.rs`
+give 50 timed calls per slot at every size; slot compute 27.6 ms at `floor @1M`
+against 511.4 ms at `floor @10M`, a 18.5x range with 0 difference in reps.
+
+**A/A null control (same invocation):** not applicable — no timing was taken for this
+correction. It is a code read plus arithmetic over figures already banked.
+
+**WHAT I AM NOT DOING.** I am not retracting the 226-row measurement; it is data and
+it is unchanged. I am not deleting `adaptive_balanced_square_rounds` or its six tests
+— the function is correct, tested, unwired and default-off, and more rounds is a
+real if secondary remedy. What changes is `flicz`'s premise, and the bead is being
+re-scoped rather than left to send the next agent down a mechanism I have just
+falsified. **Two mechanism errors in one day — the sampler I blamed for a true
+reading, and this — both caught by checking the code instead of trusting the story I
+had already written down. The pattern is that my prose runs ahead of my arithmetic.**
