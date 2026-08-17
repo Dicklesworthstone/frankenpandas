@@ -27278,3 +27278,131 @@ other and goes stale the moment the repo moves. Any ELF kept for comparison
 across commits must be re-derived, or the row must say which commit it was built
 from. My earlier rows said "ELF 4a89472f" without saying WHAT that was, which is
 how the drift survived a day of measurement.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `log10 @10M` CERTIFIES **FASTER at 3.385x**, all three gate clauses true; and a cross-project drift check on both arms comes back clean
+
+The lane added in `68618911e` produced a row on its first use, and it is the first
+verdict of `FASTER` — not `NULL_UNDECIDABLE` — in this bead's history.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=be6261e02da785600ac0b2519e99877900bea11ea590ed895a394c727d19b3f3 (79469760 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-head2`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files, 70681559 bytes), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T011027.745508Z-pid3023974 , giving
+measured_ratio=3.385x for this row.
+
+| arm | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **21922.45us** | 4.50% | 1.001713 — PASSES |
+| pandas | 74333.20us | 2.22% | 0.993958 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.00171281 and
+pandas median ratio 0.99395847, both inside the 2% limit.
+
+**Median-CI decision:** effect median 3.385x, 95% CI [3.27222, 3.46230], excluding
+unity; the claimed log effect is 1.21947489 against a required threshold of
+0.0859709 — it cleared the decidability margin by more than 14x, which is why this one certifies
+where every 1.06–1.18x row in this bead did not. All three clauses true:
+`effect_ci_excludes_unity`, `effect_exceeds_two_x_null_margin`,
+`null_medians_within_2pct_unity`.
+
+**CV role:** provenance only, no vote — FP 4.50%, pandas 2.22%.
+
+```
+LOADAVG      20.37 → 18.41 (in-run 1-min min 15.77, max 20.37)
+OBSERVED MHz busy-core BY ARM: FP 4290.1 / pandas 4284.2, arm clock ratio 1.0014
+             host median 3398.4 (min 2599.8, max 4288.8, n=73)
+THREADS      FP peak 10 · pandas peak 67
+```
+
+**MECHANISM, so nobody mistakes this for an ISA effect:** `log10` is a libm call per
+element and FP runs it across workers while numpy evaluates its ufunc on ONE
+thread — FP peak 10 threads against pandas' 67 total, but pandas' are BLAS pool
+threads that a ufunc never uses. This is the compute-bound-parallelism vein the
+ledger banked at 4.4–10.3x for the libm binaries in 2026-06/07, showing up again on
+a unary. It is NOT the `+sse4.1` axis, and it does not transfer to
+`floor`/`ceil`/`trunc`, where the per-element work is too small for threads to pay
+(measured in this same bead: parallel LOSES there by 1.7–3.1x).
+
+**CROSS-PROJECT DRIFT CHECK (prompted by franken_networkx's installed-package drift
+that inverted a ratio 5.4x) — verified here, not assumed:**
+
+  * **The FP arm is not an installed artifact at all.** `fp-bench` is a locally
+    compiled ELF whose sha I record in every row. There is no packaged
+    FrankenPandas that could shadow it: `import frankenpandas` raises
+    `ModuleNotFoundError` and `pip list` shows no such distribution.
+  * **My analogous exposure is staleness against a MOVING HEAD, not against an
+    installer.** This checkout takes peer commits constantly — HEAD moved to
+    `4315d588c` (a peer's `fp-frame` pooled-dot change, and `fp-frame` IS linked
+    into `fp-bench`) between my last build and this row. So I rebuilt at that HEAD
+    rather than measure the older binary. **Result: the rebuild is BIT-IDENTICAL,
+    sha `be6261e0…` both times.** No drift — but that is now a checked fact rather
+    than an assumption, and the check is cheap enough to keep doing.
+  * **The incumbent IS an installed package**, `pandas 2.2.3` under
+    `/home/ubuntu/.local/lib/python3.13/site-packages/pandas`, with numpy 2.4.3 on
+    CPython 3.13.7. That is correct and intended — it is the reference
+    implementation, so "drift from a repo" does not apply. The guard that does
+    apply is already in the harness: it content-hashes all 2922 files of the
+    package into every row (`c10b13e6…`), so any substitution or local edit would
+    change the recorded artifact hash and be visible in the row rather than silent.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-03fp5) — `df_dot @10k`: the certified 0.573x gap is GONE, and the row is UNDECIDABLE because the difference is now too small to measure
+
+Same-invocation live-pandas row on the pooled build (`be6261e0…`), 21
+balanced-square rounds, `uptime` 16.87 1-min / 18.28 5-min at launch and 16.19 at
+the end — the run barely moved the load, which is what a 4-thread shape does.
+
+| | FrankenPandas | pandas 2.2.3 |
+|---|---:|---:|
+| min | **0.1241 ms** | 0.1327 ms |
+| p50 | 0.1719 ms | 0.1643 ms |
+| cv | 10.0% | 11.1% |
+| observed threads | 4 | 3 |
+| A/A null | 0.974276 | 0.976512 |
+| busy-core MHz | 4167.4 | 4191.5 — same clock, ratio 1.0058 |
+
+**Verdict NULL_UNDECIDABLE at 0.965x, and the reason is the point of this entry.**
+The effect CI [0.9175, 0.9777] excludes unity, but the claim's log effect 0.03606
+does not reach the required 0.11514: the two engines are now within a few percent
+of each other, which is BELOW what this harness can resolve against its own null.
+The like-for-like check fires for the same reason from the other side — the median
+says 0.965x while best-vs-best says **1.0693x**, i.e. FrankenPandas' fastest
+sample is FASTER than the incumbent's. The statistics straddle unity.
+
+**Against this morning's certified row on the same shape and host:**
+
+| | FP p50 | pandas p50 | verdict |
+|---|---:|---:|---|
+| this morning, scoped build | 0.3036 ms | 0.1747 ms | **CERTIFIED 0.573x** |
+| now, pooled build | 0.1719 ms | 0.1643 ms | undecidable 0.965x |
+
+FrankenPandas' own time fell **1.77x** on this shape between those rows, from the
+pooled dispatch and the pool chunk threshold. The incumbent moved 6%.
+
+**NO CROSSING IS CLAIMED.** Undecidable means undecidable: this row does not say
+FrankenPandas is faster, and the one statistic that puts it ahead (best-vs-best
+1.0693x) is a diagnostic, not a verdict. What the row DOES establish is that the
+certified 0.573x loss banked this morning no longer describes the code — the gap
+it measured is now inside the noise floor, in both directions. Both A/A nulls sit
+just outside the 2% band (0.9743, 0.9765), so the row would need a quieter host
+to resolve at all, and it may never resolve while the difference is this small.
+
+**A/A null control (same invocation):** 21 balanced-square rounds, FrankenPandas
+median ratio 0.974276 and pandas median ratio 0.976512 — both ~2.5% from unity,
+outside the limit, which together with the sub-margin effect is why the row is
+refused.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=be6261e02da785600ac0... (repo build, HEAD with 32fac195e + 4315d588c) /data/projects/frankenpandas/target/release-perf/fp-bench
+
+**Median-CI decision:** median effect 0.965x, CI [0.9175, 0.9777]; the claim's log
+effect 0.03606 did NOT reach the required threshold 0.11514, so the interval is
+inside the two-times-null margin and the row is refused rather than decided.
+
+**CV role:** provenance only; CV had no vote.
+
+**Artifacts:** `artifacts/bench/03fp5_df_dot_10k_pooled_certification_thinkstation1_2026-08-16.json`
