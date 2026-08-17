@@ -31296,3 +31296,134 @@ certified LOSS at 0.928x before the fix. All three are now certified wins, and t
 two measured at 10M are the largest ratios this bead has produced. **One constant,
 three ops, and the only reason any of it was visible was a clean certified defeat
 with `peak_process_threads: 2` printed beside it.**
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-3qpj4) — the rounding-family gap is a FLAG effect, not a HOST effect: 4.1-4.5x with both arms on ONE host, ONE window, ONE source tree, and the cross-host confound on `cu22b` is now resolved
+
+`br-frankenpandas-cu22b` carries MagentaFortress' caveat that its `+sse4.1` row
+(floor @10M 1.680x, rch worker vmi1167313) and the default-build row (floor @10M
+0.612x, thinkstation1) differ in BOTH the ISA flag AND the machine, so the gap
+between them "could be mostly flag, mostly host, or a mix — the data as it stands
+does not separate them". That comment asked for both arms on one worker. Here they
+are, and the answer is: it is the flag.
+
+**Both arms are the same source.** Default `e40c18de...` and `+sse4.1`
+`ded4edcb...` are both `release-perf` builds of `96a7cd9d0`. I did not assume the
+default binary was current — I re-ran its build first and it returned `Finished
+release-perf profile in 0.17s`, a no-op, which is the only thing that proves the
+sitting ELF is this commit and not a stale artifact. The candidate was built
+locally under `RCH_CARGO_WRAPPER_BYPASS=1` with zero `[RCH]` lines in its output,
+and its path was taken from `--message-format=json`.
+
+**Counted mechanism:** 91 `roundpd`/`roundsd` instructions in the `+sse4.1` ELF
+against 0 in the default ELF, counted by `objdump -d` on the two binaries that were
+actually timed. A green run under an inert flag would prove nothing, so this is
+counted before any ratio is read.
+
+18 invocations in 99 seconds, alternating candidate and reference, live pandas
+inside every one of them, `thread_count_actually_used=1` on both arms throughout.
+
+| `@1M` | FP p50, `+sse4.1` | FP p50, default | flag effect on FP time | vs pandas, cand | vs pandas, ref |
+|---|---|---|---|---|---|
+| `floor` | 134.26 / 133.45 / 135.68us | 569.20 / 573.32 / 581.15us | **4.27x** | 1.369 / **1.348** / 1.309 | 0.327 / 0.314 / 0.350 |
+| `ceil`  | 137.04 / 138.00 / 138.08us | 606.60 / 618.20 / 622.60us | **4.47x** | 1.283 / 1.352 / 1.372 | 0.305 / 0.317 / **0.311** |
+| `trunc` | 133.86 / 140.62 / 135.79us | 553.59 / 564.67 / 554.82us | **4.08x** | 1.339 / 1.557 / 1.340 | 0.343 / 0.337 / **0.314** |
+
+pandas held 176.7-215.7us across all 18 runs, which is how the window is known to
+have been stable enough to compare arms taken 5 seconds apart.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=ded4edcb2b6f1410d19cde9ec0b459f18d0d7df5eadd652561e5f073d2628514 (82186792 bytes) /data/projects/frankenpandas/target-sse41/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T110738.908097Z-pid3915090 , giving
+measured_ratio=1.348x for this row.
+
+| `floor @1M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas `+sse4.1` | **133.45us** | 10.88% | 1.003132 — PASSES |
+| pandas | 179.30us | 9.04% | 0.993538 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.003132 and
+pandas median ratio 0.993538, both inside the 2% limit.
+
+**Median-CI decision:** effect median 1.348x, 95% CI [1.14529001, 1.41910814],
+excluding unity; claimed log effect 0.29886472 against a required threshold of
+0.17345643, cleared by 1.72x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 10.88%, pandas 9.04%.
+
+```
+LOADAVG      13.60 → 20.27 across the 18-run sequence (1-min, sampled per run)
+OBSERVED MHz host-wide per run: mean 2924.6-4053.3, cross-core min 1429.0 max 4298.3
+             (the 3.00x cross-core spread this host is known for; both arms sampled
+             it identically because they alternate inside the same window)
+THREADS      FP 1 · pandas 1 on every row — this family is serial on both sides
+```
+Best-vs-best 1.2895 (FP min 130.542us vs pandas min 168.3385us), direction agrees
+with the median.
+
+**The reference arm certified on the other side of unity in the same window:**
+`floor @1M` default build, invocation_id=vs-pandas-20260817T110711.573758Z-pid3904314,
+0.327x, CI [0.30171943, 0.37295605], nulls 0.985745 / 0.990640, best-vs-best 0.3058
+agreeing. Two certified rows, opposite sides of unity, 27 seconds apart, one host,
+one commit, differing only in one `-C target-feature` flag. That is the separation
+`cu22b` asked for.
+
+**AND THE FLAG COSTS NOTHING ELSEWHERE THAT I COULD MEASURE.** The blanket-ISA
+experiment this repo already turned down was `x86-64-v3` (2026-07-31 CyanLynx: sqrt
+0.361x, log regressed), so the obvious way for `+sse4.1` to be a bad trade is for it
+to take back on `sqrt`/`log` what it gains on rounding. It does not, on this host:
+
+| `@1M` | FP p50, `+sse4.1` | FP p50, default | flag effect |
+|---|---|---|---|
+| `sqrt`   | 1294.91 / 1273.40us | 1282.09 / 1295.67us | 1.00x — unchanged |
+| `log`    | 1864.82 / 1790.65us | 1844.56 / 1781.26us | 0.99x — unchanged |
+| `round2` |  550.69 /  560.70us |  605.65 /  622.02us | 1.10x, and it crosses unity vs pandas (0.978/0.950 → 1.055/1.107) |
+
+`sqrt` stays a certified 0.866-0.883x on BOTH arms, so the flag neither causes nor
+cures it. This independently reproduces h67zz's "sqrt did not move under `+sse4.1`"
+on a second machine: `+sse4.1` supplies a rounding instruction, and `sqrt` needs
+vector WIDTH.
+
+**A SEPARATE FINDING THAT REMOVES THE STATED OBJECTION TO `x86-64-v3`, since I had
+the binaries to check it.** `cu22b` argues for `+sse4.1` and against v3 because "v3
+enables FMA and re-opens `br-frankenpandas-jawxr`". Disassembling four `fp-bench`
+ELFs — default, `+sse4.1`, `+avx2` without FMA, and `x86-64-v3` — the FMA
+instruction count is **2 in all four, including the SSE2 default**, and in every one
+of them both sites are inside
+`compiler_builtins::math::libm_math::arch::x86::fma::fma_with_fma`. Zero
+FrankenPandas kernel receives an FMA instruction under v3. Enabling FMA in the ISA
+makes the instruction *available*; it does not make rustc contract `a*b+c`, which
+Rust does not do without fast-math. So the FMA half of the objection to v3 is empty
+by construction. This does not make v3 the right choice — CyanLynx's measured sqrt
+and log regressions under v3 are a separate and still-live reason to prefer the
+minimal flag — it only means the reason `cu22b` gives is not one of them.
+
+**WHAT I DID NOT DO, DELIBERATELY.** I did not touch `.cargo/config.toml`. `cu22b`
+is explicit that adoption is a decision, not a ratio, and it is CalmMink's bead.
+Two of its four gate items move on this evidence, and I am recording where they land
+rather than acting on them:
+
+* Gate item 3, the fleet half, is answered by rch's own `workers.toml`: its inline
+  survey records "/proc/cpuinfo on all 12 workers. Result: ovh-b is the ONLY worker
+  without avx2+fma", and ovh-b is `enabled = false`. An AVX2-universal fleet is
+  SSE4.1-universal, since SSE4.1 predates AVX2 by four years.
+* Gate item 3, the CI half, and gate item 4 are the same question, and the answer is
+  NOT a bare `[build] rustflags`. `.github/workflows/ci.yml` runs a matrix of
+  `[ubuntu-latest, macos-latest]`, and `macos-latest` is aarch64. Observed directly
+  rather than assumed: `rustc --print cfg --target aarch64-apple-darwin -C
+  target-feature=+sse4.1` emits `warning: unknown and unstable feature specified for
+  -Ctarget-feature: sse4.1`. A blanket `[build]` entry would put that warning on
+  every crate compile in the macOS leg. The narrow placement is
+  `[target.x86_64-unknown-linux-gnu] rustflags`, which leaves the aarch64 leg alone.
+
+**Null dispersion across the whole sequence, since most rows here did not certify:**
+all 18 runs came in between 0.972396 and 1.053023 on the FrankenPandas arm and
+0.937426 and 1.090482 on the pandas arm. The `NULL_UNDECIDABLE` verdicts in this
+sequence are CI-width outcomes at a 133us arm, not null failures — no null median in
+the sequence was outside 6% of unity, and the four rows that did certify are the
+ones quoted above.
