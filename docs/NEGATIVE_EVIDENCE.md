@@ -28184,3 +28184,62 @@ falls back to the repo's own `target/` when that variable is absent. So
 `cargo`. Every standing instruction says `env -u CARGO_TARGET_DIR cargo ...` and
 none of them says it for the harness. Without it the run measures nothing and says
 so only in a line that is easy to scroll past.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `log_int64 @10M` CERTIFIES **FASTER at 2.297x**, the first certified row on an INTEGER column; `sqrt_int64` misses its null by 0.05% and is not banked
+
+The lanes added one commit ago produced rows on their first use. Both on ELF
+`a6505848`, rebuilt at HEAD because a peer had landed `983af0c39` (sqrt's
+all-finite witness derived from the input rather than folded per element) into the
+very arm being measured — checked with a name-only diff rather than assumed, and
+this time the diff DID contain `.rs`, so the older binary would have described code
+that no longer exists.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=a6505848053940cea81583a05eed142c11ddc3dd90bcb5fa15f4427b8cc0b19e (80645312 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-i64b`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T034735.000763Z-pid1964010 , giving
+measured_ratio=2.297x for this row.
+
+| `log_int64 @10M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **20351.38us** | 4.39% | 0.988736 — PASSES |
+| pandas | 46814.09us | 1.22% | 0.992894 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.988736 and
+pandas median ratio 0.992894, both inside the 2% limit.
+
+**Median-CI decision:** effect median 2.297x, 95% CI [2.26957, 2.32898], excluding
+unity; the claimed log effect is 0.8314089 against a required threshold of
+0.14072831, cleared by roughly 6x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 4.39%, pandas 1.22%.
+
+```
+LOADAVG      15.26 → 22.90 (in-run 1-min min 14.91, max 23.49)
+OBSERVED MHz busy-core BY ARM: FP 4259.0 / pandas 4260.8, arm clock ratio 1.0004
+THREADS      FP peak 10 · pandas peak 67
+```
+
+Best-vs-best **2.4462** (FP min 18604.0us vs pandas min 45509.2us), agreeing in
+direction with the median.
+
+**`sqrt_int64 @10M` IS NOT BANKED, and it missed by 0.05 percentage points.** Point
+ratio 1.079x, CI [1.07100, 1.10148] which excludes unity, best-vs-best 1.1794,
+effect clearing its required threshold (0.07624916 against 0.05419966) — and
+**FrankenPandas' A/A null came in at 1.020485 against a 2% limit.** Two hundredths
+of a percent. Every other clause passed. It is not banked, because a gate that is
+negotiable at 0.05% is not a gate, and I have spent this session insisting on that
+in the other direction.
+
+**THE TWO ROWS TOGETHER CONFIRM THE COST MODEL A FOURTH TIME.** Same input dtype,
+same arm, same widening cast, same binary, minutes apart: `log_int64` clears the
+incumbent by 2.297x while `sqrt_int64` manages 1.079x. The difference is entirely
+that `ln` is expensive per element and `sqrt` is cheap, so FP's parallel arm has
+something to amortise in one case and almost nothing in the other. Predicted by the
+in-binary observation in the previous entry (+0.15% vs +33.6% for the identical
+cast), and consistent with every other result in this bead.
