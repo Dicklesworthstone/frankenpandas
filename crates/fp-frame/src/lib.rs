@@ -40819,10 +40819,44 @@ impl SeriesGroupByRolling<'_, '_> {
         // O(n) against a compute-bound O(n*window) rolling — so buying it back
         // would be the wrong trade even if it were expressible.
         //
-        // Thresholds mirror `value_counts`' group-parallel arm, which is this
-        // crate's existing sanctioned shape for exactly this decision.
+        // The 64-group floor mirrors `value_counts`' group-parallel arm, this
+        // crate's existing sanctioned shape for the same decision.
         const SGBROLL_PAR_MIN_GROUPS: usize = 64;
-        const SGBROLL_PAR_MIN_PER_WORKER: usize = 16;
+
+        // 8, NOT `value_counts`' 16, AND THE DIFFERENCE IS MEASURED.
+        // br-frankenpandas-u5cg4, CrimsonPine 2026-08-17.
+        //
+        // This divisor was inherited from `value_counts`, where it was measured
+        // for a different kernel. Here it was the BINDING CONSTRAINT between 64
+        // and 256 groups — `n_groups / 16` pinned a 64-group call to 4 workers and
+        // a 100-group call to 6, when more workers were plainly better. Measured
+        // FP-vs-FP with `fp-bench --category sgb_rolling_policy --groups N`, group
+        // count varied at FIXED rows so per-row work is identical by
+        // construction, self-speedup against a forced-serial baseline, ABBA over
+        // 15 rounds:
+        //
+        //   rows groups rows/grp    2       4       8      16    (auto, divisor 16)
+        //     1M     64    15625  1.167x  1.414x  1.682x  1.682x  1.458x  (4 workers)
+        //     1M    128     7812  1.247x  1.448x  1.661x  1.802x  1.568x  (8 workers)
+        //     1M    100    10000  1.111x  1.310x  1.460x  1.469x  1.333x  (6 workers)
+        //     1M    500     2000  1.058x  1.270x  1.478x  1.500x  1.478x (16 workers)
+        //     1M   2000      500  1.082x  1.255x  1.435x  1.567x  1.589x (16 workers)
+        //     1M  20000       50  0.794x  0.915x  1.071x  1.125x  1.123x (16 workers)
+        //   100k     64     1562  0.770x  1.156x  1.317x  1.237x  1.175x  (4 workers)
+        //   100k    128      781  0.973x  1.291x  1.277x  1.303x  1.358x  (8 workers)
+        //   100k    100     1000  0.817x  1.143x  1.181x  1.252x  1.158x  (6 workers)
+        //
+        // Every arm was bit-identical to serial at every setting. Two things the
+        // table says and reasoning would not have: LOW worker counts LOSE (2
+        // workers is below unity in four of nine shapes and never beats 4,
+        // because the per-call `thread::scope` spawn is not free), and 8 BEATS 16
+        // at the 64-group boundary (1.317x vs 1.237x at 100k) — which is why this
+        // is 8 and not 4. A divisor of 4 would hand a 64-group call 16 workers,
+        // the one setting measured WORSE there.
+        //
+        // Above ~256 groups the `.min(16)` cap binds instead and this constant is
+        // inert, so the change is confined to the range where it was measured.
+        const SGBROLL_PAR_MIN_PER_WORKER: usize = 8;
         let n_groups = order_keys.len();
         let workers = match sgb_rolling_max_workers_override() {
             Some(forced) => forced.max(1),
@@ -193753,6 +193787,57 @@ mod sgb_rolling_group_parallel_u5cg4 {
             assert_eq!(serial.name(), parallel.name(), "{name}: name differs");
         }
         set_sgb_rolling_max_workers(None);
+    }
+
+    /// REGRESSION LOCK on the worker-count routing at the boundary.
+    /// br-frankenpandas-u5cg4.
+    ///
+    /// `SGBROLL_PAR_MIN_PER_WORKER` was lowered from 16 to 8 on a measured
+    /// group-count sweep: at 16 it pinned a 64-group call to 4 workers, worth
+    /// 1.156x/1.414x against the 1.317x/1.682x that 8 workers gets. Nothing else
+    /// in the crate would notice if it drifted back — the VALUES are identical at
+    /// any worker count (the bit-identity test above proves exactly that), so only
+    /// the thread count changes and no correctness test can see it.
+    ///
+    /// This lock is not hypothetical: the divisor change was silently reverted
+    /// once already by a concurrent edit in this shared checkout, AFTER its
+    /// measurement had been banked. A test is what makes that visible.
+    #[test]
+    fn sixty_four_groups_must_get_eight_workers_not_four_u5cg4() {
+        let available = fp_columnar::cached_available_parallelism();
+        if available < 8 {
+            return; // a small host cannot demonstrate the divisor's effect
+        }
+        let rows = 64_000_usize;
+        let index = Index::new((0..rows).map(|r| IndexLabel::Int64(r as i64)).collect());
+        let values = Series::new(
+            "v",
+            index.clone(),
+            Column::from_i64_values(
+                (0..rows)
+                    .map(|r| ((r as i64 * 7919) % 1009) - 504)
+                    .collect(),
+            ),
+        )
+        .expect("value series");
+        let keys = Series::new(
+            "k",
+            index,
+            Column::from_i64_values((0..rows).map(|r| (r as i64) % 64).collect()),
+        )
+        .expect("key series");
+
+        set_sgb_rolling_max_workers(None);
+        let grouped = values.groupby(&keys).expect("groupby");
+        let _ = grouped.rolling(10).mean().expect("mean");
+        assert_eq!(
+            sgb_rolling_last_worker_count(),
+            8,
+            "64 groups must route to 8 workers (64 / SGBROLL_PAR_MIN_PER_WORKER=8). \
+             4 would mean the divisor drifted back to 16, which measured 1.156x \
+             against 8 workers' 1.317x at this shape and is invisible to every \
+             correctness test because the output is bit-identical either way"
+        );
     }
 
     /// Below the group-count threshold the arm must stay serial — the negative
