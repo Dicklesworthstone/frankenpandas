@@ -1719,6 +1719,22 @@ def bench_math_log1p_pandas(df: pd.DataFrame) -> PairedSamples:
     return _bench_math_unary(df, np.log1p)
 
 
+def bench_math_expm1_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, np.expm1)
+
+
+def bench_math_cbrt_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, np.cbrt)
+
+
+def bench_math_sin_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, np.sin)
+
+
+def bench_math_atan_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, np.arctan)
+
+
 # DataFrame Ops Workloads (pandas)
 def bench_sort_values_single_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df.sort_values("col_0"))
@@ -2658,6 +2674,10 @@ PANDAS_WORKLOADS = {
         "log10": bench_math_log10_pandas,
         "log2": bench_math_log2_pandas,
         "log1p": bench_math_log1p_pandas,
+        "expm1": bench_math_expm1_pandas,
+        "cbrt": bench_math_cbrt_pandas,
+        "sin": bench_math_sin_pandas,
+        "atan": bench_math_atan_pandas,
     },
     "dataframe_ops": {
         "sort_values_single": bench_sort_values_single_pandas,
