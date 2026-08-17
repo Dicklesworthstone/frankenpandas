@@ -31477,3 +31477,53 @@ The prediction on record before the rows are taken, so it can be wrong in public
 because at 550us for 24MB of traffic it is already running at ~44 GB/s and has
 little headroom for threads to buy.** `div @1M` at 906us is the one to watch — if
 the threshold is costing anything, it will show there first.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the FIRST vs-pandas measurements of core arithmetic: `div @1M` is **0.473x** and crossing the threshold does NOT rescue it. Half my prediction was right and the important half was wrong
+
+Two rows, neither banked (nulls failed), both first-of-their-kind — `div` has never
+been measured against pandas in this campaign.
+
+| row | ratio | best-vs-best | FP p50 | pandas p50 | FP threads | FP null |
+|---|---|---|---|---|---|---|
+| `div @1M` | **0.473x** | 0.4535 | 939.51us | 425.12us | **2** | 1.135379 FAIL |
+| `div @2M` | **0.640x** | 0.5115 | 4010.94us | 2714.34us | **10** | 0.935410 FAIL |
+
+**MY PREDICTION, RECORDED LAST TURN: "`div @1M` is the one to watch — if the
+threshold is costing anything, it will show there first." That half held.** `div @1M`
+runs on 2 threads because 1,000,000 < 1,048,576, exactly as `pow` did, and it loses
+by more than 2x.
+
+**THE OTHER HALF WAS WRONG, AND IT MATTERS MORE.** I predicted the group was
+bandwidth-bound with "little headroom for threads to buy". Crossing the threshold by
+size moved `div` from 0.473x to only **0.640x** — parallelism engaged, ten threads
+confirmed, and **FrankenPandas is still 1.6x slower than pandas.** Compare `pow`,
+where the identical crossing went 0.928x → 3.965x. **The threshold was the whole
+story for `pow` and is not the story for `div`.**
+
+**Counted mechanism:** at 2M the arithmetic moves 48000000 bytes and FrankenPandas
+takes 4010.94us against pandas' 2714.34us, i.e. 12 GB/s against 17.7 GB/s — so the
+required bandwidth to reach parity is 17.7 GB/s and FrankenPandas falls short by
+about a third while running on 10 threads to pandas' 1 vectorised pass.
+
+**WHERE THE TIME PLAUSIBLY GOES, stated as a hypothesis I have NOT yet tested.**
+`apply_f64_slices_nan_tracked` folds TWO witnesses through the hot loop —
+`input_nan |= x.is_nan() | y.is_nan()` and `output_nan |= r.is_nan()` — which is
+three comparisons and three ORs per element on top of the divide. numpy pays none of
+that. **This is the same shape as the finding that opened this bead**, where the
+per-element validity witness, not the kernel, was two thirds of `floor`.
+
+**And `input_nan` is load-bearing, which I checked before proposing to remove it:**
+it gates `if !input_nan { if output_nan { … } }`, distinguishing a GENERATED NaN from
+an absent operand. It cannot simply be dropped.
+
+**But it may be computable more cheaply, and the argument is per-op rather than
+general.** For `add`/`sub`/`mul`/`div`/`mod`/`floordiv`, NaN propagates: a NaN input
+forces a NaN output, so `input_nan` implies `output_nan`, and the inner loop could
+fold only `output_nan` and derive `input_nan` in a second pass on the rare occasion
+that any NaN appeared at all. **`pow` is the exception and must keep both** —
+`powf(NaN, 0.0)` is `1.0`, not NaN, so the implication fails there. That per-op check
+is exactly what this bead has recorded me skipping four times, and the answer differs
+between ops, so it is not optional.
+
+Not implemented this turn. Recorded with its scope and its one exception so it can be
+taken up deliberately rather than generalised into.
