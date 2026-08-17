@@ -30276,3 +30276,116 @@ disassembly of four binaries. The timed comparison of the no-fma build is OWED a
 was NOT run: my own build put the 1-minute loadavg at 74.85 and it was still 43.76
 when I stopped, well above the threshold, so certifying into it would have produced
 the refused rows this ledger already has too many of.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-cu22b) — WHY `+sse4.1` BARELY HELPED `floor`: our own hand-rolled `floor_fast` never calls `f64::floor`, so there is no intrinsic for the flag to lower. The flag and the kernel are working against each other
+
+`+sse4.1` exists in this campaign to emit `roundpd`/`roundsd` for the math_unary
+family, and it certified only 1.33x on `floor @1M` where v3 gave 2.94x. I assumed
+that meant width mattered more than rounding. Counting which SYMBOLS actually
+contain a rounding instruction says something better.
+
+**Counted, whole-binary, symbols containing `roundpd`/`roundsd`/`vroundpd`:**
+
+| build | `Column::round` | `DataFrame::describe` | `Series::clip` | **`Column::floor`** |
+|---|---:|---:|---:|---:|
+| `+sse4.1` | 5 | 6 | 4 | **ABSENT** |
+| `+sse4.1,+avx2` | 5 | 6 | 4 | **ABSENT** |
+| `x86-64-v3` | 7 | 6 | 4 | **ABSENT** |
+
+**`Column::floor` does not appear in ANY build.** The flag emitted 66 rounding
+instructions into the binary and gave `floor` none of them.
+
+**The cause is in our source, not the toolchain.** `Column::floor_fast` is a
+hand-rolled bit/arithmetic kernel — `abs`, `or_sign`, `nearest_even_magnitude`, a
+comparison and a subtract — and it **never calls `f64::floor`**. LLVM therefore
+never sees an `llvm.floor.f64` intrinsic, and `-C target-feature=+sse4.1`, whose
+entire effect for this op is to lower that intrinsic to a single `roundpd`, has
+nothing to act on. `ceil_fast` and `trunc_fast` are the same shape: zero calls to
+`f64::ceil` / `f64::trunc`. The contrast is `Column::round`, which DOES use the std
+`round_ties_even()` — and it is right there in the table collecting `roundsd`.
+
+**AND THE OPTIMISATION THAT CAUSED THIS WAS CORRECT WHEN IT LANDED.** This ledger
+records "witness-free `floor`/`ceil`/`trunc` 2.1–2.4x" as STANDING. On a build with
+no `+sse4.1`, `f64::floor` lowers to a libm CALL, and a branchless bit-trick beats a
+function call comfortably. Under `+sse4.1` the same intrinsic becomes ONE
+instruction, and the bit-trick — roughly a dozen operations — becomes the slow path.
+**The kernel optimisation and the build flag are each correct in isolation and
+actively cancel each other.** That is not a bug anyone introduced; it is two locally
+sound decisions taken a month apart.
+
+**SO cu22b's ADOPTION QUESTION IS MIS-SCOPED AS WRITTEN.** Adopting `+sse4.1`
+globally, on today's source, buys `floor`/`ceil`/`trunc` almost nothing, because the
+three ops the flag was chosen for are the three that opt out of it. The lever is a
+PAIR: use the intrinsic in the kernel AND enable the flag. Either alone
+underperforms, which is exactly what the 1.33x measured.
+
+**Counted mechanism:** `floor_fast`/`ceil_fast`/`trunc_fast` contain 0 calls to
+`f64::floor`/`ceil`/`trunc`; `Column::floor` appears in 0 of 3 flagged binaries'
+rounding-symbol lists while `Column::round` appears in all 3 with 5, 5 and 7 sites;
+the `+sse4.1` binary carries 66 rounding instructions in total.
+
+**A/A null control (same invocation):** not applicable — no timing was taken. This is
+symbol-level disassembly of three binaries plus a source read, and it needed no
+measurement window, which is why it got done while three peer builds were running.
+
+**THE NEXT LEVER, and it is now specific.** Restore `f64::floor`/`ceil`/`trunc` in the
+`*_fast` kernels behind the flag, then re-measure. The correctness gate is already
+half-built: `floor_ceil_trunc_fast_are_bit_identical_o57rj` exists precisely to
+compare these kernels against the std functions, so the bit-identity question is
+"does the existing test still pass with the arms swapped", not new work. Expected
+outcome if the account is right: `floor @1M` moves from 0.415x toward the 0.909x v3
+reached, and possibly past it, since v3's gain came from width alone on a kernel that
+was never using the right instruction.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — LOADAVG CANNOT SEE A STORM THAT STARTED SECONDS AGO: 21.46 reported while 43 cores were compiling, and that is why rows "enter quiet and end loud"
+
+Went to take the queued `pow @1M` row with no build needed (ELF `77572f10` already
+current, so the window was undisturbed by me). `uptime` read **21.46** — under every
+threshold this campaign uses, and I would have proceeded. Checked `ps` first:
+
+```
+  loadavg 1-min                      21.46
+  rustc/cargo CPU right now        4342.7%      <- 43 cores, elapsed 0-4 seconds
+```
+
+**A build storm was at full intensity and the load average had not noticed.** Watched
+it catch up:
+
+```
+  t+0s    loadavg 21.46    build CPU 4343%
+  t+20s   loadavg 40.42    build CPU 3117%
+  t+40s   loadavg 39.69    build CPU 1396%
+  t+60s   loadavg 39.39    build CPU 1442%
+```
+
+**Loadavg understated the host by roughly 2x at the exact moment of decision**, then
+converged on a storm that had already peaked. That is not a defect in loadavg — it
+is an exponentially-damped average with a ~60 second time constant, doing what it
+says. It is a defect in using it as a go/no-go signal for a two-to-five minute
+measurement.
+
+**AND IT RETROSPECTIVELY EXPLAINS THE PATTERN I HAVE BEEN RECORDING ALL SESSION.**
+Three `log2` attempts entered at 10.7, 15.3 and 28.2 and ended at 17.6, 50.2 and
+73.9. I wrote that "the load that matters is the one DURING the run and it cannot be
+read in advance". **The second half of that is wrong.** It can be read in advance —
+just not from loadavg. Every one of those entries is consistent with a storm already
+running and not yet visible.
+
+**`scripts/host_is_quiet_now.py`** sums the CPU of live build processes from
+`/proc/<pid>/stat` and reports it beside loadavg. Verified against `ps` on the
+storm that blocked this row: the script reported 1123% and `ps` 1126%, the 3%
+being processes starting and exiting between the two reads. It exits 1 when busy so
+it can gate a shell line, and it calls out the specific dangerous case — busy while
+loadavg still looks calm — because that is the one an agent will otherwise walk
+into. It enforces nothing and nothing branches on it; it takes well under a second,
+which is the point, since a check has to be cheap enough to run before EVERY row.
+
+**Delete it when the harness refuses to start inside a storm on its own.** It
+already samples per-CPU busy fractions for `host-wide-exclusive` mode, so the
+capability is close by; this is a stopgap that should not outlive it.
+
+**THE ROW WAS NOT TAKEN.** `pow @1M` is still queued, and it remains the most
+valuable row available: the fix measured 4.08x against the old binary, so it should
+turn this family's only certified loss into a large win. Deferring it cost a few
+minutes. Taking it inside a 43-core storm would have cost the run AND produced a
+number I would have had to explain away.
