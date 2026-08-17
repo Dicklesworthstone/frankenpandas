@@ -27678,3 +27678,49 @@ fp-columnar -p fp-bench --all-targets -D warnings` clean, `fmt --check` clean.
 `#[cfg(test)]` `DType` match that does not cover `Float64Nullable`
 (crates/fp-io/src/lib.rs:22308) — committed at HEAD, untouched by this change,
 and taken next.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the last ten `typed_float_unary_par` residents get explicit domains; the test RE-DERIVES each domain from std instead of encoding my belief about it
+
+`cos tan asin acos sinh cosh tanh asinh acosh atanh` were the whole remainder of
+the family still reaching values by INDEX (`|i| f(data[i])`, bounds-checked, so the
+loop does not vectorize), pre-zeroing an output buffer, and then re-reading the
+entire result asking `is_nan()`. All ten now take
+`typed_float_domain_fused_unary`, which folds the domain and the finiteness witness
+as boolean reductions in the same pass that computes the values.
+
+**Every domain was transcribed from a std probe run first, not from memory:**
+
+| predicate | ops | what std actually does |
+|---|---|---|
+| `\|_\| true` | `sinh` `cosh` `tanh` `asinh` | total — `±inf` in gives `±inf`/`±1.0` OUT as a PRESENT value, and finite overflow gives `±inf`, never NaN |
+| `x.is_finite()` | `cos` `tan` | NaN only at `±inf`; a finite input near a pole gives a huge finite value |
+| `x.abs() <= 1.0` | `asin` `acos` `atanh` | NaN outside `[-1, 1]`; `abs(±inf) > 1` excludes the infinities by the same test |
+| `x >= 1.0` | `acosh` | NaN below 1; `acosh(1.0)` = `0.0` and `acosh(+inf)` = `+inf`, both present |
+
+**`atanh` is the one that repays reading twice.** Its endpoints `±1.0` map to
+`±inf` — which are PRESENT values, not missing ones — so the bound has to be
+INCLUSIVE. An exclusive `< 1.0` would be the mirror of the `sin(±inf)` trap from the
+previous entry: not a crash, just two slots silently reported as missing that
+pandas reports as `±inf`.
+
+**THE TEST DOES NOT ENCODE THE TABLE ABOVE.** `trig_family_domains_match_std_4kig1`
+runs each op over a probe set (both infinities, both sides of `±1`, signed zeros,
+subnormals, `±1e300`) and asks **std** what the answer is: if `f(x)` is NaN the
+column MUST report that slot missing, and if `f(x)` is anything else — including
+`±inf` — the column MUST report it present. So the assertion is "FrankenPandas
+agrees with std about its own domain", which stays true if a libm update moves a
+boundary, where a hand-written expectation would quietly rot. It then checks
+bit-identity over a 10k seeded in-domain corpus per op, and for every op that HAS an
+out-of-domain value it plants one among 2048 in-domain elements and requires exactly
+that index to come back missing.
+
+**NO RATIO IS CLAIMED, and these ten have no lanes.** That is deliberate: I added
+four lanes last time with the reasoning that seventeen ops are not seventeen
+independent questions, and the same applies here. The mechanism is identical to
+the one `log10` and `log1p` already certified under (see their own entries above for
+the figures), so the expectation is well-founded — but an expectation is not a
+measurement and this entry does not pretend otherwise. No number is quoted here
+because none was taken: the host was at loadavg 22-42 throughout.
+
+Gates: `cargo test -p fp-columnar` 629 passed / 0 failed / 0 filtered out,
+`clippy -D warnings` clean, `fmt --check` clean.
