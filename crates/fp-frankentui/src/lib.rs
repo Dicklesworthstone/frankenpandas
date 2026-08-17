@@ -2174,6 +2174,11 @@ mod tests {
                 fixture_count: 3,
                 passed: 1,
                 failed: 2,
+                // All three cases below are EXECUTED, so nothing is retired and
+                // `passed + failed + retired == fixture_count` holds at 1+2+0=3.
+                // This fixture exists to exercise the strict-vs-hardened taxonomy,
+                // which a retired case would silently shrink.
+                retired: 0,
                 results: Vec::new(),
             },
             differential_results: vec![
@@ -2194,6 +2199,10 @@ mod tests {
                         message: "forced strict drift".to_owned(),
                     }],
                     evidence_records: 0,
+                    // Executed, not retired: `retired_reason` is `Some` only for a case
+                    // that never ran, and each of these carries drift records that
+                    // could only come from an executed comparison.
+                    retired_reason: None,
                 },
                 DifferentialResult {
                     case_id: "hardened_allowlisted".to_owned(),
@@ -2212,6 +2221,10 @@ mod tests {
                         message: "forced hardened allowlist drift".to_owned(),
                     }],
                     evidence_records: 0,
+                    // Executed, not retired: `retired_reason` is `Some` only for a case
+                    // that never ran, and each of these carries drift records that
+                    // could only come from an executed comparison.
+                    retired_reason: None,
                 },
                 DifferentialResult {
                     case_id: "hardened_critical".to_owned(),
@@ -2230,6 +2243,10 @@ mod tests {
                         message: "forced hardened hard failure".to_owned(),
                     }],
                     evidence_records: 0,
+                    // Executed, not retired: `retired_reason` is `Some` only for a case
+                    // that never ran, and each of these carries drift records that
+                    // could only come from an executed comparison.
+                    retired_reason: None,
                 },
             ],
             drift_summary: fp_conformance::DriftSummary {
