@@ -88,6 +88,12 @@ def scalar_equal(a: Any, b: Any) -> bool:
         return False
     if isinstance(a, dict) and isinstance(b, dict):
         return dict_equal(a, b)
+    # LISTS, so the nested blocks below compare structurally rather than by
+    # Python's ==. expected_join/expected_alignment are dicts OF lists of
+    # {kind,value} dicts, and `==` on those would miss the kind-alias
+    # normalization (str/string -> utf8) and would call NaN != NaN.
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(scalar_equal(x, y) for x, y in zip(a, b))
     if isinstance(a, float) and isinstance(b, float):
         if math.isnan(a) and math.isnan(b):
             return True
@@ -217,6 +223,21 @@ def frame_equal(pinned: dict, live: dict) -> tuple[bool, str]:
     return True, ""
 
 
+# Blocks the oracle emits and the fixtures assert that compare_expected used to
+# walk straight past. br-frankenpandas-fixture-divergence-triage-9s0c4: 16
+# fixtures assert ONLY one of these (7 dtype, 4 alignment, 3 join, 2 positions),
+# and with no comparator the loop below fell through and returned (True, "") —
+# reporting them as MATCHING while comparing nothing. The oracle has always
+# emitted all four (base_oracle_response lists them), so this compares them
+# rather than declaring them unverifiable.
+STRUCTURAL_EXPECTED_KEYS = [
+    "expected_dtype",       # plain string, e.g. "int64" / "Sparse[int64, 0]"
+    "expected_join",        # {index, left_values, right_values}
+    "expected_alignment",   # {union_index, left_positions, right_positions}
+    "expected_positions",   # list[int | None]
+]
+
+
 def compare_expected(pinned: dict, live: dict) -> tuple[bool, str]:
     for key in ["expected_series", "expected_frame", "expected_scalar", "expected_bool"]:
         if pinned.get(key) is not None or live.get(key) is not None:
@@ -240,6 +261,18 @@ def compare_expected(pinned: dict, live: dict) -> tuple[bool, str]:
                 if pval != lval:
                     return False, f"{key} mismatch: {pval} vs {lval}"
                 return True, ""
+
+    for key in STRUCTURAL_EXPECTED_KEYS:
+        if pinned.get(key) is None and live.get(key) is None:
+            continue
+        pval, lval = pinned.get(key), live.get(key)
+        if pval is None:
+            return False, f"{key}: pinned is None but live is not"
+        if lval is None:
+            return False, f"{key}: live is None but pinned is not"
+        if not scalar_equal(pval, lval):
+            return False, f"{key} mismatch: {pval!r} vs {lval!r}"
+        return True, ""
 
     return True, ""
 
@@ -378,6 +411,33 @@ def diff_packet(
             matches_pinned=False,
             divergence="",
             live_error=live_error,
+        )
+
+    # THE FIXTURE EXPECTED AN ERROR AND THE ORACLE DID NOT RAISE.
+    # br-frankenpandas-fixture-divergence-triage-9s0c4. `expected_error_contains`
+    # was read ONLY inside the `if live_result.get("error")` branch above, so this
+    # case fell through to compare_expected — which, for the 87 fixtures whose
+    # ONLY assertion is expected_error_contains, found no comparable block and
+    # returned (True, ""). A fixture asserting "this must fail" was therefore
+    # reported as MATCHING when live pandas succeeded: absence of comparison
+    # rendered as agreement, on the largest such population in the corpus.
+    #
+    # This is the direction scripts/regenerate_fixtures.py already detects as
+    # ERROR_EXPECTED_BUT_SUCCEEDED; the differ simply never checked it.
+    expected_error = packet.get("expected_error_contains")
+    if expected_error is not None:
+        return DiffResult(
+            packet_id=packet_id,
+            case_id=case_id,
+            fixture_file=fixture_file,
+            operation=operation,
+            live_derivable=True,
+            matches_pinned=False,
+            divergence=(
+                f"expected an error containing {expected_error!r}, but the oracle "
+                f"SUCCEEDED"
+            ),
+            live_error="",
         )
 
     matches, divergence = compare_expected(packet, live_result)
