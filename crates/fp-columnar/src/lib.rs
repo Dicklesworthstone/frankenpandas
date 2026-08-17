@@ -10715,6 +10715,30 @@ impl Column {
     /// `k` `Float64DotInput`s + a fresh `Arc<[..]>` for every column — the prior
     /// `from_f64_all_valid_dot_product` did the latter `n` times, an O(n·k)
     /// Arc-and-alloc construction tax that dominated `df.dot` construction.
+    /// How many chunks a dot of `total_work` multiply-adds over `columns`
+    /// output columns should be split into, given `available` workers.
+    ///
+    /// br-frankenpandas-03fp5. Exposed so the frame-level pooled dispatch uses
+    /// the SAME rule and the SAME `FP_DOT_WORK_PER_WORKER` knob as the scoped
+    /// path it replaced, rather than always chunking to the pool width — a tiny
+    /// dot should not dispatch 64 jobs through channels to multiply four numbers.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn dot_chunk_count(
+        total_work: u128,
+        available: usize,
+        columns: usize,
+        work_per_chunk: u128,
+    ) -> usize {
+        ScalarValues::dot_worker_count(
+            total_work,
+            work_per_chunk,
+            available,
+            ScalarValues::dot_materialization_worker_cap(),
+            columns,
+        )
+    }
+
     /// One output column of a dot product, as owned data.
     ///
     /// br-frankenpandas-03fp5. Exposed so the ORCHESTRATOR can decide how to
@@ -25112,6 +25136,15 @@ impl Column {
 
     /// Base-10 logarithm of numeric values. Matches numpy's log10 ufunc.
     pub fn log10(&self) -> Result<Self, ColumnError> {
+        // Same domain as `log`: NaN only from a negative input, and `log10(0.0)`
+        // is `-inf`, a PRESENT value. Takes the fused arm ahead of
+        // `typed_float_unary_par`, which reaches its values by INDEX (bounds-checked,
+        // so the loop does not vectorize) and then re-reads the whole output asking
+        // `is_nan()` — a pass measured at 505.1us per 1M elsewhere in this file.
+        // br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= 0.0, f64::log10) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::log10) {
             return Ok(out);
         }
@@ -25137,6 +25170,10 @@ impl Column {
 
     /// Base-2 logarithm of numeric values. Matches numpy's log2 ufunc.
     pub fn log2(&self) -> Result<Self, ColumnError> {
+        // See `log10` — identical domain and identical reason. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= 0.0, f64::log2) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::log2) {
             return Ok(out);
         }
@@ -26568,6 +26605,13 @@ impl Column {
 
     /// Compute ln(1 + x) with improved precision for small x.
     pub fn log1p(&self) -> Result<Self, ColumnError> {
+        // `ln_1p` is shifted by one, so its domain is `x >= -1.0`, NOT `x >= 0.0` —
+        // `ln_1p(-1.0)` is `-inf` and PRESENT, `ln_1p(x < -1.0)` is NaN. Getting this
+        // bound wrong by one would mark a valid `-inf` slot missing, or worse, mark a
+        // NaN slot present. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= -1.0, f64::ln_1p) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::ln_1p) {
             return Ok(out);
         }
@@ -36889,6 +36933,101 @@ mod tests {
                 (0..3).all(|i| !rooted.validity().get(i)),
                 "every negative sqrt is NaN and therefore missing"
             );
+        }
+
+        /// br-frankenpandas-4kig1. `log10`/`log2`/`log1p` joined the domain-fused
+        /// arm, and `log1p`'s domain is shifted: `x >= -1.0`, not `x >= 0.0`.
+        ///
+        /// An off-by-one there is silent and severe in BOTH directions — too strict
+        /// marks a legitimate `-inf` slot missing, too loose marks a NaN slot
+        /// PRESENT. So the boundary is tested from both sides for each op, and the
+        /// NEGATIVE CASE (one out-of-domain element among many in-domain ones) is
+        /// asserted per op, since a kernel that assumed all-valid would pass every
+        /// benchmark and be wrong on one element in a million.
+        #[test]
+        fn log_family_domain_bounds_and_missing_slots_4kig1() {
+            type UnaryOp = (
+                &'static str,
+                fn(&Column) -> Result<Column, ColumnError>,
+                fn(f64) -> f64,
+                f64,
+            );
+            let ops: [UnaryOp; 4] = [
+                ("log", Column::log, f64::ln, 0.0),
+                ("log10", Column::log10, f64::log10, 0.0),
+                ("log2", Column::log2, f64::log2, 0.0),
+                ("log1p", Column::log1p, f64::ln_1p, -1.0),
+            ];
+
+            for (name, op, oracle, edge) in ops {
+                // IN-DOMAIN, including the exact boundary, which maps to -inf and
+                // must come back PRESENT.
+                let mut inside: Vec<f64> = vec![edge, edge + 1.0, edge + 0.5, edge + 1e9];
+                let mut seed: u64 = 0x1092_1041_9203_7771;
+                for _ in 0..5_000 {
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let unit = ((seed >> 11) as f64) / ((1u64 << 53) as f64);
+                    inside.push(edge + unit * 1e5);
+                }
+                let out = op(&Column::from_f64_values(inside.clone())).expect(name);
+                assert!(
+                    out.validity().all(),
+                    "{name}: every in-domain value must be present, including the \
+                     boundary {edge} which maps to -inf"
+                );
+                let got = out.as_f64_slice().expect("all-valid typed slice");
+                assert_eq!(
+                    got[0].to_bits(),
+                    f64::NEG_INFINITY.to_bits(),
+                    "{name}: the domain boundary must map to -inf"
+                );
+                for (i, (&g, &x)) in got.iter().zip(inside.iter()).enumerate() {
+                    assert_eq!(
+                        g.to_bits(),
+                        oracle(x).to_bits(),
+                        "{name} at {i}: input {x:e}"
+                    );
+                }
+
+                // JUST OUTSIDE the boundary: NaN, therefore MISSING.
+                let just_outside = f64::from_bits(edge.to_bits() + 1).min(edge - f64::MIN_POSITIVE);
+                let below = if edge == 0.0 {
+                    -f64::MIN_POSITIVE
+                } else {
+                    just_outside.min(-1.0000000000000002)
+                };
+                let out = op(&Column::from_f64_values(vec![below, edge + 1.0])).expect(name);
+                assert!(
+                    !out.validity().get(0),
+                    "{name}: {below:e} is outside the domain and must be MISSING"
+                );
+                assert!(
+                    out.validity().get(1),
+                    "{name}: the in-domain slot must stay present"
+                );
+
+                // THE NEGATIVE CASE: one out-of-domain element among many.
+                for bad_at in [0_usize, 1, 4095] {
+                    let mut mixed: Vec<f64> = (0..4096).map(|i| edge + 1.0 + i as f64).collect();
+                    mixed[bad_at] = edge - 1.0;
+                    let out = op(&Column::from_f64_values(mixed.clone())).expect(name);
+                    assert_eq!(out.len(), mixed.len(), "{name} length drift");
+                    assert!(
+                        !out.validity().get(bad_at),
+                        "{name}: out-of-domain element at {bad_at} must be MISSING"
+                    );
+                    for i in 0..mixed.len() {
+                        if i != bad_at {
+                            assert!(
+                                out.validity().get(i),
+                                "{name}: in-domain slot {i} must stay present"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         #[test]

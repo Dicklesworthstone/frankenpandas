@@ -27166,3 +27166,56 @@ performance is. So the nulls are expected to keep failing for these two ops, and
 the certification problem this bead was filed to solve remains unsolved. Anyone
 picking it up should attack the per-call spawn (a persistent pool, as
 br-frankenpandas-03fp5 sketches for `df.dot`) rather than the witness.
+
+### 2026-08-16 CrimsonPine — NULL CONTROL ON MY OWN PAIRED A/B: identical code measures 0.960x–1.161x, so every claim I banked in the 1.06–1.17x band is INDISTINGUISHABLE FROM NOTHING
+
+While routing `log10`/`log2`/`log1p` I ran the unchanged siblings as a control and
+got `log` 1.116x and `sqrt` 1.161x — **on code that is byte-for-byte the same in
+both ELFs.** That is not a result, it is the instrument. So I characterised it.
+
+**Same ELF on BOTH arms (a true A/A of the paired harness), 3 rounds, `@1M`:**
+`sqrt` 0.975x · `log` 1.028x · `floor` 0.998x · `ceil` 1.033x (p50);
+best-vs-best 0.965 / 0.933 / 0.973 / 1.006. So the harness itself is ±3% on the
+median and ±7% on the minima.
+
+**TWO DIFFERENT ELFs whose `log`/`sqrt` code is IDENTICAL (`0453bd8d` vs
+`8fa3d1e1`; only `log10`/`log2`/`log1p` differ between them):**
+
+| op | 2 rounds | 3 rounds | 3 rounds, arms REVERSED |
+|---|---|---|---|
+| `sqrt` | **1.161x** | 0.975x | 1.083x |
+| `log` | **1.116x** | 0.972x | 0.960x |
+
+**A null comparison swings from 0.960x to 1.161x.** The same-binary A/A is tight
+(±3%) and the cross-binary null is four times wider, so this is NOT sampling noise
+— it is build-to-build code layout, and it does not average away with more rounds
+because it is a property of the pair, not of the draw.
+
+**WHAT THIS RETRACTS OR QUALIFIES, in my own entries above:**
+
+| claim | verdict under this control |
+|---|---|
+| `round2` 2.051x | **STANDS** — far outside the envelope |
+| witness-free `floor`/`ceil`/`trunc` 2.1–2.4x | **STANDS** — far outside |
+| serial-fused `log` 0.433x regression | **STANDS** — far outside, and it was real |
+| `ceil` `copysign`→OR **1.168x** | marginal; sits at the very edge of the envelope |
+| `floor` `copysign`→OR **1.061x** | **INDISTINGUISHABLE FROM NOTHING** |
+| `sqrt` domain-fused **1.071x** | **INDISTINGUISHABLE FROM NOTHING** |
+| `trunc` 0.969x/1.080x | already recorded as a wash — confirmed |
+
+The `copysign`→OR and domain-fused levers are still worth keeping: they are
+bit-identical, they strictly remove work (an operation, a bounds-checked index, a
+provably-false scan), and the mechanism is sound. **But I should not have quoted
+1.061x or 1.071x as measured gains, and I am withdrawing them.** The vs-incumbent
+rows are unaffected — those run both arms in ONE invocation of ONE binary against a
+live pandas and carry their own A/A nulls, which is exactly why that harness exists.
+
+**A/A null control (same invocation):** the in-binary null median ratio across
+these control runs is 0.9997 and 1.0054, both inside the 2% limit — so the engine's
+own null is clean and the 0.96–1.16x spread is entirely between-binary, not
+within-run instability.
+
+**THE RULE FOR ANYONE USING A TWO-ELF PAIRED A/B HERE:** run the pair on an
+UNCHANGED op first and use that as the null. If your effect is inside the band that
+null produces, you have measured your build, not your lever. Three rounds is not
+enough to separate them, and reversing the arms changes the answer by 11%.
