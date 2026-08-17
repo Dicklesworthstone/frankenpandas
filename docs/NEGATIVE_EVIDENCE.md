@@ -33185,3 +33185,72 @@ says the gate cannot be satisfied by an absence.
 CONDITIONS  BUILD FREEZE, disk 19G / 100% used. No cargo, no bench, no target writes, no files
             created under any target dir. uptime 7.18 / 11.56 / 16.79. Reading only.
 ```
+
+
+### 2026-08-17 CrimsonPine — CORRECTING MY OWN ENTRY FROM THIS MORNING. "The entire engine is compiled to 128-bit" was the wrong headline. **87.7% of FrankenPandas' float arithmetic is SCALAR — one double at a time** — and the AVX2 flag barely touches computation
+
+Two entries above I banked "1160 symbols, 95,920 `%xmm` operands, ZERO `%ymm`" and headlined it
+as the engine being compiled to 128-bit width. **The zero-`%ymm` half is correct and stands. The
+128-bit half is wrong, and it is wrong in the direction that matters.**
+
+**THE ERROR:** I counted OPERANDS containing `%xmm`, not instructions that do 128-bit work.
+`%xmm` is also the register file for SCALAR double arithmetic — `addsd`, `mulsd`, `divsd`,
+`movsd` all name `%xmm` while operating on ONE lane. So the 95,920 figure conflates three
+different things, and I read it as one.
+
+**THE MEASUREMENT, redone properly** — floating-point ARITHMETIC only (add/sub/mul/div/sqrt/
+max/min), moves and logic excluded, FrankenPandas crates only, default build:
+
+| | count | share |
+|---|---:|---:|
+| **PACKED** (`addpd`/`mulpd`/`divpd`… — 2 f64 per op) | 432 | **12.3%** |
+| **SCALAR** (`addsd`/`mulsd`/`divsd`… — 1 f64 per op) | 3,073 | **87.7%** |
+
+`addsd` alone is 1,413 instructions — more than three times ALL packed arithmetic in the engine.
+
+**SO THE REAL FINDING IS NOT WIDTH, IT IS THAT THE ARITHMETIC IS NOT VECTORIZED AT ALL.** The
+engine is not doing 2-wide work that could be 4-wide. It is overwhelmingly doing 1-wide work.
+
+**AND THE FLAG BARELY CHANGES THAT — which corrects the advice I gave `oxv4u`.** In the `+avx2`
+build, across every FrankenPandas symbol:
+
+```
+256-bit ARITHMETIC instructions : 535      (vmaxpd 167, vminpd 128, vaddpd 119,
+                                            vmulpd 35, vsubpd 34, vdivpd 29)
+256-bit moves / logic           : 33,536
+```
+
+**1.6% of the 256-bit code the flag produced is arithmetic.** The rest is `vmovupd`-class data
+movement — the flag mostly widened memcpy, not math. And specifically:
+
+```
+DataFrame::dot : 8 arithmetic %ymm ops (4 vmulpd, 4 vaddpd) against 273 moves
+```
+
+I told `oxv4u` that `DataFrame::dot` was "REACHED" by the blanket flag on the strength of 209
+`%ymm` operands. **That was the enablement trap I had warned them about in the same comment**,
+in a subtler form: I checked that 256-bit code appeared and did not check that it was doing the
+work. Eight arithmetic instructions is not a vectorized GEMM.
+
+**WHAT CHANGES STRATEGICALLY, and it is the point of the correction:** a build flag is a small
+lever here, not a large one. The dominant gap is that FP reductions and elementwise loops emit
+scalar arithmetic, and the reason is usually IEEE ordering — `m2 += d.powi(2)` is a loop-carried
+FP add and LLVM may not reorder it without fast-math, which Rust does not enable. `Series::skew`
+is the clean example: a fused two-accumulator pass over `&[f64]` with no slice-vs-array
+asymmetry at all, and no flag will vectorize it.
+
+**The lever for that is multi-accumulator restructuring, and this repo already owns it** —
+"blocked-sum vectorize reductions" (9ab0f8cc1, 2026-07-03 BlackThrush) is exactly this
+technique. The correct reading of today's work is: **the AVX2 question is a sideshow next to the
+scalar-reduction question, and the repo already has the tool for the bigger one.**
+
+**WHAT STILL STANDS from the earlier entry:** zero `%ymm` in the default build (verified twice);
+`is_x86_feature_detected!` used only to PRINT features into every banked row while no FP
+instruction uses them; `pairwise_stat_gram_partial_rows` gaining zero 256-bit even under the
+flag; and `div @1M` being a genuine width case — its kernel really did emit `divpd`, which puts
+it in the 12.3%, and it is atypical rather than representative.
+
+**METHOD NOTE, third time today:** counting a proxy is not counting the thing. `%xmm` operands
+proxy for "128-bit work" and are not it; `%ymm` presence proxies for "the flag reached this
+kernel" and is not it. Both times the fix was to count the ARITHMETIC MNEMONIC instead of the
+register name, and both times I published before doing that.
