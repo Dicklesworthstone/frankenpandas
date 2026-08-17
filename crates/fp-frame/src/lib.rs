@@ -50122,10 +50122,6 @@ fn format_pydatetime_naive(value: NaiveDateTime) -> String {
     }
 }
 
-fn format_utc_datetime(value: NaiveDateTime) -> String {
-    format!("{}+00:00", format_naive_datetime(value))
-}
-
 fn format_aware_datetime(value: DateTime<FixedOffset>, zone_name: Option<&str>) -> String {
     let mut rendered = format!(
         "{}{}",
@@ -51121,22 +51117,23 @@ fn format_timestamp_from_nanos(origin: DatetimeOrigin, offset_nanos: i128, utc: 
     let Ok(subsec) = u32::try_from(subsec) else {
         return Scalar::Null(NullKind::NaT);
     };
-    if utc {
-        format_unix_timestamp(secs, subsec, true)
-    } else {
-        datetime64_scalar_from_unix_timestamp(secs, subsec)
-    }
-}
-
-fn format_unix_timestamp(secs: i64, nanos: u32, utc: bool) -> Scalar {
-    match Utc.timestamp_opt(secs, nanos) {
-        LocalResult::Single(dt) => Scalar::Utf8(if utc {
-            format_utc_datetime(dt.naive_utc())
-        } else {
-            format_naive_datetime(dt.naive_utc())
-        }),
-        _ => Scalar::Null(NullKind::NaT),
-    }
+    // `utc` SELECTS SEMANTICS, NOT REPRESENTATION. br-frankenpandas-f2mlr,
+    // CrimsonPine 2026-08-17.
+    //
+    // This used to return `Scalar::Utf8` whenever `utc` was set, so
+    // `to_datetime(utc=True)` produced a STRING column where pandas produces
+    // `datetime64`. That is a dtype divergence rather than a formatting one:
+    // every downstream `.dt` accessor, comparison, resample and arithmetic saw
+    // `Utf8`. Caught by the live-oracle differential suite once it was actually
+    // run (br-frankenpandas-live-oracle-passes-by-skip-l7r1p) — with the oracle
+    // absent the two cases skipped and reported PASS.
+    //
+    // The nanoseconds here are ALREADY UTC-normalized by the caller, so both
+    // arms describe the same instant and only the carrier differed. `utc` still
+    // governs how the input is interpreted upstream; it no longer decides what
+    // the output is made of.
+    let _ = utc;
+    datetime64_scalar_from_unix_timestamp(secs, subsec)
 }
 
 fn datetime64_scalar_from_unix_timestamp(secs: i64, nanos: u32) -> Scalar {
@@ -51180,27 +51177,50 @@ fn datetime64_scalar_from_parsed_datetime(value: Scalar) -> Scalar {
     }
 }
 
+/// Normalize a parsed `to_datetime(utc=True)` scalar to a UTC `Datetime64`.
+///
+/// br-frankenpandas-f2mlr. This used to return `Scalar::Utf8` on every arm, which
+/// is what made `utc=True` produce a string column instead of `datetime64`.
+///
+/// THE `Datetime64` PASS-THROUGH IS LOAD-BEARING, not defensive padding: the
+/// numeric-epoch input path now hands this function a `Datetime64` (see
+/// `format_timestamp_from_nanos`), and the old `_ => Null(NaT)` catch-all would
+/// have silently turned every epoch-number input under `utc=True` into NaT. The
+/// value arriving here is already UTC-normalized, so it passes through unchanged.
 fn normalize_datetime_scalar_to_utc(value: Scalar) -> Scalar {
     match value {
         Scalar::Null(_) => Scalar::Null(NullKind::NaT),
+        Scalar::Datetime64(nanos) => Scalar::Datetime64(nanos),
         Scalar::Utf8(rendered) => {
             if has_tz_suffix(&rendered) {
                 return parse_tz_aware_datetime(&rendered).map_or_else(
                     |_| Scalar::Null(NullKind::NaT),
                     |parsed| {
-                        Scalar::Utf8(format_utc_datetime(
+                        datetime64_scalar_from_naive_utc(
                             parsed.fixed.with_timezone(&Utc).naive_utc(),
-                        ))
+                        )
                     },
                 );
             }
             parse_naive_datetime_value(&rendered).map_or_else(
                 |_| Scalar::Null(NullKind::NaT),
-                |naive| Scalar::Utf8(format_utc_datetime(naive)),
+                datetime64_scalar_from_naive_utc,
             )
         }
         _ => Scalar::Null(NullKind::NaT),
     }
+}
+
+/// `Datetime64` from a naive datetime already understood to be in UTC.
+///
+/// br-frankenpandas-f2mlr. Routes through the same
+/// `datetime64_scalar_from_unix_timestamp` the non-`utc` path uses, so both
+/// paths agree bit-for-bit on the NaT sentinel and on out-of-range handling
+/// rather than growing a second conversion with its own edge cases.
+fn datetime64_scalar_from_naive_utc(naive: NaiveDateTime) -> Scalar {
+    let secs = naive.and_utc().timestamp();
+    let nanos = naive.and_utc().timestamp_subsec_nanos();
+    datetime64_scalar_from_unix_timestamp(secs, nanos)
 }
 
 #[inline]
@@ -159414,8 +159434,9 @@ mod tests {
         assert_eq!(
             result.values(),
             &[
-                Scalar::Utf8("1970-01-01 00:00:01.705312200+00:00".into()),
-                Scalar::Utf8("2024-01-01 00:00:00+00:00".into()),
+                // br-frankenpandas-f2mlr: `utc=True` yields datetime64, not a string.
+                Scalar::Datetime64(1_705_312_200),
+                Scalar::Datetime64(1_704_067_200_000_000_000),
             ]
         );
     }
@@ -159819,8 +159840,9 @@ mod tests {
         assert_eq!(
             result.values(),
             &[
-                Scalar::Utf8("2024-01-15 10:30:00+00:00".into()),
-                Scalar::Utf8("2024-01-16 00:00:00+00:00".into()),
+                // br-frankenpandas-f2mlr: `utc=True` yields datetime64, not a string.
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(1_705_363_200_000_000_000),
             ]
         );
     }
@@ -159847,8 +159869,9 @@ mod tests {
         assert_eq!(
             result.values(),
             &[
-                Scalar::Utf8("2024-01-15 05:00:00+00:00".into()),
-                Scalar::Utf8("2024-01-15 10:30:00+00:00".into()),
+                // br-frankenpandas-f2mlr: `utc=True` yields datetime64, not a string.
+                Scalar::Datetime64(1_705_294_800_000_000_000),
+                Scalar::Datetime64(1_705_314_600_000_000_000),
             ]
         );
     }
@@ -159872,9 +159895,14 @@ mod tests {
             },
         )
         .unwrap();
+        // br-frankenpandas-f2mlr: `utc=True` yields datetime64, not a string.
+        // The [1] arm is unchanged and is NOT part of this fix — whether a mixed
+        // naive/offset sequence should coerce its offset element to NaT at all is
+        // a separate question, and the live-oracle differential suite now
+        // actually runs and covers it.
         assert_eq!(
             result.values()[0],
-            Scalar::Utf8("2024-01-15 10:30:00+00:00".into())
+            Scalar::Datetime64(1_705_314_600_000_000_000)
         );
         assert!(result.values()[1].is_missing());
     }
