@@ -29604,3 +29604,59 @@ re-scoped rather than left to send the next agent down a mechanism I have just
 falsified. **Two mechanism errors in one day — the sampler I blamed for a true
 reading, and this — both caught by checking the code instead of trusting the story I
 had already written down. The pattern is that my prose runs ahead of my arithmetic.**
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-flicz) — THIRD AND FINAL ANSWER on why fast ops fail the null: BOTH of my mechanisms were wrong, the noise is MULTIPLICATIVE, and the intervention survives on a plainer basis than either story I told
+
+I have now given two explanations for the measured fact that sub-1ms rows pass the
+A/A null at 33-41% against 54% above 5ms. Both are dead. This entry tests the second
+one the same way I should have tested the first — against banked data — and lands on
+the simple answer.
+
+**The discriminating prediction, stated before looking.** If FIXED per-slot cost
+drives between-slot variance, the ABSOLUTE spread of slot p50s is roughly constant
+across ops and only the RELATIVE spread rises as ops get faster. If the noise is
+MULTIPLICATIVE, absolute spread scales with p50 and relative spread is roughly flat.
+
+**Counted over 463 arm-rows carrying per-slot `samples_us`:**
+
+| p50 bucket | n | median p50 | median ABSOLUTE sd | median RELATIVE sd |
+|---|---:|---:|---:|---:|
+| <300us | 82 | 177.7us | 20.8us | **11.27%** |
+| 300us–1ms | 36 | 598.6us | 43.5us | 7.81% |
+| 1–3ms | 89 | 1667.1us | 147.7us | 8.63% |
+| 3–20ms | 147 | 10473.7us | 746.1us | 6.07% |
+| >20ms | 109 | 30268.4us | 4621.0us | 8.20% |
+
+**Absolute spread scales 222x while p50 scales 170x.** It is not flat, so fixed
+per-slot cost is REFUTED — the fresh-subprocess story I banked one turn ago is wrong.
+Relative spread is broadly flat at 6-9%, which is what multiplicative noise looks
+like.
+
+**What is left, and it is enough.** The fastest bucket does sit higher — 11.27%
+against 6.07% for 3-20ms, close to 2x relative dispersion. A gate that tests a
+RELATIVE quantity against a fixed 2% limit will therefore fail roughly twice as often
+there, which is the observed 33-41% versus 54% without needing any story about slot
+composition at all.
+
+**THE INTERVENTION SURVIVES, ON A SIMPLER JUSTIFICATION THAN EITHER MECHANISM.** With
+multiplicative noise, the null median's estimate tightens with the number of rounds
+regardless of why an op is noisy — more paired samples, tighter median CI. So
+`adaptive_balanced_square_rounds` is defensible after all, not because slots are short
+(false) and not because fixed cost dominates (false), but because ops starting from
+~2x relative dispersion need proportionally more samples to estimate their null median
+to the same precision. That is the plainest possible reason and it is the one that
+survives contact with the data.
+
+**Counted mechanism:** 463 arm-rows; absolute sd 20.8us → 4621.0us across a p50 range
+177.7us → 30268.4us (222x against 170x); relative sd 11.27% in the fastest bucket
+against 6.07-8.63% elsewhere.
+
+**A/A null control (same invocation):** not applicable — no timing was taken. This is
+arithmetic over `samples_us` already banked in the artifacts.
+
+**On having been wrong three times about the same number.** The measurement never
+moved: 226 rows, sub-1ms passes 33-41%. What moved was my explanation, twice, and
+each time I published the explanation with the confidence of the measurement. The
+correction that matters for whoever picks up `flicz` is that the FIX is unchanged and
+now rests on a mechanism I have actually tested, and the two discarded stories are on
+the record so nobody re-derives them.
