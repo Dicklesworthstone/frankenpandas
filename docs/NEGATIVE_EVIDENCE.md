@@ -33254,3 +33254,64 @@ it in the 12.3%, and it is atypical rather than representative.
 proxy for "128-bit work" and are not it; `%ymm` presence proxies for "the flag reached this
 kernel" and is not it. Both times the fix was to count the ARITHMETIC MNEMONIC instead of the
 register name, and both times I published before doing that.
+
+
+### 2026-08-17 CrimsonPine — I ALMOST PUBLISHED A "SCALAR ARITHMETIC TARGET LIST" THAT WOULD HAVE RE-OPENED A CLOSED LEVER. Static instruction counts are CODE SIZE, not work
+
+Following the correction above (87.7% of static FP arithmetic is scalar), the obvious next step
+was to rank symbols by scalar arithmetic and hand over a target list. I built it: 3,073 scalar
+ops across 146 symbols, top 16 owning 53%, headed by `SeriesGroupBy::agg_numeric` instantiated
+for `std` (216) and `var` (208), `Series::kurtosis` (131), `DataFrame::std_axis1` (112) and
+`var_axis1` (108), then `mean` (80), `sum` (72), `prod` (72).
+
+**I did not publish it, because it is not a hotness ranking and acting on it would have undone
+finished work.**
+
+**WHY THE RANKING IS INVALID.** `objdump` counts INSTRUCTIONS IN A SYMBOL — static code size. A
+tight scalar loop executing ten million times is two instructions; a routine that got inlined or
+unrolled twenty times is hundreds. The two have no fixed relationship. `nansum` reads as ONE
+scalar add not because it is vectorized but because its loop body is one `sum += x` wrapped in
+branches over `&[Scalar]`. **Ranking by static count ranks by inlining, not by cost.**
+
+**AND THE TOP OF MY LIST IS ALREADY FIXED.** `blocked-sum-vectorize-reductions` (9ab0f8cc1,
+2026-07-03 BlackThrush) records the identical mechanism — `iter().sum()` is a 0.0-seeded
+sequential left-fold that LLVM cannot vectorize because f64 add is non-associative — and SHIPPED
+`blocked_sum_f64`, eight independent accumulator lanes over `chunks_exact(8)`. It took
+`Series.sum` 0.41x → 2.2x and `mean` 0.82x → 4.2x, and it states in terms that **var, std,
+df.sum, df.mean and prod already WIN** by picking up the blocked `f64_valid_sum_count` for free,
+and closes with "DON'T re-surface sum/mean as losses — CLOSED." My list is headed by std, var,
+mean, sum and prod. **I would have re-surfaced exactly the closed set.**
+
+**WHAT IS STILL DEFENSIBLE, verified by reading the current source rather than by counting.**
+`Series::skew` (fp-frame) computes its mean as
+
+```rust
+let mean = data.iter().sum::<f64>() / n;   // left-fold-locked: the exact pattern
+for &v in data {                            // blocked_sum_f64 exists to fix
+    let d = v - mean;
+    m2 += d.powi(2);
+    m3 += d.powi(3);
+}
+```
+
+and `skew`, `kurtosis` and `sem` are NOT in the closed set that memory enumerates. The typed
+fast path is present (`as_f64_slice`, fused single pass, no `Vec` copy — a real earlier win) but
+the accumulation is still an ordered left-fold. That is a plausible remaining instance of a
+documented, already-solved lever, and it is worth ONE measurement when builds resume — not a
+campaign.
+
+**⚠ AND THE LEVER IS NOT BIT-IDENTICAL, which the target-list framing would have hidden.**
+Multi-accumulator blocking changes summation order and therefore rounding. The sanctioned safety
+argument is specific and must be repeated for any new application: `chunks_exact(8)` is EMPTY
+below 8 elements so short arrays flow through the remainder left-fold and stay bit-identical,
+which is why every reduction fixture (all `[1,2,3]`-scale) passes unchanged; and on a 2M array
+the blocked result was ~8x CLOSER to numpy's pairwise value than the old left-fold. **The
+acceptance test is "full suite green AND print fp-vs-numpy to show it is closer, not just
+faster."** A win here is a numerics change, not a free speedup.
+
+**THE PATTERN IN MY OWN WORK TODAY, stated because it is now four for four.** `%xmm` operands
+proxied for 128-bit work and were not it. `%ymm` presence proxied for "the flag reached this
+kernel" and was not it. Static instruction counts proxied for hotness and were not it. Each time
+the proxy was cheap to compute and the real quantity needed one more step — an arithmetic
+mnemonic, a dynamic profile, an existing ledger entry. **The first three I published before
+checking. This one I checked first, and it is the only reason a closed lever stayed closed.**
