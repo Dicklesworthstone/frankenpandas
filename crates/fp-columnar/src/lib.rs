@@ -13323,7 +13323,20 @@ impl Column {
                     }
                 }
             }
-            DType::Float64 => {
+            // Paired with `Float64` exactly as `Bool | BoolNullable` and
+            // `Int64 | Int64Nullable` already are above. br-frankenpandas-1hc9i,
+            // fourth instance of that defect class: `Float64Nullable` was added to
+            // `DType` and the arms it belonged in were never widened, so a
+            // nullable float column fell to `_ => return None` and lost this
+            // typed gather even when every one of its values was present.
+            //
+            // Output is unchanged in every case. The caller keeps `self.dtype` and
+            // falls back to cloning `self.values[pos]`, which for a present value
+            // yields the SAME `Scalar::Float64`; and a missing element is not a
+            // `Scalar::Float64`, so it still takes `_ => return None` and still
+            // falls back. This widens which columns reach the fast path, never
+            // what the fast path produces.
+            DType::Float64 | DType::Float64Nullable => {
                 for &pos in positions {
                     match &self.values[pos] {
                         Scalar::Float64(value) => values.push(Scalar::Float64(*value)),
@@ -30919,6 +30932,100 @@ mod tests {
         assert_eq!(out.values()[0], Scalar::Float64(1.0));
         assert_eq!(out.values()[1], Scalar::Float64(f64::INFINITY));
         assert_eq!(out.values()[2], Scalar::Float64(2.0));
+    }
+
+    /// br-frankenpandas-1hc9i, fourth instance. `take_positions`' typed primitive
+    /// gather pairs `Bool | BoolNullable` and `Int64 | Int64Nullable` but left
+    /// `Float64` unpaired, so a nullable float column fell to the generic clone
+    /// loop even when every value was present.
+    ///
+    /// The gather must be INDISTINGUISHABLE either way — same values by bits, same
+    /// dtype, same validity — because the caller keeps `self.dtype` and the
+    /// fallback clones the very same scalars. This pins that, and pins that the
+    /// nullable result matches the plain-`Float64` result element for element.
+    #[test]
+    fn a_nullable_float_column_gathers_like_its_plain_float_twin_1hc9i() {
+        let raw = [1.5_f64, -2.25, 0.0, 9.75, 1e300];
+        let plain = Column::new(
+            DType::Float64,
+            raw.iter().map(|&v| Scalar::Float64(v)).collect(),
+        )
+        .expect("plain float column");
+        let nullable = Column::new(
+            DType::Float64Nullable,
+            raw.iter().map(|&v| Scalar::Float64(v)).collect(),
+        )
+        .expect("nullable float column");
+
+        let positions = [4_usize, 0, 3, 1, 1];
+
+        // THE NON-VACUOUS ASSERTION. Everything below compares VALUES, and the
+        // generic clone fallback produces exactly the same values — so a
+        // value-only test passes against the unwidened arm and proves nothing.
+        // Call the typed gather directly: before the arm was paired it returned
+        // `None` here and the whole lever was inert.
+        assert!(
+            nullable
+                .take_all_valid_primitive_positions(&positions)
+                .is_some(),
+            "the nullable column did not reach the typed gather — the fast path \
+             is inert and this test would otherwise pass vacuously"
+        );
+
+        let got_plain = plain.take_positions(&positions);
+        let got_nullable = nullable.take_positions(&positions);
+
+        assert_eq!(
+            got_nullable.dtype(),
+            DType::Float64Nullable,
+            "the gather must not silently re-type a nullable column"
+        );
+        assert_eq!(got_plain.dtype(), DType::Float64);
+        assert_eq!(got_nullable.len(), positions.len());
+        for (i, &p) in positions.iter().enumerate() {
+            let (Scalar::Float64(n), Scalar::Float64(q)) =
+                (&got_nullable.values()[i], &got_plain.values()[i])
+            else {
+                panic!("slot {i} must be a present Float64 on both columns");
+            };
+            assert_eq!(n.to_bits(), q.to_bits(), "slot {i} differs between dtypes");
+            assert_eq!(
+                n.to_bits(),
+                raw[p].to_bits(),
+                "slot {i} gathered the wrong element"
+            );
+        }
+    }
+
+    /// NEGATIVE CASE: a MISSING element must still gather as missing.
+    ///
+    /// The widened arm bails to the generic path on anything that is not a present
+    /// `Scalar::Float64`, which is what keeps a null a null. An implementation that
+    /// widened the arm but assumed presence — pushing a payload for the missing
+    /// slot, or treating the nullable dtype as all-valid — would turn `pd.NA` into
+    /// a number, and no value-only assertion would catch it.
+    #[test]
+    fn a_missing_element_survives_the_widened_nullable_gather_1hc9i() {
+        let nullable = Column::new(
+            DType::Float64Nullable,
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(3.5),
+            ],
+        )
+        .expect("nullable float column with a hole");
+
+        let got = nullable.take_positions(&[2_usize, 1, 0]);
+
+        assert_eq!(got.dtype(), DType::Float64Nullable);
+        assert!(
+            got.values()[1].is_missing(),
+            "the gathered null must stay missing, not become a number"
+        );
+        assert!(!got.values()[0].is_missing());
+        assert!(!got.values()[2].is_missing());
+        assert!(!got.validity().get(1), "validity must mark the hole");
     }
 
     /// br-frankenpandas-yx692 follow-on. The write-once arm returns the output as
