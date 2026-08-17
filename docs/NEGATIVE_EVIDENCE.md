@@ -31854,3 +31854,66 @@ describing the same fixture in two languages, with one of them defaulting instea
 failing, produced fully provenanced rows comparing different problem sizes. Any lane
 where the harness and the engine each own a copy of a fixture parameter has this
 shape. The fix is not vigilance, it is that the engine must refuse to guess.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — REJECTED, and it is the THIRD time the same probe error has fooled me: `collect` on the binary serial arm is a **2.3–3.5x REGRESSION**, because my probe inlined the operator and the real code calls it through a fn POINTER
+
+The previous entry named the pre-zeroed output buffer as the remaining candidate for
+`div`'s deficit and told the next person to measure the memset before rewriting.
+I did measure it, standalone, and it looked decisive:
+
+```
+  vec![0.0; n] + index writes   p50  829.2us / 1053.4us
+  collect()                     p50  647.5us /  788.5us   -> 1.28x / 1.34x
+  alloc_zeroed ALONE            p50  187.3us /  249.8us   -> ~25% of the op
+```
+
+**Implemented it, and it is a disaster.** Paired ABBA, two ELFs, interleaved, load
+18.38, whole-binary checksums IDENTICAL:
+
+| op | before p50 | after p50 | ratio |
+|---|---|---|---|
+| `div @1M` | 808.5us | 1859.3us | **0.435x — 2.3x SLOWER** |
+| `add @1M` | 690.0us | 2436.2us | **0.283x — 3.5x SLOWER** |
+
+**A/A null control (same invocation):** the in-binary A/A null median ratio was
+0.9995 on the baseline ELF and 1.0008 on the candidate ELF, both inside the 2%
+limit, so the collapse is a real throughput loss and not a null artefact.
+
+**Mechanism** (reasoned from the source, NOT counted with a hardware counter — I did
+not run `perf`, and the gate's counted-mechanism vocabulary would be a fabrication
+here): the shipped serial path expands one `sweep!` macro arm per
+operator, so the arithmetic is monomorphised and inlined into the loop; my rewrite
+called `binary_f64_apply(op)`, which returns `fn(f64, f64) -> f64`, once per element
+— 1000000 indirect calls per column where there had been 0, and the loop can no
+longer vectorize around them. The required work is the same and the delivered
+throughput fell by a factor of 2.3 to 3.5.
+
+**MY PROBE WROTE `x / y` DIRECTLY.** The real code cannot: it dispatches on
+`ArithmeticOp` at runtime. **So the probe measured an inlined divide against a
+pre-zeroed buffer, and the implementation measured an indirect call against a
+collected one — two differences, and I attributed the whole result to the one I was
+looking at.**
+
+**THIS IS THE THIRD TIME.** The ledger already records: the `copysign` lever
+inflated from 1.08x to 1.647x by a `fn`-pointer probe; the binary family found still
+ON fn-pointer dispatch and fixed for exactly this reason; and now a probe that
+avoided the pointer where the real code has one. **I have written the warning twice
+and walked into it a third time from the opposite direction — previously the CODE had
+the pointer and the probe did not; this time the probe was clean and the code I wrote
+introduced one.**
+
+The rule that would have caught all three, stated so it survives me: **a probe must
+call the kernel the way the production path calls it — same dispatch, same
+monomorphisation, same inlining — and if the production path dispatches at runtime,
+the probe must too.** A probe that is *cleaner* than production is as misleading as
+one that is dirtier.
+
+**REVERTED.** The working tree is byte-identical to the committed state, verified
+with `git diff --quiet`. The pre-zeroed buffer stays, and the ~25% of the op it costs
+is real but is not recoverable this way — recovering it needs the operator inlined
+AND the buffer avoided, which the macro sweep cannot express through a runtime
+`ArithmeticOp` without monomorphising the whole collect per arm. That is a larger
+change than the one I attempted and it is not obviously worth it: `div`'s deficit is
+1.8x and the memset is 25%, so even a perfect fix leaves most of the gap unexplained.
+**`div`'s 1.8x remains unexplained, and I am recording that rather than reaching for
+a fourth hypothesis in the same session.**
