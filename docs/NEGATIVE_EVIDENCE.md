@@ -28325,3 +28325,71 @@ reductions that fold chunk-wise through `float64_chunks_ref` never materialize a
 would keep the producer-side saving. That niche is now a measured hypothesis
 rather than a hope, and nobody should enable this toggle without re-running the
 consume arm for their own consumer.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-284ul follow-on) — `sqrt @1M` REFUSED to certify twice on a rising host, and the three attempts together show FP's dispersion is LOAD-COUPLED while pandas' is not. No ratio is claimed from either refused row
+
+Two certification attempts in a window the orchestrator described as low and my own
+`uptime` did not: 1-min 23.54 rising to 33.48 across the pair, against 5-min 18.9
+and 15-min 11.7 — a RAMP, not a quiet window. Both rows were refused by the gate.
+
+| | attempt 1 | attempt 2 |
+|---|---:|---:|
+| FP A/A null | **1.14780787 FAIL** | **1.03136458 FAIL** |
+| pandas A/A null | 1.02763149 FAIL | 0.99404552 pass |
+| point ratio | 0.648x | 0.719x |
+| verdict | NULL_UNDECIDABLE | NULL_UNDECIDABLE |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.14780787 and
+1.03136458 across the two attempts, both outside the 2% limit; pandas 1.02763149
+and 0.99404552. The FP arm's own null missed unity by 14.8% in the first attempt,
+which is the instrument saying it cannot resolve anything, so neither 0.648x nor
+0.719x is a measurement of FrankenPandas and neither is banked as one. A failure to
+certify under load is not a loss.
+
+**WHAT THE THREE ATTEMPTS DO ESTABLISH, because the method was identical each
+time.** Same workload, same harness, same balanced-square design, three load
+regimes:
+
+| run | 1-min load | FP cv | pandas cv | best-vs-best |
+|---|---:|---:|---:|---:|
+| quiet, earlier today | 20.78 falling | **14.97%** | 4.06% | 0.9976 |
+| attempt 1 | 23.54 rising | **38.66%** | 4.38% | 0.839 |
+| attempt 2 | 28.66 → 33.48 | **38.70%** | 11.65% | 1.1671 |
+
+**FP's dispersion more than DOUBLES with host load while pandas' barely moves**,
+and best-vs-best swings 0.839 → 0.9976 → 1.1671 on the same code and the same
+input. That is a 39% spread in the one statistic that is supposed to isolate the
+kernel from the host. The mechanism is not mysterious: FP needs 8 worker slots and
+is set by its slowest, pandas needs 1 and is not.
+
+**THE CONSEQUENCE FOR THIS CAMPAIGN'S GATE, stated as a limitation and not a
+complaint.** A median-based vs-incumbent gate on a contended shared host is
+structurally harder for a parallel arm than for a single-threaded incumbent, and
+the difficulty scales with foreign load rather than with our code. That is not an
+argument for weakening the gate — the gate is what stopped me banking a 2.7x
+phantom an hour ago. It IS an argument that `sqrt @1M` may be uncertifiable on this
+host while the fleet is busy, and that the honest report is "refused, host too
+noisy", not a ratio.
+
+```
+CLASS        vs-incumbent attempt, live pandas 2.2.3 in the SAME invocation, REFUSED
+ELF          the harness resolved target/release-perf/fp-bench; note the binary had
+             been REBUILT BY A PEER between my last row and these two
+             (5b12dd8d → 19b16af2 → 6674588c → fcc8dee4), which is why the sha is
+             read per row and never assumed
+LOADAVG      attempt 1: 23.54/18.93/11.69 → 23.99/19.28/11.92
+             attempt 2: 28.66/20.73/12.63 → 33.48/22.28/13.27 (crossed the ~30
+             defer threshold DURING the run, which is itself a reason to refuse)
+OBSERVED MHz host mean 3680.2 → 3688.4 (min 1429.0, max 4139.2), host-level not
+             per-arm; this harness does not sample per-arm frequency
+ARTIFACTS    artifacts/bench/sqrt_1m_cert_thinkstation1_2026-08-17.json
+             artifacts/bench/sqrt_1m_cert2_thinkstation1_2026-08-17.json
+```
+
+**CV role:** provenance only, no vote — and here the CV IS the finding, which is
+why three of them are tabulated above.
+
+**Deferring rather than re-running.** Load crossed the threshold mid-attempt and is
+still climbing, so a third try would buy another refused row. The next attempt on
+this workload should wait for 1/5/15 to converge LOW together, and should expect
+that FP's null is the binding constraint, not the effect size.
