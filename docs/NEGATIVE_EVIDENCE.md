@@ -28012,3 +28012,51 @@ TIMING it would not be, per the binary-substitution finding in the 284ul entry.
 an orchestrator build halt (disk 21G, below the floor): no build, no benchmark, no
 measurement. The next lever on `sqrt @1M` should attack the per-element work in
 that body — the packed sqrt is already there.
+
+### 2026-08-17 CrimsonPine — the two commits landed BLIND under the disk halt both gate clean, and the detector works on first execution
+
+`2ce78044e` (Int64 arm on the domain-fused helper) and `13e6d9a7b` (unbanked-row
+detector) were written and pushed without a compiler or an interpreter ever seeing
+them, because disk was at 16G and falling. Both are now gated. Recording the
+outcome either way, since "landed uncompiled" is only an acceptable state if
+somebody comes back and closes it.
+
+**`2ce78044e` — GREEN.** `cargo check -p fp-columnar --all-targets` clean,
+`cargo test -p fp-columnar` **632 passed / 0 failed / 0 filtered out** with
+`int64_input_takes_the_domain_fused_arm_and_matches_float64_4kig1` passing,
+`clippy -D warnings` clean, `fmt --check` clean.
+
+**All three risks I flagged in that commit message were unfounded** — the `Sync`
+bounds on the i64 closures satisfied rustc, the `as fn` casts were needed only on
+the first array element, and `from_i64_values_owned` was the right constructor.
+Worth recording as calibration: writing Rust blind against a codebase I had been
+reading closely for a day produced zero compile errors, but I would not have
+predicted that in advance, which is exactly why the commit message enumerated the
+risks rather than asserting confidence.
+
+**`13e6d9a7b` — WORKS ON FIRST RUN**, and its output demonstrates the thing it was
+built to catch. At `--min-ratio 2.0` it reports **10** fully-passing rows recorded
+nowhere, not the 28 the inventory found — because the inventory entry banked the
+BEST row per workload, and those now match and drop off the worklist. What survives
+is the REPLICATE runs:
+
+```
+14.688x  indexing  loc_labels @1M     (the 14.817x twin is banked; this one is not)
+10.356x  joins     join_inner @1M
+  9.53x  strings   str_contains_arrow @1M
+ 7.789x  joins     join_inner_str @1M
+ 5.827x  groupby   groupby_sum_int64 @1M
+ 4.824x  strings   str_startswith_arrow @1M
+ 3.377x  strings   str_len @1M
+ 3.287x  strings   str_len @1M
+ 2.958x  strings   str_groupby_sum_arrow @1M
+   2.9x  strings   str_groupby_sum_arrow @1M
+```
+
+**That the worklist SHRANK when rows were banked is the script validating itself** —
+the same self-check the p50/null fingerprint method passed earlier. But it also
+exposes something the inventory got slightly wrong: I banked one row per workload
+and treated the pair as covered. The replicate is not redundant. **Two independent
+invocations agreeing to within 1% is the strongest evidence shape in this ledger**,
+stronger than either row alone, and by recording only the better of each pair I
+recorded the weaker claim. Whoever banks these should bank the PAIR.
