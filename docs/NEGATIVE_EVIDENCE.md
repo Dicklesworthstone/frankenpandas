@@ -30389,3 +30389,63 @@ valuable row available: the fix measured 4.08x against the old binary, so it sho
 turn this family's only certified loss into a large win. Deferring it cost a few
 minutes. Taking it inside a 43-core storm would have cost the run AND produced a
 number I would have had to explain away.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `pow @1M` CERTIFIES **FASTER at 3.594x**, converting this family's only certified LOSS into a win, and the incumbent arm proves the swing is ours
+
+Two entries ago `pow @1M` certified as a **LOSS at 0.928x** with both A/A nulls
+clean — a genuine, gated defeat. Reading the thread count on that clean loss found
+`PARALLEL_MIN_LEN = 1 << 20` sitting 4.9% above the corpus's canonical 1M. `e7d87c811`
+gave the compute-bound f64 binary ops the campaign's existing `par_min` instead.
+This is the row that closes it.
+
+**Window selected with `scripts/host_is_quiet_now.py`, landed one entry ago,
+BEFORE trusting `uptime`:** loadavg 14.87 AND build CPU 104% (one straggler `rustc`,
+under the 200% threshold) — quiet by both readings. No build was started in this
+window; the ELF was already current and a name-only diff confirmed no `.rs` drift.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=77572f10670c1d79094b04adfecb46de5e755a6e8d06f37270447728baa30b20 (82163632 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-thr`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T083900.716658Z-pid2359643 , giving
+measured_ratio=3.594x for this row.
+
+| `pow @1M` | p50 | cv | A/A null | threads |
+|---|---|---|---|---|
+| FrankenPandas | **2989.34us** | 5.73% | 1.008410 — PASSES | **10** |
+| pandas | 10707.20us | 1.44% | 0.996539 — PASSES | 67 |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.008410 and
+pandas median ratio 0.996539, both inside the 2% limit.
+
+**Median-CI decision:** effect median 3.594x, 95% CI [3.48551, 3.74526], excluding
+unity; claimed log effect 1.27923262 against a required threshold of 0.09215735,
+cleared by nearly 14x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 5.73%, pandas 1.44%.
+
+```
+LOADAVG      20.67 → 20.10 (in-run 1-min min 19.84, max 23.18)
+OBSERVED MHz busy-core BY ARM: FP 4156.9 / pandas 4199.9, arm clock ratio 1.0103
+THREADS      FP peak 10 (was 2) · pandas peak 67
+```
+Best-vs-best 3.9439 (FP min 2616.7us vs pandas min 10320.0us), direction agrees.
+
+**THE INCUMBENT ARM IS THE CONTROL, AND IT DID NOT MOVE.** pandas measured
+**10705.19us** on the losing row and **10707.20us** here — the same arm, two hours
+and two binaries apart, agreeing to **0.02%**. FrankenPandas went 11530.07us →
+2989.34us on the identical fixture. **There is no room in that for host drift,
+fixture drift or measurement luck: the entire 3.87x swing is the constant.**
+
+**WHAT THIS COST AND WHAT FOUND IT.** A single power-of-two constant, `1 << 20`,
+sitting 48,576 elements above the size this corpus measures most, held one op
+single-threaded against a 67-thread incumbent and produced a certified defeat. It
+was found not by profiling but by reading `peak_process_threads: 2` on a row whose
+siblings reported 10 — **a provenance field the harness records on every row and
+that I had been skimming past for a day.** The certified loss was necessary: had the
+gate been lax enough to pass 0.928x as noise, there would have been nothing to
+explain and nothing to read.
