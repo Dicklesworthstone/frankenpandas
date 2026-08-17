@@ -33742,3 +33742,62 @@ LIKE-FOR-LIKE ok=true; par=64; peak_process_threads=10 (parallel arm)
 INCUMBENT    pandas 2.2.3, artifact c10b13e6b6bec9a3, same invocation, p50 11577.86us
 ARTIFACT     artifacts/bench/4kig1_mod1M_MAIN_2026-08-17.json
 ```
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `div @1M` CERTIFIES ON CURRENT MAIN at 0.515x. The stale-ELF caveat is now retired with a number: main is **1.123x faster** than the binary every div row today was measured on
+
+The cleanest window of the day — 1% build CPU, no `rustc` running at all, loadavg 8.49 draining
+from a 13.56 fifteen-minute — spent on the row that closes the staleness question rather than on
+another flag experiment.
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.98882 and pandas 0.99188,
+both comfortably inside the 2% limit. **All three clauses pass.**
+
+**Median-CI decision:** effect median 0.515x, 95% CI [0.50572, 0.51905], excluding unity and
+clearing its required threshold.
+
+**CV role:** provenance only, no vote — 8.54%.
+
+| | FP p50 | pandas p50 | ratio | verdict |
+|---|---:|---:|---:|---|
+| **current main** `a802073c…` | **620.78us** | 318.25us | **0.515x** | SLOWER, 3/3 |
+| stale default `31c630ba…` (earlier today) | 697.16us | 311.31us | 0.447x | SLOWER, 3/3 |
+
+**THE CAVEAT I ATTACHED TO EVERY div AND add ROW TODAY IS NOW QUANTIFIED: 1.1230x.** Current main
+runs `div @1M` 12.3% faster than the ELF those rows were measured on. I estimated ~9% from
+`cached_available_parallelism` alone (`q1evw` measures the old call at 66-68us on a ~700us op),
+so the migration explains most of it and something else accounts for the rest — **I am not
+attributing the remainder, only recording that it exists.**
+
+**PREDICTION SCORING, both halves.** I registered FP p50 630-650us and ratio 0.47-0.52x before
+running. The ratio landed at **0.515x, inside the range**; the p50 landed at 620.78us, **below my
+floor by 9us**. So the headline prediction hit and the component prediction was slightly
+pessimistic — the same direction of error as the `add` miss, where I under-predicted the gain.
+**I appear to systematically underestimate how much these changes are worth, and that is worth
+knowing about my own calibration.**
+
+**WHAT THIS SETTLES AND WHAT IT DOES NOT.** It settles the honest current standing of `div @1M`:
+**pandas is 1.94x faster and that is the number to quote**, not the 0.447x from the stale binary
+nor the 0.721x from the flag build. It does NOT settle what `+avx2` is worth on current main —
+the flag was measured at 1.6056x on the OLD serial code, and applying that ratio here would
+suggest ~386us and ~0.82x, but **that is arithmetic on two different binaries and I am not
+banking it as a measurement.** Measuring it needs a `+avx2` build of current main, which is one
+build and one window.
+
+**SERIAL ARM CONFIRMED, which is why this row certifies and `mod @1M` does not.**
+`peak_process_threads=2` — the serial path, as expected for 1,000,000 elements against the
+`1 << 20` binary-op threshold. Both nulls clean. That is the fourth consecutive serial-arm div
+row to certify, against three consecutive parallel-arm `mod @1M` rows that failed their null. The
+serial/parallel split in A/A reliability this ledger measured (72% vs 44%) keeps holding.
+
+```
+LOADAVG      8.49 / 10.23 / 13.56 at launch (quiet AND draining, 1% build CPU, zero rustc),
+             7.98 / 10.01 / 13.41 at the end — the calmest conditions recorded today
+OBSERVED MHz host mean 2324.2 before -> 2785.6 after; arms_saw_same_clock=true, arm_clock_ratio
+             exactly 1.0000
+LIKE-FOR-LIKE ok=true, no reasons; par=64; peak_process_threads=2 (serial)
+INCUMBENT    pandas 2.2.3, same invocation, p50 318.25us
+ELF          a802073cf042d28d... built from a detached worktree at 8b263954b == origin/main with
+             `tracked-dirty 0` asserted INSIDE the build command
+ARTIFACT     artifacts/bench/4kig1_div1M_MAIN_2026-08-17.json
+```
