@@ -27724,3 +27724,104 @@ because none was taken: the host was at loadavg 22-42 throughout.
 
 Gates: `cargo test -p fp-columnar` 629 passed / 0 failed / 0 filtered out,
 `clippy -D warnings` clean, `fmt --check` clean.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `cbrt @10M` CERTIFIES **FASTER at 3.736x**, both nulls clean in the quietest part of the window
+
+Third certified row from the lanes, and the first on an op whose domain predicate
+is the constant `true` (`cbrt` is total — defined on negatives, `cbrt(±inf)` =
+`±inf`).
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=b6a142facfbd7bb362873349959ff7cd1411cefb152cba281e91d12ecbbfd201 (80218912 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-final`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T022017.656288Z-pid197876 , giving
+measured_ratio=3.736x for this row.
+
+| `cbrt @10M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **33184.22us** | 5.15% | 1.005750 — PASSES |
+| pandas | 124379.70us | 3.65% | 1.001519 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.005750 and
+pandas median ratio 1.001519, both inside the 2% limit.
+
+**Median-CI decision:** effect median 3.736x, 95% CI [3.63263, 3.80162], excluding
+unity; the claimed log effect is 1.31788388 against a required threshold of
+0.13352687, cleared by roughly 10x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 5.15%, pandas 3.65%.
+
+```
+LOADAVG      44.01 → 15.93 (in-run 1-min min 15.93, max 44.01)
+OBSERVED MHz busy-core BY ARM: FP 4207.9 / pandas 4168.4, arm clock ratio 1.0095
+             host median 3409.3 (min 1429.0, max 4201.1, n=73)
+THREADS      FP peak 10 · pandas peak 67
+```
+
+Best-vs-best 3.7031 (FP min 31762.0us vs pandas min 117617.7us), direction agrees.
+
+**`expm1 @10M` from the same batch is NOT banked:** 1.532x, CI [1.44710, 1.65659],
+best-vs-best 1.6699 — but FrankenPandas' A/A null FAILED at 0.956197 while pandas'
+passed at 1.011659, and the in-run load went from 23.51 to **48.9** during that row.
+Owed a re-run, not a result.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `sin @10M` CERTIFIES **FASTER at 4.953x**, the largest margin of the campaign, and it certified DESPITE a 28% subject CV
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=b6a142facfbd7bb362873349959ff7cd1411cefb152cba281e91d12ecbbfd201 (80218912 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-final`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T022555.848476Z-pid329065 , giving
+measured_ratio=4.953x for this row.
+
+| `sin @10M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **33373.99us** | 28.00% | 0.992085 — PASSES |
+| pandas | 166601.87us | 6.32% | 1.002425 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.992085 and
+pandas median ratio 1.002425, both inside the 2% limit.
+
+**Median-CI decision:** effect median 4.953x, 95% CI [4.57411, 4.99219], excluding
+unity; the claimed log effect is 1.59999066 against a required threshold of
+0.9143861 — note that threshold is SEVEN TIMES the one `cbrt` faced, because the
+gate scales what it demands to the dispersion it observed, and this row was noisy.
+It cleared anyway. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 28.00%, pandas 6.32%.
+
+```
+LOADAVG      14.61 → 37.72 (in-run 1-min min 14.40, max 44.64)
+OBSERVED MHz busy-core BY ARM: FP 4068.2 / pandas 4091.0, arm clock ratio 1.0056
+THREADS      FP peak 10 · pandas peak 67
+```
+
+Best-vs-best **5.0869** (FP min 31456.93us vs pandas min 160019.17us), agreeing in
+direction with the median.
+
+**THIS ROW IS THE ARGUMENT FOR THE GATE'S SHAPE, and worth stating because I have
+spent this session on the other side of it.** A 28% subject CV is the worst
+dispersion of any row I have taken, and the row still certified — because the gate
+does not vote on CV. It raised the required effect from 0.134 to 0.914 to account
+for the noise, and a 5x effect cleared even that. Every one of my 1.06–1.18x
+claims failed the same gate for the same reason, correctly. **The gate is not
+conservative about big effects and is not lenient about small ones; it is
+proportionate, and the CV that would have disqualified a small row simply raised
+the bar for this one.**
+
+**`atan @10M` ran in the same batch and IS NOT BANKED.** It returned 3.894x with
+CI [2.49485, 4.05623] and best-vs-best 4.1653 — but FrankenPandas' A/A null FAILED
+at 1.043486 (pandas' passed at 1.005561), FP's cv was 31.28%, and the in-run
+1-minute load went from 37.72 to **442.77**. That is not a measurement condition by
+any reading. The point estimate happens to sit right beside `cbrt`'s certified
+3.736x, which is precisely why it must not be quoted: an unbanked number that looks
+plausible is more dangerous than one that looks wrong. Owed a re-run.
