@@ -30826,3 +30826,61 @@ ARTIFACTS    artifacts/bench/3qpj4b_{floor,ceil,trunc}_settled.json
 points in a window that was otherwise ideal, which is itself worth noting: the
 cleanest host conditions of the session did not produce clean nulls on two of three
 ops.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-3qpj4) — `floor @1M` now CERTIFIES at 1.326x, completing the arc from a certified 0.343x LOSS. `trunc` is 1.35-1.37x across five attempts and has never certified
+
+Owed run, taken in a tightly converged window (load 8.69/9.81/16.72, zero builds).
+
+**Campaign result class:** incumbent-win.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=0797b4b29b6bfe7e0875f6df617bc590079956dadb538b796b31693bb3b3b174 (82377808 bytes) /data/projects/frankenpandas/target-avx2nofma/release-perf/fp-bench
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files, 70681559 bytes), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T091440.466097Z-pid2870529 , giving
+measured_ratio=1.326x for the `floor` row.
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.98714 and pandas
+median ratio 0.99193, both inside the 2% limit.
+
+**Median-CI decision:** effect median 1.326x, 95% CI [1.27828439, 1.38810985]
+excluding unity and clearing its required threshold, which is why this row decides.
+
+**CV role:** provenance only, no vote.
+
+| attempt | `floor` | `trunc` |
+|---|---|---|
+| settled r0 | 1.384x refused | 1.346x refused |
+| r1 | **1.326x CERTIFIED 3/3** | 1.360x refused |
+| r2 | 1.337x refused (pandas null 1.02433) | 1.372x refused |
+
+**`floor @1M` IS NOW A CERTIFIED WIN.** The arc, all on one host: certified **0.343x
+SLOWER** → certified **1.326x FASTER**. FrankenPandas' own p50 went 588us → 198.1us
+(flag) → 133.4us (flag + intrinsic), a 4.4x self-speedup, and every step of it was
+found by counting instructions rather than timing them.
+
+**The three settled `floor` figures cluster at 1.326-1.384x**, which supersedes the
+1.544x I first banked; that row divided by a slow incumbent. Quote **1.326x**, the
+one with both nulls clean.
+
+**`trunc` HAS NOT CERTIFIED IN FIVE ATTEMPTS** — 1.346, 1.354, 1.360, 1.372 and
+earlier 1.354 — a tight cluster that never passes the gate. Four of the five failures
+are the null clause, and in r2 BOTH arms failed (0.97259 and 0.96267). Its effect is
+the same size as `ceil`'s, which certified twice, so this is not a small-effect
+problem. **I am recording it as an open anomaly rather than quoting 1.35x**: five
+consistent measurements that the gate refuses is either a real property of that
+workload's variance or something specific to `trunc`'s lane, and I have not
+established which.
+
+**Counted mechanism:** `floor` FP p50 588 → 198.1 → 133.4us across default, flag-only
+and flag-plus-intrinsic, with the incumbent between 178.5 and 191.2us in every
+settled row.
+
+```
+LOADAVG      8.69 / 9.81 / 16.72 at launch → 9.86 / 9.88 / 16.30 at the end, zero
+             builds running throughout
+OBSERVED MHz host mean 2535.1 → 3821.2 (min 1429.0, max 4292.2), host-level not per-arm
+ARTIFACTS    artifacts/bench/3qpj4c_{floor,trunc}_r{1,2}.json
+```
