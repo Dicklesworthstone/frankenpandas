@@ -27953,3 +27953,62 @@ window and returns nothing.
 Concrete follow-up for whoever holds these beads: read each artifact, decide bank or
 reject, and write the reason either way. That work needs no host, no build and no
 quiet window — it can be done flat out during exactly the kind of halt we are in now.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-284ul follow-on) — REJECTED, on a counted mechanism: the "math_unary lowers to scalar `sqrtsd` because we build generic x86-64" attribution is FALSE for today's kernel, which emits packed `sqrtpd`
+
+The 2026-06-26 entry closes the math_unary family with: FrankenPandas builds for
+generic x86-64, so `sqrt` lowers to scalar `sqrtsd` while numpy runtime-dispatches
+AVX, and "this is the ceiling for the math-unary family until that build-target
+call is revisited". Every later entry in the family inherits that framing, and
+br-frankenpandas-cu22b/h67zz file `sqrt @1M`'s 0.805x as "NOT source-addressable —
+it is the AVX2 gap".
+
+**The premise is checkable without running anything, and it does not hold.** SSE2
+— which generic x86-64 guarantees — HAS a packed double square root, `sqrtpd`.
+"Generic x86-64" therefore never implied scalar; it implied 2-wide. Whether the
+kernel is scalar or packed is a property of whether the loop VECTORIZED, not of
+the ISA baseline, and that is readable straight out of the binary.
+
+**Counted mechanism:** disassembling the shipped `sqrt` worker
+(`par_map_slice_f64_domain_fused::<Column::sqrt::{closure#0}, f64::sqrt>`, 0x703c50)
+gives, over the 384-byte function, these instructions: 2 packed `sqrtpd`, 2 packed
+`cmplepd`, 10 `andpd`, 4 `movupd`, 8 `movapd`, and exactly 1 scalar `sqrtsd` — plus
+0 libm calls. The loop body is 2x-unrolled and fully packed:
+
+```
+703ce2:  cmplepd %xmm7,%xmm8        <- domain test x >= 0.0, PACKED
+703ce8:  andpd   %xmm8,%xmm0        <- domain fold, PACKED
+703ced:  sqrtpd  %xmm6,%xmm6        <- 2 doubles
+703cf1:  sqrtpd  %xmm7,%xmm7        <- 2 more, 4 per iteration
+703cf5:  movupd  %xmm6,(%rcx,%r8,8) <- packed store
+```
+
+The single `sqrtsd` is the remainder epilogue, not the body. So the domain-fused
+arm this campaign landed for br-frankenpandas-4kig1 vectorizes, INCLUDING the
+domain predicate, which was the part most at risk of forcing a scalar loop.
+
+**What this rejects, precisely.** Not the 0.805x measurement — that stands. It
+rejects the stated CAUSE. The remaining width gap against numpy is 2-wide versus
+4-wide (AVX) or 8-wide (AVX-512), which bounds the ISA-attributable headroom at
+roughly 2x on the sqrt instruction itself, not the order of magnitude "scalar vs
+AVX" implies. And it means "not source-addressable" was never established: a
+kernel that already vectorizes can still be losing on load/store shape, on the 10
+`andpd` of domain-and-sign bookkeeping per body, or on the validity/witness work
+around it — all of which are source, not build flags.
+
+**Scope, stated so nobody over-reads it.** This is ONE symbol, the spawned-worker
+path, which is the hot path at 1M under the default 8-worker policy that
+br-frankenpandas-284ul just confirmed as best. I did not inspect the serial arm or
+`typed_float_witness_free_unary`, and I am not claiming those vectorize.
+
+**Binary inspected:** `target/release-perf/fp-bench`, sha256
+`b6a142facfbd7bb362873349959ff7cd1411cefb152cba281e91d12ecbbfd201` (76 MB). ⚠ This
+is NOT the ELF the 284ul rows were measured on (`eaf79091…`) — it is a peer's later
+build of a moved HEAD, picked up from the shared `target/`. For an instruction-shape
+question that is acceptable and I checked the sha rather than assuming; for any
+TIMING it would not be, per the binary-substitution finding in the 284ul entry.
+
+**No timing was taken and none is implied.** This entry is a disassembly read under
+an orchestrator build halt (disk 21G, below the floor): no build, no benchmark, no
+measurement. The next lever on `sqrt @1M` should attack the per-element work in
+that body — the packed sqrt is already there.
