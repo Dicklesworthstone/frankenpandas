@@ -31917,3 +31917,157 @@ change than the one I attempted and it is not obviously worth it: `div`'s defici
 1.8x and the memset is 25%, so even a perfect fix leaves most of the gap unexplained.
 **`div`'s 1.8x remains unexplained, and I am recording that rather than reaching for
 a fourth hypothesis in the same session.**
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — BANKING 14 CERTIFIED ROWS THAT WERE PRODUCED AND DROPPED: six workloads on one ELF, 1.435x to 14.688x over live pandas, every one 3/3 clauses
+
+These were found by `scripts/unbanked_certified_rows.py`, which exists because 28
+fully-passing rows had already been produced, gated, and left in `artifacts/bench/`
+without reaching any ledger. Thirteen of that first batch were banked; this entry and
+the two below it close out the remainder. **Nothing here was re-measured — a row that
+already passed does not need a rerun, it needs a decision**, and re-running it would
+spend a measurement window on a contended host to learn what is already on disk.
+
+**Campaign result class:** incumbent-win.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=a307856618b1fe1b03750fbed492849f3090f7da33a488427a0beb413672d462 (78378664 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files, 70681559 bytes), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260816T080820.189428Z-pid2507353 , giving
+measured_ratio=14.688x for the `loc_labels` row.
+
+| row | ratio | 95% CI | FP p50 | pandas p50 | nulls (FP / pandas) |
+|---|---:|---|---:|---:|---|
+| `loc_labels @1M` | **14.688x** | [14.47212, 14.94692] | 2118.35us | 31100.91us | 1.00044 / 1.00338 |
+| `join_inner @1M` | **10.356x** | [10.11720, 10.56214] | 2690.80us | 27967.98us | 1.00295 / 1.00295 |
+| `join_inner_str @1M` | **7.789x** | [7.74576, 7.96161] | 16718.19us | 130184.09us | 0.98835 / 1.00427 |
+| `groupby_sum_int64 @1M` | **5.827x** | [5.68463, 5.85156] | 1616.79us | 9391.31us | 1.00304 / 1.01078 |
+| `reindex @1M` | **1.439x** | [1.42318, 1.46794] | 15465.27us | 22091.43us | 1.01257 / 1.00574 |
+| `to_datetime @1M` | **1.435x** | [1.40874, 1.44768] | 40256.75us | 57769.00us | 0.99786 / 0.98752 |
+
+Six rows, six separate invocations, 3/3 clauses each, twelve nulls all inside the 2%
+limit. Every row ran with `runtime_available_parallelism` = 64 on `thinkstation1`
+(AMD Ryzen Threadripper PRO 5975WX, 32C/64T), tree at git_sha b4f64f2723a8.
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.00044 and pandas
+median ratio 1.00338 on the `loc_labels` row; across all twelve nulls in the table the
+range is 0.98752 to 1.01257 and every one is inside the 2% limit.
+
+**Median-CI decision:** `loc_labels` effect median 14.688x, 95% CI [14.47212,
+14.94692] excluding unity, claim log-effect 2.68702 against a required threshold of
+0.05369 — cleared by a factor of fifty. The narrowest margin in the table is
+`to_datetime`, claim 0.36146 against required 0.12760, still cleared 2.8-fold.
+
+**CV role:** provenance only, no vote.
+
+**THE WORST ROW HERE BEATS PANDAS BY 43%, AND THE BEST BY MORE THAN FOURTEEN TIMES.**
+`loc_labels` and `join_inner` are both levers this ledger already records shipping;
+what was missing was a vs-incumbent row proving the shipped state beats the incumbent
+rather than beating our own past. It does, on all six.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the string family, seven certified rows on one ELF, 1.43x to 9.53x, including two independent replicates each of `str_len`, `str_groupby_sum_arrow` and `str_value_counts_arrow`
+
+**Campaign result class:** incumbent-win.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=1753af69f2b9d76b7358ab2f0be6face6856c2cac713ae3c7c4f99a7086bd2d6 (78110344 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files, 70681559 bytes), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260816T062556.055965Z-pid1323756 , giving
+measured_ratio=9.53x for the `str_contains_arrow` row.
+
+| row | ratio | 95% CI | FP p50 | pandas p50 | nulls (FP / pandas) |
+|---|---:|---|---:|---:|---|
+| `str_contains_arrow @1M` | **9.53x** | [9.09474, 9.88616] | 1927.85us | 18022.19us | 0.99130 / 0.98829 |
+| `str_len @1M` (a) | **3.377x** | [3.34926, 3.44646] | 3041.64us | 10346.95us | 1.00215 / 0.99709 |
+| `str_len @1M` (b) | **3.287x** | [3.21597, 3.42775] | 3076.71us | 10159.09us | 1.00290 / 0.98778 |
+| `str_groupby_sum_arrow @1M` (a) | **2.958x** | [2.91670, 2.97548] | 5959.65us | 17574.02us | 0.99397 / 1.00258 |
+| `str_groupby_sum_arrow @1M` (b) | **2.900x** | [2.84779, 2.93847] | 6062.87us | 17462.81us | 0.99348 / 1.00874 |
+| `str_value_counts_arrow @1M` (a) | **1.442x** | [1.36736, 1.47412] | 9652.06us | 13935.06us | 1.00262 / 0.99881 |
+| `str_value_counts_arrow @1M` (b) | **1.430x** | [1.39188, 1.44663] | 8898.98us | 12691.36us | 0.99087 / 1.00282 |
+
+**THREE INDEPENDENT REPLICATE PAIRS, AND THEY AGREE TO WITHIN 2.7%, 2.0% AND 0.8%.**
+`str_len` 3.377 vs 3.287, `str_groupby_sum_arrow` 2.958 vs 2.900, `str_value_counts`
+1.442 vs 1.430 — separate invocations, separate processes, minutes apart. That is
+worth more than any single row in the table: it is the campaign's own estimate of its
+run-to-run reproducibility at fixed binary and fixed host, and it is tight.
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.99130 and pandas
+median ratio 0.98829 on the `str_contains_arrow` row; all fourteen nulls in the table
+lie between 0.98778 and 1.00874, inside the 2% limit.
+
+**Median-CI decision:** `str_contains_arrow` effect median 9.53x, 95% CI [9.09474,
+9.88616] excluding unity, claim log-effect 2.25444 against a required threshold of
+0.22539, cleared tenfold. Tightest in the table is `str_value_counts_arrow` (b),
+claim 0.35759 against required 0.10135, cleared 3.5-fold.
+
+**CV role:** provenance only, no vote.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `str_startswith_arrow @1M` certifies at BOTH 1.275x and 4.824x on the same host and the same day, and the difference is the THREAD CAP, not the code. The capped row has the cleanest nulls in the batch
+
+**Campaign result class:** incumbent-win.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=e0849dd782e33c06d269ac4d597fc00a41eb23ab1ab259b3f339ead4d10389a6 (78114096 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files, 70681559 bytes), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260816T064405.329514Z-pid1619061 , giving
+measured_ratio=4.824x for the unconstrained `str_startswith_arrow` row.
+
+| row | parallelism | ratio | 95% CI | FP p50 | pandas p50 | nulls (FP / pandas) |
+|---|---:|---:|---|---:|---:|---|
+| `str_startswith_arrow @1M` | 64 | **4.824x** | [4.75729, 4.91178] | 797.44us | 3822.44us | 0.99250 / 0.98544 |
+| same, 27 minutes earlier | **1** | 1.275x | [1.26715, 1.27898] | 2980.09us | 3797.89us | 0.99960 / 0.99997 |
+
+**BOTH ROWS PASS ALL THREE CLAUSES. BOTH ARE HONEST. THEY ARE NOT REPLICATES.** The
+earlier one ran with `affinity_cpus=[0]`, `affinity_logical_cpu_cap=1` and
+`thread_count_requested=1` — a deliberate single-core run, faithfully recorded by the
+harness. pandas is single-threaded on this workload, so **its arm moved 0.6%
+(3797.89us to 3822.44us) while FrankenPandas' moved 3.74x (2980.09us to 797.44us)**.
+The whole 3.8x spread between the two certified ratios is FrankenPandas' parallelism
+being taken away and given back.
+
+**THE CAPPED ROW HAS THE CLEANEST NULLS OF ALL FIFTEEN: 0.99960 and 0.99997**, four
+and five decimal places from unity, against a batch range of 0.98544 to 1.01257. Of
+course it does — one busy core on a 64-thread host is a quiet host. **Null quality
+measures how still the machine was, not how representative the row is**, and the
+stillest row in this batch is the one that understates the subject by 3.74x. That is
+the shape the orders asked about when they asked whether our gates reject good
+measurements: this gate does not reject anything here, it *accepts* two rows that
+answer different questions and offers no signal that they differ.
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.99250 and pandas
+median ratio 0.98544 on the 64-way row; the 1-way row's nulls are 0.99960 and 0.99997.
+All four are inside the 2% limit.
+
+**Median-CI decision:** 64-way effect median 4.824x, 95% CI [4.75729, 4.91178]
+excluding unity, claim log-effect 1.57369 against a required threshold of 0.13786,
+cleared elevenfold. The 1-way row also cleared its own threshold (claim 0.24278 versus
+required 0.01630) — passing the gate is not the thing in question.
+
+**CV role:** provenance only, no vote. Worth recording anyway: cv was **0.28% on the
+capped row and 17.54% on the unconstrained one**. The row with the best-looking
+dispersion is again the misleading one, which is exactly why cv does not vote.
+
+**FIXED, IN THE ONE PLACE THAT WOULD HAVE PROPAGATED THE ERROR.**
+`scripts/unbanked_certified_rows.py` now prints each row's effective parallelism and
+marks a capped row with `!`, because that worklist is where these two rows sat side by
+side looking like replicates, and tabulating them together is exactly the mistake I
+was about to make this turn. It reads `runtime_available_parallelism`, not
+`thread_count_requested` (None on every unconstrained run) and not
+`thread_count_actually_used` (reads 1 even on the 64-way row — this ledger already
+records that field as unreliable in both directions).
+
+**TWO BINARIES, ONE COMMIT.** This ELF and the string-family ELF above both report
+git_sha 8e2f31be27c0 and differ by 3752 bytes. The committed diff between that sha and
+the previous one touches no `.rs` file at all. The binaries therefore differ by
+UNCOMMITTED working-tree content at build time, which on this shared checkout is
+routine and is precisely why the executing-ELF marker is required: the commit sha does
+not identify the thing that ran, and here it demonstrably does not.

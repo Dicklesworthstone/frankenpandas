@@ -33,6 +33,15 @@ WHY THE MATCHING WORKS THIS WAY, which took three attempts:
      immediately after, which is exactly what was observed when `log @1M`
      (2.036x) was banked and re-checked.
 
+A ROW'S RATIO IS NOT INTERPRETABLE WITHOUT ITS THREAD REQUEST, which this script
+learned the hard way on 2026-08-17: two `str_startswith_arrow @1M` rows in this very
+worklist certified at 1.275x and 4.824x, both FASTER, both 3/3 clauses, twenty-seven
+minutes apart on one host with NO source change between the two commits. The only
+difference was `thread_count_requested`: 1 versus 64. pandas is single-threaded here
+so its arm moved 0.6%; FrankenPandas' moved 3.74x. Banking those two side by side as
+replicates would have manufactured a contradiction out of a documented parameter, so
+the table now prints the thread request and flags any capped row with `!`.
+
 Read-only. Runs no build, opens no network, writes nothing.
 """
 
@@ -119,9 +128,28 @@ def scan(min_ratio: float) -> list[dict]:
             hits = sum(1 for token in row_fingerprint(result) if token in prose)
             if hits:
                 continue
+            provenance = result.get("thread_provenance", {})
+            host_threads = provenance.get("logical_threads")
+            # `thread_count_requested` is None on an unconstrained run and
+            # `thread_count_actually_used` reads 1 even on a 64-way run, so neither
+            # can be trusted alone. `runtime_available_parallelism` is what the
+            # process could actually see, and it is the field that separated the
+            # 1.275x row from the 4.824x one.
+            available = provenance.get("runtime_available_parallelism") or {}
+            requested = available.get("frankenpandas") or provenance.get(
+                "thread_count_requested"
+            )
             unbanked.append(
                 {
                     "ratio": result["ratio"],
+                    "threads_requested": requested,
+                    "host_logical_threads": host_threads,
+                    # A row measured under a thread cap is NOT comparable to an
+                    # unconstrained one and must never be tabulated beside it --
+                    # see the module docstring.
+                    "thread_capped": bool(
+                        requested and host_threads and requested < host_threads
+                    ),
                     "category": result.get("category", "?"),
                     "workload": result.get("workload", "?"),
                     "size": result.get("size", "?"),
@@ -158,11 +186,25 @@ def main() -> int:
         return 0
 
     print(f"{len(rows)} fully-passing rows are recorded in no ledger or report:\n")
-    print(f"{'ratio':>9}  {'category':>12}  {'workload':>24}  {'size':>5}  artifact")
+    print(f"{'ratio':>9}  {'thr':>5}  {'category':>12}  {'workload':>24}  {'size':>5}  artifact")
     for row in rows:
+        threads = row["threads_requested"]
+        marker = f"{threads}!" if row["thread_capped"] else (str(threads) if threads else "?")
         print(
-            f"{row['ratio']:>8}x  {row['category']:>12}  {row['workload']:>24}  "
+            f"{row['ratio']:>8}x  {marker:>5}  {row['category']:>12}  {row['workload']:>24}  "
             f"{row['size']:>5}  {row['artifact']}"
+        )
+    capped = [row for row in rows if row["thread_capped"]]
+    if capped:
+        print(
+            f"\n{len(capped)} row(s) marked `!` ran under a THREAD CAP below this host's "
+            "core count.\nThey are honest rows and the harness recorded the cap, but their "
+            "ratio answers a\ndifferent question and must not be tabulated beside "
+            "unconstrained rows. Observed:\n`str_startswith_arrow @1M` certified 3/3 clauses "
+            "at 1.275x on one core and 4.824x on\nsixty-four, same host, same day, no source "
+            "change between them -- pandas' arm moved\n0.6% and FrankenPandas' moved 3.74x. "
+            "The capped row also had the CLEANEST A/A nulls\nof the batch (0.99960/0.99997), "
+            "because one busy core is a quiet host: null quality\nis not representativeness."
         )
     print(
         "\nEach needs a decision, not a rerun: read the artifact, then bank it or "
