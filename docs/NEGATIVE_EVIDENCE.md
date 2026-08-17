@@ -31640,3 +31640,51 @@ profile of `Column::sqrt` at `@10k`, where the constant is 85% of the runtime an
 therefore trivially visible, against `Column::floor` at the same size as the control.
 Re-open the width question only after the constant is either removed or shown to be
 irreducible.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the binary hot loop stops asking `is_nan` of its INPUTS on the six ops where NaN propagates; `pow` keeps both witnesses because `powf(NaN, 0.0)` is `1.0`
+
+Follow-on from the `div` rows: `div @2M` moved 48 MB at 12 GB/s against pandas'
+17.7 GB/s **while running ten threads to pandas' one vectorised pass**, and the
+per-element work numpy does not do is the witness fold —
+`input_nan |= x.is_nan() | y.is_nan()` alongside `output_nan |= r.is_nan()`, two
+extra compares and an OR on ops whose arithmetic is a handful of cycles.
+
+**`input_nan` could not simply be deleted** — it gates
+`if !input_nan { if output_nan { … } }`, which is what separates a GENERATED NaN
+from an absent operand. It can, however, be DERIVED, and the argument is per-op:
+
+  * `add`/`sub`/`mul`/`div` — IEEE propagates NaN.
+  * `mod`/`floordiv` — `python_mod_f64` and `python_floor_div_f64` both open with
+    an explicit `if lhs.is_nan() || rhs.is_nan() { return NAN }`.
+  * **`pow` — NOT propagating. `powf(NaN, 0.0)` is `1.0`.** It keeps both.
+
+So for the six, a NaN input FORCES a NaN output, `input_nan` implies `output_nan`,
+and **a clean `output_nan` proves clean inputs without reading them.** The inner loop
+now folds only the output witness, and the input scan runs only when a NaN actually
+appeared — one extra pass over data still in cache, on columns that have one.
+
+**THE TEST ATTACKS THE CLAIM, NOT THE CODE.** The correctness of this rests on
+"NaN in forces NaN out", which is true per op and FALSE in general — exactly the
+shape of generalisation this bead has recorded me getting wrong four times. So
+`binary_nan_witness_is_unchanged_by_the_output_only_fold_4kig1` asserts the claim
+directly at the element level for all six ops across `0`, `±1`, `2.5` and `±inf` on
+both sides, and asserts that `powf(NaN, 0.0)` is NOT NaN — pinning the exception, so
+that if it ever changes, `pow` can join the others deliberately rather than by
+someone noticing. It then compares the full `(data, input_nan, output_nan)` triple
+against a reference that folds both witnesses the old way, over
+`(1 << 20) + 4096` elements so the parallel arm runs, with NaNs placed in the first
+chunk, the last chunk, and both at once — a per-chunk witness that failed to combine
+would pass a small fixture. Empty and single-element inputs are checked too, because
+the derive pass must not run off the end of an empty slice.
+
+**If the claim were ever wrong for one of the six**, a NaN-carrying column would
+report `input_nan == false` and the caller would treat an absent operand as a
+generated NaN. Silent, and wrong in the direction that loses data — which is why the
+test asserts the premise rather than the outcome.
+
+**NO RATIO CLAIMED.** Three local builds were running and loadavg was 31.8 and
+rising, so no row was taken; `div @1M`/`@2M` remain at 0.473x/0.640x from the
+previous entry and re-measuring them is the next step, not a conclusion of this one.
+
+Gates: `cargo test -p fp-columnar` **648 passed / 0 failed / 0 filtered out**,
+`clippy -D warnings` clean, `fmt --check` clean.

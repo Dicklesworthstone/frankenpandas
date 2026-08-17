@@ -1967,6 +1967,9 @@ fn apply_f64_slices_nan_tracked_into(
     let mut input_nan = false;
     let mut output_nan = false;
 
+    // BOTH witnesses, for the one op that needs them. `pow` does NOT propagate
+    // NaN: `powf(NaN, 0.0)` is `1.0`, so a NaN input can produce a non-NaN output
+    // and `input_nan` cannot be recovered from `output_nan`.
     macro_rules! sweep {
         ($f:expr) => {{
             for ((x, y), d) in a.iter().zip(b).zip(data.iter_mut()) {
@@ -1978,14 +1981,47 @@ fn apply_f64_slices_nan_tracked_into(
         }};
     }
 
+    // OUTPUT WITNESS ONLY, for the six ops where NaN propagates.
+    // br-frankenpandas-4kig1.
+    //
+    // The inner loop was asking `x.is_nan() | y.is_nan()` of every element on top
+    // of the arithmetic — two extra compares and an OR per element, on ops where
+    // the divide or add is itself only a handful of cycles. `div @2M` measured
+    // 12 GB/s against pandas' 17.7 GB/s while running ten threads to pandas' one
+    // vectorised pass, and this is the per-element work numpy does not do.
+    //
+    // WHY IT IS RECOVERABLE, per op rather than in general: for add, sub, mul and
+    // div IEEE propagates NaN, and `python_mod_f64` / `python_floor_div_f64` both
+    // open with an explicit `if lhs.is_nan() || rhs.is_nan() { return NAN }`. So a
+    // NaN input FORCES a NaN output for all six, `input_nan` implies `output_nan`,
+    // and `output_nan == false` proves `input_nan == false` without looking at the
+    // inputs at all. Only when a NaN actually appears is the input scan needed, and
+    // then it is one extra pass over data already in cache.
+    macro_rules! sweep_propagating {
+        ($f:expr) => {{
+            for ((x, y), d) in a.iter().zip(b).zip(data.iter_mut()) {
+                let r = $f(*x, *y);
+                output_nan |= r.is_nan();
+                *d = r;
+            }
+        }};
+    }
+
     match op {
-        ArithmeticOp::Add => sweep!(|x: f64, y: f64| x + y),
-        ArithmeticOp::Sub => sweep!(|x: f64, y: f64| x - y),
-        ArithmeticOp::Mul => sweep!(|x: f64, y: f64| x * y),
-        ArithmeticOp::Div => sweep!(|x: f64, y: f64| x / y),
-        ArithmeticOp::Mod => sweep!(python_mod_f64),
+        ArithmeticOp::Add => sweep_propagating!(|x: f64, y: f64| x + y),
+        ArithmeticOp::Sub => sweep_propagating!(|x: f64, y: f64| x - y),
+        ArithmeticOp::Mul => sweep_propagating!(|x: f64, y: f64| x * y),
+        ArithmeticOp::Div => sweep_propagating!(|x: f64, y: f64| x / y),
+        ArithmeticOp::Mod => sweep_propagating!(python_mod_f64),
         ArithmeticOp::Pow => sweep!(|x: f64, y: f64| x.powf(y)),
-        ArithmeticOp::FloorDiv => sweep!(python_floor_div_f64),
+        ArithmeticOp::FloorDiv => sweep_propagating!(python_floor_div_f64),
+    }
+
+    // Derive the input witness only when it can possibly be true. For the
+    // propagating ops a clean output proves clean inputs, so this pass runs only
+    // on columns that actually contain a NaN somewhere.
+    if output_nan && !matches!(op, ArithmeticOp::Pow) {
+        input_nan = a.iter().any(|x| x.is_nan()) || b.iter().any(|y| y.is_nan());
     }
 
     (input_nan, output_nan)
@@ -39017,6 +39053,121 @@ mod tests {
                     assert_eq!(got.to_bits(), expected.to_bits(), "add at {i}");
                 }
             }
+        }
+
+        /// br-frankenpandas-4kig1. Six of the seven binary ops stopped folding
+        /// `input_nan` per element and now derive it only when `output_nan` fired.
+        ///
+        /// That rests on a claim which is TRUE PER OP AND FALSE IN GENERAL: a NaN
+        /// input forces a NaN output. It holds for add/sub/mul/div by IEEE and for
+        /// mod/floordiv by an explicit early return, and it FAILS for `pow`, where
+        /// `powf(NaN, 0.0)` is `1.0`. If it were ever wrong for one of the six, a
+        /// NaN-carrying column would report `input_nan == false` and the caller
+        /// would treat an absent operand as a generated NaN — silent, and wrong in
+        /// the direction that loses data.
+        ///
+        /// So this asserts the claim directly at the element level for every op,
+        /// and then asserts the whole `(data, input_nan, output_nan)` triple
+        /// against a reference that folds both witnesses the old way.
+        #[test]
+        fn binary_nan_witness_is_unchanged_by_the_output_only_fold_4kig1() {
+            use ArithmeticOp::{Add, Div, FloorDiv, Mod, Mul, Pow, Sub};
+
+            // 1. THE CLAIM ITSELF: NaN in forces NaN out, for the six — and not
+            //    for pow, which is why pow keeps both witnesses.
+            let probes = [0.0_f64, 1.0, -1.0, 2.5, f64::INFINITY, f64::NEG_INFINITY];
+            for &y in &probes {
+                for (op_name, f) in [
+                    ("add", (|a: f64, b: f64| a + b) as fn(f64, f64) -> f64),
+                    ("sub", |a: f64, b: f64| a - b),
+                    ("mul", |a: f64, b: f64| a * b),
+                    ("div", |a: f64, b: f64| a / b),
+                    ("mod", crate::python_mod_f64),
+                    ("floordiv", crate::python_floor_div_f64),
+                ] {
+                    assert!(
+                        f(f64::NAN, y).is_nan(),
+                        "{op_name}(NaN, {y:e}) must be NaN — the output-only fold \
+                         depends on it"
+                    );
+                    assert!(f(y, f64::NAN).is_nan(), "{op_name}({y:e}, NaN) must be NaN");
+                }
+            }
+            assert!(
+                !(f64::NAN).powf(0.0).is_nan(),
+                "powf(NaN, 0.0) must be 1.0 — this is why pow is excluded, and if \
+                 it ever changes pow can join the others"
+            );
+
+            // 2. THE TRIPLE, against a reference that folds both witnesses.
+            fn reference(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<f64>, bool, bool) {
+                let f = crate::binary_f64_apply(op);
+                let (mut input_nan, mut output_nan) = (false, false);
+                let mut out = Vec::with_capacity(a.len());
+                for (&x, &y) in a.iter().zip(b.iter()) {
+                    let r = f(x, y);
+                    input_nan |= x.is_nan() | y.is_nan();
+                    output_nan |= r.is_nan();
+                    out.push(r);
+                }
+                (out, input_nan, output_nan)
+            }
+
+            // Above 1 << 20 so the parallel arm runs too, and NaNs placed to land
+            // in different chunks — a per-chunk witness that failed to combine
+            // would pass a small fixture.
+            let n = (1usize << 20) + 4096;
+            let mut a: Vec<f64> = (0..n).map(|i| (i % 97) as f64 - 40.0).collect();
+            let mut b: Vec<f64> = (0..n).map(|i| (i % 13) as f64 - 6.0).collect();
+
+            for (label, nan_at) in [
+                ("no nan", vec![]),
+                ("nan in lhs, first chunk", vec![(true, 7usize)]),
+                ("nan in rhs, last chunk", vec![(false, n - 5)]),
+                (
+                    "nan both sides, far apart",
+                    vec![(true, 11), (false, n - 11)],
+                ),
+            ] {
+                let (mut la, mut lb) = (a.clone(), b.clone());
+                for &(in_lhs, idx) in &nan_at {
+                    if in_lhs {
+                        la[idx] = f64::NAN
+                    } else {
+                        lb[idx] = f64::NAN
+                    }
+                }
+                for op in [Add, Sub, Mul, Div, Mod, Pow, FloorDiv] {
+                    let (want, want_in, want_out) = reference(op, &la, &lb);
+                    let (got, got_in, got_out) = crate::apply_f64_slices_nan_tracked(op, &la, &lb);
+                    assert_eq!(
+                        got_in, want_in,
+                        "{label} / {op:?}: input_nan drifted — a false here turns an \
+                         absent operand into a generated NaN"
+                    );
+                    assert_eq!(got_out, want_out, "{label} / {op:?}: output_nan drifted");
+                    assert_eq!(got.len(), want.len(), "{label} / {op:?}: length drift");
+                    for i in 0..got.len() {
+                        assert_eq!(
+                            got[i].to_bits(),
+                            want[i].to_bits(),
+                            "{label} / {op:?} at {i}"
+                        );
+                    }
+                }
+            }
+
+            // Keep the zero-length and single-element edges honest: the derive
+            // pass must not run off the end of an empty slice.
+            for op in [Add, Div, Mod, Pow] {
+                let (_, i0, o0) = crate::apply_f64_slices_nan_tracked(op, &[], &[]);
+                assert!(!i0 && !o0, "{op:?}: empty input has no NaN either way");
+            }
+            a.truncate(1);
+            b.truncate(1);
+            a[0] = f64::NAN;
+            let (_, i1, o1) = crate::apply_f64_slices_nan_tracked(Add, &a, &b);
+            assert!(i1 && o1, "a single NaN element must set both witnesses");
         }
 
         #[test]
