@@ -108,6 +108,60 @@ PAIRED_ROUNDS = 25
 BALANCED_SQUARE = "ABBAABBA"
 BALANCED_SQUARE_ROUNDS = 9
 BOOTSTRAP_RESAMPLES = 10_000
+
+# Adaptive round scaling for FAST workloads (CrimsonPine, br-frankenpandas-4kig1).
+#
+# MEASURED over 226 rows in artifacts/bench/: the A/A null gate is far harder for a
+# short operation than a long one, at the SAME 2% limit.
+#
+#     incumbent p50   rows   median worst-arm |dev|   both-arms pass @2%
+#     0-200us           54            2.27%                  40.7%
+#     200us-1ms         21            3.45%                  33.3%
+#     1-5ms             24            1.78%                  50.0%
+#     >5ms             127            1.61%                  54.3%
+#
+# Nine ABBAABBA rounds of a 186us call is under 7ms of actual timed work, so
+# per-call overhead and scheduler jitter are a large fraction of it. That bias
+# points the wrong way for this campaign: FrankenPandas' WORST ratios are the fast
+# ops (floor/ceil/trunc @1M, incumbent ~180us, in the 40.7% bucket), so the gate is
+# hardest exactly where the losses are biggest and the rows we most need are the
+# ones most often discarded. Six x86-64-v3 floor rows across two windows reproduced
+# a 2.8-3.2x effect and not one of them certified.
+#
+# THE FIX IS NOT TO LOOSEN THE LIMIT. Raising 2% to 3% would lift both-arm pass from
+# 48.7% to 65.5%, and that is gate self-weakening -- docs/NEGATIVE_EVIDENCE.md
+# records a 2.7x phantom that a clean null was the only thing standing against. Null
+# deviation is a SAMPLING property and shrinks with samples, so the measurement is
+# scaled to the op instead of the threshold to the failures.
+ADAPTIVE_TARGET_TIMED_US = 40_000.0
+ADAPTIVE_MAX_ROUNDS = 120
+
+
+def adaptive_balanced_square_rounds(
+    observed_slot_us: float,
+    *,
+    base_rounds: int = BALANCED_SQUARE_ROUNDS,
+    target_timed_us: float = ADAPTIVE_TARGET_TIMED_US,
+    max_rounds: int = ADAPTIVE_MAX_ROUNDS,
+) -> int:
+    """Rounds needed so ONE arm's timed region reaches `target_timed_us`.
+
+    Each round contributes `BALANCED_SQUARE.count("A")` timed slots per arm, so the
+    timed region per arm is `rounds * slots * observed_slot_us`.
+
+    ⚠ THE INVARIANT THAT MAKES THIS NOT GATE-WEAKENING: the result is NEVER below
+    `base_rounds`. This function can only ADD samples, never remove them, so no
+    workload is measured less carefully than it is today and no previously-banked
+    methodology is loosened. A non-finite or non-positive input returns
+    `base_rounds` rather than guessing.
+    """
+    slots = BALANCED_SQUARE.count("A")
+    if not math.isfinite(observed_slot_us) or observed_slot_us <= 0.0 or slots <= 0:
+        return base_rounds
+    needed = math.ceil(target_timed_us / (slots * observed_slot_us))
+    return max(base_rounds, min(max_rounds, needed))
+
+
 NULL_CI_CONFIDENCE = 0.95
 DECIDABILITY_MARGIN = 2.0
 NULL_MEDIAN_MAX_ABS_DEVIATION = 0.02
