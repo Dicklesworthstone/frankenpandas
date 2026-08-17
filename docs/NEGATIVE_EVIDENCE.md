@@ -26945,3 +26945,63 @@ moved (747 → 695us p50) while pandas got materially FASTER (219 → 171us), so
 measured ratio fell from 0.297x to 0.245x. **A quieter host made our number look
 WORSE**, because the incumbent has more to gain from idle cores than a
 single-threaded arm does. "Wait for quiet" is not a neutral act on a ratio.
+
+### 2026-08-16 SilverFalcon (br-frankenpandas-oxv4u) — a CERTIFIED 1.68x at `df_dot @1M` that I am NOT banking: the arms sat at different clocks and the minima disagree with the median — REJECT
+
+Same-window ISA pair at `dim = 1000`, 21 rounds each, baseline then AVX2 back to
+back. `uptime` 5.11 1-min at launch — the quietest of the session — rising to 83
+by the end, self-inflicted by the arms (63-64 threads each).
+
+| | baseline `4a89472f…` | +avx2,+fma `76661ac3…` |
+|---|---|---|
+| verdict | NULL_UNDECIDABLE 1.089x | **FASTER 1.680x, all three clauses** |
+| effect CI | [0.9196, 1.1892] | [1.5685, 1.7245] |
+| claim vs required log-effect | 0.0857 / 0.2758 | 0.5186 / 0.1581, cleared by 3.3x |
+| FP min / p50 / cv / threads | 18.338 / 19.782 ms / 4.0% / 63 | 14.409 / **15.580** ms / 3.5% / 58 |
+| pandas min / p50 / cv | 9.344 / 22.301 ms / 28.1% | 13.121 / **26.633** ms / 18.4% |
+| A/A nulls FP / pandas | 0.986731 / 0.921680 | **0.998014 / 0.994222** |
+| best-vs-best | 0.5095 | **0.9106** |
+| arms on one clock | **false**, 1.3775 | **false**, 1.2796 |
+| loadavg across the cell | 5.58 -> 69.39 | 70.96 -> 83.27 |
+
+**THE GATE SAYS CERTIFIED AND I AM REFUSING THE ROW ANYWAY, on the evidence my
+own instruments added this session.** Two independent flags fire on it:
+
+1. **The arms did not share a clock.** FrankenPandas' busy cores ran at 3730.8
+   MHz against pandas' 3868.0, a ratio of 1.2796. A ratio whose arms sat at
+   different frequencies is a frequency ratio in disguise, and this one is 28%
+   apart.
+2. **The median and the minima point in OPPOSITE directions.** Gated median
+   1.680x FASTER; best-vs-best **0.9106**, i.e. comparing each arm's fastest
+   sample FrankenPandas is still slightly SLOWER (14.409 ms against pandas'
+   13.121). That is the exact signature that exposed the retracted 1.187x row.
+
+The mechanism is visible in the table: pandas' p50 is **26.633 ms** in the AVX2
+cell against **22.301 ms** in the baseline cell, because the AVX2 run happened at
+loadavg 71-83 while the baseline ran from 5.6. **The incumbent degraded more than
+the subject under load I created**, and the gate cannot see that — both A/A nulls
+were clean (0.998, 0.994), so all three clauses passed on a comparison that is
+not like-for-like.
+
+**A/A null control (same invocation):** AVX2 row, 21 balanced-square rounds,
+FrankenPandas median ratio 0.998014 and pandas median ratio 0.994222 — both
+inside the 2%-of-unity limit, which is precisely why this row certified and
+precisely why a clean null is necessary but not sufficient. The baseline row's
+nulls were FrankenPandas 0.986731 and pandas 0.921680, the latter outside the
+limit, so that row is refused on the null clause as well.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=76661ac389c685da64e582aecd53aacb398c3dbe3557c6fd724847f2d6561e9f (78866952 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench-avx2fma
+
+**Decision: REJECT the 1.68x as a vs-incumbent claim.** What survives is the
+FrankenPandas-side comparison, which no incumbent-side or clock artifact touches:
+**FP's own fastest sample improves 18.338 -> 14.409 ms with AVX2 at `dim = 1000`,
+1.27x**, matching the 1.24x FP-vs-FP figure measured independently earlier today
+and the 1.175x at `dim = 316`. Three shapes, three methods, one number.
+
+**Method note worth more than the row:** this is the second certified row this
+session that the diagnostics refute, and the first where BOTH nulls were clean.
+The three-clause gate is necessary and it is not sufficient — a like-for-like
+comparison also requires the arms to have run at the same clock and the median
+to agree in direction with the minima. Both checks now ride on every row
+automatically.
