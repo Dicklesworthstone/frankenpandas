@@ -30103,3 +30103,76 @@ v3 with the incumbent held at 180-205us in every quoted row.
 
 **CV role:** provenance only, no vote — and here it was the DIAGNOSTIC: 41.56% and
 34.88% on the cold runs against 7.4-9.4% on every warm one.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `atan2 @1M` CERTIFIES at 4.864x and `hypot @1M` at 4.979x; `pow @1M` certifies as a LOSS at 0.928x, and the cause is a threshold 4.9% above the workload size
+
+Three rows on ELF `e94c077a` in one undisturbed window (no build started in it),
+loadavg 26.76 → 23.49, per-arm clocks within 1.5%. **All three passed both A/A
+nulls.**
+
+| row | ratio | verdict | FP cv | FP threads |
+|---|---|---|---|---|
+| `atan2 @1M` | **4.864x** | **FASTER** | 56.43% | 10 |
+| `hypot @1M` | **4.979x** | **FASTER** | 6.17% | 10 |
+| `pow @1M` | **0.928x** | **SLOWER** | **1.60%** | **2** |
+
+**THE PREDICTION I RECORDED LAST TURN HELD, AND IT WAS ABOUT CERTIFIABILITY, NOT
+DIRECTION.** I wrote that `pow` should be among the easiest rows in this family to
+certify because at 11.7ms it sits in the low-dispersion duration band. It came back
+at **cv 1.60% — the cleanest row of the entire session** — and certified on the
+first attempt. It also came back a loss, which the prediction said nothing about.
+
+**AND THE LOSS EXPLAINS ITSELF THROUGH THE THREAD COUNT.** `pow` ran on **2**
+threads while its two siblings — same libm class, same binary path — ran on 10 and
+won 4.9x. Reading the code rather than guessing: `apply_f64_slices_nan_tracked` gates
+its parallel arm on `const PARALLEL_MIN_LEN: usize = 1 << 20`. **That is 1,048,576.
+The corpus's canonical "1M" is 1,000,000.** Every 1M-row f64 binary op falls **4.9%
+short** of the parallel arm and runs single-threaded against a pandas arm using 67
+threads.
+
+**Confirmed by crossing it, same binary, minutes apart:**
+
+```
+  pow @1M  (1_000_000 < 1_048_576)   0.928x SLOWER   FP threads  2   p50 11530us
+  pow @2M  (2_000_000 > 1_048_576)   3.965x FASTER   FP threads 10   p50  6006us
+```
+
+**A 4.3x swing decided by 48,576 elements.** The @2M row's own null failed
+(1.021455) so it is not banked, but the mechanism is not in doubt: the thread count
+and the per-element time both move exactly as the threshold predicts.
+
+**A/A null control (same invocation):** all three rows passed both arms —
+`atan2` FrankenPandas median ratio 1.014214 / pandas 1.007090, `hypot` 1.015143 /
+1.000952, `pow` 1.001031 / 1.005446 — every one inside the 2% limit, so the
+`pow` loss is a gated result and not an artefact of a drifting instrument.
+
+**Counted mechanism:** the threshold is 1048576 elements and the workload is
+1000000, so 48576 elements decide it; FrankenPandas retires the work on 2 threads
+below it and 10 above, and the per-element time falls from 11530us per 1000000 rows
+to 6006us per 2000000 rows — a 3.8x reduction in per-element cost that the required
+single-threaded arm failed to deliver.
+
+**THIS IS THE SHAPE THE CROSS-PROJECT CHECK ASKED ABOUT, IN THE CODE RATHER THAN THE
+GATE.** I audited my gates for a threshold sitting at the operating point and
+correctly found none. I did not think to audit the ordinary constants in the
+kernels, and one of them sat 4.9% above the single most-used size in the corpus. A
+power-of-two constant meeting a decimal workload size is a silent, permanent
+handicap on exactly the measurements the campaign runs most.
+
+**THE FIX, and why the number is not invented.** `add`/`sub`/`mul`/`div` genuinely
+belong on the high threshold: they are bandwidth-bound, LLVM autovectorizes them,
+and this bead has measured five times that parallelism does not pay for cheap
+per-element work. `powf`, `python_mod_f64` and `python_floor_div_f64` are the
+opposite. Those three now use `elementwise_witness_policy()`'s `par_min` — the
+campaign's existing constant for exactly this decision on the unary side — so the
+two families finally agree. **The i64 sibling already drew this distinction; its
+comment reads "Mod/FloorDiv are COMPUTE-bound → parallelize". The f64 path simply
+never got it.**
+
+Gates: `cargo test -p fp-columnar` **645 passed / 0 failed / 0 filtered out**,
+`clippy -D warnings` clean, `fmt --check` clean. The new test runs all three
+compute-bound ops at 300_000 — above the new threshold, below the old one, the exact
+band where the two arms now disagree about which path to take — and requires
+bit-identity with the scalar formula plus correct missingness, including deliberate
+NaN-makers so the per-chunk NaN reduction is exercised rather than uniformly false.
+`add` is checked at the same length to confirm the cheap ops are untouched.

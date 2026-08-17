@@ -1867,8 +1867,44 @@ fn binary_f64_apply(op: ArithmeticOp) -> fn(f64, f64) -> f64 {
 #[inline]
 fn apply_f64_slices_nan_tracked(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<f64>, bool, bool) {
     debug_assert_eq!(a.len(), b.len());
+    // CHEAP OPS KEEP 2^20; COMPUTE-BOUND OPS DO NOT. br-frankenpandas-4kig1.
+    //
+    // A single threshold for every binary op put `pow` on the wrong side of it at
+    // the most common benchmark size, and the cost was a CERTIFIED LOSS:
+    //
+    //   pow @1M  (1_000_000 < 1_048_576)  0.928x SLOWER, both nulls passing,
+    //                                     FP peak threads 2, p50 11530us
+    //   pow @2M  (2_000_000 > 1_048_576)  3.965x FASTER,
+    //                                     FP peak threads 10, p50  6006us
+    //
+    // Same op, same binary, same host, minutes apart: a 4.3x swing decided by
+    // 48_576 elements. `1 << 20` is 1_048_576 and the corpus's canonical "1M" is
+    // 1_000_000, so every 1M-row f64 binary op fell 4.9% short of the parallel arm
+    // and ran single-threaded against a pandas arm using 67 threads.
+    //
+    // `add`/`sub`/`mul`/`div` genuinely belong on the high threshold — they are
+    // bandwidth-bound, LLVM autovectorizes them to packed SIMD, and this bead has
+    // measured five times that parallelism does not pay for cheap per-element
+    // work. `powf`, `python_mod_f64` and `python_floor_div_f64` are the opposite:
+    // libm-class calls where the same bead measured 2.6-5x from threads, and where
+    // `atan2` and `hypot` — the same libm class, already on a parallel arm —
+    // certified at 4.864x and 4.979x in the same window that `pow` lost.
+    //
+    // The i64 sibling ALREADY draws this distinction; its comment reads
+    // "Mod/FloorDiv are COMPUTE-bound -> parallelize; add/sub/mul ...". The f64
+    // path simply never got it.
+    //
+    // The compute-bound threshold is `elementwise_witness_policy()`'s `par_min`,
+    // not a number invented here: it is the campaign's existing constant for
+    // exactly this decision on the unary side, so the two families now agree.
     const PARALLEL_MIN_LEN: usize = 1 << 20;
     const PARALLEL_MAX_CHUNKS: usize = 8;
+    let parallel_min_len = match op {
+        ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => {
+            elementwise_witness_policy().1
+        }
+        _ => PARALLEL_MIN_LEN,
+    };
 
     let mut data = vec![0.0_f64; a.len()];
 
@@ -1876,7 +1912,7 @@ fn apply_f64_slices_nan_tracked(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<
         .map_or(1, usize::from)
         .min(PARALLEL_MAX_CHUNKS)
         .min(a.len().max(1));
-    if a.len() >= PARALLEL_MIN_LEN && worker_count >= 2 {
+    if a.len() >= parallel_min_len && worker_count >= 2 {
         let chunk_len = a.len().div_ceil(worker_count);
         let mut chunks = Vec::with_capacity(worker_count);
         let mut rest = data.as_mut_slice();
@@ -38797,6 +38833,103 @@ mod tests {
                 out.validity().get(0) && out.validity().get(LEN - 1),
                 "the surrounding rows must stay present"
             );
+        }
+
+        /// br-frankenpandas-4kig1. The f64 binary parallel threshold is now
+        /// op-aware, so `pow`/`mod`/`floordiv` cross it far earlier than
+        /// `add`/`sub`/`mul`/`div`.
+        ///
+        /// A threshold change alters WHICH code computes the answer, so what has
+        /// to hold is that both sides compute the SAME answer. This runs each op
+        /// at a length that is above the compute-bound threshold and below the
+        /// cheap-op one — the band where the two arms now disagree about which
+        /// path to take — and requires bit-identity with the scalar formula, plus
+        /// the NaN bookkeeping that the parallel arm folds per chunk and the
+        /// serial arm folds inline.
+        #[test]
+        fn compute_bound_binary_ops_are_bit_identical_across_the_threshold_4kig1() {
+            // 300_000: above elementwise par_min (200_000), below 1 << 20.
+            // Pow/Mod/FloorDiv now go parallel here; Add/Sub/Mul/Div stay serial.
+            const LEN: usize = 300_000;
+            let mut state: u64 = 0x4c19_2026_0817_0001;
+            let mut left: Vec<f64> = Vec::with_capacity(LEN);
+            let mut right: Vec<f64> = Vec::with_capacity(LEN);
+            for i in 0..LEN {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let unit = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                // Mixed signs and magnitudes, plus deliberate NaN-makers, so the
+                // per-chunk NaN reduction is actually exercised rather than being
+                // uniformly false.
+                left.push(match i % 5000 {
+                    0 => -2.0, // negative base: powf -> NaN for frac exp
+                    1 => 0.0,
+                    2 => f64::INFINITY,
+                    _ => unit * 100.0 - 50.0,
+                });
+                right.push(match i % 5000 {
+                    0 => 0.5, // fractional exponent
+                    1 => 0.0,
+                    2 => f64::INFINITY,
+                    _ => unit * 10.0 - 5.0,
+                });
+            }
+
+            let lhs = Column::from_f64_values(left.clone());
+            let rhs = Column::from_f64_values(right.clone());
+
+            type Bin = (
+                &'static str,
+                fn(&Column, &Column) -> Result<Column, ColumnError>,
+                fn(f64, f64) -> f64,
+            );
+            let ops: [Bin; 3] = [
+                ("pow", Column::pow, |a: f64, b: f64| a.powf(b)),
+                ("mod", Column::r#mod, crate::python_mod_f64),
+                ("floordiv", Column::floordiv, crate::python_floor_div_f64),
+            ];
+
+            for (name, op, oracle) in ops {
+                let out = op(&lhs, &rhs).expect(name);
+                assert_eq!(out.len(), LEN, "{name}: length drift");
+                for (i, (&x, &y)) in left.iter().zip(right.iter()).enumerate() {
+                    let expected = oracle(x, y);
+                    let value = &out.values()[i];
+                    if expected.is_nan() {
+                        assert!(
+                            value.is_missing(),
+                            "{name}({x:e}, {y:e}) is NaN, so slot {i} must be MISSING — \
+                             a per-chunk NaN flag that failed to combine would pass \
+                             every other assertion here"
+                        );
+                    } else {
+                        match value {
+                            Scalar::Float64(got) => assert_eq!(
+                                got.to_bits(),
+                                expected.to_bits(),
+                                "{name} at {i}: inputs {x:e}, {y:e} — crossing the \
+                                 threshold must not change a single value"
+                            ),
+                            other => panic!("{name} at {i}: expected Float64, got {other:?}"),
+                        }
+                    }
+                }
+            }
+
+            // The cheap ops must be UNAFFECTED at this length: they still take the
+            // serial arm, and their values must be exact either way.
+            let sum = Column::from_f64_values(left.clone())
+                .add(&Column::from_f64_values(right.clone()))
+                .expect("add");
+            for (i, (&x, &y)) in left.iter().zip(right.iter()).enumerate().take(1000) {
+                let expected = x + y;
+                if expected.is_nan() {
+                    assert!(sum.values()[i].is_missing(), "add NaN at {i}");
+                } else if let Scalar::Float64(got) = &sum.values()[i] {
+                    assert_eq!(got.to_bits(), expected.to_bits(), "add at {i}");
+                }
+            }
         }
 
         #[test]
