@@ -25125,6 +25125,17 @@ impl Column {
 
     /// Exponential (e^x) of numeric values. Matches numpy's exp ufunc.
     pub fn exp(&self) -> Result<Self, ColumnError> {
+        // TOTAL, and this function's own comment below already said so: "exp of
+        // finite is finite/inf, never NaN". It nonetheless paid the shared arm's
+        // per-element `is_nan()` and its validity word per 64 elements to
+        // re-establish that at runtime. `exp(+inf)` = `+inf`, `exp(-inf)` = `0.0`,
+        // overflow gives `+inf` and underflow gives `0.0` — there is no input that
+        // yields NaN, so the mask is a constant. Asserted from std by
+        // `total_unary_ops_declare_their_domain_correctly_4kig1`.
+        // br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::exp) {
+            return Ok(out);
+        }
         // Use the nullable-capable helper (mirror of log) so a nullable Float64
         // input gets the typed path too (the all-valid `typed_float_unary_par`
         // bailed on any NaN → Scalar loop). Bit-identical for all-valid input
@@ -37176,6 +37187,10 @@ mod tests {
         fn total_unary_ops_declare_their_domain_correctly_4kig1() {
             // 1. The totality claims, asserted against std at the edges.
             for (name, y) in [
+                ("exp(+inf)", f64::INFINITY.exp()),
+                ("exp(-inf)", f64::NEG_INFINITY.exp()),
+                ("exp(710) overflow", 710.0_f64.exp()),
+                ("exp(-746) underflow", (-746.0_f64).exp()),
                 ("expm1(+inf)", f64::INFINITY.exp_m1()),
                 ("expm1(-inf)", f64::NEG_INFINITY.exp_m1()),
                 ("cbrt(+inf)", f64::INFINITY.cbrt()),
@@ -37211,7 +37226,8 @@ mod tests {
                 fn(f64) -> f64,
                 bool,
             );
-            let ops: [Op; 4] = [
+            let ops: [Op; 5] = [
+                ("exp", Column::exp, f64::exp, true),
                 ("expm1", Column::expm1, f64::exp_m1, true),
                 ("cbrt", Column::cbrt, f64::cbrt, true),
                 ("atan", Column::atan, f64::atan, true),
