@@ -19843,6 +19843,17 @@ impl Column {
     /// Borrowed typed numeric view for the pairwise cov/corr fast paths — `Some`
     /// only for an all-valid or nullable Float64/Int64 column with a slice-exposing
     /// backing.
+    /// ⚠ THE "or nullable" IN THE DOC ABOVE IS ASPIRATIONAL, NOT CURRENT.
+    /// br-frankenpandas-1hc9i: I widened this match to
+    /// `Float64 | Float64Nullable` and `Int64 | Int64Nullable`, and my own
+    /// mechanism assertion proved the arms UNREACHABLE and I reverted them. No
+    /// crate ever constructs a `Column` with a nullable dtype — `Float64Nullable`
+    /// lives in the fp-types lattice and in fp-io's mappers, but
+    /// `dtype: DType::Float64Nullable` is assigned nowhere — so the only way to
+    /// get one is `Column::new(DType::Float64Nullable, ..)`, which yields a
+    /// generic `from_vec` backing with no contiguous buffer for a typed view to
+    /// borrow. Widening the dtype gate without a constructor to feed it is dead
+    /// code. Fix the constructor side first, then this arm becomes real.
     fn typed_numeric_values(&self) -> Option<TypedNumericValues<'_>> {
         match self.dtype {
             DType::Float64 => self
@@ -30965,6 +30976,54 @@ mod tests {
         assert_eq!(out.values()[0], Scalar::Float64(1.0));
         assert_eq!(out.values()[1], Scalar::Float64(f64::INFINITY));
         assert_eq!(out.values()[2], Scalar::Float64(2.0));
+    }
+
+    /// br-frankenpandas-1hc9i. `cov` must skip a pair whose left element is
+    /// MISSING rather than folding the payload the nullable backing still stores
+    /// in that slot.
+    ///
+    /// Kept from a reverted lever, and worth keeping on its own: it is the only
+    /// coverage that a nullable-dtype column reaches `cov` at all and gets the
+    /// same answer as the same data with the incomplete pair simply absent.
+    #[test]
+    fn a_missing_pair_is_skipped_not_folded_by_cov_on_a_nullable_column_1hc9i() {
+        let mk = |dtype: DType, vals: Vec<Scalar>| Column::new(dtype, vals).expect("col");
+        let f = Scalar::Float64;
+        // Slot 2 is missing on the left. The right column carries an ordinary
+        // value there, so folding the hole in would move the answer.
+        let nx = mk(
+            DType::Float64Nullable,
+            vec![
+                f(1.0),
+                f(2.0),
+                Scalar::Null(NullKind::Null),
+                f(8.0),
+                f(16.0),
+            ],
+        );
+        let ny = mk(
+            DType::Float64Nullable,
+            vec![f(2.0), f(1.0), f(7.0), f(5.0), f(11.0)],
+        );
+        // The same data with the incomplete pair simply absent.
+        let rx = mk(
+            DType::Float64Nullable,
+            vec![f(1.0), f(2.0), f(8.0), f(16.0)],
+        );
+        let ry = mk(
+            DType::Float64Nullable,
+            vec![f(2.0), f(1.0), f(5.0), f(11.0)],
+        );
+
+        let (Scalar::Float64(with_hole), Scalar::Float64(without)) = (nx.cov(&ny), rx.cov(&ry))
+        else {
+            panic!("cov is a Float64");
+        };
+        assert_eq!(
+            with_hole.to_bits(),
+            without.to_bits(),
+            "the missing pair was folded into the covariance instead of skipped"
+        );
     }
 
     /// br-frankenpandas-1hc9i, fourth instance. `take_positions`' typed primitive

@@ -28485,3 +28485,65 @@ Gates: `cargo test -p fp-columnar` **640 passed / 0 failed / 0 filtered out**,
 CHANGED path specifically — 300_000 elements, above the old 200_000 default, so the
 column used to run parallel — and asserts bit-identity against the scalar oracle
 plus that one negative among 300_000 still comes back missing at exactly its index.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-1hc9i) — REJECTED: widening the pairwise typed view to nullable dtypes. My own mechanism assertion proved the arms UNREACHABLE, and the reason kills a 183-call-site audit I was about to start
+
+`Column::typed_numeric_values` carries a doc comment reading "`Some` only for an
+all-valid **or nullable** Float64/Int64 column", and its match handled only the
+non-nullable pair — so `cov`, `corr` and the other pairwise statistics appeared to
+be dropping every nullable column to the generic Scalar path. That is the fifth
+instance of the catch-all class this bead named, it had the intent written down
+already, and the blast radius looked ideal: seven call sites, all returning a
+`Scalar`, so no output column whose dtype could be silently re-typed.
+
+I widened it. **The lever is inert and I reverted it.**
+
+**Counted mechanism:** the test asserted `nx.typed_numeric_values().is_some()`
+before comparing any values, and it FAILED. `Column::new(DType::Float64Nullable,
+..)` produces a `ScalarValues::from_vec` backing — `Column::new`'s typed-backing
+match has arms only for `(ColumnData::Bool, DType::Bool)` and
+`(ColumnData::Int64, DType::Int64)` — so there is no contiguous `f64` buffer for a
+typed view to borrow, and the widened arm cannot fire.
+
+**THE ROOT FACT, and it is the useful part: NO CRATE EVER CONSTRUCTS A COLUMN WITH
+A NULLABLE DTYPE.** `grep -n "dtype: DType::Float64Nullable" crates/*/src/lib.rs`
+returns NOTHING. The dtype has 82 mentions in fp-types (cast lattice, missing-value
+kind, serde spelling) and 13 in fp-io (SQL and arrow mappers), but it is never
+assigned to a `Column`. The only way to obtain one is to ask for it explicitly, and
+that path yields an untyped backing.
+
+**WHAT THIS SAVES.** I was one step from auditing `as_f64_slice_with_validity`'s
+54 fp-columnar callers plus 129 more across fp-frame and fp-groupby, on the theory
+that nullable columns were missing every typed fast path. They are not missing the
+fast paths; they do not exist. **Do not widen dtype gates for nullable columns
+until a constructor produces one.** The ordering is: give the nullable dtypes a
+typed backing in `Column::new` (and decide there what a nullable-typed output's
+dtype should be, which is the real design question), and only then widen the
+readers. Widening readers first is dead code that reviews as progress.
+
+**Counted mechanism:** 0 constructors assign a nullable dtype to a Column; 1 of 1
+mechanism assertions failed on the widened arm; 183 call sites left un-audited as a
+direct result, and correctly so.
+
+**WHAT SURVIVES, and why it is not the same thing.** The `take_positions` pairing
+landed earlier today (3dc0d4311) IS live, and its own mechanism assertion passes —
+because that arm reads `self.values[pos]` as `Scalar`s rather than borrowing a
+typed buffer, so a `from_vec`-backed nullable column reaches it fine. The
+distinction is exactly whether the fast path needs a contiguous buffer. The
+fp-io SQL mappers and `zeros`/`ones` are likewise unaffected: they switch on the
+dtype to pick a value or a column type, and never borrow a buffer.
+
+**Also corrected: the doc comment that sent me here.** `typed_numeric_values` now
+says plainly that the "or nullable" clause is aspirational, names the missing
+constructor as the blocker, and states the ordering. A doc that describes intent as
+if it were behaviour is how this cost a build slot.
+
+**A/A null control (same invocation):** not applicable and none is claimed — no
+timing was taken for this entry. The rejection rests on a counted reachability
+fact (0 constructors, 1 failed mechanism assertion), not on a ratio, and the
+orchestrator has certification suspended (my own `uptime` read 64.85 1-min against
+a quoted 28.0).
+
+Gates on the reverted state: `cargo test -p fp-columnar --lib` 641 passed / 0
+failed / 58 ignored / 0 FILTERED OUT; `clippy --all-targets -D warnings` clean;
+`fmt --check` clean.
