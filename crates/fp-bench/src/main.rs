@@ -1230,6 +1230,157 @@ const POLICY_SWEEP_ARMS: [(usize, usize, bool); 10] = [
 /// baseline's. An A/B between settings that disagree on the answer is meaningless,
 /// and the settings CAN disagree in principle — they move the block boundaries the
 /// validity words and the `all_valid`/`all_finite` reductions are computed over.
+/// Worker counts measured against the FORCED-SERIAL baseline, in order.
+/// `None` means "let the group-count routing decide", which is what ships.
+const SGB_ROLLING_ARMS: [Option<usize>; 5] = [None, Some(2), Some(4), Some(8), Some(16)];
+
+/// FP-vs-FP: does group-parallelising `SeriesGroupBy.rolling` actually pay?
+///
+/// br-frankenpandas-u5cg4. THIS IS THE INSTRUMENT THE BEAD HAS BEEN BLOCKED ON,
+/// and it is deliberately not a vs-pandas lane. The bead's question is a SELF
+/// comparison — the July attempt measured 12.20ms serial against 12.29ms parallel
+/// and saw nothing — and the 7.505x vs-pandas row banked on 2026-08-17 cannot
+/// answer it, because a ratio against the incumbent cannot separate "the parallel
+/// arm paid" from "the serial kernel was already this fast".
+///
+/// It could not be run before because `set_sgb_rolling_max_workers` is a
+/// THREAD-LOCAL Rust API with no environment toggle, so the Python driver has no
+/// way to reach it. That is on purpose: July's `FP_SGBROLL_SERIAL` was
+/// process-global, and a leaked global silently re-labels a measurement (the
+/// `FP_DOT_SERIAL` incident on `6df71eae2`). The answer is an in-process arm —
+/// this one — not an env var.
+///
+/// Per section 1 of the campaign law, whatever this prints is a MAINTENANCE
+/// self-speedup and NOT a win: there is no incumbent in this process.
+fn run_sgb_rolling_policy_sweep(workload: &str, rows: usize) -> bool {
+    if workload != "mean" {
+        return false;
+    }
+
+    // 100 groups: the same cardinality as the `rolling/groupby_rolling_mean_w10`
+    // vs-pandas lane, and above the 64-group threshold that gates the parallel
+    // arm at all. Keys come from the row index so this fixture and that lane
+    // group identically.
+    let keys: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
+    let mut rng = SplitMix64(0x1234_5678_9ABC_DEF0);
+    let values: Vec<f64> = (0..rows).map(|_| 1.0 + rng.unit() * 99_999.0).collect();
+    let index = Index::new_known_unique_int64_unit_range(0, rows);
+    let value_series = Series::new("v", index.clone(), Column::from_f64_values(values))
+        .expect("sgb rolling sweep value series");
+    let key_series = Series::new("k", index, Column::from_i64_values(keys))
+        .expect("sgb rolling sweep key series");
+
+    let apply = |v: &Series, k: &Series| -> Series {
+        v.groupby(k)
+            .expect("sgb rolling sweep groupby")
+            .rolling(10)
+            .mean()
+            .expect("sgb rolling sweep mean")
+    };
+
+    // Bits AND validity: grouped rolling emits nullable-f64 and the first
+    // `window-1` slots of every group are legitimately missing, so a values-only
+    // checksum would ignore exactly the part a broken window boundary corrupts.
+    let checksum = |s: &Series| -> u64 {
+        let column = s.column();
+        let (data, valid) = column.as_f64_slice_with_validity().map_or_else(
+            || {
+                let d = column.as_f64_slice().expect("grouped rolling emits f64");
+                (d.to_vec(), vec![true; d.len()])
+            },
+            |(d, v)| (d.to_vec(), (0..d.len()).map(|i| v.get(i)).collect()),
+        );
+        data.iter().zip(valid).fold(0_u64, |acc, (v, ok)| {
+            acc.rotate_left(7) ^ v.to_bits() ^ u64::from(ok) ^ 0x9e37_79b9_7f4a_7c15
+        })
+    };
+
+    // Installed OUTSIDE the clock; the kernel reads the thread-local at call time,
+    // so the arm that follows is the arm that was requested. The worker count is
+    // read back AFTER the call — requested is not observed, and this bead exists
+    // because nobody could tell the two apart in July.
+    let time_arm = |workers: Option<usize>| -> (f64, usize) {
+        fp_frame::set_sgb_rolling_max_workers(workers);
+        let started = Instant::now();
+        let out = apply(black_box(&value_series), black_box(&key_series));
+        let elapsed_us = started.elapsed().as_secs_f64() * 1e6;
+        let observed = fp_frame::sgb_rolling_last_worker_count();
+        black_box(out);
+        (elapsed_us, observed)
+    };
+
+    const SERIAL: Option<usize> = Some(1);
+    let mut rows_json: Vec<String> = Vec::with_capacity(SGB_ROLLING_ARMS.len());
+    for candidate in SGB_ROLLING_ARMS {
+        fp_frame::set_sgb_rolling_max_workers(candidate);
+        let candidate_checksum = checksum(&apply(&value_series, &key_series));
+        fp_frame::set_sgb_rolling_max_workers(SERIAL);
+        let serial_checksum = checksum(&apply(&value_series, &key_series));
+
+        for _ in 0..WARMUP {
+            black_box(time_arm(SERIAL));
+            black_box(time_arm(candidate));
+        }
+
+        let mut serial_us = Vec::with_capacity(POLICY_SWEEP_ROUNDS);
+        let mut candidate_us = Vec::with_capacity(POLICY_SWEEP_ROUNDS);
+        let mut candidate_workers = 0_usize;
+        let mut serial_workers = 0_usize;
+        for round in 0..POLICY_SWEEP_ROUNDS {
+            // ABBA so drift and foreign load land on both arms equally.
+            if round % 2 == 0 {
+                let (s, sw) = time_arm(SERIAL);
+                let (c, cw) = time_arm(candidate);
+                serial_us.push(s);
+                candidate_us.push(c);
+                serial_workers = sw;
+                candidate_workers = cw;
+            } else {
+                let (c, cw) = time_arm(candidate);
+                let (s, sw) = time_arm(SERIAL);
+                candidate_us.push(c);
+                serial_us.push(s);
+                candidate_workers = cw;
+                serial_workers = sw;
+            }
+        }
+        fp_frame::set_sgb_rolling_max_workers(None);
+
+        let fmt = |xs: &[f64]| -> String {
+            xs.iter()
+                .map(|x| format!("{x}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        rows_json.push(format!(
+            concat!(
+                "{{\"requested_workers\":{},\"observed_workers\":{},",
+                "\"serial_observed_workers\":{},",
+                "\"serial_checksum\":\"{:016x}\",\"candidate_checksum\":\"{:016x}\",",
+                "\"bit_identical_to_serial\":{},",
+                "\"serial_us\":[{}],\"candidate_us\":[{}]}}"
+            ),
+            candidate.map_or(-1_i64, |w| w as i64),
+            candidate_workers,
+            serial_workers,
+            serial_checksum,
+            candidate_checksum,
+            serial_checksum == candidate_checksum,
+            fmt(&serial_us),
+            fmt(&candidate_us),
+        ));
+    }
+
+    println!(
+        "sgb_rolling_policy_json={{\"rows\":{},\"groups\":100,\"window\":10,\"warmup\":{},\"rounds\":{},\"arms\":[{}]}}",
+        rows,
+        WARMUP,
+        POLICY_SWEEP_ROUNDS,
+        rows_json.join(","),
+    );
+    true
+}
+
 fn run_elementwise_policy_sweep(workload: &str, rows: usize, consume: bool) -> bool {
     let apply: fn(&Series) -> Series = match workload {
         "sqrt" => |s: &Series| s.sqrt().expect("policy sweep: sqrt"),
@@ -3711,6 +3862,18 @@ fn main() {
     // br-frankenpandas-284ul. FP-vs-FP, not vs-pandas: this lane picks the
     // elementwise worker cap and parallel threshold, and it prints its own
     // schema rather than the `times_us` the Python driver parses.
+    // br-frankenpandas-u5cg4. FP-vs-FP: serial against group-parallel grouped
+    // rolling, both arms in ONE process, with the worker count OBSERVED per arm.
+    // Prints its own schema, not the `times_us` the Python driver parses.
+    if category == "sgb_rolling_policy" {
+        let (rows, _cols) = size_rows_cols(size);
+        if !run_sgb_rolling_policy_sweep(workload, rows) {
+            eprintln!("fp-bench: unsupported sgb_rolling_policy/{workload} (mean)");
+            std::process::exit(2);
+        }
+        return;
+    }
+
     if category == "elementwise_policy" {
         let (rows, _cols) = size_rows_cols(size);
         let consume = args.iter().any(|a| a == "--consume");
