@@ -33315,3 +33315,63 @@ kernel" and was not it. Static instruction counts proxied for hotness and were n
 the proxy was cheap to compute and the real quantity needed one more step — an arithmetic
 mnemonic, a dynamic profile, an existing ledger entry. **The first three I published before
 checking. This one I checked first, and it is the only reason a closed lever stayed closed.**
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-oxv4u) — HYPOTHESIS REFUTED BY ITS OWN PRE-REGISTERED TEST, and the refutation corrects a claim I made two entries ago: the gram kernel's arithmetic is NOT 128-bit, it is SCALAR
+
+I predicted that `pairwise_stat_gram_partial_rows` failed to emit 256-bit code because of a
+width asymmetry — `acc_row` is `&mut [f64; 4]` with a compile-time width while `pr` was
+`&panel[a..a+BT]`, a slice whose length LLVM must prove. I registered both outcomes in advance:
+nonzero `%ymm` confirms it and generalises to the other 40 not-reached symbols; zero `%ymm`
+retires it and sends the next step to LLVM IR instead of another guess.
+
+**IT CAME BACK ZERO.**
+
+```
+                                          %xmm   %ymm
+  +avx2, before the change                 431      0
+  +avx2, WITH `pr: &[f64; BT]`             431      0     <- identical
+```
+
+Byte-for-byte the same counts. The one-line change did nothing. **Hypothesis retired**, change
+reverted, diff parked at `.scratch/crimsonpine/oxv4u_slice_to_array_REFUTED.diff`.
+
+**AND THE REASON IS A CORRECTION TO MY OWN EARLIER ENTRY.** Counting arithmetic mnemonics rather
+than register names — the discipline I had to learn twice today and finally applied first here:
+
+```
+  256-bit ARITHMETIC : 0
+  128-bit ARITHMETIC : 80   ->  vaddsd 48, vmulsd 32
+```
+
+**`vaddsd` and `vmulsd` are SCALAR double instructions.** The `sd` suffix is one lane. So the
+gram kernel's 431 `%xmm` operands are scalar arithmetic and moves — **it was never vectorized at
+all.** Two entries ago I wrote that LLVM "did NOT decline to vectorize; it vectorized harder, at
+128 bits, and never widened." That was wrong, and it was wrong because I read `%xmm` as
+"128-bit packed" when `%xmm` is also where scalar doubles live. Same proxy error, same register
+file, third appearance.
+
+**WHAT THE KERNEL ACTUALLY IS:** `acc_row[dj] += av * pr[dj]` is a multiply-then-add accumulated
+across `lr` — a loop-carried f64 add. That is the SAME non-associativity constraint that keeps
+`iter().sum()` scalar and that `blocked_sum_f64` exists to work around. No operand-width
+knowledge could have helped, which is exactly why making `pr` statically sized changed nothing.
+
+**THIS EXPLAINS jawxr, AND jawxr EXPLAINS THE DEAD END.** `vmulsd` + `vaddsd` in an accumulation
+IS the shape `f64::mul_add` fuses, and `br-frankenpandas-jawxr` proposed precisely that for the
+corr/cov/spearman Gram — then was CLOSED 2026-06-13 REJECTING it, because "this campaign
+requires unchanged FP bits and current golden SHA verification for keeps". So the kernel is
+scalar for a reason the project has already adjudicated: the only two ways to speed it up
+(fusing the mul-add, or reassociating the accumulation across lanes) both change f64 bits, and
+the first was formally refused.
+
+**THE ADMISSIBLE ROUTE, if anyone takes it:** multi-accumulator restructuring in the
+`blocked_sum_f64` style, which is the one precedent that DID survive the bit-identity contract —
+and it survived only because `chunks_exact(8)` is empty below 8 elements so the fixture surface
+stayed bit-identical. Whether that argument transfers here needs checking against the corr/cov
+golden inputs, which are NOT [1,2,3]-scale, so it may well not transfer. **That is a decision
+for whoever owns the numerics contract, not a lever I can take.**
+
+**COST OF BEING WRONG, recorded because it is the point of pre-registering:** one build, three
+minutes, zero measurement windows. The instruction-count design meant a rising-load host
+(loadavg 16.15 over an 8.65 fifteen-minute) could not corrupt the answer, and the wrong
+hypothesis cost nothing but the compile.
