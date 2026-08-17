@@ -31527,3 +31527,116 @@ between ops, so it is not optional.
 
 Not implemented this turn. Recorded with its scope and its one exception so it can be
 taken up deliberately rather than generalised into.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `sqrt` is TWO gaps, not one: a **66.5us fixed per-call constant** plus an 11.6% per-element tax, and only the second one is what the ISA and parallelism levers have been aimed at
+
+`sqrt @1M 0.87x` has been retried against ISA flags, worker counts and window
+quality for weeks. Measuring it at FOUR sizes on one ELF says why none of that
+moved it: the ratio is not a property of the op, it is a fixed cost being divided
+by different denominators.
+
+| `sqrt`, default build `1dde689f...` | FP p50 | pandas p50 | ratio |
+|---|---:|---:|---:|
+| `@10k`  | 78.57us | 41.15us | **0.518** |
+| `@100k` | 191.99us | 136.93us | **0.709** |
+| `@1M`   | 1270.7us | 1109.0us | **0.869** |
+| `@10M`  | 17986us | 16106us | **0.895** |
+
+Fit on `10k`→`1M` (the linear region; `10M` departs upward on both arms, which is
+the 160MB working set leaving cache and is a separate story):
+
+```
+FrankenPandas   t(n) = 66.5us + 1.204 ns/element
+pandas          t(n) = 30.4us + 1.079 ns/element
+```
+
+**The fit was tested on a size it was not fitted on, before it was believed.** The
+model was built from `10k` and `1M` and predicted `@100k` at FP 186.9us / pandas
+138.2us; observed 191.99us / 136.93us — 2.7% and 0.9%. It also predicted the `@10k`
+ratio at 0.47 before that size was run; observed 0.518/0.510/0.573.
+
+So FrankenPandas pays **36.1us more fixed cost per call** than pandas, and 11.6%
+more per element. At `@10k` the constant is 85% of FrankenPandas' whole runtime;
+at `@10M` it is 0.4%. That is the entire size-dependence, and it is why every
+attempt to close this ratio at one size has produced a number that did not
+generalise.
+
+**Counted mechanism, and it is a CONTROL, not a story: the constant is NOT framework
+overhead.** `floor` runs through the same `run_math_unary` fixture, the same
+`Series`/`Column` construction, the same `time_us` region — the fixture is built
+OUTSIDE the timed closure for both, so only the op itself is timed:
+
+| `@10k` | FP p50 | pandas p50 |
+|---|---:|---:|
+| `floor`, `+sse4.1` | **1.41 / 1.37us** | 33.88 / 32.84us |
+| `floor`, default | 5.63 / 5.74us | 33.59 / 32.90us |
+| `sqrt` | 78.57us | 41.15us |
+| `log` | 104.33 / 108.32us | 64.28 / 65.65us |
+
+`floor` at `@10k` costs FrankenPandas **1.4us** and shows no fixed constant at all —
+its 0.139 ns/element at `@10k` is the same 0.133 ns/element it shows at `@1M`. Same
+machinery, same size, 56x less time. Whatever costs 66.5us happens on the
+domain-fused arm that `sqrt` and `log` take and not on the witness-free arm that
+`floor`/`ceil`/`trunc` take. `log`'s constant is larger still (~100us), which is
+consistent with it being the same cost on the same arm.
+
+**VERDICT: the ISA-width and worker-count direction for `sqrt` is REJECTED**, and
+this row is a certified LOSS against the live incumbent (0.870x), not a win. What is
+rejected is the lever, not the op: `sqrt` remains a target, but the next attempt on
+it must be aimed at the constant.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=1dde689fa4cfb4513ae362ffc0511976a3ce891e5f212093751cd60e17983ddd (82303816 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T112508.065653Z-pid25289 , giving
+measured_ratio=0.870x for this row.
+
+| `sqrt @1M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **1283.32us** | 3.27% | 1.012093 — PASSES |
+| pandas | 1118.89us | 1.51% | 1.000380 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.012093 and
+pandas median ratio 1.000380, both inside the 2% limit.
+
+**Median-CI decision:** effect median 0.870x, 95% CI [0.85381649, 0.88503995],
+excluding unity; claimed log effect 0.13935778 against a required threshold of
+0.12372381, cleared by 1.13x. All three clauses true. This row certified SLOWER, and
+so did `sqrt @1M` on the `+sse4.1` arm at 0.874x and 0.872x in the same window,
+which is the point: the flag does not touch it.
+
+**CV role:** provenance only, no vote — FP 3.27%, pandas 1.51%.
+
+```
+LOADAVG      14.61 → 33.34 across this sequence. The 10k floor/log rows were taken
+             at the top of that range, ABOVE the 30 defer threshold, and I am saying
+             so rather than quietly banking them. They are used here only for a 56x
+             qualitative contrast (floor 1.4us vs sqrt 78.6us), which no amount of
+             load noise produces; the four-size sqrt fit itself was taken at 14-24.
+OBSERVED MHz host-wide 2924-3104 mean, cross-core min 1429.0 max 4263.9
+THREADS      FP 1 · pandas 1 on every sqrt row at every size
+```
+
+**WHAT THIS RETIRES.** "`sqrt` needs vector WIDTH" is not wrong but it is aimed at
+the 11.6% term, which is the smaller of the two gaps at every size below 10M. The
+`+sse4.1` arm is flag-independent here at all four sizes (0.528/0.717/0.873/0.919
+against the default's 0.518/0.709/0.869/0.895), reproducing h67zz's finding a third
+time. Nobody should spend another window on an ISA or worker-count lever for `sqrt`
+until the 66.5us constant is identified, because at `@1M` that constant alone is
+5.2% of the arm and the whole gap is 13%.
+
+**A/A null dispersion across this sequence, stated as measured rather than as I
+first wrote it:** across all 18 sqrt rows the FrankenPandas null spans 0.898900 to
+1.042800. The two readings below 0.91 are both `@10k` rows taken at loadavg 33, and
+they are the reason those rows carry no verdict here. Every sqrt row at `@100k` and
+above sits between 0.970613 and 1.035200. The `NULL_UNDECIDABLE` rows at the larger
+sizes are CI-width outcomes at small arms, not null failures.
+
+**RETRY PREDICATE — do not re-open this as an ISA question.** The next step is a
+profile of `Column::sqrt` at `@10k`, where the constant is 85% of the runtime and
+therefore trivially visible, against `Column::floor` at the same size as the control.
+Re-open the width question only after the constant is either removed or shown to be
+irreducible.
