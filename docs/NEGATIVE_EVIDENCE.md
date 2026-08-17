@@ -27467,3 +27467,44 @@ mechanism is the same one as `log10`: a libm call per element that FP spreads
 across workers while numpy's ufunc runs single-threaded. Whoever extends this
 should check the OTHER `typed_float_unary_par` residents the same way — `expm1`,
 `cbrt`, and the trig family all route there and none of them has a lane.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the `log2` re-run lost its window mid-flight (load 15 → 50), and four more `typed_float_unary_par` lanes are now wired
+
+**`log2 @10M` re-run: STILL NOT BANKED, and this attempt is worse than the first.**
+Entered at loadavg 15.28 with the 1/5/15-minute averages converged (15.28 / 14.88 /
+16.97 — the best-converged window of the session). A peer's build storm started
+during the row: in-run 1-minute went to **50.18**, FP cv **66.18%**, pandas cv
+30.12%, and BOTH nulls failed (0.975814 / 0.978263). Point ratio 2.109x with CI
+[1.64992, 2.46937] — an interval three times wider than the first attempt's.
+
+Per the standing orders, a failure to certify under load is not a loss, so this is
+recorded as what it is: **two attempts, no gated `log2` row, and the window was
+lost after entry both times.** Note the first attempt failed on FP's null alone
+(1.045422) and this one on both, which is the signature of ambient load rather than
+of the arm. `log2` is still owed a row; the point estimate has been 2.148x and
+2.109x, which is consistent, but consistency is not a gate.
+
+**FOUR MORE LANES, wired and verified to emit (`5b12dd8d`), 1M samples:**
+
+| lane | n | p50 | why this one |
+|---|---|---|---|
+| `expm1` | 50 | 2024.5us | non-trig `typed_float_unary_par` resident |
+| `cbrt` | 50 | 4021.7us | non-trig resident, and total on negatives |
+| `sin` | 50 | 4127.3us | cheapest trig, the one numpy most likely vectorises |
+| `atan` | 50 | 2811.2us | among the most expensive trig |
+
+Four, not seventeen. One representative per cost class, because the point is to
+find out where this family sits, not to grow the matrix — the seventeen ops on that
+arm are not seventeen independent questions. All are total on the strictly-positive
+fixture, so no arm drifts onto a NaN path and each lane measures arithmetic.
+
+**Verified the lanes RUN rather than assuming it.** A workload name that falls
+through the Rust `match` returns `None`, and the harness then reports nothing rather
+than failing — the exact "absence of work rendered as success" shape this ledger has
+recorded eight times. Each lane above is quoted with its sample count for that
+reason.
+
+**No ratio is claimed for any of the four.** The host was at loadavg 35 when they
+were built and 50 during the `log2` attempt. They exist so the rows can be taken;
+on the two lanes that have been taken so far the answer was 3.385x and 3.921x, both
+certified on first use.
