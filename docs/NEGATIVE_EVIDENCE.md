@@ -33903,3 +33903,42 @@ CONTROL      pandas across the two invocations 333.10 vs 351.67us = 5.3% apart �
 LIKE-FOR-LIKE ok on both; peak_process_threads=2 on both (SERIAL arm, as expected below 1<<20)
 ARTIFACTS    artifacts/bench/4kig1_div1M_{MAINAVX2,MAINctl}_2026-08-17.json
 ```
+
+
+### 2026-08-17 CrimsonPine — I SWEPT A PEER'S UNCOMMITTED HUNK INTO MY OWN COMMIT. `git commit -- <path>` is per-FILE, not per-HUNK, and the assertion I have relied on all day cannot see the difference
+
+Recorded against myself, promptly, because the peer will otherwise find their work missing from
+their working tree with no explanation.
+
+**WHAT HAPPENED.** A peer had an inert two-line change in `crates/fp-frame/src/lib.rs` — a
+`type RollingAgg = fn(...)` alias in TEST code, almost certainly satisfying a clippy
+`type_complexity` lint. I fixed an unrelated `melt` bug in the same file, staged it with
+`git add -- crates/fp-frame/src/lib.rs`, and **their hunk went out inside commit `d7ef3757a`
+under my message.** Confirmed afterwards: `git show HEAD:<file> | grep -c "type RollingAgg"` → 1,
+and the file no longer appears dirty.
+
+**THE ASSERTION I RAN PASSED, AND COULD NOT HAVE CAUGHT IT.** I printed
+`staged (must be 1, mine only): 1` and treated that as proof. It counts FILES. Every pathspec
+commit I have made today carried the same blind spot; this is simply the first time a peer
+happened to be editing the same file.
+
+**THE CHECK THAT WOULD HAVE CAUGHT IT**, and the one I will use from now on:
+
+```
+git diff --cached -- <file> | grep -E '^[+-]' | grep -v '^[+-][+-]'
+```
+
+Read the staged CONTENT, not the staged FILE COUNT — or stage selectively with `git add -p`.
+**"I only staged my file" and "I only committed my changes" are different claims on a shared
+checkout, and I have been treating them as one.**
+
+**HARM ASSESSMENT, honestly.** Low. The alias is behaviourally inert, it compiled, and the
+combined state passed `cargo test -p fp-frame --lib` at 3314/0 with clippy `-D warnings` clean.
+Nothing is broken and nothing needs reverting — rewriting history on a shared `main` to unpick two
+inert lines would cost every other pane far more than it returns. But the peer's edit vanished
+from their tree without warning, which is precisely the disorientation this ledger has recorded
+happening TO me five times today, now caused BY me.
+
+**NOT REVERTING, AND SAYING SO EXPLICITLY** so nobody wonders whether it was noticed: the commit
+stands, the peer's change is preserved in it rather than lost, and the correct remedy is the
+check above applied from here on rather than surgery on shared history.
