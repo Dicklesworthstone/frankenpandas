@@ -35106,3 +35106,67 @@ same conditions and the subtraction is a ratio of two neighbouring measurements.
 shares as the finding and the absolutes as provisional. **The 26.7% needs re-measuring in a quiet
 window before anyone acts on it**, and the same run should extend to dim=1000 and add the parallel
 arm, which I did not take here.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-v3q4j) — REFUTED, and the bug is MINE: I filed a parity defect against FrankenPandas off the oracle's answer without probing live pandas. The oracle hardcodes `dropna=False`
+
+Yesterday's live-oracle run surfaced four divergences and I filed three beads from them.
+One of the three was wrong, and it was wrong in the way this corpus's own guidance
+warns about most loudly: **I compared FrankenPandas to the ORACLE and called the
+difference a FrankenPandas defect, without asking live pandas.**
+
+**MEASURED, live pandas 2.2.3, the fixture's own inputs**
+(`row=[r1,r1,r2,NaN,None,r1,r2]`, `col=[c1,c2,c1,c1,c2,NaN,None]`,
+`val=[1,2,3,100,200,400,500]`):
+
+| `pivot_table(...)` | index | columns |
+|---|---|---|
+| `dropna=True` — **pandas' documented default** | `['r1','r2']` | `['c1','c2']` |
+| `dropna=False` — what the oracle forces | `['r1','r2',nan]` | `['c1','c2',nan]` |
+
+FrankenPandas returns `['r1','r2']`. **It matches pandas' default exactly; the oracle
+does not.** There is no FrankenPandas defect here and `v3q4j` is closed as refuted.
+
+**Counted mechanism.** `crates/fp-conformance/oracle/pandas_oracle.py`,
+`op_dataframe_pivot_table` builds its kwargs with `"sort": False, "dropna": False`
+hardcoded, against pandas' defaults of `True` for both. Grepping the whole crate for
+`pivot_dropna` and `pivot_sort` returns **zero** hits, so there is no payload knob and
+the override applies to every pivot_table fixture — including
+`reshape_pivot_table_missing_keys_dropna_default_tn6qb9`, whose name asserts a contract
+it does not test.
+
+**HOW I CHASED THE WRONG HYPOTHESIS FIRST, because the shape is worth recording.** The
+drift message read `expected=[Utf8("r1"), Utf8("r2"), Utf8("nan")]`, and `Utf8("nan")`
+looked exactly like a lossy label encoding — there is even a filed bead about
+`label_to_json` lacking a FLOAT branch. I tested that: feeding pandas the literal string
+`"nan"` reproduces the oracle's answer precisely (`['nan','r1','r2']`). It was a
+plausible, self-consistent, WRONG explanation. What separated it from the real one was
+running the actual call at both `dropna` settings rather than reasoning about the
+encoding. **A hypothesis that reproduces the symptom is not thereby the cause.**
+
+**A/A null control (same invocation):** not applicable — this entry reports index
+contents from a live-pandas probe, not timings. No ratio is claimed.
+
+```
+LOADAVG   37.56 (1-min) / 30.40 / 23.62 at the probe
+CPU IDLE  84.12%, iowait 0.19%, by mpstat — verified directly. Reported to me as
+          "load 20, idle 78 pct, iowait 8 pct"; my own reading was quieter on every
+          axis, which is the second time this session the reported window and the
+          measured one disagreed in opposite directions.
+```
+
+**WHAT I DID NOT DO.** I did not change the oracle. Three live `conformance_reshape`
+pivot_table cases and eight banked fixtures under
+`crates/fp-conformance/fixtures/packets/` were all generated under the override;
+flipping it to pandas' default rewrites every one of their expectations, and re-banking
+eight fixtures on my own authority is the laundering this campaign exists to prevent.
+Filed as `br-frankenpandas-eay9h` with the blast radius and the two defensible options
+(honor an explicit knob defaulting to pandas' defaults, or keep `dropna=False`
+deliberately and rename the fixture that claims otherwise). I lean toward the first —
+an oracle that silently rewrites the arguments under test cannot certify parity — but
+it is a corpus decision.
+
+**THE OTHER TWO BEADS FROM THAT RUN STAND.** `f2mlr` was real and is fixed
+(`71971cda2`); its conformance cases now pass against live pandas. `b8n0q` (read_csv
+int64 vs float64) is a genuine divergence and is decision-gated on the same promotion
+rule as `nywa8` and `09ygw`. **One of three filed beads being an oracle artifact is the
+argument for probing live pandas before filing, not after.**
