@@ -29992,3 +29992,39 @@ ARTIFACTS    artifacts/bench/flicz_floor_{control,adaptive}.json
 prediction held, and it is opt-in and default-off so nothing already banked moved.
 It does NOT retroactively certify anything — the six earlier ISA rows stay refused,
 and the v3 arm still needs a window where the pandas null behaves.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the pow/atan2/hypot lanes DO emit; verification discharged, and `pow` looks like the easiest row in the family to certify
+
+`f39ef0c87` landed those lanes marked **NOT VERIFIED TO EMIT**, because confirming
+them needed a build and the throttle had landed mid-turn. That was the one thing I
+said to do first when builds returned, so it is done first. ELF `e94c077a`, `df`
+read immediately before the build (145G) and after (136G):
+
+```
+  pow    n=50  p50 11721.9us
+  atan2  n=50  p50  3090.5us
+  hypot  n=50  p50  2117.5us
+```
+
+All three wired, all three emitting a nonzero sample count. This matters because a
+workload name that falls through the Rust `match` returns `None` and the harness
+reports nothing rather than failing — the "absence of work rendered as success"
+shape this ledger has recorded eight times, and the reason every lane commit here
+quotes its own sample counts rather than asserting success.
+
+**AND THE p50s PREDICT SOMETHING USEFUL BEFORE ANY ROW IS RUN.** `pow @1M` is
+**11.7ms**, an order of magnitude slower than the unary family at the same size
+(`floor @1M` is 1.66ms) — `powf` is the most expensive kernel in `math_unary` by a
+wide margin. By the between-slot dispersion table measured two entries ago, that
+puts it in the 5–20ms band at **2.83%** rather than the sub-millisecond band at
+8.65%. **So `pow` should be among the easiest rows in this family to certify, and it
+should not need the adaptive rounds the fast cells do** — a prediction recorded
+before the measurement, which is the discipline that caught the `sqrt_int64`
+regression when I got one half of a prediction wrong.
+
+**NOT CERTIFIED, and the reason is load rather than the lanes.** I entered the turn
+at loadavg 34, and by the time the build finished it was 45.88 and then **52.23 and
+rising**. I have refused rows at this load repeatedly, including one that missed its
+null by 0.05 percentage points, and making an exception because a row is newly
+available would be exactly the wrong reason. The three rows are queued for the next
+window, with `pow @1M` first on the reasoning above.
