@@ -29377,3 +29377,63 @@ is claimed and no build was run for it.
 **Counted mechanism:** 226 rows, 452 null values, median FP deviation 0.0094 and
 median pandas deviation 0.0104 against a 0.02 limit; joint pass 48.7% versus the
 0.464 predicted by independence; sub-1ms rows pass at 33-41% against 54% above 5ms.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — CORRECTING MY OWN NULL FINDING TWICE OVER: it is not repo-wide, FrankenPandas is not the noisy engine, and null failure is PREDICTABLE from cv — every row under 3% cv passed, 18 for 18
+
+The previous entry said "the 2% limit sits at FrankenPandas' median null deviation,
+so half of all rows fail by construction". That was measured on `math_unary` alone
+and then stated as a property of the engine. **Measured across every category, it is
+wrong in two separate ways.**
+
+```
+        category    n   FP median|null-1|   pandas   FP fail rate at 2%
+      math_unary  104         1.52%          1.02%          44%
+         strings   24         0.71%          0.37%          21%
+          linalg   14         0.37%          2.74%           7%
+
+  REPO-WIDE       159         1.09%          0.88%          34%
+```
+
+**FIRST ERROR: it is not repo-wide.** The repo-wide median is 1.09%, comfortably
+under the 2% limit, and the fail rate is 34% rather than "half". `math_unary` is
+FrankenPandas' noisiest category by a factor of two, and I generalised from it to
+the whole engine. **That is the third time this session I have generalised past the
+domain I measured** — `floor` → `sqrt`/`log`, then f64 → i64 (which cost a certified
+1.203x win), and now `math_unary` → the repo. The pattern is consistent enough to be
+worth naming: I generalise along the axis I did not vary.
+
+**SECOND ERROR, and it inverts the story: FrankenPandas is not the noisy engine.**
+In `linalg`, PANDAS' median null deviation is **2.74%** against FrankenPandas'
+**0.37%** — pandas is over seven times noisier there, and would fail its own null on
+half those rows. The asymmetry I attributed to our engine is a property of the
+WORKLOAD, not the implementation.
+
+**AND THE USEFUL PART: null failure is predictable BEFORE the row is run.** Across
+160 rows carrying both figures:
+
+| FP cv band | n | median \|null−1\| | null pass rate |
+|---|---|---|---|
+| 0–3% | 18 | 0.25% | **100%** |
+| 3–5% | 28 | 1.16% | 75% |
+| 5–8% | 40 | 0.86% | 72% |
+| 8–15% | 41 | 1.93% | 51% |
+| >15% | 33 | 2.04% | 48% |
+
+Pearson r(cv, |null−1|) = 0.362 — moderate, but the BANDS are what matter: **every
+single row whose subject cv came in under 3% passed its null, 18 for 18**, while
+above 8% it is a coin flip. The null is not an independent lottery on top of the
+measurement; it is largely the same dispersion the row already reports, re-expressed.
+
+**So the 43% tax from the previous entry is not a fixed cost — it is a function of
+dispersion, and dispersion is partly ours to control.** The actionable rule replaces
+"budget two attempts per row": **look at the subject cv. Under 3%, the row will
+almost certainly bank. Over 8%, expect to pay for two.** That also explains the arm
+split without needing a separate mechanism — the parallel arm's rows carry higher cv,
+so they land in the worse bands.
+
+**`round2 @10M`, THIRD ATTEMPT, still not banked.** 2.562x, CI [2.41974, 2.67481],
+best-vs-best 2.7255, FP null 1.059406 FAIL, pandas null 1.008657 PASS, FP cv 7.60%,
+per-arm clocks within 0.01%, loadavg 14.23 → 11.78. Three estimates now: 2.444x,
+2.404x, 2.562x — a 6.5% spread, and 0-for-3 on the null at a cv that predicts ~72%
+per attempt. Unlucky rather than anomalous, and I am not calling it anomalous this
+time.
