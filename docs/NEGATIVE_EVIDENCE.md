@@ -31146,3 +31146,37 @@ intrinsic-bypass account has a boundary I have not found yet.
 **Counted mechanism:** 5 `*_fast` kernels total, 4 now behind the `cfg`, 1
 (`round_scaled_ties_even_fast`) inheriting via its caller; `f64::abs` used 0 times
 against 174 `.abs()` calls, which is the same std method and needs no change.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-3qpj4) — the intrinsic-bypass audit is CLOSED at five kernels, all in fp-columnar. Nothing to find elsewhere; do not re-run this sweep
+
+Completing the audit across the workspace so nobody repeats it. Symbol counting and
+source reading; no build, no measurement, done with a peer build running.
+
+| crate | hand-rolled rounding kernels | direct std intrinsic calls |
+|---|---|---|
+| fp-columnar | **5** — `round_ties_even_fast`, `round_scaled_ties_even_fast`, `floor_fast`, `ceil_fast`, `trunc_fast` | — |
+| fp-frame | **0** | `.floor()` 49, `.ceil()` 31, `.trunc()` 9, `round_ties_even` 4 |
+| fp-groupby | **0** | `.ceil()` 1 |
+| fp-io | **0** | 0 |
+
+**The bypass was confined to fp-columnar's five kernels and all five are now behind
+the `cfg`.** fp-frame calls the std intrinsics directly in 93 places, so it already
+inherits `roundpd` from the flag with no source change — its `*_fast` functions
+(`kendall_no_tie_fast`, `rolling_rank_fast`, `expanding_rank_fast`) are algorithmic
+fast paths, not instruction substitutes. A search for the magic-number trick
+(`2^52` / `4503599627370496`) outside fp-columnar returns nothing.
+
+**The sweep is complete and bounded, and this entry exists to say so.** The pattern
+was worth hunting — it produced three certified wins out of the campaign's three
+worst ratios — but it is not a general disease in this codebase. One module
+hand-rolled five kernels for a target that could not do better at the time, and that
+is the whole of it.
+
+**Counted mechanism:** 5 hand-rolled kernels in 1 of 5 crates searched, 0 in the
+other 4, and 93 direct std-intrinsic call sites in fp-frame that need no change.
+
+**A/A null control (same invocation):** not applicable — no timing was taken.
+
+**What remains owed on this bead is one measurement, not more auditing:**
+`round(decimals) @1M` under `+sse4.1`, with the prediction on record that it inverts
+the 2026-07-02 regression.
