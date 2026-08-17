@@ -27508,3 +27508,47 @@ reason.
 were built and 50 during the `log2` attempt. They exist so the rows can be taken;
 on the two lanes that have been taken so far the answer was 3.385x and 3.921x, both
 certified on first use.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `expm1`/`cbrt`/`atan` declared TOTAL and `sin` declared `is_finite`, moving all four off the by-index arm; the domain claims are asserted against std, not against my reading of them
+
+The four ops that got lanes in `ee6c36202` were still the last `math_unary`
+members reaching their values through `typed_float_unary_par`, which indexes
+(`|i| f(data[i])`, bounds-checked, so the loop does not vectorize), pre-zeroes its
+output, and then re-reads the whole result asking `is_nan()` — the pass measured at
+505.1us per 1M when it was removed from `round()`. They now take
+`typed_float_domain_fused_unary`, which folds the domain and the finiteness witness
+as boolean reductions in the same pass that computes the values.
+
+**Three of the four are TOTAL, and one is not — that asymmetry is the whole risk:**
+
+| op | predicate | why |
+|---|---|---|
+| `expm1` | `\|_\| true` | `exp_m1(+inf)` = `+inf`, `exp_m1(-inf)` = `-1.0`, finite → finite/inf |
+| `cbrt` | `\|_\| true` | the real cube root is defined on negatives; `cbrt(±inf)` = `±inf` |
+| `atan` | `\|_\| true` | saturates rather than failing: `atan(±inf)` = `±π/2` |
+| `sin` | `\|x\| x.is_finite()` | **`sin(±inf)` is NaN** — every FINITE input is in the domain and only the infinities are not |
+
+`sin` is the trap. A constant-true predicate there would have been right for every
+value the bench fixture contains and for essentially every real column, and wrong
+for `±inf` — and the failure mode is silent, because the column would report a NaN
+slot as PRESENT rather than crashing.
+
+**So the totality claims are TESTED AGAINST std, not asserted from my reading of
+the docs.** `total_unary_ops_declare_their_domain_correctly_4kig1` evaluates
+`exp_m1`/`cbrt`/`atan` at both infinities and requires the result not be NaN — if
+any of those ever changes, the test fails and the predicate must be revisited
+rather than silently over-claiming. It requires `sin(±inf)` to BE NaN, with the
+comment that relaxing `sin` to `true` is only legitimate if that stops holding.
+Then, per op: bit-identity against the scalar oracle over a 20k seeded corpus, and
+with the infinities appended — the three total ops must keep every slot PRESENT and
+bit-identical, while `sin` must return BOTH infinity slots MISSING and every finite
+slot present.
+
+**NO RATIO IS CLAIMED.** The host was at loadavg 52.6 when this was written and
+25.8 when the gate finished; `math_unary` only certifies at 10M in a quiet window by
+this ledger's own finding, and my two-ELF paired A/B has a measured ±16% null
+envelope that would swallow anything smaller than a large effect. The lanes for all
+four exist now, so the rows are takeable; this commit is the code and its tests.
+
+Gates: `cargo test -p fp-columnar` 628 passed / 0 failed / 0 filtered out,
+`clippy -D warnings` clean, `fmt --check` clean.

@@ -25248,6 +25248,13 @@ impl Column {
 
     /// Compute element-wise sine.
     pub fn sin(&self) -> Result<Self, ColumnError> {
+        // NOT total, and this is the one in the group that is easy to get wrong:
+        // `sin(±inf)` is NaN (there is no limit to return), so infinities are OUT
+        // of the domain even though every FINITE input is in it. Predicate is
+        // `is_finite`, not `true`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.is_finite(), f64::sin) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::sin) {
             return Ok(out);
         }
@@ -25373,6 +25380,11 @@ impl Column {
 
     /// Compute element-wise arctangent.
     pub fn atan(&self) -> Result<Self, ColumnError> {
+        // TOTAL: `atan` saturates rather than failing — `atan(±inf)` is `±π/2`.
+        // br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::atan) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::atan) {
             return Ok(out);
         }
@@ -26629,6 +26641,13 @@ impl Column {
 
     /// Compute exp(x) - 1 with improved precision for small x.
     pub fn expm1(&self) -> Result<Self, ColumnError> {
+        // TOTAL on an all-valid input: `exp_m1(+inf)` is `+inf`, `exp_m1(-inf)` is
+        // `-1.0`, and a finite input gives a finite or infinite result — never NaN.
+        // So the output mask is provably all-valid and the predicate is constant.
+        // br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::exp_m1) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::exp_m1) {
             return Ok(out);
         }
@@ -26686,6 +26705,12 @@ impl Column {
 
     /// Compute element-wise cube root.
     pub fn cbrt(&self) -> Result<Self, ColumnError> {
+        // TOTAL: the real cube root is defined on negatives, and `cbrt(±inf)` is
+        // `±inf`. This is the one root-like op with no domain restriction at all —
+        // contrast `sqrt`, which needs `x >= 0.0`. br-frankenpandas-4kig1.
+        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::cbrt) {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_par(f64::cbrt) {
             return Ok(out);
         }
@@ -37074,6 +37099,114 @@ mod tests {
                                 "{name}: in-domain slot {i} must stay present"
                             );
                         }
+                    }
+                }
+            }
+        }
+
+        /// br-frankenpandas-4kig1. `expm1`/`cbrt`/`atan` now declare themselves
+        /// TOTAL (constant-true predicate) and `sin` declares `is_finite`.
+        ///
+        /// A wrong totality claim is silent: the column reports a NaN slot as
+        /// PRESENT. So each claim is checked against the actual Rust semantics at
+        /// the infinities rather than against my reading of them — `sin(inf)` is
+        /// the trap, since every FINITE input is in the domain and only the
+        /// infinities are not.
+        #[test]
+        fn total_unary_ops_declare_their_domain_correctly_4kig1() {
+            // 1. The totality claims, asserted against std at the edges.
+            for (name, y) in [
+                ("expm1(+inf)", f64::INFINITY.exp_m1()),
+                ("expm1(-inf)", f64::NEG_INFINITY.exp_m1()),
+                ("cbrt(+inf)", f64::INFINITY.cbrt()),
+                ("cbrt(-inf)", f64::NEG_INFINITY.cbrt()),
+                ("atan(+inf)", f64::INFINITY.atan()),
+                ("atan(-inf)", f64::NEG_INFINITY.atan()),
+            ] {
+                assert!(
+                    !y.is_nan(),
+                    "{name} must not be NaN — the total claim rests on it"
+                );
+            }
+            assert!(
+                f64::INFINITY.sin().is_nan() && f64::NEG_INFINITY.sin().is_nan(),
+                "sin(±inf) must be NaN — if this ever changes, sin's predicate can \
+                 be relaxed from is_finite to true"
+            );
+
+            let mut values: Vec<f64> = vec![0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 1e-300, 1e300, -1e300];
+            let mut seed: u64 = 0x5b12_dd8d_7c50_8d28;
+            for _ in 0..20_000 {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let unit = ((seed >> 11) as f64) / ((1u64 << 53) as f64);
+                let sign = if seed & 1 == 0 { 1.0 } else { -1.0 };
+                values.push(sign * unit * 1e4);
+            }
+
+            type Op = (
+                &'static str,
+                fn(&Column) -> Result<Column, ColumnError>,
+                fn(f64) -> f64,
+                bool,
+            );
+            let ops: [Op; 4] = [
+                ("expm1", Column::expm1, f64::exp_m1, true),
+                ("cbrt", Column::cbrt, f64::cbrt, true),
+                ("atan", Column::atan, f64::atan, true),
+                ("sin", Column::sin, f64::sin, false),
+            ];
+
+            for (name, op, oracle, total_at_infinity) in ops {
+                // Finite corpus: all-valid and bit-identical for every op.
+                let out = op(&Column::from_f64_values(values.clone())).expect(name);
+                assert!(
+                    out.validity().all(),
+                    "{name}: a finite input is always in domain"
+                );
+                let got = out.as_f64_slice().expect("all-valid typed slice");
+                for (i, (&g, &x)) in got.iter().zip(values.iter()).enumerate() {
+                    assert_eq!(
+                        g.to_bits(),
+                        oracle(x).to_bits(),
+                        "{name} at {i}: input {x:e}"
+                    );
+                }
+
+                // Now with the infinities present, which is where the four differ.
+                let mut with_inf = values.clone();
+                with_inf.push(f64::INFINITY);
+                with_inf.push(f64::NEG_INFINITY);
+                let inf_at = with_inf.len() - 2;
+                let out = op(&Column::from_f64_values(with_inf.clone())).expect(name);
+                assert_eq!(out.len(), with_inf.len(), "{name} length drift");
+                if total_at_infinity {
+                    assert!(
+                        out.validity().all(),
+                        "{name} is total: ±inf must stay PRESENT"
+                    );
+                    let got = out.as_f64_slice().expect("all-valid typed slice");
+                    for (i, (&g, &x)) in got.iter().zip(with_inf.iter()).enumerate() {
+                        assert_eq!(
+                            g.to_bits(),
+                            oracle(x).to_bits(),
+                            "{name} at {i}: input {x:e}"
+                        );
+                    }
+                } else {
+                    // THE NEGATIVE CASE: sin(±inf) is NaN, so both slots must come
+                    // back MISSING while every finite slot stays present.
+                    assert!(
+                        !out.validity().get(inf_at) && !out.validity().get(inf_at + 1),
+                        "{name}(±inf) is NaN and both slots must be MISSING, not \
+                         silently present"
+                    );
+                    for i in 0..inf_at {
+                        assert!(
+                            out.validity().get(i),
+                            "{name}: finite slot {i} must stay present"
+                        );
                     }
                 }
             }
