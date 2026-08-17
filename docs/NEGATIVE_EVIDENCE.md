@@ -31238,3 +31238,61 @@ now", never "will one start in the next three minutes".
 **`mod @1M` at 6.496x/6.604x and `floordiv @10M` at 6.869x are the largest ratios
 this family has produced, and none of the three is banked.** Recorded as point
 estimates so the next attempt knows what to expect, not as results.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — STANDING CLAIMS for the compute-bound binary family, quoted at the WORST BOUND: `floordiv @10M` ≥ **6.504x** and `mod @10M` ≥ **5.651x**
+
+Both rows certified on ELF `e40c18de` against pandas 2.2.3 (artifact `c10b13e6`),
+each in one invocation with the incumbent arm in the same process, both A/A nulls
+inside 2%, and all three gate clauses true.
+
+**These are stated at the LOWER 95% CI BOUND, not the point estimate.** A standing
+claim is the number someone else will repeat without re-deriving it, so it should be
+the one the data supports even at its least flattering, and the point estimate is
+not that number.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=e40c18de5e5122482db93a3e1f5f0cce9d2d703325b91c64947db5b87f80c38e (82230440 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-mod`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T110638.764138Z-pid3892879 , giving
+measured_ratio=6.649x for the `floordiv` row.
+
+| standing | worst bound | point | 95% CI | best-vs-best | FP p50 | pandas p50 |
+|---|---|---|---|---|---|---|
+| **`floordiv @10M` ≥ 6.504x** | **6.504x** | 6.649x | [6.50395, 6.84411] | 7.5409 | 20752.35us | 138685.95us |
+| **`mod @10M` ≥ 5.651x** | **5.651x** | 6.064x | [5.65072, 6.19467] | 7.134 | 20095.26us | 119382.73us |
+
+**A/A null control (same invocation):** `floordiv` FrankenPandas median ratio
+0.993198 and pandas median ratio 0.996292; `mod` FrankenPandas 0.987415 and pandas
+0.998432. All four inside the 2% limit.
+
+**Median-CI decision:** `floordiv` effect median 6.649x with claimed log effect
+1.89439369 against a required threshold of 0.1363143, cleared by 13.9x; `mod`
+6.064x with 1.80231147 against 0.20949874, cleared by 8.6x.
+
+**CV role:** provenance only, no vote — `floordiv` FP 6.08% / pandas 1.12%, `mod` FP
+6.76% / pandas 1.78%.
+
+```
+floordiv  LOADAVG 13.36 → 18.48 (in-run 13.30–20.49)  MHz FP 4294.2 / pandas 4293.5
+mod       LOADAVG 16.72 → 11.57 (in-run 11.57–16.72)  MHz FP 4294.0 / pandas 4294.9
+THREADS   FP peak 10 · pandas peak 67 on both
+```
+
+**`floordiv` CERTIFIED ON ITS SECOND ATTEMPT, AND THE FIRST FAILURE IS THE POINT.**
+Attempt one gave 6.869x with the null failing at 0.977035 while the in-run load
+climbed 10.92 → 41.15. Attempt two, gated the same way, gave 6.649x with the null at
+0.993198. **The point estimate moved 3.2% and the verdict moved from nothing to a
+standing claim** — which is the clearest statement I can make of what the null clause
+is actually buying: not accuracy, but the right to believe the number at all.
+
+**WHAT THE FAMILY LOOKS LIKE NOW.** `pow`, `mod` and `floordiv` were all on the
+`1 << 20` threshold that sat 4.9% above the corpus's most-used size. `pow` was a
+certified LOSS at 0.928x before the fix. All three are now certified wins, and the
+two measured at 10M are the largest ratios this bead has produced. **One constant,
+three ops, and the only reason any of it was visible was a clean certified defeat
+with `peak_process_threads: 2` printed beside it.**
