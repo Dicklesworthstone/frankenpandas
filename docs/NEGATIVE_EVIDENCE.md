@@ -32153,3 +32153,78 @@ an uncompiled edit to `fp-columnar` would break every pane that builds after it.
 lands when a window opens with `scripts/host_is_quiet_now.py` reporting quiet — at the
 time of writing it reports 264% build CPU against a 1-minute loadavg of 28.80, a rustc
 storm the average has not caught up to yet.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — A BASELINE BUILD THAT SUCCEEDED IN 0.12 SECONDS HANDED ME ANOTHER AGENT'S BINARY. Ninth shape of "the absence of work is rendered as the success of work", and the first where cargo was entirely correct
+
+No measurement was taken. This entry exists because the next person will hit it.
+
+**WHAT HAPPENED.** The window was good — `host_is_quiet_now.py` reporting 99% build
+CPU against a 200% threshold, loadavg 13.32 and falling, disk 117G — so I took a build
+window to produce the baseline ELF for a paired A/B, deliberately not measuring in it.
+The build reported:
+
+```
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 0.12s
+cargo exit=0
+```
+
+**Exit 0. Zero warnings. Nothing rebuilt, and nothing wrong with cargo.** In the same
+output, `git status` showed `M crates/fp-columnar/src/lib.rs` — a file that was clean
+twenty minutes earlier when I verified my own revert with `git diff --quiet`.
+
+**WHAT WAS ACTUALLY IN THE TREE:** 86 insertions and 58 deletions from another pane —
+`pub fn cached_available_parallelism` (a `OnceLock` around `available_parallelism()`)
+plus 24 call-site migrations. `fn cached_available_parallelism` **does not exist in
+HEAD at all.** Their build had already compiled that exact content into the shared
+`target/`, so cargo was right to do nothing, and the binary sitting at
+`target/release-perf/fp-bench` is `d370a302d507cb0c`: **HEAD plus another agent's
+uncommitted lever.**
+
+**WHAT THE ROW WOULD HAVE SAID.** Had I gone from that build straight to the
+benchmark, the "baseline" arm of a paired A/B — whose entire claim is that the two arms
+differ ONLY by my patch — would have contained someone else's threading change. Both
+arms would have contained it, so the null would have passed, the checksums would have
+matched, and nothing in the artifact would have flagged it. The ratio would have been
+wrong in an unknowable direction and I would have banked it.
+
+**WHY THIS ONE IS DIFFERENT FROM THE OTHER EIGHT.** The previous sightings were all
+tools reporting success for work they did not do: a piped `$?`, a filter matching
+nothing, a fleet refusal, `Files: 0`, a stale Bash cwd, a bogus flag read as a
+filename, a pathspec commit shipping a ledger without its code. **Here cargo behaved
+perfectly.** Nothing lied. The build was genuinely unnecessary because the bytes were
+genuinely already built — by someone else, from a tree that is not the one I believed
+I was measuring. **A correct "up to date" is indistinguishable from "I built your
+code" at the terminal, and on a shared checkout with a shared target directory those
+two mean completely different things.**
+
+**THE CHECK THAT CAUGHT IT, which is the transferable part:** `git status --porcelain
+-- crates` in the same command as the build, expecting empty. Not the build's exit
+code, not its output, not `--stat` on the commit afterwards — the tree's cleanliness
+BEFORE the compiler is asked anything. A build's success says nothing about whose
+source it consumed. **The executing-ELF sha in every row is what makes this
+recoverable after the fact; `git status` before the build is what makes it avoidable.**
+
+**AGENT MAIL DID NOT WORK EITHER, AND THAT MATTERS HERE.** I hold an EXCLUSIVE
+reservation on `crates/fp-columnar/src/lib.rs` (id 22576, until 13:27Z) and
+`check_file_reservation_conflicts` returns `conflict_free: true` — **the lease system
+does not see the conflicting edit at all**, because the other pane never reserved the
+path. Two attempts to send a warning both timed out in the mail server's archive-commit
+stage (`archive_commit_p99_ms=4195`, its own `blocking_dispatch_timeouts_total` ticking
+44 → 45), leaving only an auto-generated contact request. **So the coordination
+mechanism reported no conflict while a conflict was live, and the notification channel
+was down.** This ledger is the channel that persists, which is why the warning is here.
+
+**I HAVE NOT TOUCHED, REVERTED OR COMMITTED THEIR WORK**, and the change itself looks
+right. Two notes for whoever owns it, recorded where they will find them:
+`apply_f64_slices_nan_tracked` calls `available_parallelism()` once per CALL, so at 1M
+(~800us) the cache buys almost nothing and the size worth measuring is small-n in a
+loop; and `OnceLock` freezes the value for process lifetime, so any harness varying
+thread count *within* a process — ours does, via `--threads`, and this ledger has a row
+that certified at 1.275x because of exactly that flag — will read the first value
+forever. Fine in production, a live hazard in the bench binary.
+
+**MY A/B IS HELD, NOT ABANDONED.** The patch and its pre-registered prediction are in
+the entry above (commit `e6c697839`). It runs when the tree is attributable. Waiting
+costs a window; measuring an unattributable tree costs a wrong number that looks
+exactly like a right one.
