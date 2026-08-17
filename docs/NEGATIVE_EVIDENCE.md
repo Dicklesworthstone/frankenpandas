@@ -29069,3 +29069,73 @@ at 1M — a size dependence larger than any other op in this family, and consist
 with the DRAM-bound regime the earlier `floor` work identified. `log @10M` at 2.095x
 sits within 1% of the 2.079-2.251x `log2` cluster. Neither is banked, both are worth
 a re-run, and at a 57% base rate one of them should come back on the next attempt.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — REJECTED as a kernel result: the banked `floor @10M` 1.056x is a MEMORY-BANDWIDTH ARTEFACT. The `floor` contradiction is size-dependence, not a regression, and the real deficit is 3.1x per element at the cache-resident size
+
+Yesterday's ledger banked `floor @10M` CERTIFIED 1.056x FASTER. Today I certified
+`floor @1M` at 0.314x SLOWER and flagged that both could not be "the" floor ratio.
+The discriminator I named — the same op at three sizes on ONE binary — ran, and it
+settles the question. Neither row is wrong; the ratio genuinely inverts with size,
+and the reason is that only ONE of the three sizes can see the kernel at all.
+
+ELF `4c50f09ba713bb8373b57ee658675d7bc16ebb7a5815902d068e75230d98ec62`, unchanged
+before and after; no build in this window (built two windows earlier).
+
+| size | FP p50 | pandas p50 | **FP ns/elem** | **pandas ns/elem** | ratio | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| 100k | 54.64us | 49.04us | 0.546 | 0.490 | 0.953x | NULL_UNDECIDABLE |
+| 1M | 555.61us | 177.77us | 0.556 | **0.178** | **0.342x** | **SLOWER** |
+| 10M | 10227.34us | 11425.49us | 1.023 | 1.143 | 1.158x | NULL_UNDECIDABLE |
+
+**Counted mechanism:** FrankenPandas is essentially FLAT in per-element cost —
+0.546, 0.556, 1.023 ns/elem — while pandas swings by 6.4x — 0.490, **0.178**,
+1.143. pandas has a sweet spot at 1M and FrankenPandas does not have one anywhere.
+
+**READ THE THREE SIZES AS THREE DIFFERENT EXPERIMENTS, because that is what they
+are.**
+  * **100k** — 800 KB in, 800 KB out. pandas has not amortised its per-call
+    overhead (0.490 ns/elem, nearly its 10M figure), so the comparison is measuring
+    Python and ufunc dispatch, not the loop. Undecidable, and it should be.
+  * **1M** — 8 MB in, 8 MB out, comfortably inside this box's 128 MB L3. pandas runs
+    at **0.178 ns/elem**, which at ~3.3 GHz is well under one cycle per element and
+    is only reachable with wide SIMD. This is the ONLY size where the kernel itself
+    is on the clock, and it is where FrankenPandas loses 3.2x.
+  * **10M** — 80 MB in, 80 MB out, past L3. BOTH engines collapse to roughly one
+    ns/elem, pandas degrading 6.4x from its own sweet spot and FP only 1.8x from
+    its flat line. FP "wins" by 1.16x here purely because it had less to lose.
+
+**SO THE BANKED 1.056x DOES NOT DESCRIBE THE KERNEL AND MUST NOT BE READ THAT WAY.** It is
+two engines hitting the same memory wall, where the faster kernel's advantage is
+invisible by construction. The row is not retracted — it passed its gate and it
+correctly describes what a 10M-row `floor` costs — but its INTERPRETATION was
+wrong, and mine was the ledger that carried it. A 10M elementwise row on this host
+cannot distinguish a good kernel from a bad one.
+
+**PRACTICE THIS ESTABLISHES: size the fixture to the question.** For an elementwise
+float op on this box, measure at 1M, where the working set is cache-resident and
+the loop is the bottleneck. 10M measures DRAM and 100k measures dispatch. That is
+not a general rule about benchmarking — it is a specific consequence of a 128 MB L3
+and a 16 MB versus 160 MB working set, and it is checkable by the ns/elem column
+above rather than assumed.
+
+**A/A null control (same invocation):** only the 1M row is clean —
+FrankenPandas median ratio 0.996675 and pandas median ratio 0.983776, both inside
+the 2% limit. The 100k row's
+FP null is 1.120404 and the 10M row's is 0.935762, BOTH FAILING, which is exactly
+why those two rows read NULL_UNDECIDABLE and why neither the 0.953x nor the 1.158x
+is quoted as a result here. They are shape evidence for the ns/elem curve, not
+ratios.
+
+**Median-CI decision:** the 1M row, effect median 0.342x, is the only decidable one
+of the three; it replicates this morning's independent 0.314x on the same binary.
+
+**CV role:** provenance only, no vote.
+
+**WHAT THIS MEANS FOR THE LEVER.** The 3.1x per-element gap at the cache-resident
+size is a SIMD-width story, and the ledger has already rejected the two obvious
+alternatives: parallelism loses 1.7-3.1x for these ops at every worker count from 2
+to 63, and `Column::floor` is already off the witness arm. numpy reaches 0.178
+ns/elem with `vroundpd` at AVX width; FrankenPandas emits SSE2-width scalar-ish code
+for a generic x86-64 target. That is the same axis br-frankenpandas-cu22b/oxv4u have
+open on `+sse4.1`/`+avx2`, and this row is the first measurement that isolates it
+from threading, from allocation and from memory bandwidth all at once.
