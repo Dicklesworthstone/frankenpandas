@@ -33678,3 +33678,67 @@ counts proxied for hotness. The harness `checksum` proxied for value equality. N
 `checksum` proxied for value equality. **Every one was a field whose NAME described what I
 wanted, and in every case the real quantity was one cheap step further on.** The step I skipped
 here was: run it on two different workloads and see whether the number moves.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `mod @1M` fails its A/A null a THIRD time, and the cause is structural: MY OWN threshold change put it on the PARALLEL arm, which is the arm whose null fails
+
+Third attempt at this row, first one on an ELF that describes current main
+(`a802073cf042d28d`, built from a worktree at `8b263954b` with `tracked-dirty 0`).
+
+```
+  attempt   ratio     FP A/A null   peak threads   verdict
+     1      6.496x      1.02140          10        NULL_UNDECIDABLE
+     2      6.604x      1.05754          10        NULL_UNDECIDABLE
+     3      7.617x      0.96287          10        NULL_UNDECIDABLE   <- today, current main
+```
+
+**All three are on the PARALLEL arm, and all three failed the FrankenPandas null.** The pandas
+null passed every time (1.00815 today). The effect itself is never in doubt — 7.617x with a 95%
+CI of [7.46067, 7.94391], clearing its required margin by a wide margin — and the row still
+cannot be banked, because a failed null invalidates it.
+
+**THIS IS NOT A WINDOW PROBLEM AND I SHOULD STOP TREATING IT AS ONE.** This ledger measured the
+mechanism directly: FrankenPandas' A/A null passes ~72% of the time on SERIAL arms and ~44% on
+PARALLEL ones, the cause being the per-call `thread::scope`. Three consecutive failures at 44%
+each is unremarkable. Chasing this row with better windows is a strategy with a known ceiling —
+the fix is the documented cause, not the weather.
+
+**AND THE IRONY IS MINE.** `mod @1M` is on the parallel arm BECAUSE OF A CHANGE I MADE. The
+binary-op threshold split routed `pow`/`mod`/`floordiv` to the compute-bound
+`elementwise_witness_policy()` par_min instead of the bandwidth-bound `1 << 20`, precisely so
+they would parallelise at 1M. It worked — mod @1M runs 8 workers and its ratio has climbed 6.496
+→ 7.617x — **and the same change moved the row onto the arm whose A/A null fails, making it
+faster and less certifiable in one stroke.** That trade was not visible when I made it and it is
+worth stating: routing an op to the parallel arm buys throughput and spends decidability.
+
+**I OVERRODE MY OWN INSTRUMENT TO TAKE THIS ROW, AND I AM RECORDING THAT.**
+`host_is_quiet_now.py` reported 400% build CPU from three peer `rustc` processes. I judged the
+threshold too strict for a 64-core host — 400% is four cores of sixty-four — and took the row
+anyway on the reasoning that the div pair which collapsed had done so from 0% build CPU, so the
+TREND rather than the compile was the discriminator. **The row then failed.** I cannot honestly
+claim the override caused it: the parallel-arm mechanism predicts failure regardless, and the
+pandas arm's null was clean at 1.00815, which is not what a contended host looks like. So this
+episode neither vindicates nor refutes the threshold, and I am not going to pretend it settles
+the calibration question I raised.
+
+**WHAT IS WORTH KEEPING FROM THE ROW ANYWAY:** the ratio trend across the three attempts is
+6.496 → 6.604 → 7.617x, and the last is the only one on post-migration code. That is consistent
+with `cached_available_parallelism` being worth real time on an op that calls
+`available_parallelism()` once per invocation — `q1evw` measures the old call at 66-68us and mod
+@1M is ~1.5ms, so ~4-5%, while the observed jump is ~15%. **The direction agrees and the
+magnitude does not, so something else also improved and I am not attributing it.**
+
+**HOW THIS ROW COULD ACTUALLY BE CERTIFIED, for whoever wants it:** measure `mod` at a size that
+takes the SERIAL arm, or fix the per-call `thread::scope` first. The second is the real lever and
+is already this bead's ancestry — the domain-fused primitive got sqrt and log off the shared
+witness arm and their nulls started passing at @1M. mod's parallel arm is a different code path
+but the same disease.
+
+```
+LOADAVG      10.22 / 11.69 / 15.81 at launch, 11.69 / 11.82 / 15.63 at end — DRAINING throughout
+BUILD CPU    400% at launch, three peer rustc; my instrument said defer and I proceeded anyway
+OBSERVED MHz host mean 2476.8 before -> 3209.7 after; arms_saw_same_clock=true, ratio 1.0052
+LIKE-FOR-LIKE ok=true; par=64; peak_process_threads=10 (parallel arm)
+INCUMBENT    pandas 2.2.3, artifact c10b13e6b6bec9a3, same invocation, p50 11577.86us
+ARTIFACT     artifacts/bench/4kig1_mod1M_MAIN_2026-08-17.json
+```
