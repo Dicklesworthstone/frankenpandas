@@ -28393,3 +28393,47 @@ why three of them are tabulated above.
 still climbing, so a third try would buy another refused row. The next attempt on
 this workload should wait for 1/5/15 to converge LOW together, and should expect
 that FP's null is the binding constraint, not the effect size.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `log2 @10M` is now 3-for-3 on losing its window AFTER entry, and `sqrt_int64` 2-for-2 on failing its own null; three consistent point estimates still do not make a gated row
+
+Two more attempts on ELF `fcc8dee4` (verified current: `cargo build` reported
+nothing to do, meaning a peer had already compiled this exact tree, so the on-disk
+binary matches HEAD). Neither is banked.
+
+| attempt | workload | point ratio | FP null | pandas null | in-run load |
+|---|---|---|---|---|---|
+| 1st | `log2 @10M` | 2.148x | 1.045422 FAIL | 1.006069 PASS | 10.7 → 17.6 |
+| 2nd | `log2 @10M` | 2.109x | 0.975814 FAIL | 0.978263 FAIL | 15.3 → 50.2 |
+| **3rd** | `log2 @10M` | **2.251x** | 0.957584 FAIL | 0.974998 FAIL | **28.2 → 73.9** |
+| 1st | `sqrt_int64 @10M` | 1.079x | 1.020485 FAIL | 1.000973 PASS | 17.3 → 17.7 |
+| **2nd** | `sqrt_int64 @10M` | **1.15x** | 0.975023 FAIL | 0.993073 PASS | 23.3 → 26.1 |
+
+**THE POINT ESTIMATES ARE REPLICATION-GRADE AND THE ROWS ARE STILL WORTHLESS.**
+`log2` has now returned 2.148x, 2.109x and 2.251x across three independent
+invocations on two different ELFs — a 6.7% spread, tighter than several rows this
+ledger has certified. It is not banked and should not be, because **consistency is
+not certification**: every one of the three failed the A/A null clause, which is the
+clause that says the instrument was steady enough to believe. A number that
+reproduces three times on a moving host reproduces the host as much as the code.
+
+**THE FAILING CLAUSE IS ALWAYS FrankenPandas' OWN NULL, AND THAT IS DIAGNOSTIC.**
+In all five attempts above FP's null missed while pandas' passed in three of them.
+Both ops sit on the parallel domain-fused arm with its per-call `thread::scope`.
+Every op this bead moved OFF `thread::scope` — `floor`, `ceil`, `trunc`, `round` —
+now passes its null routinely; every op still on it fails intermittently. That is
+the same conclusion reached from the other direction earlier in this bead, now with
+five more data points and no counterexample.
+
+**AND THE WINDOW COLLAPSE IS NOT BAD LUCK.** All three `log2` attempts were entered
+at a load I judged acceptable (10.7, 15.3, 28.2) and all three ended above it, the
+last more than doubling to 73.9 mid-row. The orchestrator's load figure is stale on
+arrival — I have checked `uptime` myself before every run for a day and it has
+disagreed with the quoted figure in most of them — but even a self-read figure only
+describes the moment of entry. **On this host the only load that matters is the one
+during the run, and it cannot be read in advance.** A row that takes three minutes
+is a three-minute bet on a host that changes state in one.
+
+Recorded so nobody re-runs `log2` a fourth time expecting a different mechanism to
+be at fault: the mechanism is understood, it is `thread::scope` plus an unquiet
+host, and the fix is the persistent pool that is blocked on either an `unsafe`
+exemption or a rayon dependency — neither of which is an agent's call.
