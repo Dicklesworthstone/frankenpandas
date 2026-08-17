@@ -28100,3 +28100,87 @@ per-element kernel already is.**
 
 Pending: the vs-pandas rows for both lanes, when the host is quiet enough to gate
 them.
+
+### 2026-08-16 CrimsonPine (br-frankenpandas-yx692) — the counted -12 instructions/iteration DO NOT move the clock: `sqrt @1M` comes back NULL_UNDECIDABLE at 0.773x with BOTH nulls clean, and best-vs-best is 0.9976. REJECTED as a speed claim; the code stays
+
+Stage 2 of the two this bead predeclared. Stage 1 landed and was verified by
+counting: the derived-witness arm is 15 instructions per 4 doubles against the
+folding arm's 27, exactly the -12 predicted (983af0c39). Stage 2 asked whether
+that moves the wall clock. It does not, decidably, and I said in advance that a
+counted reduction which fails to move the clock would be banked as a negative
+result.
+
+| arm | p50 | min | cv | observed threads |
+|---|---:|---:|---:|---:|
+| FrankenPandas | 1433.88us | **1063.57us** | 14.97% | 8 |
+| pandas 2.2.3 | 1103.55us | **1060.99us** | 4.06% | 1 |
+
+**Verdict NULL_UNDECIDABLE at 0.773x.** The effect CI [0.72106, 0.83927] excludes
+unity, but `effect_exceeds_two_x_null_margin` is FALSE: the claim's log effect
+0.25742 does not reach the required 0.31396, because FrankenPandas' own null is
+wide enough that the combined two-times-null interval is [0.73055, 1.36884] and
+the effect sits inside it. Two of three gate clauses true, so the row is refused
+rather than decided.
+
+**A/A null control (same invocation):** 9 balanced-square ABBAABBA rounds per arm
+in one invocation — FrankenPandas median ratio 0.99964708 and pandas median ratio
+1.00855809, both inside the 2% limit, so `null_medians_within_2pct_unity` PASSES
+for both arms. This is the first `sqrt` row in this campaign whose FP null is
+clean; br-frankenpandas-4kig1 recorded it FAILING at 0.913921 while sqrt was still
+on the shared `thread::scope` witness arm. The instrument is not what refused this
+row — FP's null CI [0.85472, 1.13940] against pandas' [0.99692, 1.03426] is.
+
+**THE NUMBER THAT REFRAMES THE TARGET: best-vs-best is 0.9976.** FrankenPandas'
+fastest sample is 1063.57us against pandas' 1060.99us — a 0.24% difference, which
+is parity. FP's MEDIAN is 30% worse while its MINIMUM ties. So at 1M the remaining
+`sqrt` gap is not throughput, it is DISPERSION: FP cv 14.97% against pandas 4.06%,
+3.7x noisier, and the harness measured them in the same invocation on the same
+host so that spread is FP's, not the window's. A kernel that can already hit
+pandas' time and usually does not is a scheduling/tail problem, not an
+instruction-count problem — which is consistent with br-frankenpandas-284ul, where
+the per-call `thread::scope` spawn is paid on every call and the slowest of 8
+workers sets the call time on a contended host.
+
+**NO BEFORE/AFTER RATIO IS CLAIMED, and the reason matters.** The tempting move is
+to set 1433.88us against the 0.805x row banked 2026-07-31 (fp p50 1338.84us) and
+report a regression. That would be a cross-binary, cross-session, cross-host-state
+comparison, and this ledger's own 2026-08-16 control measured a null of that exact
+shape swinging 0.960x-1.161x on byte-identical code. There is no A/B here, only an
+absolute row, and it says undecidable.
+
+**THE CODE STAYS, without a ratio attached.** Same disposition, and same reasoning,
+as the `copysign`→OR lever above: it is bit-identical, it strictly removes work,
+the mechanism is counted rather than argued, and it is provably correct in both
+directions over the domain. What is withdrawn is any claim that it made `sqrt`
+faster. It did not, measurably.
+
+```
+CLASS        vs-incumbent row, live pandas 2.2.3 in the SAME invocation
+ELF          the harness resolved target/release-perf/fp-bench, built locally,
+             sha 19b16af27c2d34b07e9e07eadccf2ed627693ac783e705f9d57fe9f59279de58
+INCUMBENT    pandas 2.2.3 pinned as artifact_sha256=c10b13e6b6bec9a38bef8a24062c
+             35f84c343a67973eec708b0c523302a5845f (2922 files, 70681559 bytes)
+INVOCATION   vs-pandas-20260817T034121.831739Z-pid1853490, git 983af0c39
+LOADAVG      20.78 / 32.91 / 46.39 at launch, 19.04 / 32.13 / 46.00 at the end —
+             a DECAYING window, 1-min under the 30 threshold but 1/5/15 not
+             converged; recorded rather than claimed as stable
+OBSERVED MHz host mean 2633.3 before, 3343.1 after. ⚠ NOT per-arm — this harness
+             does not record per-arm frequency, so the cross-core-spread rule
+             cannot be satisfied from this row and I am not pretending it was
+THREADS      FP 8 (peak 10), pandas 1 (peak 67, BLAS pool threads a ufunc never uses)
+ARTIFACT     artifacts/bench/yx692_sqrt_1m_thinkstation1_2026-08-16.json
+```
+
+**CV role:** provenance only, no vote — FP 14.97%, pandas 4.06%. It had no part in
+the verdict, but it IS the finding, which is why it is quoted here at all.
+
+**AN OPERATIONAL TRAP THIS RUN WALKED INTO FIRST, worth one line so nobody repeats
+it.** The first invocation reported `CONTRACT_INVALID (N/A)` and printed "fp-bench
+binary not found at /data/tmp/cargo-target/release-perf/fp-bench" — it had SKIPPED
+the FrankenPandas arm entirely and still written a results file. The harness reads
+`CARGO_TARGET_DIR`, which is set session-wide to the shared cargo-target, and only
+falls back to the repo's own `target/` when that variable is absent. So
+`env -u CARGO_TARGET_DIR` is required on the HARNESS invocation, not merely on
+`cargo`. Every standing instruction says `env -u CARGO_TARGET_DIR cargo ...` and
+none of them says it for the harness. Without it the run measures nothing and says
+so only in a line that is easy to scroll past.
