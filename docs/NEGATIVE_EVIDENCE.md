@@ -29139,3 +29139,60 @@ ns/elem with `vroundpd` at AVX width; FrankenPandas emits SSE2-width scalar-ish 
 for a generic x86-64 target. That is the same axis br-frankenpandas-cu22b/oxv4u have
 open on `+sse4.1`/`+avx2`, and this row is the first measurement that isolates it
 from threading, from allocation and from memory bandwidth all at once.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — WHY the null fails half the time, counted over 105 rows: the 2% limit sits almost exactly at FrankenPandas' MEDIAN null deviation, so ~half of all rows fail by construction
+
+Second attempts at both queued rows, in the most stable window of the session
+(loadavg 12.66 → 15.91, all three averages within one point at entry, per-arm clocks
+within 0.05%, ELF `d2ddc947`, no build started in the window):
+
+| row | attempt 1 | attempt 2 | FP null (1 / 2) |
+|---|---|---|---|
+| `round2 @10M` | 2.444x | 2.404x | 1.032178 FAIL / 0.957206 FAIL |
+| `log @10M` | 2.095x | 2.016x | 0.973184 FAIL / 1.034671 FAIL |
+
+Both 0-for-2. Neither banked. The point estimates are 1.6% and 3.9% apart across
+attempts, so the ENGINE is reproducible and the NULL is not.
+
+**So I stopped re-running and measured the instrument instead. Across 105
+`math_unary` rows, comparing each arm's first-placement slots against its
+last-placement slots:**
+
+```
+                median(armA/armB)   median |null - 1|   p90 |null - 1|
+FrankenPandas        0.9980              1.75%              7.05%
+pandas               0.9982              1.40%              5.89%
+```
+
+**NEITHER ENGINE IS BIASED.** Both medians sit within 0.2% of unity, so there is no
+warmup drift, no cold-allocator effect, no systematic first-slot penalty — the
+hypothesis I would have guessed at is wrong. FrankenPandas is simply **noisier by
+about a quarter**: 1.75% median deviation against pandas' 1.40%.
+
+**AND THAT IS THE WHOLE MECHANISM.** The gate's limit is 2%. FrankenPandas' MEDIAN
+null deviation is 1.75%. **The threshold sits a hair above the middle of our own
+distribution, so roughly half of all FrankenPandas rows fail it no matter what code
+is being measured, how quiet the window is, or which arm the op takes.** pandas at
+1.40% clears the same limit comfortably, which is exactly why its null passes 68% of
+the time to our 57%. The parallel arm's 44% and the serial arm's 72% are the same
+distribution shifted, not two different phenomena.
+
+This closes out three earlier explanations of mine, each of which was a real effect
+mistaken for the whole story: the host (real, but quiet windows still fail),
+`thread::scope` (real, worth ~28 percentage points, but not determinative), and
+"`log2` is special" (already retracted, and now fully explained by the base rate).
+
+**I AM NOT PROPOSING TO CHANGE THE LIMIT, AND THAT MATTERS.** A 2% gate that rejects
+half our rows is expensive, and the obvious move — widen it — is gate
+self-weakening, which section 2 of the standing orders bans outright and which I
+have spent this session refusing in the other direction, including on a row that
+missed by 0.05 percentage points. **The limit is a shared contract and the number it
+should be is a decision for whoever owns that contract, informed by this
+measurement.** What an agent can legitimately do with this finding is what the
+previous entry already recommended: budget two attempts per row, and prefer the
+serial arm where the speed cost is inside the noise.
+
+`round2 @10M` remains the most interesting unbanked row in the family — 2.444x and
+2.404x across two attempts against 0.955x at 1M, the largest size dependence
+anywhere in this bead — and on these numbers it needs roughly four attempts to have
+an even chance of one clean null.
