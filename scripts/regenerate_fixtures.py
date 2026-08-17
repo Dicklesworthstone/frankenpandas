@@ -645,13 +645,35 @@ def provenance_write_is_faithful(
     return set(after) == set(before) | set(oracle_provenance) | set(added)
 
 
+def non_provenance(fixture: dict[str, Any]) -> dict[str, Any]:
+    """Everything a restamp is forbidden to touch."""
+    return {k: v for k, v in fixture.items() if k != PROVENANCE_KEY}
+
+
+# Refusal reasons, so a declined restamp says WHICH guard stopped it.
+REFUSED_STALE_SNAPSHOT = (
+    "stale-snapshot: the file changed on disk after this run examined it, "
+    "so the guard has nothing trustworthy to compare against"
+)
+REFUSED_UNPARSEABLE = "unparseable: the rewritten text is not JSON"
+REFUSED_NO_PROVENANCE_OBJECT = "no-provenance-object: fixture_provenance is not an object"
+REFUSED_UNFAITHFUL_PROVENANCE = (
+    "unfaithful-provenance: richer provenance than the oracle emits; writing the "
+    "oracle stamp would DROP keys (generation_command, intentional_divergence_notes)"
+)
+REFUSED_WOULD_MOVE_EXPECTED = (
+    "would-move-an-expected-value: the rewrite changed a non-provenance key, "
+    "which is regeneration, not restamping"
+)
+
+
 def write_restamp(
     path: Path,
     fixture: dict[str, Any],
     response: dict[str, Any],
     attestation: str | None = None,
-) -> bool:
-    """Refresh one fixture's provenance IN PLACE. True if written.
+) -> tuple[bool, str | None]:
+    """Refresh one fixture's provenance IN PLACE. `(written, refusal_reason)`.
 
     Text-level so the corpus keeps its compact formatting and the diff stays a
     few lines per fixture (a json.dumps round-trip would reformat ~1000 files).
@@ -659,30 +681,63 @@ def write_restamp(
     `provenance_write_is_faithful`, and must leave every non-provenance key
     equal under the parser. A rewrite that moved an expected value would be
     regeneration, so it is refused rather than written.
+
+    Returns a PAIR, not a bare bool, on purpose. The bool used to be the whole
+    answer and every refusal printed the same one-line explanation — "richer
+    provenance than the oracle emits" — regardless of which of four guards had
+    actually fired. br-frankenpandas-1dbxe is a P1 alleging that this writer
+    silently laundered an expected value, and the single hardest thing about
+    adjudicating it was that a refusal carried no reason: nothing in the output
+    could distinguish "this fixture's provenance is richer than the oracle's"
+    from "someone edited this file while the run was in flight". On a checkout a
+    dozen agents share, those are the two most likely causes and they need
+    opposite responses.
+
+    ⚠ THE PAIR ALSO CLOSES A TRUTHINESS TRAP. Returning `str | None` would have
+    been terser, but then `if write_restamp(...)` — which is how both call sites
+    were written — silently INVERTS: a refusal reason is truthy and success is
+    falsy, so every refused fixture would be counted as restamped. Two values
+    that cannot be confused is worth the extra character.
+
+    THE STALE-SNAPSHOT GUARD IS NEW AND IS THE POINT. `fixture` was parsed when
+    the run EXAMINED this path, which under `--jobs N` was in a worker thread and
+    possibly minutes ago; `raw` is read here, at write time. If anything changed
+    the file in between, those two disagree. The old code still refused — the
+    non-provenance comparison below catches it — but it reported the refusal as a
+    provenance-richness problem, which is a wrong and expensive thing to tell
+    someone. Now it is named.
     """
     raw = path.read_text(encoding="utf-8")
     before = fixture.get(PROVENANCE_KEY) or {}
     oracle_provenance = response.get(PROVENANCE_KEY) or {}
     added = {ATTESTATION_KEY: attestation} if attestation else {}
 
+    # Compare what is on disk NOW against the snapshot this run reasoned about,
+    # before attempting any surgery. Provenance is excluded because refreshing it
+    # is the whole job; everything else must be untouched since `examine`.
+    try:
+        on_disk = json.loads(raw)
+    except json.JSONDecodeError:
+        return False, REFUSED_UNPARSEABLE
+    if not isinstance(on_disk, dict) or non_provenance(on_disk) != non_provenance(fixture):
+        return False, REFUSED_STALE_SNAPSHOT
+
     updated = restamp_text(raw, before, {**oracle_provenance, **added})
     try:
         reparsed = json.loads(updated)
     except json.JSONDecodeError:
-        return False
+        return False, REFUSED_UNPARSEABLE
 
     after = reparsed.get(PROVENANCE_KEY)
     if not isinstance(after, dict):
-        return False
+        return False, REFUSED_NO_PROVENANCE_OBJECT
     if not provenance_write_is_faithful(before, after, oracle_provenance, added):
-        return False
-    if {k: v for k, v in reparsed.items() if k != PROVENANCE_KEY} != {
-        k: v for k, v in fixture.items() if k != PROVENANCE_KEY
-    }:
-        return False
+        return False, REFUSED_UNFAITHFUL_PROVENANCE
+    if non_provenance(reparsed) != non_provenance(fixture):
+        return False, REFUSED_WOULD_MOVE_EXPECTED
 
     path.write_text(updated, encoding="utf-8")
-    return True
+    return True, None
 
 
 def restamp(fixture: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
@@ -840,6 +895,10 @@ def main() -> int:
     agreed = prov_only = 0
     restampable_count = restamped = 0
     restamp_refused: list[str] = []
+    # Parallel to `restamp_refused`, carrying WHICH guard declined each one.
+    # Additive rather than a change of shape: `restamp_refused` stays a plain
+    # list of names so anything already reading the JSON report keeps working.
+    restamp_refusals: list[tuple[str, str]] = []
     moved_attributed: list[tuple[str, str]] = []
     moved_unattributed: list[tuple[str, list[str], str, str, str, list[str]]] = []
     move_classes: collections.Counter[str] = collections.Counter()
@@ -886,12 +945,14 @@ def main() -> int:
                 if origin == ORIGIN_PANDAS:
                     error_agreement_pandas += 1
                     if args.restamp_agreeing and args.apply and response:
-                        if write_restamp(
+                        written, why = write_restamp(
                             path, fixture, response, ATTESTATION_ERROR_AGREEMENT
-                        ):
+                        )
+                        if written:
                             error_agreement_stamped += 1
                         else:
                             restamp_refused.append(name)
+                            restamp_refusals.append((name, why or "unknown"))
                 else:
                     error_agreement_not_pandas.append((name, origin or "unknown"))
             else:
@@ -967,10 +1028,12 @@ def main() -> int:
             if restampable(verdict):
                 restampable_count += 1
                 if args.restamp_agreeing and args.apply:
-                    if write_restamp(path, fixture, response):
+                    written, why = write_restamp(path, fixture, response)
+                    if written:
                         restamped += 1
                     else:
                         restamp_refused.append(name)
+                        restamp_refusals.append((name, why or "unknown"))
         else:
             agreed += 1
 
@@ -984,11 +1047,16 @@ def main() -> int:
     if restamp_refused:
         # Never silent. A restampable fixture the writer declined is a fixture
         # whose stamp stays stale, and an unreported one would read as covered.
+        #
+        # The reason is PER FIXTURE now. This block used to assert one cause for
+        # every refusal — "richer provenance than the oracle emits" — which is
+        # only one of four guards, and printing it unconditionally is how a
+        # refusal caused by a concurrent edit reads as a provenance problem
+        # (br-frankenpandas-1dbxe).
         print(f"    RESTAMP REFUSED          : {len(restamp_refused)}"
-              "   <-- richer provenance than the oracle emits; flattening it "
-              "would DROP keys (generation_command, intentional_divergence_notes)")
-        for name in restamp_refused:
-            print(f"      {name}")
+              "   <-- each with the guard that declined it")
+        for name, why in restamp_refusals:
+            print(f"      {name}: {why}")
     print(f"  MOVED, attributed          : {len(moved_attributed)}")
     print(f"  MOVED, UNATTRIBUTED        : {len(moved_unattributed)}   <-- stay failing fixtures")
     print(f"  oracle: unsupported op     : {len(unsupported)}   <-- retire candidates")
@@ -1102,6 +1170,9 @@ def main() -> int:
                     "restampable": restampable_count,
                     "restamped": restamped,
                     "restamp_refused": restamp_refused,
+                    "restamp_refusals": [
+                        {"fixture": n, "reason": w} for n, w in restamp_refusals
+                    ],
                     "move_classes": dict(move_classes),
                     "roundtrip_classes": dict(roundtrip_classes),
                     "provenance_verdicts": dict(provenance_verdicts),

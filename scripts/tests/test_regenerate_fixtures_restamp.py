@@ -208,3 +208,160 @@ def test_appending_an_attestation_keeps_the_closing_brace_indented():
     parsed = json.loads(new)
     assert parsed["fixture_provenance"]["oracle_attestation"] == "error_agreement"
     assert parsed["expected_error_contains"] == "boom"
+
+
+# ---------------------------------------------------------------------------
+# br-frankenpandas-1dbxe: a refused restamp must say WHICH guard refused it.
+#
+# The bead is a P1 alleging that `--jobs 8 --restamp-agreeing --apply` silently
+# re-banked an expected value ("Sparse" -> "Sparse[int64, 0]") in a fixture the
+# same run reported as MOVED. Reading the writer settles the mechanism: it never
+# serializes the parsed fixture at all. It reads the file's RAW TEXT, splices
+# only inside the brace-matched `fixture_provenance` block, and writes that text
+# back — so there is no code path that can author a different `expected_dtype`.
+# A peer's uncommitted working-tree edit explains the observed diff, and the
+# shared checkout makes "the tool wrote this" and "a peer wrote this"
+# indistinguishable from the diff alone.
+#
+# What WAS a real defect: every refusal printed one hardcoded explanation
+# ("richer provenance than the oracle emits") no matter which of four guards
+# fired. So the one output that could have separated those two stories said the
+# wrong thing. These tests pin the reasons.
+# ---------------------------------------------------------------------------
+
+
+def _probe_fixture() -> dict:
+    return {
+        "packet_id": "FP-TEST-002",
+        "case_id": "refusal_reason_probe",
+        "operation": "series_head",
+        "fixture_provenance": {
+            "pandas_version": "2.2.3",
+            "oracle_script_sha256": "0" * 64,
+            "generated_at": "2026-04-22T21:02:48Z",
+        },
+        "expected_dtype": "Sparse",
+    }
+
+
+def _fresh_response() -> dict:
+    return {
+        "fixture_provenance": {
+            "pandas_version": "2.2.3",
+            "oracle_script_sha256": "a" * 64,
+            "generated_at": "2026-08-16T00:00:00Z",
+        }
+    }
+
+
+def test_write_restamp_reports_success_as_a_pair_and_refreshes_only_provenance(tmp_path):
+    """The happy path, and the shape every caller branches on."""
+    module = _load()
+    path = tmp_path / "probe.json"
+    fixture = _probe_fixture()
+    path.write_text(json.dumps(fixture, indent=2) + "\n", encoding="utf-8")
+
+    written, why = module.write_restamp(path, fixture, _fresh_response())
+
+    assert written is True
+    assert why is None
+    landed = json.loads(path.read_text(encoding="utf-8"))
+    assert landed["fixture_provenance"]["oracle_script_sha256"] == "a" * 64
+    assert module.non_provenance(landed) == module.non_provenance(fixture)
+
+
+def test_a_file_edited_after_it_was_examined_is_refused_as_a_stale_snapshot(tmp_path):
+    """THE 1dbxe SCENARIO, reproduced without the oracle or a corpus run.
+
+    `fixture` is the snapshot `examine()` parsed — in a worker thread, possibly
+    minutes earlier under `--jobs N`. Between then and the write, something else
+    changes the file: a peer editing the shared checkout, which is exactly what
+    the bead's alternative explanation describes.
+
+    The old code refused this too, via the non-provenance comparison, so the
+    corpus was never at risk. But it reported the refusal as a provenance
+    problem, which sent an adjudicator hunting a concurrency bug in the writer.
+    The refusal must now NAME the skew.
+    """
+    module = _load()
+    path = tmp_path / "probe.json"
+    examined = _probe_fixture()
+    path.write_text(json.dumps(examined, indent=2) + "\n", encoding="utf-8")
+
+    # Somebody else moves the expected value while the run is in flight.
+    on_disk = _probe_fixture()
+    on_disk["expected_dtype"] = "Sparse[int64, 0]"
+    path.write_text(json.dumps(on_disk, indent=2) + "\n", encoding="utf-8")
+
+    written, why = module.write_restamp(path, examined, _fresh_response())
+
+    assert written is False
+    assert why == module.REFUSED_STALE_SNAPSHOT, why
+    assert "stale-snapshot" in why
+    # And the peer's edit survives untouched: refusing means refusing to write,
+    # not reverting somebody else's file.
+    assert json.loads(path.read_text(encoding="utf-8"))["expected_dtype"] == "Sparse[int64, 0]"
+
+
+def test_a_stale_snapshot_is_not_reported_as_a_provenance_richness_problem(tmp_path):
+    """NEGATIVE CASE: the two refusals must not collapse into one message.
+
+    This is the assertion the old code fails. It returned a bare `False` and the
+    summary printed "richer provenance than the oracle emits" for every refusal,
+    so a concurrent edit and a genuinely rich stamp were the same output. A test
+    that only checked `written is False` passes against that code and proves
+    nothing; the reasons have to be DISTINCT.
+    """
+    module = _load()
+
+    stale_path = tmp_path / "stale.json"
+    examined = _probe_fixture()
+    stale_path.write_text(json.dumps(examined, indent=2) + "\n", encoding="utf-8")
+    moved = _probe_fixture()
+    moved["expected_dtype"] = "Sparse[int64, 0]"
+    stale_path.write_text(json.dumps(moved, indent=2) + "\n", encoding="utf-8")
+    _, stale_why = module.write_restamp(stale_path, examined, _fresh_response())
+
+    # A fixture carrying provenance the oracle's three-key stamp cannot express.
+    rich_path = tmp_path / "rich.json"
+    rich = _probe_fixture()
+    rich["fixture_provenance"]["intentional_divergence_notes"] = "DISC-026"
+    rich_path.write_text(json.dumps(rich, indent=2) + "\n", encoding="utf-8")
+    # A response whose provenance DROPS the extra key rather than preserving it.
+    dropping = {"fixture_provenance": {"pandas_version": "2.2.3"}}
+    rich_written, rich_why = module.write_restamp(rich_path, rich, dropping)
+
+    assert stale_why == module.REFUSED_STALE_SNAPSHOT
+    assert stale_why != rich_why, (
+        "a concurrent edit and a rich-provenance refusal produced the SAME "
+        "message — that conflation is what made br-frankenpandas-1dbxe read as "
+        "silent laundering in the tool"
+    )
+    if not rich_written:
+        assert rich_why is not None and "stale-snapshot" not in rich_why
+
+
+def test_the_writer_cannot_author_an_expected_value_it_was_not_given(tmp_path):
+    """The structural fact underneath 1dbxe, pinned so it stays true.
+
+    `write_restamp` splices text inside the `fixture_provenance` block only. Hand
+    it a response carrying a DIFFERENT expected value and the written file must
+    keep the fixture's own — not because a guard caught it, but because no code
+    path reads an expected value from the response at all.
+    """
+    module = _load()
+    path = tmp_path / "probe.json"
+    fixture = _probe_fixture()
+    path.write_text(json.dumps(fixture, indent=2) + "\n", encoding="utf-8")
+
+    response = _fresh_response()
+    response["expected_dtype"] = "Sparse[int64, 0]"
+
+    written, why = module.write_restamp(path, fixture, response)
+
+    assert written is True, why
+    landed = json.loads(path.read_text(encoding="utf-8"))
+    assert landed["expected_dtype"] == "Sparse", (
+        "the writer took an expected value from the oracle response — that is "
+        "regeneration, and it is the exact harm br-frankenpandas-1dbxe alleges"
+    )
