@@ -32551,3 +32551,84 @@ LIKE-FOR-LIKE all four rows ok=true, no reasons — including the thread-cap che
              to `like_for_like` earlier today, which correctly did NOT fire at par=64
 ARTIFACTS    artifacts/bench/4kig1_{div,add}_{BASELINE,CANDIDATE}_2026-08-17.json
 ```
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `div`'s 2.3x DEFICIT IS DIAGNOSED, AND IT IS THE SAME ROOT CAUSE AS THE ROUNDING FAMILY: our divide loop runs at HALF the host's vector width. 139 SIMD operands in the kernel, every one 128-bit, ZERO 256-bit
+
+The entry above retired the memset hypothesis and said the next attempt needs a profile,
+not another rewrite. **This is that profile, and it found the answer in one pass.**
+
+**THE LOAD-BEARING FACT IS NOT STATISTICAL.** It is a property of the shipped binary:
+
+```
+vector operands in fp_columnar::apply_f64_slices_nan_tracked_into:
+    139  %xmm   (128-bit — two f64 lanes)
+      0  %ymm   (256-bit — four f64 lanes)
+```
+
+and the hot loop, by sample share, is exactly the fused witness sweep as designed:
+
+```
+  11.90%   movupd     %xmm3,(%r15,%rdx,1)      store the result
+   9.81%   cmpunordpd %xmm1,%xmm3              the NaN witness
+   9.69%   orpd       %xmm3,%xmm2              accumulate it
+   9.28%   divpd      %xmm5,%xmm4              TWO doubles per instruction
+   7.88%   movupd     (%rdi,%rdx,1),%xmm5      load
+```
+
+**`divpd %xmm` divides TWO f64 per instruction. The host reports `avx2` and `fma` in its
+own runtime feature probe, where `vdivpd %ymm` would do FOUR.** We are issuing twice the
+divide instructions numpy issues for the same column, because the generic `x86-64` target
+gives us SSE2 and nothing else, while numpy dispatches to AVX2 at runtime. FP measures
+722.02us against pandas' 340.58us — **2.12x** — and half the vector width predicts almost
+exactly that.
+
+**Counted mechanism:** divide instructions in `apply_f64_slices_nan_tracked_into` operate
+on 2 f64 lanes (`divpd %xmm`) where the host's AVX2 allows 4 (`vdivpd %ymm`); 139 of 139
+SIMD operands in the kernel are 128-bit and 0 are 256-bit, so the kernel issues ~2x the
+vector instructions required for the same 1000000 divides.
+
+**THIS IS THE ROUNDING FAMILY AGAIN, EXACTLY.** That family sat at 0.343x, 0.294x and
+0.303x — the three worst ratios in the whole campaign — because the generic target denied
+`floor`/`ceil`/`trunc` the SSE4.1 `roundpd` instruction and lowered them to libm calls.
+Building with the flag and asking for the instruction took them to 1.329x, 1.310x and
+1.319x, all certified FASTER. **The mechanism here is one step up the same ladder: not a
+missing instruction, a missing WIDTH.** I spent two experiments rewriting a loop whose
+shape was never the problem.
+
+**AND IT EXPLAINS THE FAILED LEVER RATHER THAN EXCUSING IT.** The same profile puts
+`__memset_avx2_unaligned_erms` at 5.39% of process samples against the kernel's 31.89%,
+i.e. **the memset is roughly 14.5% of the div work — not the 23-31% my standalone probe
+estimated.** The probe overstated it because the probe's loop was cheaper than the real
+kernel, which also folds the witness. A 14.5% ceiling could never have produced the
+1.25x-1.45x I predicted, and this number was available before the experiment for the cost
+of one `perf record`.
+
+**METHOD NOTE, because it is the transferable part.** Two rewrites reasoned from the
+source cost a build, two measurement windows and a wrong prediction. One profile cost
+about ninety seconds and produced a mechanism precise enough to name the instruction.
+**Reasoning from source told me what the code does; only the profile told me what the
+MACHINE does with it** — and on this campaign the gap between those two has now decided
+the outcome three times (fn-pointer dispatch, `+sse4.1` rounding, and this).
+
+**NOT A LEVER YET, AND NOT CLAIMED AS ONE.** No ratio is banked here. The obvious next
+step is a `+avx2` build of the same source measured against the same pandas — the
+infrastructure already exists, since the rounding family's certified rows came from
+`target-avx2nofma/`. What that build is worth is unmeasured, and I am explicitly NOT
+predicting 2x: `divpd` throughput on Zen 3 is not necessarily halved by width, the loop
+also loads and stores at 128-bit, and the witness `cmpunordpd`/`orpd` pair widens too.
+**It is flag-contingent exactly as the rounding family is, which means the default build
+is unchanged and any win must say so on its face.**
+
+```
+LOADAVG      18.54 / 15.55 / 16.87 at the profile, host_is_quiet_now.py reporting quiet
+             (0% build CPU) — profiling is a measurement and was treated as one
+OBSERVED     perf_event_paranoid=1, userspace counters only; 541 samples at 4kHz over one
+             invocation; whole-process counters 443,967,516 cycles / 527,152,767
+             instructions / IPC 1.19 / 2.00% cache-miss rate / 560 page-faults
+ELF          31c630ba9b385fe834bb10592a7111dad536c83e5451e42320fce8843369ae81
+NOTE         37.34% of process samples are `sha2::sha256::compress` — the ELF hashing
+             ITSELF for the provenance line every row depends on. It is startup, outside
+             the timed region, and does not touch any ratio; recorded because it makes
+             the raw profile look wrong until you know why.
+```
