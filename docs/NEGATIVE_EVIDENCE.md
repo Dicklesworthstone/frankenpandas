@@ -35170,3 +35170,76 @@ it is a corpus decision.
 int64 vs float64) is a genuine divergence and is decision-gated on the same promotion
 rule as `nywa8` and `09ygw`. **One of three filed beads being an oracle artifact is the
 argument for probing live pandas before filing, not after.**
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-03fp5) — CORRECTING my own 26.7% from an hour ago: the subtraction was contaminated by a SECOND parallel arm I did not know I had left running, and the number was a bad-window artifact. Construction is ~5-16% at dim=100
+
+**THIS ENTRY CARRIES NO PERF VERDICT AND IS DELIBERATELY NOT VERDICT-BEARING.** It withdraws a
+number rather than claiming one; no lever is accepted or rejected here, and there is no A/A null
+and no predeclared threshold that something failed to clear, which are the two bases the ledger's
+reject contract admits. I am not dressing a method correction as a lever verdict to satisfy a
+regex.
+
+**NO INCUMBENT ARM, NO A/A NULL, NOTHING CERTIFIED OR BANKED.** FP-vs-FP diagnostics on
+`bench_elf_sha256=038855bf697cf2ba9d10cfd2dd034834c4f77925b50122357785128729964621 (82635120 bytes) /data/projects/.scratch/crimsonpine/fp-bench-KERNELLANE-dirty`
+(still matches no clean commit; see the entry above). Clean window this time: loadavg 14.76
+draining to 10.96 from a 15-min of 22.73, idle 84.3%, iowait 0.0%, **build CPU 98% — under the 200%
+threshold**, CPU MHz 2999.2 -> 2376.6, disk 190G.
+
+**Counted mechanism:** instructions, `perf stat`, dim=100, startup floor 229,602,245 subtracted:
+construction 36,378,076 instructions = 15.6% of the 232,910,463-instruction workload, 145.5
+instructions per output element. This figure is a COUNT, not a duration, and is the only one of my
+numbers that the window cannot move — which is why it is now the anchor and the timings are read
+against it.
+
+**TWO DEFECTS IN THE MEASUREMENT I PUBLISHED AN HOUR AGO.**
+
+**(1) `FP_DOT_MAX_WORKERS=1` DOES NOT SERIALISE `df_dot`.** There are two independent knobs:
+`FP_DOT_MAX_WORKERS` caps the dot chunking, and **`FP_DOT_SERIAL` separately gates
+`materialize_dot_columns_parallel`**, the second parallel pass added by br-frankenpandas-1hjgz. I
+set only the first, so my "serial" arm still ran the materialisation on the worker pool. Subtracting
+a fully-serial kernel from a partly-parallel total is not a subtraction of nested quantities, and
+it produced the impossible result that proved it: **construction of -159.92us (-3.0%) at dim=316,
+the kernel alone measuring SLOWER than the call that contains it.**
+
+`fp-columnar/src/lib.rs:4450` already carries a previous agent's warning to run these with
+`env -u FP_DOT_MAX_WORKERS -u FP_DOT_WORK_PER_WORKER -u FP_DOT_SERIAL`, because "a leaked
+`FP_DOT_SERIAL` produced a fully provenanced ratio for the wrong arm". **The trap was documented in
+the file I was measuring and I did not read that far before measuring.**
+
+**(2) THE NUMBER CAME FROM A loadavg-74 WINDOW AND I PUBLISHED IT ANYWAY.** Three runs of the same
+quantity, construction as a share of the serial call:
+
+| dim | run A — loadavg 74, one knob | run B — clean, one knob | run C — clean, BOTH knobs |
+|---|---|---|---|
+| 31 | 29.0% | 71.6% | **67.7%** |
+| 100 | **26.7%** (published) | 5.6% | **9.4%** |
+| 316 | 9.3% | -3.0% (impossible) | **3.0%** |
+
+The two clean runs agree with each other and both disagree with the one I shipped. **26.7% is
+retracted; it is wrong by 3-5x at dim=100.**
+
+**WHAT I ACTUALLY DID WRONG, WHICH IS NOT THE ARITHMETIC.** I labelled that number "provisional"
+and shipped it, reasoning that the shares would survive because each pair was measured seconds
+apart. **"Provisional" was carrying weight it cannot carry.** A caveat does not make a wrong number
+less wrong, and a reader who acts on a 26.7% does not act 3-5x more cautiously because the sentence
+after it says the window was bad. The correct call in a loadavg-74 window was to publish the
+DIRECTION — construction is a minority term — and no figure at all. That is the rule I am taking
+forward: **if the window disqualifies the number, the number does not go in the table, caveated or
+otherwise.**
+
+**THE CORRECTED PICTURE, and it strengthens the conclusion rather than weakening it.** At dim=100
+construction is **~5-16%** — 9.4% by the clean timing subtraction, 15.6% by the load-immune
+instruction count, 5.6% by the one-knob clean run. Every instrument agrees it is a MINORITY term,
+and the corrected figures are SMALLER than the ones I retracted. So this bead's hypothesis ("at
+this size FP's cost is NOT the GEMM: it is the per-call construction plus the frame/index rebuild")
+is refuted more decisively than my previous entry claimed: **the GEMM is roughly 84-95% of the
+serial 10k call.**
+
+Two further stable facts from the clean runs. **At dim=31 construction genuinely does dominate**
+(67.7% and 71.6% across two runs) — there is a size below which the plumbing is the whole cost, and
+it is nearer 1k than 10k. And **at dim=316 construction is at the noise floor** (3.0%, -3.0%),
+i.e. unmeasurable by this method, which is itself the answer for that size.
+
+**WHAT REMAINS UNSAFE.** The dim=100 timing share still swings 5.6% <-> 9.4% between two clean runs
+minutes apart, so the timing subtraction has a resolution of a few percent at best on a term this
+small. I am not quoting a point estimate from it. The instruction count is the number to cite.
