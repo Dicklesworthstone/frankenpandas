@@ -33942,3 +33942,61 @@ happening TO me five times today, now caused BY me.
 **NOT REVERTING, AND SAYING SO EXPLICITLY** so nobody wonders whether it was noticed: the commit
 stands, the peer's change is preserved in it rather than lost, and the correct remedy is the
 check above applied from here on rather than surgery on shared history.
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — I USED CPU IDLE% AS A GREEN LIGHT AND IT WAS WRONG. `add @1M` on current main returned cv 79%, the worst rows of the campaign, and neither certifies
+
+**The judgement, stated before the result so it can be scored.** The orchestrator reported CPU
+idle at 25% and called the host busy. I sampled `/proc/stat` myself three times and got **62.1%,
+62.6%, 84.4% idle with 0.0% iowait**, build CPU 126% from a single `rustc`, on a 64-core box —
+and my own instrument said *quiet, draining* (1-min 24.47 under a 25.91 fifteen-minute). I
+concluded the host had ample headroom despite loadavg 26 and took the row.
+
+**The rows:**
+
+| arm | FP p50 | pandas p50 | ratio | cv | nulls |
+|---|---:|---:|---:|---:|---|
+| main default | 874.60us | 757.52us | 0.883x | **79.51%** | 1.03730 / 0.90247 |
+| main `+avx2` | 554.39us | 645.71us | 1.071x | **78.02%** | 0.93930 / 1.05820 |
+
+**Neither certifies. All four nulls are outside the 2% limit, and cv 79% is the highest this
+campaign has recorded** — against 16-18% for the same workload on the stale ELFs and 6-9% for the
+`div` rows that certified cleanly. The `main default` FP p50 of 874.60us is not a regression
+against the 481.37us measured earlier; it is noise, and the fact that it looks like a 1.8x
+regression is exactly why the null clause exists.
+
+**The width number that falls out is 1.5776x and I am not banking it.** The pandas control moved
+**14.8%** between the two invocations (757.52 vs 645.71us), against 0.9% in the window where
+`div` certified. At that level of drift the ratio between the arms is not measuring the flag.
+
+**WHAT ACTUALLY HAPPENED TO THE WINDOW:** loadavg rose 25.97 → 36.85 across the two runs and the
+host mean clock FELL 3784.9 → 3176.4 MHz. Load was arriving while I measured, which is the
+condition my own "window is CLOSING" check exists to catch — but that check reads the trend at
+LAUNCH, and at launch the trend was genuinely draining.
+
+**THE LESSON, AND IT CONTRADICTS THE INSTINCT I ACTED ON: CPU IDLE% IS A POOR PREDICTOR OF
+MEASUREMENT QUALITY ON THIS HOST.** 65-85% idle with zero iowait still produced cv 79%. On a
+64-core machine shared by twenty panes, what corrupts a row is not CPU scarcity — it is
+scheduling jitter from many runnable processes, which idle% cannot see and loadavg reports
+faithfully. **Loadavg 26 meant what the orchestrator said it meant, and my idle sampling was a
+more precise measurement of a less relevant quantity.**
+
+That is the fifth time today a number I trusted turned out to describe something adjacent to what
+I needed — after `%xmm` for 128-bit work, `%ymm` for "the flag reached this kernel", static counts
+for hotness, and two `checksum` fields for value equality. **The pattern is not that these numbers
+are wrong. It is that I keep reaching for the cheapest available proxy and treating precision as
+relevance.**
+
+**PRACTICAL CONSEQUENCE, recorded so I stop relitigating it:** `add @1M` has now failed to certify
+in three separate windows across two ELF pairs. Like `mod @1M` it may simply be a workload whose
+dispersion exceeds the gate at this size — it is a ~500-900us op, and this ledger measured
+between-slot dispersion falling ~4x from <300us to >=20ms. The route to certifying it is a LARGER
+size or more rounds, not a better hour.
+
+```
+LOADAVG      25.97 / 25.83 / 26.01 at launch, 36.85 / 28.14 / 26.74 at the end — ROSE during
+CPU IDLE     62.1% / 62.6% / 84.4% across three 1s samples at launch, iowait 0.0%; build CPU 126%
+OBSERVED MHz host mean 3784.9 before -> 3176.4 after — FELL 16% under the arriving load
+LIKE-FOR-LIKE ok on both; peak_process_threads=2 (serial arm, as expected below 1<<20)
+ARTIFACTS    artifacts/bench/4kig1_add1M_{MAIN,MAINAVX2}_2026-08-17.json
+```
