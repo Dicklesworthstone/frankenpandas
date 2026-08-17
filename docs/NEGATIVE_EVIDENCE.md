@@ -33509,3 +33509,70 @@ STALENESS    both ELFs predate the cached_available_parallelism migration, as re
              div pair; the width DELTA is unaffected, the vs-pandas absolutes are dated
 ARTIFACTS    artifacts/bench/4kig1_add_{AVX2,SSE2}_quiet_2026-08-17.json
 ```
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — PREDICTION FALSIFIED: `div @2M` gains NOTHING from `+avx2` (0.939x). The width lever helps the SERIAL arm only, and I was comparing two different code paths
+
+Registered before running: div gained 1.6056x from `+avx2` at 1M; at 2M the working set is ~48MB
+so if that gain is divide-throughput-bound it should HOLD at >=1.4x, and I would call it
+falsified below 1.3x.
+
+**Measured 0.9394x.** Not a smaller gain — no gain at all, and slightly the wrong way.
+
+```
+  div @1M   default  697.16us -> +avx2  434.20us   = 1.6056x
+  div @2M   default 3029.80us -> +avx2 3225.09us   = 0.9394x
+```
+
+**AND THE REASON IS NOT SIZE. IT IS THAT I COMPARED TWO DIFFERENT ARMS.** From the artifacts'
+own thread provenance:
+
+```
+  div @1M  peak_process_threads = 2,  threads used = 1    <- SERIAL arm
+  div @2M  peak_process_threads = 10, threads used = 8    <- PARALLEL arm
+```
+
+`PARALLEL_MIN_LEN` is `1 << 20` = 1,048,576 and the corpus "1M" is 1,000,000. **The canonical 1M
+size falls 4.9% short of the parallel threshold** — a quirk this ledger already records, because
+it is the same 48,576 elements that once cost `pow @1M` a certified 0.928x loss while `pow @2M`
+won 3.965x. So div @1M is the serial path and div @2M is eight workers, and the two numbers were
+never measuring the same code.
+
+**THE CORRECTED FINDING, which is sharper than the one I set out to test:** `+avx2` is worth
+**1.61x on the serial elementwise arm** and **nothing on the parallel arm**, where eight workers
+already saturate memory bandwidth and wider vectors have nothing left to buy. Width helps when
+one core is issue-limited; it does not help when eight cores are bandwidth-limited.
+
+**That bounds the whole AVX2 thread far more tightly than the 1M row suggested.** Any binary f64
+op at or above 1,048,576 elements takes the parallel arm and gets no width benefit. The lever's
+reach is inputs BELOW the parallel threshold — which is exactly the size range where the op is
+cheap enough that nobody profiles it.
+
+**HONEST LIMITS ON THE 0.939x.** Neither 2M row certified: cv 13.4% on both, and the pandas nulls
+were 1.02348 and 0.95542, outside the 2% limit. So the defensible claim is **"no gain"**, not
+"AVX2 is 6% slower" — one number below unity across two uncertified rows does not establish a
+penalty. What IS solid is the thread provenance, which is structural rather than statistical, and
+the 1.61x-vs-0.94x contrast that follows from it.
+
+**RETROSPECTIVE CHECK, and it holds:** `add @1M` measured 1.2707x and is also on the serial arm
+(peak threads 2). So among serial rows the ordering is div 1.61x > add 1.27x, which is the
+compute-intensity story intact — `vdivpd` is throughput-bound where `vaddpd` is nearly free. The
+two serial results agree with each other; only my extrapolation across the threshold was wrong.
+
+**⚠ FOR `br-frankenpandas-h67zz`, which owns the v3 question on six math_unary ops at 1M:** check
+which arm each of floor/ceil/trunc/round2/sqrt/log takes at your chosen size BEFORE attributing
+any v3 delta. The unary policy uses `elementwise_witness_policy()`'s `par_min`, not
+`PARALLEL_MIN_LEN`, so the threshold is not the same one — but the lesson transfers exactly: a
+width delta measured on the serial arm says nothing about the parallel arm, and 1M sits within
+5% of one of these thresholds.
+
+```
+LOADAVG      8.48 / 18.69 / 24.10 at launch (quiet AND draining), 9.35 / 16.53 / 22.89 at end;
+             0% build CPU, no build in this window
+OBSERVED MHz host mean 2472.1 before -> 3040.4 after; arms_saw_same_clock=true, arm_clock_ratio
+             1.0074 (+avx2) and 1.0059 (default)
+LIKE-FOR-LIKE both rows ok=true
+STALENESS    both ELFs predate the cached_available_parallelism migration; the width delta is
+             unaffected, the vs-pandas absolutes (0.514x / 0.542x) are dated
+ARTIFACTS    artifacts/bench/4kig1_div2M_{AVX2,SSE2}_2026-08-17.json
+```
