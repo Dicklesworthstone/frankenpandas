@@ -26703,7 +26703,23 @@ impl Column {
             let (out, domain_held, all_finite) =
                 par_map_slice_f64_domain_fused(data, &in_domain, &f, max_workers, par_min, derived);
             if !domain_held {
-                return None;
+                // REUSE THE PASS INSTEAD OF THROWING IT AWAY.
+                // br-frankenpandas-4kig1. Returning `None` here sends the caller
+                // to the shared arm, which recomputes `f` over the WHOLE column —
+                // a second full pass, 10M libm calls for one negative element.
+                //
+                // Every value is already in `out`, including the NaNs the
+                // out-of-domain elements produced, so only the validity mask is
+                // unknown. `from_f64_values` derives exactly that mask from NaN,
+                // which is the same rule the shared arm applies per element
+                // (`validity bit set iff !y.is_nan()`), so the result is
+                // bit-identical to recomputing — for the same reason
+                // `typed_float_unary_par`'s own nullable arm is documented as
+                // bit-identical to its Scalar path.
+                //
+                // Worst case goes from two passes over the data to one pass plus a
+                // NaN scan. The common case — domain holds — is untouched.
+                return Some(Self::from_f64_values(out));
             }
             return Some(Self::from_f64_all_valid_with_finite_opt(
                 out,
@@ -26759,7 +26775,23 @@ impl Column {
                 derived,
             );
             if !domain_held {
-                return None;
+                // REUSE THE PASS INSTEAD OF THROWING IT AWAY.
+                // br-frankenpandas-4kig1. Returning `None` here sends the caller
+                // to the shared arm, which recomputes `f` over the WHOLE column —
+                // a second full pass, 10M libm calls for one negative element.
+                //
+                // Every value is already in `out`, including the NaNs the
+                // out-of-domain elements produced, so only the validity mask is
+                // unknown. `from_f64_values` derives exactly that mask from NaN,
+                // which is the same rule the shared arm applies per element
+                // (`validity bit set iff !y.is_nan()`), so the result is
+                // bit-identical to recomputing — for the same reason
+                // `typed_float_unary_par`'s own nullable arm is documented as
+                // bit-identical to its Scalar path.
+                //
+                // Worst case goes from two passes over the data to one pass plus a
+                // NaN scan. The common case — domain holds — is untouched.
+                return Some(Self::from_f64_values(out));
             }
             return Some(Self::from_f64_all_valid_with_finite_opt(
                 out,
@@ -38456,6 +38488,99 @@ mod tests {
                 out.validity().get(0) && out.validity().get(LEN - 1),
                 "the surrounding non-negative slots must stay present"
             );
+        }
+
+        /// br-frankenpandas-4kig1. The domain-fused arm no longer discards its
+        /// work when the domain fails — it derives validity from the NaNs already
+        /// in the output instead of sending the caller off to recompute.
+        ///
+        /// That swaps WHICH code produces the out-of-domain result, so the risk is
+        /// a semantic difference between "validity derived from NaN after the
+        /// fact" and "validity recorded per element as it was computed". This
+        /// asserts the observable contract on both sides of the boundary: value
+        /// exactness for in-domain slots, missingness for out-of-domain ones, and
+        /// that the two agree at every index for a column that mixes them.
+        #[test]
+        fn domain_fallback_reuses_the_pass_and_keeps_scalar_semantics_4kig1() {
+            // Every op whose domain can actually fail on a float column.
+            type Op = (
+                &'static str,
+                fn(&Column) -> Result<Column, ColumnError>,
+                fn(f64) -> f64,
+            );
+            let ops: [Op; 5] = [
+                ("sqrt", Column::sqrt, f64::sqrt),
+                ("log", Column::log, f64::ln),
+                ("log10", Column::log10, f64::log10),
+                ("log2", Column::log2, f64::log2),
+                ("acosh", Column::acosh, f64::acosh),
+            ];
+
+            for (name, op, oracle) in ops {
+                // A single out-of-domain element among many, at three positions —
+                // first, interior, last — because a mask derived from a scan and a
+                // mask recorded per element could disagree at a boundary.
+                for bad_at in [0_usize, 517, 4095] {
+                    let mut values: Vec<f64> = (0..4096).map(|i| 2.0 + i as f64).collect();
+                    values[bad_at] = -3.0; // NaN under every op above
+                    let out = op(&Column::from_f64_values(values.clone())).expect(name);
+
+                    assert_eq!(out.len(), values.len(), "{name}: length drift");
+                    assert!(
+                        !out.validity().get(bad_at),
+                        "{name}: the out-of-domain element at {bad_at} must be MISSING"
+                    );
+                    assert!(
+                        out.values()[bad_at].is_missing(),
+                        "{name}: the rendered Scalar at {bad_at} must be missing too — \
+                         validity and values must agree"
+                    );
+
+                    for (i, &x) in values.iter().enumerate() {
+                        if i == bad_at {
+                            continue;
+                        }
+                        assert!(
+                            out.validity().get(i),
+                            "{name}: in-domain slot {i} must stay present"
+                        );
+                        match &out.values()[i] {
+                            Scalar::Float64(got) => assert_eq!(
+                                got.to_bits(),
+                                oracle(x).to_bits(),
+                                "{name} at {i}: input {x:e} — reusing the pass must not \
+                                 change a single value"
+                            ),
+                            other => panic!("{name} at {i}: expected Float64, got {other:?}"),
+                        }
+                    }
+                }
+
+                // ALL out-of-domain: the fallback has to produce a fully-missing
+                // column, not an empty one and not a column of present NaNs.
+                let all_bad = Column::from_f64_values(vec![-1.0, -2.0, -3.0, -4.0]);
+                let out = op(&all_bad).expect(name);
+                assert_eq!(out.len(), 4, "{name}: length drift on the all-bad column");
+                assert!(
+                    (0..4).all(|i| !out.validity().get(i)),
+                    "{name}: every element is out of domain, so every slot is missing"
+                );
+            }
+
+            // The domain-HOLDS path must be untouched by this change: still
+            // all-valid, still a contiguous typed slice, still exact.
+            let good: Vec<f64> = (1..=2048).map(|i| i as f64).collect();
+            let out = Column::from_f64_values(good.clone()).sqrt().expect("sqrt");
+            assert!(
+                out.validity().all(),
+                "a wholly in-domain column stays all-valid"
+            );
+            let got = out
+                .as_f64_slice()
+                .expect("the in-domain path must still yield a contiguous typed slice");
+            for (i, (&g, &x)) in got.iter().zip(good.iter()).enumerate() {
+                assert_eq!(g.to_bits(), x.sqrt().to_bits(), "sqrt at {i}");
+            }
         }
 
         #[test]

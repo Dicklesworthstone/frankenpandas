@@ -29196,3 +29196,116 @@ serial arm where the speed cost is inside the noise.
 2.404x across two attempts against 0.955x at 1M, the largest size dependence
 anywhere in this bead — and on these numbers it needs roughly four attempts to have
 an even chance of one clean null.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-cu22b / oxv4u) — UNCERTIFIED BUT LARGE: `-C target-cpu=x86-64-v3` takes FrankenPandas' `floor @1M` from 0.577 to 0.199 ns/elem, a 2.89x self-speedup that lands on numpy's per-element speed. BOTH ROWS WERE REFUSED and no ratio is claimed
+
+The entry above isolated `floor`'s deficit to SIMD width at the cache-resident size
+and pointed at these two beads. This is the direct test. It is NOT a certified
+result — read the refusal section before quoting anything.
+
+**Two binaries differing ONLY in the target-cpu flag**, verified rather than
+assumed: no commit between them touched `crates/` at all, and `Column::floor`'s
+body hashes identically at both (`cbc656694ff9367d`, 36 lines). The flag demonstrably
+took effect — whole-binary instruction counts are `vroundpd` 0 / `vmulpd` 0 /
+`vaddpd` 0 in the baseline against 2 / 73 / 242 in the v3 build.
+
+| build | FP p50 | FP ns/elem | pandas p50 | point ratio | verdict |
+|---|---:|---:|---:|---:|---|
+| baseline SSE2 (`4c50f09b…`) | 576.59us | **0.577** | 186.19us | 0.323x | REFUSED |
+| v3 / AVX2 (`256e80ee…`) | **199.33us** | **0.199** | 185.23us | 0.932x | REFUSED |
+
+**A/A null control (same invocation):** the baseline row has FrankenPandas median
+ratio 0.995687 PASS but pandas median ratio 0.977276 FAIL; the v3 row has
+FrankenPandas 0.943536 FAIL and pandas 0.978087 FAIL. **Three of the four nulls miss
+the 2% limit, so BOTH rows are refused and neither 0.323x nor 0.932x is a certified
+ratio.** I ran them in a window still draining from my own v3 build — 1-min 23.24
+against a 5-min 30.96 — which is exactly the condition the ledger says produces this.
+
+**WHAT SURVIVES THE REFUSAL, and why I am recording it anyway.** The FP arm's
+absolute time fell **576.59us → 199.33us, a 2.89x self-speedup**, on byte-identical
+`floor` source. That is a cross-binary comparison, which this ledger's own control
+measured as swinging 0.960x–1.161x on identical code — but 2.89x is roughly EIGHTEEN
+TIMES that envelope, so it is not code layout. The incumbent arm corroborates the
+window: pandas measured 186.19us and 185.23us in the two runs, a 0.5% difference,
+so the host did not move materially between them.
+
+And the landing point is the interesting part: **0.199 ns/elem against numpy's
+0.178–0.186**. The 3.1x per-element deficit the previous entry isolated very nearly
+CLOSES under `-C target-cpu=x86-64-v3`. That is the first evidence in this campaign
+that the math_unary gap is an ISA-width gap rather than an algorithmic one, and it
+was obtained only after threading, allocation and memory bandwidth had each been
+excluded by their own measurements.
+
+**Counted mechanism:** `vroundpd` count 0 → 2, `vmulpd` 0 → 73, `vaddpd` 0 → 242
+between the two binaries; `floor` source byte-identical; 0 commits touching
+`crates/` between the two HEADs.
+
+**WHAT IS OWED BEFORE ANY OF THIS IS QUOTED.** A clean re-run of both arms in a
+settled window, with all four nulls inside 2%. The effect is large enough that it
+should certify easily once the host cooperates; it did not tonight because I built
+in the hour I then measured in, which is the exact mistake frankenfs warned about
+and I repeated. `cu22b` remains BLOCKED on bit-identical goldens, and nothing here
+changes that gate — a 2.89x that changes one output bit is not a win, and the
+goldens are the next thing to run, not the ratio.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the domain-fused fallback stops throwing away a completed pass; and the placement gate was never gating my rows
+
+**FIRST, THE PLACEMENT-GATE QUESTION, ANSWERED FROM MY OWN ARTIFACTS RATHER THAN
+ASSUMED.** frankenfs fixed an inverted argmin in a placement gate and the fix was
+offered as unblocking a queued certification. It does not unblock any of mine, and
+the row JSON says so directly:
+
+```
+host_state gate_input        : False
+host_wide_exclusivity        : {required: False, replacement: balanced-square-abbaabba-v1}
+clauses that decide a verdict: effect_ci_excludes_unity,
+                               effect_exceeds_two_x_null_margin,
+                               null_medians_within_2pct_unity
+```
+
+Placement (`arm_core_placement`, `arm_cpu_attribution`) is recorded as PROVENANCE in
+every row I have taken and is not a gate input. Every one of my refusals was the
+third clause — the A/A null — whose base rate the previous entry measured at 57%.
+So there is nothing here to re-run on that basis, and saying so is worth more than a
+re-run that could not have changed.
+
+**THE LEVER: the fallback was doing the work twice.** When the domain predicate
+fails — one negative in a `sqrt` column, one zero in a `log` column — the fused arm
+returned `None` and the caller fell through to the shared arm, which recomputes `f`
+over the WHOLE column. **A single out-of-domain element in a 10M-row column cost a
+second full pass, 10 million libm calls, to discover what the first pass had already
+written down.**
+
+Every value is already in the output buffer, including the NaNs the out-of-domain
+elements produced; only the validity mask is unknown. `from_f64_values` derives
+exactly that mask from NaN, which is the same rule the shared arm applies per
+element (`validity bit set iff !y.is_nan()`) — the same equivalence
+`typed_float_unary_par`'s own nullable arm is documented as relying on. So the
+fallback now returns the column it already computed. **Worst case goes from two
+passes to one pass plus a NaN scan; the common case, where the domain holds, is
+untouched.**
+
+The chunked write-once site is deliberately NOT changed: its all-valid chunk
+constructor cannot represent a missing slot, so there is nothing there to salvage.
+
+**The risk this carries is semantic, not arithmetic** — it swaps WHICH code produces
+the out-of-domain result, and "validity derived from NaN afterwards" could in
+principle differ from "validity recorded per element as computed". So
+`domain_fallback_reuses_the_pass_and_keeps_scalar_semantics_4kig1` asserts the
+observable contract across that boundary for the five ops whose domain can actually
+fail (`sqrt`, `log`, `log10`, `log2`, `acosh`): one bad element at index 0, 517 and
+4095 of 4096 — first, interior and last, because a scanned mask and a recorded mask
+could disagree at a boundary — requiring the bad slot MISSING in both `validity()`
+and `values()`, every other slot present and bit-exact against the scalar oracle,
+plus an all-out-of-domain column coming back fully missing rather than empty or
+full of present NaNs, plus the in-domain path still returning a contiguous typed
+slice.
+
+**NO RATIO IS CLAIMED.** The host went from loadavg 30 to 64.73 while this was
+written, which is not a measurement condition, and the affected shape — a column
+that is mostly in-domain with a few exceptions — has no lane. What can be said
+without a benchmark is that the change removes a whole pass over the data from that
+shape and cannot affect the shape where the domain holds.
+
+Gates: `cargo test -p fp-columnar` **643 passed / 0 failed / 0 filtered out**,
+`clippy -D warnings` clean, `fmt --check` clean.
