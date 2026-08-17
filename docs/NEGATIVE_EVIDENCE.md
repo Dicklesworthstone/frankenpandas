@@ -29437,3 +29437,61 @@ per-arm clocks within 0.01%, loadavg 14.23 → 11.78. Three estimates now: 2.444
 2.404x, 2.562x — a 6.5% spread, and 0-for-3 on the null at a cv that predicts ~72%
 per attempt. Unlucky rather than anomalous, and I am not calling it anomalous this
 time.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-cu22b) — GATE ITEM 1 AND 2 DISCHARGED: all three suites pass under `-C target-feature=+sse4.1` with NO golden regenerated. 5562 tests, 0 failures, 0 filtered out
+
+`cu22b` is BLOCKED not on evidence but on a correctness gate: `.cargo/config.toml`
+changes every crate and every peer's build, so `roundsd` being bit-identical to
+libm's `f64::floor` "must be demonstrated, not assumed". Demonstrated.
+
+| suite | result | filtered out |
+|---|---|---:|
+| `cargo test -p fp-columnar --lib` | **643 passed, 0 failed**, 58 ignored | **0** |
+| `cargo test -p fp-frame --lib` | **3312 passed, 0 failed**, 32 ignored | **0** |
+| `cargo test -p fp-conformance --lib` | **1607 passed, 0 failed**, 0 ignored | **0** |
+
+All three under `RUSTFLAGS="-C target-feature=+sse4.1"`, into a dedicated
+`target-sse41/` so the default tree was untouched. **NO GOLDEN AND NO FIXTURE WAS
+REGENERATED** — `git status` over `crates/fp-conformance/fixtures` and `crates/` is
+clean apart from one peer's unrelated in-flight edit to `fp-columnar`, which is
+theirs and which I did not commit. The conformance number is the full 1607-packet
+corpus the bead names.
+
+**Counted mechanism, because a green suite under an INERT flag proves nothing:** the
+`+sse4.1` test binary emits **9** `roundpd`/`roundsd` instructions where the default
+build emits **0**. The flag demonstrably changed codegen and the suites still pass.
+(The two binaries differ in profile as well — the sse4.1 run is a test/dev build and
+the default comparison a release one — so treat 9-versus-0 as presence-versus-absence
+of the instruction, not as a count to compare.)
+
+**WHAT THIS DOES AND DOES NOT UNBLOCK.** Gate items 1 and 2 of four are now
+satisfied on this host. Item 3 (confirm the fleet AND CI floor really is
+SSE4.1-universal — `workers.toml` answers the workers, not the CI runners) and item
+4 (whether the flag belongs in `.cargo/config.toml` or only in the release profiles)
+are policy questions I have not touched and should not decide alone. The bead stays
+BLOCKED; what changes is that the correctness half is no longer the thing blocking
+it.
+
+**AND A CORRECTION TO WHERE MY OWN v3 EVIDENCE BELONGS.** I banked an `x86-64-v3`
+floor result last turn. Reading this bead properly afterwards: cu22b argues
+specifically for `+sse4.1` and AGAINST v3, because v3 enables FMA and re-opens
+br-frankenpandas-jawxr, where `+fma,+avx2` was reverted after FMA contraction proved
+neutral-to-worse for the corr/cov/spearman Gram. So my v3 number is not evidence for
+this bead's proposal; it is evidence for the separate question the bead explicitly
+defers — "sqrt is the one math-unary op that needs WIDTH rather than rounding, so
+measure it separately before widening". My floor-under-v3 measurement answered the
+rounding question with the wrong flag. **The measurement cu22b actually wants from
+me is `sqrt` under v3 versus default on ONE host**, which also answers
+MagentaFortress' confound on this bead — their caveat is that the 1.680x sse4.1 row
+and the 0.612x default row came from DIFFERENT machines, so flag and host cannot be
+separated. Both of my arms are on thinkstation1, which is the shape that comment
+asks for. I have both binaries; the run is blocked only on a quiet window.
+
+**A/A null control (same invocation):** not applicable — this entry reports test
+outcomes, not timings. No ratio is claimed and no measurement was taken.
+
+⚠ **DISK, reported because I caused part of it:** `/data` fell from 136G to 62G
+during the conformance run. My three new target trees account for 5.4G
+(`target-sse41`) plus 2.2G (`target-v3`) against the repo's existing 33G `target`,
+so the bulk is other tenants, but I added ~7.6G tonight and I have stopped building.
+Nothing was deleted.
