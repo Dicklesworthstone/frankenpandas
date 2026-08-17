@@ -29011,3 +29011,61 @@ the change the ledger REJECTED on 2026-08-16 (parallel LOSES for these ops by
 small for threads to pay). So the answer is not "parallelize it", and the 0.31x has
 to come from somewhere else: numpy is doing 1M floors in 172us, which is ~0.17ns per
 element, and that is a SIMD-width story, not a threading one.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — THE A/A NULL YIELD, COUNTED OVER 102 ROWS: FrankenPandas passes 57%, and the parallel arm passes 44% against the serial arm's 72%. My "`log2` is special" claim from the previous entry is RETRACTED
+
+Three more rows in the same sustained window (loadavg 9.09-14.78 throughout, per-arm
+clocks agreeing to 0.05%, ELF `d2ddc947`, no build started in the window). **All
+three failed FrankenPandas' A/A null, in conditions as good as this host offers:**
+
+| row | point ratio | 95% CI | best-vs-best | FP null | pandas null | FP threads |
+|---|---|---|---|---|---|---|
+| `log @10M` | 2.095x | [2.01093, 2.12417] | 2.3111 | 0.973184 FAIL | 1.000247 PASS | 10 |
+| `round2 @10M` | 2.444x | [2.30840, 2.49774] | 2.3692 | 1.032178 FAIL | 1.019780 PASS | 2 |
+| `trunc @10M` | 1.12x | [1.08818, 1.21462] | 1.247 | 0.932844 FAIL | 0.953666 FAIL | 2 |
+
+None is banked.
+
+**THE RETRACTION FIRST.** One entry ago I wrote that `log2`'s four consecutive null
+failures meant "something is specific to `log2`", because its arm-mates certified
+either side of it. That inference was too strong and I am withdrawing it. `log`,
+`round2` and `trunc` have now failed the same way in the same window, and once the
+base rate is counted, four failures in a row is unremarkable rather than diagnostic.
+
+**COUNTED, over every `math_unary` row in `artifacts/bench/` carrying a recorded
+null — 102 of them:**
+
+```
+FrankenPandas A/A null PASSED:  58/102 = 57%
+pandas        A/A null PASSED:  69/102 = 68%
+
+  serial arm   (FP peak threads <= 2):  34/47 = 72%
+  parallel arm (FP peak threads >  2):  24/55 = 44%
+```
+
+**The `thread::scope` finding survives, but as a PROBABILITY SHIFT, not a
+determinism: 72% versus 44%.** That is a real and large effect — moving an op off
+the shared parallel arm nearly doubles its odds of producing a bankable row — and it
+is exactly why `floor`, `ceil` and `round` became certifiable earlier in this bead.
+But it does not make the serial arm safe (28% of serial rows still fail) and it does
+not make four consecutive parallel-arm failures surprising: at a 56% failure rate,
+four in a row happens about 10% of the time. **I read a 10% coincidence as a
+mechanism because I wanted an explanation.**
+
+**WHAT THE BASE RATE MEANS FOR THE CAMPAIGN, and it is the most useful number in
+this entry.** Roughly **43% of FrankenPandas measurement attempts cannot produce a
+bankable row no matter how good the window is.** Every certification is a coin
+flip weighted slightly in our favour, and on this host a 10M row costs two to three
+minutes plus a window that appears a few times an hour. That is the real price of a
+certified number here, and it is not a host problem, a scheduling problem or a
+discipline problem — it is the instrument's yield, now measured instead of guessed.
+Two consequences worth acting on: budget two attempts per row you actually need, and
+prefer the serial arm wherever the measured speed cost is inside the noise, because
+the yield difference is worth more than a few percent of runtime.
+
+**AND THE THREE RATIOS ARE STILL WORTH SOMETHING, stated carefully.** `round2 @10M`
+at 2.444x is the first time that op has been measured at 10M at all, against 0.955x
+at 1M — a size dependence larger than any other op in this family, and consistent
+with the DRAM-bound regime the earlier `floor` work identified. `log @10M` at 2.095x
+sits within 1% of the 2.079-2.251x `log2` cluster. Neither is banked, both are worth
+a re-run, and at a 57% base rate one of them should come back on the next attempt.
