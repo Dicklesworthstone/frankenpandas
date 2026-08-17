@@ -30449,3 +30449,60 @@ siblings reported 10 — **a provenance field the harness records on every row a
 that I had been skimming past for a day.** The certified loss was necessary: had the
 gate been lax enough to pass 0.928x as noise, there would have been nothing to
 explain and nothing to read.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-cu22b) — PREDICTION CONFIRMED: `+sse4.1,+avx2` WITHOUT `+fma` equals `x86-64-v3` to 1.1%, and both take `floor @1M` from 0.343x to PARITY. The FMA objection can be dropped because FMA is doing nothing
+
+Last turn I counted that v3 adds no FMA instructions to our code and predicted that
+a no-FMA build would therefore match it. Recorded before running. It matched.
+
+| build | FP p50 | FP ns/elem | pandas p50 | ratio | both nulls |
+|---|---:|---:|---:|---:|---|
+| default (SSE2) | ~588us | 0.588 | ~198us | **0.343x** certified | pass |
+| `+sse4.1` | ~443us | 0.443 | ~192us | **0.415-0.446x** certified | pass |
+| **`+sse4.1,+avx2` (no fma)** | **198.1us** | **0.198** | 203.2us | **1.020x** | **pass** |
+| `x86-64-v3` (fma on) | 200.3us | 0.200 | 204.3us | **1.019x** | **pass** |
+
+**The two AVX2 builds agree to 1.1% — 198.1us against 200.3us, ratios 1.020 and
+1.019.** Dropping `+fma` costs nothing measurable, which is what a count of zero
+added FMA instructions predicts.
+
+**A/A null control (same invocation):** all four nulls in the two AVX2 rows PASS —
+no-fma FrankenPandas 1.007125 and pandas 1.013481; v3 FrankenPandas 1.003953 and
+pandas 0.990550. The instrument was clean in both.
+
+**BOTH ROWS ARE REFUSED, AND THAT IS THE CORRECT VERDICT FOR PARITY.** The no-fma
+row's claim log effect is 0.01980 against a required 0.09891, CI [0.99113, 1.04822]
+straddling unity; v3's is 0.01915 against 0.18593. **A gate built to detect a
+difference cannot certify "the same".** Refusal here means the effect is absent, not
+that the measurement failed — the nulls passing is what distinguishes those two
+cases, and they passed. I am therefore NOT claiming a certified 1.02x; I am claiming
+the certified 0.343x default has been eliminated as a gap, which is the decision-
+relevant fact.
+
+**WHAT THIS SETTLES FOR cu22b.** `+sse4.1,+avx2` reaches parity on `floor @1M`,
+equals v3, and raises no FMA question at all — so the bead's objection to v3 is not
+merely refuted in principle (zero FMA emitted), it is now MOOT in practice, because
+a flag combination exists that gets the same result without the argument. The
+campaign's worst certified ratio, 0.343x, is a build-flag artefact of the default
+target, and it is recoverable to parity.
+
+```
+LOADAVG      22.04 / 28.53 / 50.73 at launch → 21.01 / 27.47 / 49.55 at the end
+             ⚠ ONE PEER BUILD WAS RUNNING (1 rustc, 1 cargo) throughout. Recorded
+             rather than hidden: the balanced square pairs both arms against
+             background load, and all four nulls passed, but this is not a
+             build-free window and the row says so.
+OBSERVED MHz host mean 2647.0 → 3631.7 (min 1429.0, max 4106.2), host-level not per-arm
+BINARIES     avx2nofma 30cd8606a48e6318…, v3 256e80ee3100c3cd…, both WARMED with two
+             throwaway runs each before measuring, per the cold-binary artefact
+ARTIFACTS    artifacts/bench/nofma_floor_1m.json, artifacts/bench/v3_floor_1m_warm.json
+```
+
+**CV role:** provenance only, no vote — FP 11.31% and 12.61%; pandas 13.66% and
+32.22%, the latter reflecting the peer build.
+
+**AND THIS IS WITHOUT THE INTRINSIC FIX.** Width alone reaches parity while
+`floor_fast` is still bypassing `roundpd` entirely (br-frankenpandas-3qpj4). If that
+kernel is switched to `f64::floor` under the flag, floor should pass parity rather
+than arrive at it — the two levers are independent and neither has been combined
+with the other.
