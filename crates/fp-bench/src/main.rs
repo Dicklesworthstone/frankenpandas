@@ -1087,24 +1087,33 @@ fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
 const POLICY_SWEEP_ROUNDS: usize = 15;
 
 /// The setting every candidate is compared against: today's shipped defaults.
-const POLICY_SWEEP_BASELINE: (usize, usize) = (8, 200_000);
+const POLICY_SWEEP_BASELINE: (usize, usize, bool) = (8, 200_000, false);
 
-/// `(max_workers, par_min)` arms, in the order they are measured.
+/// `(max_workers, par_min, write_once)` arms, in the order they are measured.
 ///
 /// `par_min = 1` forces the parallel arm so the worker cap is the only variable;
 /// `(8, 2_000_000)` is above the row count and therefore forces the SERIAL arm,
 /// which is the direct test of the bead's question (1). `(1, 1)` reaches serial by
 /// the other door — through the `workers <= 1` guard — and the two must agree, or
 /// the instrument is not measuring what it says.
-const POLICY_SWEEP_ARMS: [(usize, usize); 8] = [
-    (8, 200_000),
-    (1, 1),
-    (2, 1),
-    (4, 1),
-    (16, 1),
-    (32, 1),
-    (64, 1),
-    (8, 2_000_000),
+///
+/// The last two arms are br-frankenpandas-tyiss: `write_once = true` routes the
+/// domain-fused map through per-worker owned chunks instead of one pre-zeroed
+/// shared buffer, which is the third 8 MB pass numpy does not make. They are
+/// carried at the SHIPPED policy and at the 4-worker policy, because 284ul found
+/// 4 and 8 workers indistinguishable on throughput and the allocation cost may
+/// not scale the same way the compute does.
+const POLICY_SWEEP_ARMS: [(usize, usize, bool); 10] = [
+    (8, 200_000, false),
+    (1, 1, false),
+    (2, 1, false),
+    (4, 1, false),
+    (16, 1, false),
+    (32, 1, false),
+    (64, 1, false),
+    (8, 2_000_000, false),
+    (8, 200_000, true),
+    (4, 1, true),
 ];
 
 /// br-frankenpandas-284ul: ONE process, ONE binary, both knobs varied, arms
@@ -1127,7 +1136,7 @@ const POLICY_SWEEP_ARMS: [(usize, usize); 8] = [
 /// baseline's. An A/B between settings that disagree on the answer is meaningless,
 /// and the settings CAN disagree in principle — they move the block boundaries the
 /// validity words and the `all_valid`/`all_finite` reductions are computed over.
-fn run_elementwise_policy_sweep(workload: &str, rows: usize) -> bool {
+fn run_elementwise_policy_sweep(workload: &str, rows: usize, consume: bool) -> bool {
     let apply: fn(&Series) -> Series = match workload {
         "sqrt" => |s: &Series| s.sqrt().expect("policy sweep: sqrt"),
         "log" => |s: &Series| s.log().expect("policy sweep: log"),
@@ -1153,12 +1162,24 @@ fn run_elementwise_policy_sweep(workload: &str, rows: usize) -> bool {
         })
     };
 
-    let time_arm = |policy: (usize, usize)| -> f64 {
+    // ⚠ CONSUME OR NOT IS THE WHOLE ANSWER FOR THE WRITE-ONCE ARM, so it is an
+    // explicit axis rather than an accident. The shared-buffer arm produces a
+    // contiguous `Vec<f64>`; the chunked arm produces per-worker chunks and
+    // materializes them LAZILY, in a `OnceLock` that `as_f64_slice` drives and
+    // whose own doc comment prices it at ~5.7ms per 1M of page faults. Timing
+    // only the producer therefore credits the chunked arm for work it has merely
+    // DEFERRED. `consume` touches the result the way any consumer needing a
+    // contiguous slice would, inside the clock.
+    let time_arm = |policy: (usize, usize, bool), consume: bool| -> f64 {
         // Installed OUTSIDE the clock; the kernel reads it on this thread at call
         // time, so the arm that follows is the arm that was requested.
         fp_columnar::set_elementwise_witness_policy(policy.0, policy.1);
+        fp_columnar::set_elementwise_write_once(policy.2);
         let started = Instant::now();
         let out = apply(black_box(&series));
+        if consume {
+            black_box(out.column().as_f64_slice().map(<[f64]>::len));
+        }
         let elapsed_us = started.elapsed().as_secs_f64() * 1e6;
         black_box(out);
         elapsed_us
@@ -1167,6 +1188,7 @@ fn run_elementwise_policy_sweep(workload: &str, rows: usize) -> bool {
     let mut rows_json: Vec<String> = Vec::with_capacity(POLICY_SWEEP_ARMS.len());
     for candidate in POLICY_SWEEP_ARMS {
         fp_columnar::set_elementwise_witness_policy(candidate.0, candidate.1);
+        fp_columnar::set_elementwise_write_once(candidate.2);
         let in_effect = fp_columnar::elementwise_witness_policy_in_effect();
         let candidate_checksum = bits_checksum(&apply(&series));
         // OBSERVED, not requested. `operation_threads_used` is a 20us sampler over
@@ -1178,25 +1200,26 @@ fn run_elementwise_policy_sweep(workload: &str, rows: usize) -> bool {
             POLICY_SWEEP_BASELINE.0,
             POLICY_SWEEP_BASELINE.1,
         );
+        fp_columnar::set_elementwise_write_once(POLICY_SWEEP_BASELINE.2);
         let baseline_checksum = bits_checksum(&apply(&series));
         let baseline_probe = probe_operation_threads(&mut || apply(black_box(&series)));
 
         for _ in 0..WARMUP {
-            black_box(time_arm(POLICY_SWEEP_BASELINE));
-            black_box(time_arm(candidate));
+            black_box(time_arm(POLICY_SWEEP_BASELINE, consume));
+            black_box(time_arm(candidate, consume));
         }
 
         let mut baseline_us = Vec::with_capacity(POLICY_SWEEP_ROUNDS);
         let mut candidate_us = Vec::with_capacity(POLICY_SWEEP_ROUNDS);
         for round in 0..POLICY_SWEEP_ROUNDS {
             if round % 2 == 0 {
-                let b = time_arm(POLICY_SWEEP_BASELINE);
-                let c = time_arm(candidate);
+                let b = time_arm(POLICY_SWEEP_BASELINE, consume);
+                let c = time_arm(candidate, consume);
                 baseline_us.push(b);
                 candidate_us.push(c);
             } else {
-                let c = time_arm(candidate);
-                let b = time_arm(POLICY_SWEEP_BASELINE);
+                let c = time_arm(candidate, consume);
+                let b = time_arm(POLICY_SWEEP_BASELINE, consume);
                 candidate_us.push(c);
                 baseline_us.push(b);
             }
@@ -1210,7 +1233,7 @@ fn run_elementwise_policy_sweep(workload: &str, rows: usize) -> bool {
         };
         rows_json.push(format!(
             concat!(
-                "{{\"max_workers\":{},\"par_min\":{},",
+                "{{\"max_workers\":{},\"par_min\":{},\"write_once\":{},",
                 "\"in_effect\":[{},{}],",
                 "\"baseline_checksum\":\"{:016x}\",\"candidate_checksum\":\"{:016x}\",",
                 "\"bit_identical_to_baseline\":{},",
@@ -1220,6 +1243,7 @@ fn run_elementwise_policy_sweep(workload: &str, rows: usize) -> bool {
             ),
             candidate.0,
             candidate.1,
+            candidate.2,
             in_effect.0,
             in_effect.1,
             baseline_checksum,
@@ -1234,12 +1258,13 @@ fn run_elementwise_policy_sweep(workload: &str, rows: usize) -> bool {
         ));
     }
     fp_columnar::clear_elementwise_witness_policy();
+    fp_columnar::clear_elementwise_write_once();
 
     println!(
         concat!(
             "{{\"sweep\":\"elementwise_policy\",\"workload\":\"{}\",\"rows\":{},",
-            "\"rounds_per_arm\":{},\"warmup\":{},",
-            "\"baseline\":[{},{}],",
+            "\"rounds_per_arm\":{},\"warmup\":{},\"consume\":{},",
+            "\"baseline\":[{},{}],\"baseline_write_once\":{},",
             "\"runtime_available_parallelism\":{},",
             "\"arms\":[{}]}}"
         ),
@@ -1247,8 +1272,10 @@ fn run_elementwise_policy_sweep(workload: &str, rows: usize) -> bool {
         rows,
         POLICY_SWEEP_ROUNDS,
         WARMUP,
+        consume,
         POLICY_SWEEP_BASELINE.0,
         POLICY_SWEEP_BASELINE.1,
+        POLICY_SWEEP_BASELINE.2,
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
         rows_json.join(","),
     );
@@ -3563,7 +3590,8 @@ fn main() {
     // schema rather than the `times_us` the Python driver parses.
     if category == "elementwise_policy" {
         let (rows, _cols) = size_rows_cols(size);
-        if !run_elementwise_policy_sweep(workload, rows) {
+        let consume = args.iter().any(|a| a == "--consume");
+        if !run_elementwise_policy_sweep(workload, rows, consume) {
             eprintln!("fp-bench: unsupported elementwise_policy/{workload} (sqrt, log)");
             std::process::exit(2);
         }
