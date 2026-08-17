@@ -56900,6 +56900,36 @@ fn gram_partial_rows(
     }
 }
 
+/// Multiply-adds per chunk for the POOLED dot dispatch.
+///
+/// br-frankenpandas-03fp5. A SEPARATE constant from the scoped path's
+/// `FP_DOT_WORK_PER_WORKER`, deliberately. That one defaults to 2e6 because it
+/// was calibrated against `thread::scope`, where each worker cost ~60us to spawn
+/// and a `dim = 100` dot could not afford even one extra thread. The persistent
+/// pool dispatches over per-worker channels instead, so small-shape parallelism
+/// finally pays — and reusing the scoped constant would leave that on the table.
+///
+/// MEASURED, interleaved, one ELF, loadavg 19.0 (p50 ms over 4 rounds each):
+///
+/// | shape | 2e6 (scoped default) | 2e5 (this) | |
+/// |---|---:|---:|---|
+/// | `dim = 100` | 0.2318 0.2294 0.2292 0.2328 | 0.1793 0.1795 0.1773 0.1861 | **1.29x, 4/4** |
+/// | `dim = 316` | 1.4038 1.4871 1.2868 1.3155 | 1.7944 1.1308 1.2157 1.3920 | 2/4, noise |
+///
+/// At `dim = 100` the work is 1e6 multiply-adds: 2e6 yields ONE chunk (serial),
+/// 2e5 yields five. The larger shapes are already chunk-saturated, so the change
+/// is a small-shape lever and is measured as one. `FP_DOT_POOL_WORK_PER_CHUNK`
+/// overrides it; `0` means one chunk per available worker.
+fn pooled_work_per_chunk() -> u128 {
+    static WORK: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    *WORK.get_or_init(|| {
+        std::env::var("FP_DOT_POOL_WORK_PER_CHUNK")
+            .ok()
+            .and_then(|v| v.trim().parse::<u128>().ok())
+            .unwrap_or(200_000)
+    })
+}
+
 impl DataFrame {
     fn validate_column_lengths(index: &Index, columns: &ColumnStore) -> Result<(), FrameError> {
         for column in columns.values() {
@@ -67896,8 +67926,22 @@ impl DataFrame {
                 // measured 175 ms against the scoped path's 21 ms. Chunking to
                 // the pool's width is how the scoped path already grouped
                 // columns; only the thread mechanism changes.
+                // Chunk count from the SAME work rule the scoped path used, so
+                // `FP_DOT_WORK_PER_WORKER` still governs and a tiny dot does not
+                // dispatch 64 channel jobs to multiply a handful of numbers. The
+                // constant it defaults to was calibrated against ~60us-per-spawn
+                // scoped dispatch; the pool makes dispatch far cheaper, which is
+                // why it is a knob and not a literal here.
                 let width = str_worker_pool::pool().threads().max(1);
-                let chunk = b_values_by_column.len().div_ceil(width).max(1);
+                let total_work = (b_values_by_column.len() as u128) * (k as u128) * (m as u128);
+                let workers = Column::dot_chunk_count(
+                    total_work,
+                    width,
+                    b_values_by_column.len(),
+                    pooled_work_per_chunk(),
+                )
+                .max(1);
+                let chunk = b_values_by_column.len().div_ceil(workers).max(1);
                 let jobs: Vec<_> = b_values_by_column
                     .chunks(chunk)
                     .map(|group| {
