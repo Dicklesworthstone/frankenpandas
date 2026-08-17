@@ -34141,3 +34141,153 @@ LIKE-FOR-LIKE ok on both; peak_process_threads=2 (serial arm); pandas peak 67 on
 INCUMBENT    pandas 2.2.3, same invocation, 307.02us and 313.32us — 2.1% apart
 ARTIFACTS    artifacts/bench/4kig1_div1M_{MAINAVX2,MAIN}_retry_2026-08-17.json
 ```
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-u5cg4) — the July null result describes code that no longer exists: group-parallel grouped rolling DOES pay, monotone in worker count and bit-identical at every setting, and the shipping default is not the best setting
+
+`u5cg4` has been open on one question since July: why does parallelising 79-90% of a
+call buy nothing? The answer is that it does not buy nothing. The July A/B (12.20ms
+serial vs 12.29ms parallel) was measuring something that cannot now be reconstructed —
+the bead established that the arm and its `FP_SGBROLL_SERIAL` toggle were both reverted
+and that candidate (4), "the parallel arm never ran", was untestable. With a re-built
+arm that reports its own worker count, the comparison is unambiguous.
+
+**Campaign result class:** `maintenance-self-speedup`.
+
+Both arms run in ONE process on ONE binary with no incumbent present, so by section 1
+this is maintenance and NOT a win. It is banked because it settles a question that has
+blocked this bead for a month, not because it is a ratio worth quoting.
+
+**THE INSTRUMENT, which is why this was not measurable before.**
+`fp-bench --category sgb_rolling_policy --workload mean --size 1M` installs
+`fp_frame::set_sgb_rolling_max_workers` OUTSIDE the clock, times one grouped rolling
+mean, then reads `fp_frame::sgb_rolling_last_worker_count` AFTER the call. Requested is
+not observed — that distinction is the entire reason this bead stalled — and the arms
+interleave ABBA over 15 rounds after 3 warmups. The setter is a thread-local with no
+environment toggle on purpose: July's was process-global, and a leaked global silently
+re-labels a measurement (`FP_DOT_SERIAL`, `6df71eae2`).
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=d9e6859fde8b83e433cf88fd51cc5810453d47eb96bd5ea26a7db7d001cf33e9 (82576384 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**MEASURED, 1M rows / 100 groups / window 10, two full sweeps:**
+
+| requested | observed | serial p50 | candidate p50 | self-speedup | bit-identical |
+|---|---:|---:|---:|---:|---|
+| `auto` (ships) | **6** | 43320.3 / 42143.5us | 32903.2 / 32917.9us | **1.317x / 1.280x** | yes |
+| 2 | 2 | 42048.3 / 39780.1us | 39292.7 / 36412.7us | 1.070x / 1.092x | yes |
+| 4 | 4 | 40688.3 / 44200.9us | 30517.9 / 34633.0us | 1.333x / 1.276x | yes |
+| 8 | 8 | 39573.1 / 43356.3us | 28957.7 / 30997.8us | 1.367x / 1.399x | yes |
+| 16 | 16 | 41008.5 / 38068.2us | 27595.6 / 27392.6us | **1.486x / 1.390x** | yes |
+
+Observed worker counts match requested EXACTLY at every arm, and the forced-serial
+baseline reported 1 worker on all ten measurements. That is the check July could not
+make.
+
+**BIT-IDENTITY IS ASSERTED, NOT ASSUMED.** Every arm's checksum folds raw f64 bits AND
+the validity bit per slot, because grouped rolling emits nullable-f64 and the first
+`window-1` slots of every group are legitimately missing — a values-only checksum would
+ignore exactly the region a broken window boundary corrupts. All ten arms matched
+serial.
+
+**Median-CI decision:** effect median 1.4492x on the 16-worker arm over 15 paired
+rounds, 95% percentile interval [1.19780, 1.52890], excluding unity; the second sweep
+gives median 1.3275x with interval [1.21050, 1.94380], also excluding unity. Both
+clear the unity threshold, and the decision here is the SIGN, not the magnitude.
+
+**CV role:** provenance only, no vote — sweep one serial 4.64% / candidate 9.44%,
+sweep two serial 8.99% / candidate 10.40%.
+
+**A/A null control (same invocation):** not applicable — this is an FP-vs-FP arm
+comparison with no incumbent in the process, and the ABBA interleave with a
+forced-serial baseline re-timed inside every round is what stands in for it. The
+baseline's own median moved 38068-44200us across arms, ~15%, which is the honest noise
+figure for this window and is why the 2-worker arm (1.07-1.09x) should be read as
+"small" rather than as a precise number.
+
+```
+LOADAVG      22.49 -> 22.66 across both sweeps (1-min), 5-min 21.95-22.09
+CPU IDLE     63.1% and 64.0% measured with mpstat immediately before each sweep;
+             iowait 0.03% / 0.06%. Verified directly rather than taken on report:
+             the orchestrator's 85% idle figure predates my own build and sweeps,
+             which are themselves most of the remaining load.
+OBSERVED MHz not sampled per arm here — both arms are in the SAME process microseconds
+             apart and alternate ABBA, so a frequency excursion lands on both.
+THREADS      observed per arm above; serial baseline 1 on every one of the 10 rounds
+```
+
+**THE SHIPPING DEFAULT IS NOT THE BEST SETTING, and that is the actionable half.** The
+routing computes `min(available,16).min(n_groups/16).max(1)`, and at 100 groups the
+`n_groups/16` term pins it to **6** workers for **1.28-1.32x**, while 8 gives
+1.37-1.40x and 16 gives 1.39-1.49x. `SGBROLL_PAR_MIN_PER_WORKER = 16` — inherited from
+`value_counts`, where it was measured for a different kernel — is the binding
+constraint here, not `available_parallelism` and not the 16-worker cap.
+
+**I AM NOT CHANGING THE CONSTANT ON THIS EVIDENCE, deliberately.** It is one group
+count on one row count. The per-group work is `rows/groups`, so 100 groups at 1M rows
+is 10,000 rows per group — a shape where per-worker fixed cost is trivially amortised
+and more workers can only help. At the 2,000-group / 200k-row fixture this bead was
+filed against, groups are 100 rows each and the same change could easily lose. The
+missing measurement is a GROUP-COUNT sweep at fixed rows, which needs a second axis on
+this lane; until it exists, lowering the divisor would be tuning on the one shape that
+flatters it.
+
+**WHAT IS SETTLED AND WHAT IS NOT.** Settled: parallelising this kernel pays, the arm
+runs, and the output is bit-identical — so the July 0.9x describes code that no longer
+exists and should not be cited again. Not settled: the right value for
+`SGBROLL_PAR_MIN_PER_WORKER`, and whether any of this holds at small group sizes.
+
+
+### 2026-08-17 CrimsonPine — THE INSTRUMENT CHANGED UNDER ME MID-SESSION, and I compared rows across it without noticing. Also: the repo finally has a LIVE regression lock
+
+Two things surfaced while re-running the lock assembler after today's certifications.
+
+**1. THERE IS NOW A LOCK ON THE CURRENT HARNESS, AND IT IS NOT QUARANTINED.** The assembler went
+13 baselines → 14, 51 → 52 workloads. The new one is
+`standing_thinkstation1_60ed3c58fdd5.json`, holding `groupby_rolling_mean_w10 @1M` at **7.592x** —
+a peer's workload, certified on the harness that is current right now. **Every previous lock in
+this repo quarantines against today's runs; this one does not.** After a day of recording that the
+lock system was structurally idle, it is worth saying plainly that it now has one live row.
+
+My own certified rows are NOT in it, correctly: `div @1M` certified at 0.496x and 0.878x, which are
+**losses**. The assembler banks `verdict == FASTER` only, and a certified loss is not a standing win.
+
+**A/A null control (same invocation):** the two rows being compared here carry their own
+controls — the `3002dd69c8a2` row had FrankenPandas median ratio 0.98882 with pandas 0.99188, and
+the `60ed3c58fdd5` row had FrankenPandas 0.99615 with pandas 1.00620. All four are inside the 2%
+limit and both rows passed all three clauses, which is exactly why the 3.8% gap between them is
+worth explaining rather than dismissing as a failed measurement.
+
+**CV role:** provenance only, no vote — 8.54% on the earlier row and 1.69% on the later one.
+
+**2. THE HARNESS SHA MOVED BETWEEN MY OWN MEASUREMENTS, AND I DID NOT NOTICE UNTIL NOW.**
+
+```
+  4kig1_div1M_MAIN_2026-08-17.json          harness 3002dd69c8a2     ratio 0.515x
+  4kig1_div1M_MAIN_retry_2026-08-17.json    harness 60ed3c58fdd5     ratio 0.496x
+```
+
+**Same ELF (`a802073c…`), same workload, same size, same host — different instrument.** A peer
+added a `groupby_rolling_mean_w10` lane to `benches/vs_pandas_harness.py` (landed at `13c0caf1f`)
+between my two runs, which changed the harness's identity hash.
+
+The two rows differ by **3.8%** (0.515x vs 0.496x). I have no evidence that the harness edit caused
+that — adding a lane should not change how an unrelated workload is timed, and 3.8% is well inside
+the window-to-window variation this ledger has measured all day. **But I cannot rule it out
+either, because I did not know the instrument had changed when I compared them.** I described the
+0.496x row as confirming the 0.515x one; that comparison silently crossed an instrument boundary.
+
+**THIS IS THE SAME CLASS AS THE STALE-ELF PROBLEM, ONE LAYER UP.** I built infrastructure all day
+to guarantee the BINARY was attributable — detached worktrees, `tracked-dirty` assertions inside
+build commands, preserved ELFs with recorded shas — and never applied the same discipline to the
+MEASURING INSTRUMENT, even though `perf_ratchet` treats the harness sha as part of the identity
+precisely because it can change results. The harness is a file in the shared checkout that any
+pane can edit, and it was edited under me twice today (once by me, once by a peer).
+
+**THE CHECK, and it costs nothing:** read `harness_source.sha256` out of the artifact when
+comparing two rows, exactly as I read `frankenpandas.executable.sha256`. It is already recorded in
+every row. I simply never looked at it.
+
+**PRACTICAL CONSEQUENCE:** the pair I banked as "both arms certified in ONE window" (0.496x and
+0.878x) IS internally sound — both carry harness `60ed3c58fdd5` and the same ELF pair, measured
+minutes apart. The 1.7353x width gain stands. What does not stand is my implicit treatment of the
+0.515x and 0.496x rows as interchangeable measurements of the same thing.
