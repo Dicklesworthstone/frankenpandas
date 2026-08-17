@@ -32790,3 +32790,85 @@ diff to `.scratch/crimsonpine/4kig1_collect_REFUTED.diff`, reverse-applied it, a
 restarted only after the same command printed `tracked-source diff lines: 0`. The lesson
 generalises past this campaign: **put the cleanliness assertion INSIDE the build command,
 because that is the only place it is read at the moment it matters.**
+
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — REGRESSION LOCK for the standing `mod`/`floordiv @10M` wins. The ratchet had an EMPTY baseline and had been locking nothing since May
+
+Asked to defend the standing wins rather than re-measure them. **They were undefended,
+and not because a lock was missing — because the lock that exists was empty.**
+
+`.bench-history/latest.json` is dated **2026-05-25** and contains `"results": []`, with
+its own note reading *"Initial empty baseline - populate with: python
+scripts/perf_ratchet.py --update-baseline <results.json>"*. Nobody ever did.
+`scripts/perf_ratchet.py` is 28KB of careful machinery — primary/geomean/tail budgets,
+cross-worker quarantine, CV explicitly denied a vote — and **a ratchet with zero rows
+passes everything forever.** That is this campaign's own law wearing its dullest
+disguise: the absence of work rendered as the success of work, in a gate that reports
+ALLOW because it compared nothing.
+
+**LOCKED, in `.bench-history/standing_math_binary_10m.json`:**
+
+| row | ratio | FP p50 | pandas p50 |
+|---|---:|---:|---:|
+| `floordiv @10M` | 6.649x | 20752.3us | 138686.0us |
+| `mod @10M` | 6.064x | 20095.3us | 119382.7us |
+
+**A/A null control (same invocation):** the locked rows carry their own controls from
+the invocations that produced them — `floordiv` FrankenPandas median ratio 0.99320 and
+pandas median ratio 0.99629; `mod` FrankenPandas 0.98742 and pandas 0.99843. All four are
+inside the 2% limit, which is why these two rows were bankable in the first place and are
+therefore fit to lock. Effect CIs [6.50395, 6.84411] and [5.65072, 6.19467], both
+excluding unity. CV 6.08% and 6.76%, provenance only, no vote.
+
+Both rows already banked as wins; nothing is re-measured here and no new claim is made.
+The two came from **different invocations**, so before merging them I checked they were
+comparable **by the ratchet's own `comparability_identity`, not by my own idea of
+sameness** — my first attempt asserted full `host_fingerprint` equality and refused the
+merge over `git_sha`, which moves between invocations and is not a machine property. They
+share host `thinkstation1`, harness `4aa484cde23f`, and **one fp-bench ELF**
+(`e40c18de5e51…`). The document records `baseline_provenance` naming both source
+artifacts and both invocation ids, and its summary says in terms that it is a baseline
+assembled from two runs and **must not be read as a single invocation.**
+
+**PROVED IT CAN FAIL, which is the only part that makes it a lock:**
+
+```
+self-comparison        -> ALLOW      Workloads: 2/2 passed
++10% synthetic p50     -> BLOCK      floordiv (10M): p50 regressed +10.0% (budget: +3.0%)
+                                     mod (10M):      p50 regressed +10.0% (budget: +3.0%)
+```
+
+A lock that has never been shown to block is indistinguishable from the empty baseline it
+replaces.
+
+**AND HERE IS THE HONEST LIMIT, WHICH IS MY OWN FAULT.** A run under **today's** harness
+QUARANTINEs against this baseline — verified, not assumed:
+
+```
+Verdict: QUARANTINE
+  No workload or category comparison was computed. A cross-worker delta measures a
+  different machine and a cross-harness delta measures a different instrument.
+```
+
+The harness sha is part of the comparability identity, and **I changed the harness this
+morning** to add the thread-cap reason to `like_for_like`. Its sha moved
+`4aa484cde23f` → `3002dd69c8a2`, so every row banked before that edit is now
+uncomparable for ratchet purposes. **That is a real cost of touching the instrument, and
+I did not think about it when I made the change.** The gate is right to refuse and I am
+not weakening it — the remedy is a re-measure of the pair under the current harness,
+which is a measurement window I was told not to spend this turn, so it is recorded as the
+next step rather than done.
+
+So the lock's status, stated exactly: **ACTIVE and provably blocking for any run under
+harness `4aa484cde23f`; REFUSING (not passing) for runs under the current harness until
+the pair is re-measured.** It is not yet a gate that will catch a regression landed
+tomorrow, and I am not going to describe it as one.
+
+**A SECOND, HARNESS-INDEPENDENT LOCK IS THE RIGHT COMPANION AND IS BEING WRITTEN
+SEPARATELY.** The `mod`/`floordiv @10M` win exists because those ops are routed to the
+COMPUTE-BOUND parallel threshold (`elementwise_witness_policy().1`) instead of the
+bandwidth-bound `1 << 20`; the ledger already records that a single shared threshold cost
+`pow @1M` a certified 0.928x loss while `pow @2M` won 3.965x, a 4.3x swing decided by
+48576 elements. A unit test pinning that routing decision costs no measurement window,
+cannot quarantine, and fails deterministically in CI the moment someone re-routes those
+ops. **That is the lock that survives an instrument change.**
