@@ -30506,3 +30506,41 @@ ARTIFACTS    artifacts/bench/nofma_floor_1m.json, artifacts/bench/v3_floor_1m_wa
 kernel is switched to `f64::floor` under the flag, floor should pass parity rather
 than arrive at it — the two levers are independent and neither has been combined
 with the other.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — a window that opened clean and turned mid-batch: `pow @10M` 4.043x and `round2 @10M` 2.654x, neither banked, and BATCHING rows is what exposed them
+
+Entered with both readings agreeing — loadavg 18.95, build CPU 117%,
+`host_is_quiet_now.py` returning quiet — and no `.rs` drift, so no build was
+started in the window. Both rows still failed FrankenPandas' A/A null:
+
+| row | ratio | 95% CI | best-vs-best | FP null | pandas null | FP cv | in-run load |
+|---|---|---|---|---|---|---|---|
+| `pow @10M` | 4.043x | [3.82769, 4.43384] | 4.4812 | 1.025952 FAIL | 1.001166 PASS | 27.89% | **17.26 → 42.87** |
+| `round2 @10M` | 2.654x | [2.58137, 2.74571] | 2.834 | 1.029952 FAIL | 0.984248 PASS | 7.44% | 19.95 → 29.93 |
+
+**THE WINDOW TURNED WHILE THE FIRST ROW WAS RUNNING.** `pow @10M` entered at
+loadavg 17.26 and peaked at **42.87** inside its own invocation, and the storm check
+run immediately afterwards reported BUSY with loadavg still lagging. The pre-check
+was correct when it ran; the host changed underneath it. **A pre-flight check
+answers "is a storm running now", which is necessary and not sufficient — nothing
+available to an agent answers "will one start in the next three minutes".**
+
+**AND BATCHING TWO ROWS COMPOUNDED IT, which is a mistake I can name and stop
+making.** I asked for `pow,round2` in one invocation to use the window efficiently.
+That put `round2` inside the storm `pow` had already met, with no opportunity to
+re-check between them — the harness runs them back to back. **Two rows in one
+invocation is one storm check for two exposures.** One row per invocation, with the
+detector between, costs a few seconds and halves the exposure per check. That is how
+I will take them from here.
+
+**WHAT THE NUMBERS SAY ANYWAY, as point estimates and nothing more.** `pow @10M` at
+4.043x is consistent with the certified `pow @1M` at 3.594x on the same binary, and
+larger, which is what the threshold fix predicts once both sizes are parallel.
+`round2 @10M` is now **0-for-4** on its null across 2.444x, 2.404x, 2.562x and
+2.654x — a 10% spread with every attempt failing the same clause. At its measured
+7.44% cv that is roughly a 72%-per-attempt pass rate, so four consecutive failures
+sits at about 0.6%: unlikely, but this bead has already recorded me reading a 10%
+coincidence as a mechanism and having to retract it. **I am not calling `round2`
+anomalous. I am recording that it has now cost four attempts and remains unbanked,
+and that its cv sits in the band where the peer's adaptive-rounds lever should
+help.**
