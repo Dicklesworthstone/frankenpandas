@@ -1252,16 +1252,27 @@ const SGB_ROLLING_ARMS: [Option<usize>; 5] = [None, Some(2), Some(4), Some(8), S
 ///
 /// Per section 1 of the campaign law, whatever this prints is a MAINTENANCE
 /// self-speedup and NOT a win: there is no incumbent in this process.
-fn run_sgb_rolling_policy_sweep(workload: &str, rows: usize) -> bool {
+fn run_sgb_rolling_policy_sweep(workload: &str, rows: usize, groups: i64) -> bool {
     if workload != "mean" {
         return false;
     }
 
-    // 100 groups: the same cardinality as the `rolling/groupby_rolling_mean_w10`
-    // vs-pandas lane, and above the 64-group threshold that gates the parallel
-    // arm at all. Keys come from the row index so this fixture and that lane
-    // group identically.
-    let keys: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
+    // GROUP COUNT IS AN AXIS, not a constant. br-frankenpandas-u5cg4.
+    //
+    // The first sweep measured only 100 groups at 1M rows — 10,000 rows per
+    // group, a shape where per-worker fixed cost is trivially amortised and more
+    // workers can only help. It showed the shipping default (6 workers) leaving
+    // ~0.1x on the table against 8 or 16, which is a real finding and an
+    // INSUFFICIENT basis for changing `SGBROLL_PAR_MIN_PER_WORKER`, because this
+    // bead's own fixture is 2,000 groups over 200k rows — 100 rows each — where
+    // per-group fixed cost is ~4,324 instructions and the same change could
+    // lose. Varying groups at FIXED rows holds per-row work constant by
+    // construction and is the measurement that decides the constant.
+    //
+    // Keys come from the row index so this fixture and the
+    // `rolling/groupby_rolling_mean_w10` vs-incumbent lane group identically at
+    // the shared default of 100.
+    let keys: Vec<i64> = (0..rows as i64).map(|i| i % groups).collect();
     let mut rng = SplitMix64(0x1234_5678_9ABC_DEF0);
     let values: Vec<f64> = (0..rows).map(|_| 1.0 + rng.unit() * 99_999.0).collect();
     let index = Index::new_known_unique_int64_unit_range(0, rows);
@@ -1372,8 +1383,9 @@ fn run_sgb_rolling_policy_sweep(workload: &str, rows: usize) -> bool {
     }
 
     println!(
-        "sgb_rolling_policy_json={{\"rows\":{},\"groups\":100,\"window\":10,\"warmup\":{},\"rounds\":{},\"arms\":[{}]}}",
+        "sgb_rolling_policy_json={{\"rows\":{},\"groups\":{},\"window\":10,\"warmup\":{},\"rounds\":{},\"arms\":[{}]}}",
         rows,
+        groups,
         WARMUP,
         POLICY_SWEEP_ROUNDS,
         rows_json.join(","),
@@ -3867,7 +3879,13 @@ fn main() {
     // Prints its own schema, not the `times_us` the Python driver parses.
     if category == "sgb_rolling_policy" {
         let (rows, _cols) = size_rows_cols(size);
-        if !run_sgb_rolling_policy_sweep(workload, rows) {
+        // Groups is an axis (br-frankenpandas-u5cg4); default matches the
+        // vs-incumbent lane's cardinality so the two stay comparable.
+        let groups: i64 = arg(&args, "--groups")
+            .and_then(|g| g.parse().ok())
+            .filter(|g| *g >= 1)
+            .unwrap_or(100);
+        if !run_sgb_rolling_policy_sweep(workload, rows, groups) {
             eprintln!("fp-bench: unsupported sgb_rolling_policy/{workload} (mean)");
             std::process::exit(2);
         }

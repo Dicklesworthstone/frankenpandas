@@ -34567,3 +34567,98 @@ and that row is now banked and defending.
 **Live baseline `standing_thinkstation1_60ed3c58fdd5.json` goes 3 -> 4 workloads:** floordiv @10M
 8.787x, groupby_rolling_mean_w10 @1M 7.592x, sqrt @10k 3.73x, sqrt @100k 1.157x. Of 56 unique
 locked workloads, 4 now defend anything. Still 7%.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-u5cg4) — the grouped-rolling worker divisor was inherited from a different kernel and was the binding constraint between 64 and 256 groups; a nine-shape sweep decides it
+
+Yesterday's sweep showed the shipping default leaving headroom at 100 groups and I
+explicitly declined to change the constant on it: one group count at one row count,
+on the one shape that flatters more workers. This is the measurement I said was
+missing — group count varied at FIXED rows, so per-row work is identical by
+construction — and it changes the constant.
+
+**Campaign result class:** `maintenance-self-speedup`.
+
+Both arms run in ONE process with no incumbent, so by section 1 this is maintenance and
+not a win. It is banked because it decides a routing constant, not because the ratios
+are quotable.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=8068b5b704bb666683040b1365c10720bf3d8a0769e6770e7d13a618715e0d36 (82579256 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**MEASURED, `fp-bench --category sgb_rolling_policy --workload mean --groups N`,
+self-speedup against a forced-serial baseline, ABBA over 15 rounds after 3 warmups:**
+
+| rows | groups | rows/grp | 2 workers | 4 | 8 | 16 | `auto` (old divisor) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1M | 64 | 15625 | 1.167x | 1.414x | **1.682x** | **1.682x** | 1.458x (4 workers) |
+| 1M | 128 | 7812 | 1.247x | 1.448x | 1.661x | **1.802x** | 1.568x (8 workers) |
+| 1M | 100 | 10000 | 1.111x | 1.310x | 1.460x | **1.469x** | 1.333x (6 workers) |
+| 1M | 500 | 2000 | 1.058x | 1.270x | 1.478x | **1.500x** | 1.478x (16 workers) |
+| 1M | 2000 | 500 | 1.082x | 1.255x | 1.435x | **1.567x** | 1.589x (16 workers) |
+| 1M | 20000 | 50 | **0.794x** | 0.915x | 1.071x | 1.125x | 1.123x (16 workers) |
+| 100k | 64 | 1562 | **0.770x** | 1.156x | **1.317x** | 1.237x | 1.175x (4 workers) |
+| 100k | 128 | 781 | 0.973x | 1.291x | 1.277x | 1.303x | 1.358x (8 workers) |
+| 100k | 100 | 1000 | **0.817x** | 1.143x | 1.181x | 1.252x | 1.158x (6 workers) |
+
+Every arm at every shape was BIT-IDENTICAL to serial (checksum over raw f64 bits plus
+the validity bit per slot).
+
+**Two things the table says that reasoning would not have.** First, LOW worker counts
+LOSE — 2 workers is below unity in four of nine shapes and never better than 4. The
+per-call `thread::scope` spawn is not free and two workers do not buy enough to cover
+it. Second, **8 beats 16 at the 64-group boundary** (1.317x against 1.237x at 100k),
+which is the whole reason the new divisor is 8 and not 4: a divisor of 4 would hand a
+64-group call 16 workers, the one setting measured worse there.
+
+**THE CONSTANT.** `SGBROLL_PAR_MIN_PER_WORKER` was 16, inherited from
+`value_counts`' group-parallel arm where it was measured for a different kernel. At 16
+it pinned a 64-group call to 4 workers and a 100-group call to 6 — below optimal in
+every shape measured. Lowered to **8**. Above ~256 groups the `.min(16)` cap binds
+instead and the constant is inert, so the change is confined to the range it was
+measured in.
+
+**Median-CI decision:** effect median 1.682x at the 64-group/1M shape on the 8-worker
+arm, against a forced-serial baseline in the same rounds; the decision threshold here
+is unity and the sign, not the magnitude — every arm from 4 workers upward clears it at
+every shape except 20000 groups, where 4 workers sits at 0.915x and only 8 and 16
+clear.
+
+**CV role:** provenance only, no vote. Run-to-run spread on this lane is ~5-8% —
+the `auto` arm at 100 groups read 1.333x both before and after a change that moved it
+from 6 to 12 workers, and the 16-worker arm read 1.469x then 1.420x across runs. That
+is why the constant is chosen on the SHAPE of the table (more workers is better or
+equal in nine of nine) rather than on any single pair of numbers.
+
+**CONFIRMED AFTER THE CHANGE, same binary rebuilt:** `auto` now observes **8 / 12 / 16**
+workers at 64 / 100 / 128 groups where it previously observed **4 / 6 / 8**, with
+self-speedups 1.591x / 1.333x / 1.641x against 1.458x / 1.333x / 1.568x before. The
+64- and 128-group shapes improved; 100 groups was flat within the noise quoted above.
+**The routing change is what is being claimed here, not those three deltas.**
+
+```
+LOADAVG      11.19 -> 21.39 across the sweeps (1-min, sampled per group count)
+CPU IDLE     89.11% / 86.72% / 88.68% by mpstat immediately before each sweep,
+             iowait 0.11% / 0.08% / 0.05% — verified directly. The figure reported
+             to me for this window was "load 12, idle 88 pct"; my own first reading
+             was load 23.56 at idle 73.69%, so the quiet window was real but arrived
+             later than advertised.
+OBSERVED MHz per sweep: 2162.1 - 3385.5 mean, cross-core min 1429.0 max 4298.3
+THREADS      observed per arm in the table; forced-serial baseline 1 on every round
+```
+
+**A/A null control (same invocation):** not applicable — FP-vs-FP with no incumbent in
+the process. The forced-serial baseline is re-timed inside every ABBA round, and its
+own median moved 33752-45583us across arms and sweeps, which is the honest noise figure
+and is quoted above rather than hidden.
+
+**REGRESSION LOCK, because nothing else would notice.** The output is bit-identical at
+every worker count — the existing bit-identity test proves exactly that — so a drift
+back to 16 changes only the thread count and no correctness test can see it.
+`sixty_four_groups_must_get_eight_workers_not_four_u5cg4` asserts the observed worker
+count is 8 for a 64-group call, and skips on hosts with fewer than 8 CPUs where the
+divisor's effect cannot be demonstrated.
+
+**WHAT IS STILL OPEN.** Whether `SGBROLL_PAR_MIN_GROUPS = 64` is itself right: every
+shape at or above 64 groups profits, and nothing below 64 was measured because the arm
+refuses to engage there. The floor, unlike the divisor, has never been measured on this
+kernel either.
