@@ -33801,3 +33801,40 @@ ELF          a802073cf042d28d... built from a detached worktree at 8b263954b == 
              `tracked-dirty 0` asserted INSIDE the build command
 ARTIFACT     artifacts/bench/4kig1_div1M_MAIN_2026-08-17.json
 ```
+
+
+### 2026-08-17 CrimsonPine — ELF INVENTORY for the AVX2 thread. Four binaries now exist and two of them differ only by a build flag; confusing them would silently invert a conclusion
+
+Recorded because this bead has already lost time twice to reading a binary that was not the one
+it thought, and there are now four.
+
+| name | sha256 (first 24) | source | flag |
+|---|---|---|---|
+| `fp-bench-BASELINE-4c1adb6c6` | `31c630ba9b385fe834bb1059` | worktree @ `4c1adb6c6` | default |
+| `fp-bench-AVX2-4c1adb6c6` | `3314b1a61352c47febd00109` | worktree @ `4c1adb6c6` | `+avx2` |
+| `fp-bench-MAIN-8b263954b` | `a802073cf042d28d9807347a` | worktree @ `8b263954b` | default |
+| `fp-bench-MAINAVX2-8b263954b` | `10468acf6056c084d70fb7e8` | worktree @ `8b263954b` | `+avx2` |
+
+All four built from a DETACHED WORKTREE with `git status --porcelain` empty asserted INSIDE the
+build command, each into its own Cargo target directory, never the shared one. A fifth binary
+exists in that worktree's `target-avx2` history (`0b80a509…`) and **must not be used** — it
+carries the REFUTED slice-to-array change from the `oxv4u` experiment.
+
+**`8b263954b` IS main's code even though main's tip has moved.** Verified rather than assumed:
+`git diff 8b263954b 287f5ef98 -- crates/ benches/ scripts/` is EMPTY. The three commits between
+them are ledger entries and bench artifacts only. So rows taken on the last two ELFs describe
+current main.
+
+**WHAT IS NOW MEASURABLE WITHOUT A REBUILD, and what it would settle:** `div @1M` on
+`MAINAVX2` against `MAIN`. Current main's default is **620.78us / 0.515x certified**. The flag
+was worth **1.6056x on the OLD serial code**. If that gain is a property of the kernel rather
+than of the pre-migration binary, main+avx2 lands near **385-400us and ~0.78-0.83x**; a gain
+materially below 1.4x would mean part of what I attributed to "the flag" belonged to that
+particular build. **Registered before the measurement exists, per the discipline this bead runs
+on.**
+
+**NOT MEASURED THIS TURN, deliberately.** The build finished into a rising window — loadavg
+27.33 against a 15.81 fifteen-minute, 346% build CPU from my own tail plus a peer `rustc`. The
+row costs one window and no rebuild, so there is nothing to gain by forcing it into a storm; this
+ledger already holds a pair that collapsed exactly that way and a `mod @1M` row I pushed through
+a 400% window against my own instrument's advice.
