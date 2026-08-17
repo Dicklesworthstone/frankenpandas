@@ -29918,3 +29918,77 @@ landed by a peer — scale the MEASUREMENT so each arm's null tightens — and n
 loosening either limit, which would be gate self-weakening and which this ledger
 records catching a 2.7x phantom with. Everything here is arithmetic over artifacts
 already on disk: no build, no benchmark, no measurement, at load 603 and 89% iowait.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-flicz) — ADAPTIVE ROUNDS VALIDATED: the same workload goes from NULL_UNDECIDABLE to CERTIFIED by adding samples alone, and `floor @1M` on the default build is now a certified 0.311x SLOWER
+
+The prediction I recorded before running: `floor @1M` should pick ~32 rounds and its
+nulls should tighten enough to certify; if they did not, the dispersion account was
+wrong for a third time. They did.
+
+| | control | `--adaptive-rounds` |
+|---|---|---|
+| rounds | 9 (36 slots/arm) | **32 (128 slots/arm)** |
+| pandas A/A null | 0.977717 **FAIL** (2.23% off) | 0.982506 **PASS** (1.75% off) |
+| FrankenPandas A/A null | 0.996695 PASS | 1.001497 PASS |
+| pandas cv | 18.83% | 10.09% |
+| clauses | 2/3 | **3/3** |
+| verdict | NULL_UNDECIDABLE 0.362x | **SLOWER 0.319x** |
+
+**Nothing about the code, the binary, the host or the gate changed between those two
+rows — only the number of samples.** 32 is exactly the count predicted from the
+measured dispersion table (<300us bucket, cv 11.27% against the 6.07% yardstick,
+×3.45 on a base of 9). The mechanism now has a prediction that came true rather than
+a story: adding samples tightens the null median estimate, and the arm that was
+failing was the one with the higher cv.
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.001497 and
+pandas median ratio 0.982506 in the adaptive row, both inside the 2% limit; in the
+control the pandas arm read 0.977717 and failed.
+
+**Median-CI decision:** adaptive row effect median 0.319x, CI [0.31578, 0.32400].
+
+**AND THE APPLICATION, run immediately after on the same window and binaries.** With
+adaptive rounds the ISA A/B that had produced SIX uncertified rows across two windows
+finally resolves on one side:
+
+| build | rounds | FP p50 | FP ns/elem | pandas p50 | ratio | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| baseline SSE2 `4c50f09b…` | 32 | 549.4us | 0.549 | 171.2us | **0.311x** | **SLOWER, 3/3 clauses** |
+| v3 AVX2 `256e80ee…` | 32 | **186.8us** | **0.187** | 171.3us | 0.909x | REFUSED |
+
+**The SSE2 row is now CERTIFIED** — nulls 1.000469 and 0.980800 both passing, CI
+[0.30821, 0.31716], claim log effect 1.16776 against a required 0.13546. `floor @1M`
+on the shipped build is a 3.2x loss and that is no longer in doubt.
+
+**The v3 row is still REFUSED and I am not quoting it as a ratio.** Two clauses fail:
+the pandas null came back 1.041917 (4.2% off, worse than in the adjacent run) and the
+effect is now too SMALL to clear its margin — claim 0.09515 against a required
+0.21880. That second failure is the interesting one: v3 has moved `floor` so close to
+parity that the row is refused for lack of an effect rather than for noise.
+
+**What the pair does support, with an unusually good internal control:** pandas
+measured 171.2us and 171.3us in the two runs — 0.06% apart — so the incumbent held
+essentially constant while FrankenPandas went 549.4us → 186.8us, a **2.94x
+self-speedup**, landing at 0.187 ns/elem against numpy's 0.171. That reproduces the
+2.89x from the earlier pair and now sits alongside a CERTIFIED baseline rather than
+two refused rows.
+
+**Counted mechanism:** 9 → 32 rounds, 36 → 128 slots per arm, pandas null deviation
+2.23% → 1.75%, pandas cv 18.83% → 10.09%, clauses 2/3 → 3/3, on identical code and
+binary.
+
+**CV role:** provenance only, no vote.
+
+```
+LOADAVG      11.24 / 206.35 / 263.59 at the flicz pair, 8.59 / 170.12 / 247.55 at the
+             ISA pair — 1-min low and falling hard, 5/15 still draining the storm.
+             A DECAYING window, recorded as such rather than called converged.
+OBSERVED MHz host mean 2792.4 → 3163.2 then → 3154.6; host-level, NOT per-arm
+ARTIFACTS    artifacts/bench/flicz_floor_{control,adaptive}.json
+             artifacts/bench/isa3_floor_{sse2,v3}_adaptive.json
+```
+
+**What this closes and what it does not.** `flicz` is validated: the fix works, the
+prediction held, and it is opt-in and default-off so nothing already banked moved.
+It does NOT retroactively certify anything — the six earlier ISA rows stay refused,
+and the v3 arm still needs a window where the pandas null behaves.
