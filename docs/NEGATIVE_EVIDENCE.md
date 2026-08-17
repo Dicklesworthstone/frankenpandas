@@ -27406,3 +27406,64 @@ inside the two-times-null margin and the row is refused rather than decided.
 **CV role:** provenance only; CV had no vote.
 
 **Artifacts:** `artifacts/bench/03fp5_df_dot_10k_pooled_certification_thinkstation1_2026-08-16.json`
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — `log1p @10M` CERTIFIES **FASTER at 3.921x**, the second clean win from the new lanes; `log2` measures 2.148x but its own null fails and is NOT banked
+
+Both rows on ELF `be6261e0…`, which I verified is still current: HEAD moved from
+`4315d588c` to `2006bc1dd` since the build, but the diff contains no `.rs` and no
+`Cargo.*` — only beads, artifacts and this ledger — so no rebuild was needed. That
+is the same drift discipline as the previous entry, applied cheaply rather than by
+rebuilding blind.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=be6261e02da785600ac0b2519e99877900bea11ea590ed895a394c727d19b3f3 (79469760 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-head2`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T012139.583128Z-pid2875430 , giving
+measured_ratio=3.921x for this row.
+
+| `log1p @10M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **24631.58us** | 2.52% | 0.982524 — PASSES |
+| pandas | 97472.06us | 1.94% | 1.008766 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.982524 and
+pandas median ratio 1.008766, both inside the 2% limit.
+
+**Median-CI decision:** effect median 3.921x, 95% CI [3.88853, 3.97801], excluding
+unity; the claimed log effect is 1.36640555 against a required threshold of
+0.04202015, so it cleared the decidability margin by more than 32x. All three
+clauses true.
+
+**CV role:** provenance only, no vote — FP 2.52%, pandas 1.94%. Both arms are the
+tightest of any row I have taken this session, which is what a 24ms/97ms pair in a
+quiet window buys.
+
+```
+LOADAVG      16.70 → 11.02 (in-run 1-min min 11.02, max 18.69)
+OBSERVED MHz busy-core BY ARM: FP 4291.6 / pandas 4279.5, arm clock ratio 1.0028
+             host median 3143.5 (min 1429.0, max 4237.3, n=73)
+THREADS      FP peak 10 · pandas peak 67
+```
+
+**`log2 @10M` IS NOT BANKED.** Point ratio 2.148x, CI [2.03348, 2.18268],
+best-vs-best 2.3601, and its effect clears the margin (claim 0.76442146 against
+required 0.19041537) — but **FrankenPandas' own A/A null FAILED at 1.045422**
+against pandas' clean 1.006069, so `null_medians_within_2pct_unity` is false and
+the verdict is NULL_UNDECIDABLE. The host climbed from 10.69 to 17.55 during that
+row and settled again for `log1p`; the honest reading is that `log2` needs a re-run,
+not that it is slower than `log1p`. **A 2.1x number with a failing null is still not
+evidence, and the size of the number is exactly why it must be said.**
+
+**THE LANES HAVE NOW PAID FOR THEMSELVES TWICE.** `log10` 3.385x and `log1p` 3.921x
+both certified on their FIRST use, on ops that were changed in `0c6f6bcc8` with no
+way to measure them at all. The gap was never a missing lever — it was a missing
+lane, and three of the four rows taken through it clear the incumbent by 2-4x. The
+mechanism is the same one as `log10`: a libm call per element that FP spreads
+across workers while numpy's ufunc runs single-threaded. Whoever extends this
+should check the OTHER `typed_float_unary_par` residents the same way — `expm1`,
+`cbrt`, and the trig family all route there and none of them has a lane.
