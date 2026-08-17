@@ -3659,6 +3659,39 @@ def annotate_best_vs_best(
     comparison["best_vs_best"] = detail
 
 
+def like_for_like(comparison: dict[str, Any]) -> dict[str, Any]:
+    """Is this row a comparison of the two ENGINES, or of their circumstances?
+
+    br-frankenpandas-oxv4u. On 2026-08-16 a `df_dot @1M` row passed all three
+    gate clauses at 1.680x FASTER with BOTH A/A nulls clean (0.998, 0.994) — and
+    was not bankable: FrankenPandas' busy cores ran at 3730.8 MHz against pandas'
+    3868.0, and best-vs-best said 0.9106, i.e. the minima put FrankenPandas
+    slightly SLOWER while the median put it 68% faster. The incumbent had
+    degraded more than the subject under load the run itself created.
+
+    Both facts were already in the row, in two separate fields, and it still took
+    a human read to catch. This collapses them into ONE field a banker cannot
+    miss, with the reasons named. DIAGNOSTIC ONLY: `gate_input` is false, no
+    clause is touched, and a refused row stays refused — the three-clause
+    contract is shared across the campaign and is not one agent's to rewrite.
+    What changes is what a reader sees beside the verdict.
+    """
+    reasons: list[str] = []
+    host_state = comparison.get("balanced_square", {}).get("host_state", {})
+    if host_state.get("arms_saw_same_clock") is False:
+        reasons.append(
+            f"arms ran at different clocks (ratio {host_state.get('arm_clock_ratio')}); "
+            "the measured ratio carries a frequency term"
+        )
+    detail = comparison.get("best_vs_best", {})
+    if detail.get("direction_agrees_with_median") is False:
+        reasons.append(
+            f"median says {detail.get('median_ratio')}x but best-vs-best says "
+            f"{detail.get('ratio')}x — they disagree in DIRECTION"
+        )
+    return {"ok": not reasons, "reasons": reasons, "gate_input": False}
+
+
 def apply_balanced_square_gate(
     comparison: dict[str, Any],
     fp_result: TimingResult,
@@ -3698,6 +3731,7 @@ def apply_balanced_square_gate(
     comparison["balanced_square"] = experiment
     # Diagnostic, after the verdict and deliberately not an input to it.
     annotate_best_vs_best(comparison, fp_result, pd_result)
+    comparison["like_for_like"] = like_for_like(comparison)
 
 
 def resolve_results_path(output: Path | None, timestamp: str) -> Path:
@@ -3754,6 +3788,76 @@ def _row_persistence_self_test() -> None:
             "resolve_results_path must depend only on --output and the timestamp; "
             f"got {parameters}"
         )
+
+
+def _like_for_like_self_test() -> None:
+    """Pin the combined verdict on the row that made it necessary.
+
+    br-frankenpandas-oxv4u. The fixture IS the refused row: gate FASTER at
+    1.680x with both A/A nulls clean, arms at 3730.8 vs 3868.0 MHz, best-vs-best
+    0.9106 against a median of 1.680. A diagnostic that calls that row
+    like-for-like is worthless, so this asserts it does not — and that a clean
+    row is not flagged, which is the other half.
+    """
+    refused = {
+        "verdict": "FASTER",
+        "ratio": 1.68,
+        "balanced_square": {
+            "host_state": {"arms_saw_same_clock": False, "arm_clock_ratio": 1.2796}
+        },
+        "best_vs_best": {
+            "ratio": 0.9106,
+            "median_ratio": 1.68,
+            "direction_agrees_with_median": False,
+        },
+    }
+    verdict = like_for_like(refused)
+    if verdict["ok"]:
+        raise RuntimeError("a row with skewed clocks AND inverted minima is not like-for-like")
+    if len(verdict["reasons"]) != 2:
+        raise RuntimeError(f"both reasons must be named, got {verdict['reasons']}")
+    if not any("frequency term" in reason for reason in verdict["reasons"]):
+        raise RuntimeError("the clock reason must say why it matters")
+    if not any("DIRECTION" in reason for reason in verdict["reasons"]):
+        raise RuntimeError("the minima reason must name the disagreement")
+    if verdict["gate_input"]:
+        raise RuntimeError("like_for_like must declare itself a non-gate input")
+
+    # Either flag alone is enough to disqualify a row.
+    clock_only = {
+        "balanced_square": {
+            "host_state": {"arms_saw_same_clock": False, "arm_clock_ratio": 1.3775}
+        },
+        "best_vs_best": {"ratio": 0.51, "median_ratio": 0.51,
+                         "direction_agrees_with_median": True},
+    }
+    if like_for_like(clock_only)["ok"] or len(like_for_like(clock_only)["reasons"]) != 1:
+        raise RuntimeError("clock skew alone must disqualify, with one reason")
+
+    minima_only = {
+        "balanced_square": {
+            "host_state": {"arms_saw_same_clock": True, "arm_clock_ratio": 1.0013}
+        },
+        "best_vs_best": {"ratio": 0.62, "median_ratio": 1.187,
+                         "direction_agrees_with_median": False},
+    }
+    if like_for_like(minima_only)["ok"]:
+        raise RuntimeError("an inverted best-vs-best alone must disqualify")
+
+    # The certified dim=100 row: one clock, minima agreeing. Must NOT be flagged.
+    clean = {
+        "balanced_square": {
+            "host_state": {"arms_saw_same_clock": True, "arm_clock_ratio": 1.0013}
+        },
+        "best_vs_best": {"ratio": 0.4653, "median_ratio": 0.573,
+                         "direction_agrees_with_median": True},
+    }
+    if not like_for_like(clean)["ok"] or like_for_like(clean)["reasons"]:
+        raise RuntimeError("a same-clock, direction-agreeing row must pass unflagged")
+
+    # A row missing the diagnostics entirely must not be flagged on absence.
+    if not like_for_like({"verdict": "SLOWER"})["ok"]:
+        raise RuntimeError("absent diagnostics must not be read as a failure")
 
 
 def _host_state_self_test() -> None:
@@ -4350,6 +4454,11 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                     ratio = comparison.get("ratio")
                     ratio_str = f"{ratio:.2f}x" if ratio else "N/A"
                     print(f"{verdict} ({ratio_str})")
+                    # A verdict a reader can act on: an unlike-for-like row says so HERE,
+                    # where the number is read, not only in the artifact.
+                    if comparison.get("like_for_like", {}).get("ok") is False:
+                        for reason in comparison["like_for_like"]["reasons"]:
+                            print(f"    NOT LIKE-FOR-LIKE: {reason}")
                     cell_index += 1
                     continue
 
@@ -4505,6 +4614,11 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                 ratio = comparison.get("ratio")
                 ratio_str = f"{ratio:.2f}x" if ratio else "N/A"
                 print(f"{verdict} ({ratio_str})")
+                # A verdict a reader can act on: an unlike-for-like row says so HERE,
+                # where the number is read, not only in the artifact.
+                if comparison.get("like_for_like", {}).get("ok") is False:
+                    for reason in comparison["like_for_like"]["reasons"]:
+                        print(f"    NOT LIKE-FOR-LIKE: {reason}")
 
     return results
 
@@ -4630,6 +4744,11 @@ def main():
         ),
     )
     parser.add_argument(
+        "--like-for-like-self-test",
+        action="store_true",
+        help="Exercise the combined clock/minima like-for-like verdict",
+    )
+    parser.add_argument(
         "--host-state-self-test",
         action="store_true",
         help="Exercise the per-arm CPU MHz / loadavg instrument and its clock-skew flag",
@@ -4703,6 +4822,11 @@ def main():
     if args.host_state_self_test:
         _host_state_self_test()
         print("host_state_self_test=pass")
+        return
+
+    if args.like_for_like_self_test:
+        _like_for_like_self_test()
+        print("like_for_like_self_test=pass")
         return
 
     if args.pin_cpus:
