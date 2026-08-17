@@ -30935,3 +30935,80 @@ touched. **None of that distinguishes "the code is here" from "the code is
 enabled".** That is a new failure shape for this ledger, and it is adjacent to the
 one it has recorded four times: reasoning about a quantity next to the one that
 decides.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-3qpj4) — ALL THREE ROUNDING OPS CERTIFY FASTER in the campaign's quietest window, and `trunc`'s five-attempt "anomaly" RESOLVES as host noise. Five rows, 3/3 clauses each, ten clean nulls
+
+The quietest conditions of the campaign — loadavg **5.81 / 5.61 / 5.58**, all three
+averages agreeing to 0.23, zero builds running. Every deferred question on this
+family was taken here at once.
+
+**Campaign result class:** incumbent-win.
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=0797b4b29b6bfe7e0875f6df617bc590079956dadb538b796b31693bb3b3b174 (82377808 bytes) /data/projects/frankenpandas/target-avx2nofma/release-perf/fp-bench
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files, 70681559 bytes), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260817T103547.490740Z-pid3315715 , giving
+measured_ratio=1.319x for the first `trunc` row.
+
+| row | ratio | 95% CI | FP p50 | pandas p50 | nulls (FP / pandas) |
+|---|---:|---|---:|---:|---|
+| `trunc` q1 | **1.319x** | [1.28143, 1.34730] | 132.1us | 175.8us | 1.00524 / 0.98611 |
+| `trunc` q2 | **1.459x** | [1.39227, 1.53571] | 138.4us | 205.4us | 0.98919 / 1.00566 |
+| `trunc` q3 | **1.298x** | [1.28111, 1.31740] | 137.7us | 179.7us | 1.00325 / 0.99752 |
+| `floor` q1 | **1.329x** | [1.27976, 1.36383] | 136.1us | 184.9us | 0.99811 / 0.98769 |
+| `ceil` q1 | **1.310x** | [1.28424, 1.35560] | 136.6us | 179.1us | 1.00409 / 1.01115 |
+
+**All five are 3/3 clauses. All ten nulls are inside the 2% limit.**
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.00524 and
+pandas median ratio 0.98611 on the first `trunc` row, both inside the 2% limit; ten
+such nulls across the five invocations range 0.98611 to 1.01115 and every one is
+within the limit — the cleanest set of the campaign.
+
+**Median-CI decision:** first `trunc` row effect median 1.319x, 95% CI [1.28142655,
+1.34730344] excluding unity and clearing its required threshold.
+
+**CV role:** provenance only, no vote.
+
+**`trunc`'s ANOMALY RESOLVES, AND IT WAS THE HOST.** I recorded it as an open
+question two turns ago: five attempts at 1.346-1.372x, never certifying, four
+failures on the null clause, while `ceil` certified twice at the same effect size. I
+said explicitly that I had not established whether it was a real variance property or
+something specific to that lane. **It was neither — it was ambient load.** Three
+consecutive certifications here settle it, and the honest lesson is that I could not
+have told those apart without a genuinely quiet host: a workload that refuses five
+times looks like a property until the noise floor drops.
+
+**THE FAMILY IS NOW COMPLETE.** Every op the `+sse4.1` flag was chosen for certifies
+FASTER against live pandas on this host:
+
+| op | before (default build) | after (flag + intrinsic) |
+|---|---:|---:|
+| `floor @1M` | **0.343x** certified SLOWER | **1.329x** certified FASTER |
+| `ceil @1M` | 0.294x certified SLOWER | **1.310x** certified FASTER |
+| `trunc @1M` | 0.303x certified SLOWER | **1.319x** certified FASTER |
+
+**These were the three worst ratios in the entire campaign, and they are now wins.**
+The self-speedup on FrankenPandas' own clock is ~4.3x (588us → 136us for `floor`),
+and none of it came from a better algorithm — it came from noticing, by counting
+instructions, that the generic target denied these ops their hardware instruction and
+that our own hand-rolled kernel then declined to ask for it.
+
+**Counted mechanism:** `floor` FP p50 588 → 198.1 → 136.1us across default, flag-only
+and flag-plus-intrinsic; rounding instructions in `Column::floor` 0 → 10.
+
+```
+LOADAVG      5.81 / 5.61 / 5.58 at launch → 11.11 / 7.36 / 6.19 at the end (the rise
+             is my own five runs), zero builds running throughout
+OBSERVED MHz host mean 2663.2 → 3707.7 (min 1429.0, max 4292.3), host-level not per-arm
+ARTIFACTS    artifacts/bench/{trunc_quiet_q1,q2,q3,floor_quiet_q1,ceil_quiet_q1}.json
+```
+
+**STILL CONTINGENT ON THE FLAG.** The default build is byte-for-byte unchanged and
+still selects the hand-rolled arm, which is correct there. br-frankenpandas-cu22b now
+has three certified wins behind its adoption decision instead of a 1.33x estimate;
+its fleet/CI universality question (AVX2 is stricter than SSE4.1) and its
+config-placement question remain open and are not mine.
