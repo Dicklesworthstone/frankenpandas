@@ -798,9 +798,17 @@ def main() -> int:
     parser.add_argument("--restamp-agreeing", action="store_true",
                         help="Refresh fixture_provenance ONLY on fixtures whose pinned values "
                              "the current oracle reproduces exactly (nothing moved, nothing "
-                             "uncompared). Expected values are never read from the oracle in "
-                             "this mode, so it is not regeneration and needs no attributions. "
-                             "Without --apply it reports how many WOULD be restamped.")
+                             "uncompared). The RESTAMP PASS never reads expected values from "
+                             "the oracle, so that pass is not regeneration and needs no "
+                             "attributions. Without --apply it reports how many WOULD be "
+                             "restamped. NOTE this flag governs the restamp pass ONLY: it does "
+                             "not disable the rest of the run, so --apply still REGENERATES "
+                             "every MOVED-ATTRIBUTED fixture from the oracle by the normal "
+                             "path, counted in the final 'APPLIED: N regenerated' line. If you "
+                             "want provenance refreshed and nothing rewritten, run without "
+                             "--apply and read the counts. (br-frankenpandas-1dbxe: reading "
+                             "this flag as 'this run cannot regenerate' is what produced a P1 "
+                             "alleging silent laundering.)")
     parser.add_argument("--glob", default="*.json")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--timeout", type=int, default=120)
