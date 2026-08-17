@@ -108715,6 +108715,52 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_melt_empty_frame_keeps_utf8_offsets_consistent_sn8l4() {
+        // REGRESSION: the fix in d7ef3757a shipped without a test. Before it, the
+        // guard was `if l == 0`, which misses n_rows == 0: the variable-name bytes
+        // were written unconditionally while `(1..=n_rows)` pushed NO offsets, so
+        // the column ended with bytes.len() == l and offsets still [0]. That trips
+        // `debug_assert_eq!(*offsets.last() == bytes.len())` in
+        // ScalarValues::lazy_contiguous_utf8 — and debug_assert compiles OUT of
+        // release, so a release build shipped the malformed column silently.
+        //
+        // This test IS the assertion: tests are debug builds, so merely melting an
+        // empty frame re-trips the invariant if the guard ever regresses.
+        let df = DataFrame::from_series(vec![
+            Series::from_values("id", vec![], vec![]).unwrap(),
+            Series::from_values("x", vec![], vec![]).unwrap(),
+        ])
+        .unwrap();
+
+        let melted = df.melt(&["id"], &["x"], None, None).unwrap();
+        assert_eq!(melted.index.len(), 0);
+        assert_eq!(melted.column_order.len(), 3); // id, variable, value
+        assert!(melted.columns["variable"].values().is_empty());
+        assert!(melted.columns["value"].values().is_empty());
+    }
+
+    #[test]
+    fn dataframe_melt_empty_variable_name_keeps_utf8_offsets_consistent_sn8l4() {
+        // The OTHER degenerate branch the `seg_len == 0` guard covers: a zero-length
+        // variable name (l == 0) with rows present. The old `if l == 0` guard did
+        // handle this one; pinning it so a future rewrite cannot fix n_rows == 0 by
+        // reintroducing a guard that drops this case.
+        let df = DataFrame::from_series(vec![
+            Series::from_values("id", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap(),
+            Series::from_values("", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
+        ])
+        .unwrap();
+
+        let melted = df.melt(&["id"], &[""], None, None).unwrap();
+        assert_eq!(melted.index.len(), 1);
+        assert_eq!(
+            melted.columns["variable"].values()[0],
+            Scalar::Utf8("".into())
+        );
+        assert_eq!(melted.columns["value"].values()[0], Scalar::Float64(1.0));
+    }
+
+    #[test]
     fn dataframe_melt_custom_names() {
         let df = DataFrame::from_series(vec![
             Series::from_values("key", vec![0_i64.into()], vec![Scalar::Utf8("k".into())]).unwrap(),
