@@ -173,8 +173,10 @@ def setup_pandas(args: argparse.Namespace):
         except ValueError:
             return False
 
+    legacy_path_inserted = False
     if os.path.isdir(candidate_parent):
         sys.path.insert(0, candidate_parent)
+        legacy_path_inserted = True
 
     try:
         import pandas as pd  # type: ignore
@@ -194,14 +196,45 @@ def setup_pandas(args: argparse.Namespace):
             ) from exc
 
         try:
-            # Remove legacy path and cached module, then resolve system pandas.
-            while candidate_parent in sys.path:
-                sys.path.remove(candidate_parent)
-            sys.modules.pop("pandas", None)
-            pd = importlib.import_module("pandas")
+            # DO NOT RE-IMPORT PANDAS. br-frankenpandas-pjxm1.
+            #
+            # This block used to `sys.modules.pop("pandas")` and re-import. That
+            # pop is too shallow: every `pandas._libs.*` C extension stays cached
+            # and remains bound to the FIRST pandas module object, so the capsule
+            # lookup against the NEW object fails and any op needing the datetime
+            # C-API dies with
+            #     module 'pandas' has no attribute '_pandas_datetime_CAPI'
+            # which the Rust harness then reports as "live oracle unavailable" —
+            # the least diagnosable message possible for a bug in the oracle.
+            #
+            # MEASURED, plain python, no FrankenPandas involved:
+            #   import pandas          -> _pandas_datetime_CAPI True,  to_json OK
+            #   pop("pandas") + import -> _pandas_datetime_CAPI False, to_json AttributeError
+            #   pop ALL pandas*        -> _pandas_datetime_CAPI True,  to_json OverflowError
+            #                             ("Maximum recursion level reached")
+            # So BOTH re-import strategies are broken. There is no safe in-process
+            # re-import of pandas, and the deeper pop is not a fix either.
+            #
+            # WHEN THIS BLOCK IS REACHED, in practice: the harness always passes
+            # --strict-legacy, so a SYSTEM pandas necessarily fails
+            # module_is_from_legacy_root() and raises above. If the legacy path was
+            # never inserted (its directory does not exist, which is the default on
+            # every checkout), the module already imported IS system pandas and is
+            # exactly what the caller wants — so hand it back untouched.
+            if not legacy_path_inserted:
+                pd = sys.modules.get("pandas") or importlib.import_module("pandas")
+                validate_pandas_module(pd)
+                return pd
 
-            validate_pandas_module(pd)
-            return pd
+            # The legacy path WAS on sys.path, so the cached module may be the
+            # legacy one and swapping it in-process is unsafe for the reasons
+            # above. Refuse clearly instead of returning a corrupted module.
+            raise OracleError(
+                "cannot swap legacy pandas for system pandas in-process: "
+                "re-importing pandas breaks its datetime C-API "
+                "(br-frankenpandas-pjxm1). Re-run without the legacy root on "
+                f"sys.path, or without --strict-legacy. Original cause: {exc}"
+            )
         except Exception as fallback_exc:
             raise OracleError(f"system pandas import failed: {fallback_exc}") from fallback_exc
 
