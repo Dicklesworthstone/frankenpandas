@@ -35243,3 +35243,68 @@ i.e. unmeasurable by this method, which is itself the answer for that size.
 **WHAT REMAINS UNSAFE.** The dim=100 timing share still swings 5.6% <-> 9.4% between two clean runs
 minutes apart, so the timing subtraction has a resolution of a few percent at best on a term this
 small. I am not quoting a point estimate from it. The instruction count is the number to cite.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-t2n6i) — the reason the `to_datetime(utc=True)` divergence hid for so long: the ENTIRE timezone dt surface has zero differential coverage, 10 distinct dt surfaces have none at all
+
+`f2mlr` (fixed in `71971cda2`) was `to_datetime(utc=True)` returning a string column
+where pandas returns `datetime64`. I flagged `dt().tz_localize` as a likely sibling at
+the time. It is one — and measuring WHY nobody had noticed produced a better finding
+than the divergence itself.
+
+**PROBED LIVE PANDAS FIRST, which is the correction from `v3q4j`** — the bead I filed
+off the oracle's answer yesterday and had to refute:
+
+```
+s = pd.to_datetime(pd.Series(['2024-01-15 10:30:00','2024-06-20 14:00:00']))  # datetime64[ns]
+s.dt.tz_localize('UTC')  ->  dtype datetime64[ns, UTC]
+                             nanos [1705314600000000000, 1718892000000000000]
+```
+
+FrankenPandas returns `Scalar::Utf8("2024-01-15 10:30:00+00:00")`, pinned by its own
+unit test `dt_tz_localize_utc`.
+
+**Counted mechanism — the coverage hole, measured across `DatetimeAccessor`:**
+
+| | count |
+|---|---:|
+| methods on the accessor | **46** |
+| with an oracle handler in `pandas_oracle.py` | **30** |
+| without | **16** |
+| of those, thin aliases delegating to a covered sibling | 5 |
+| **distinct surfaces with NO differential coverage** | **~10** |
+
+The five aliases are `day_of_week`→`dayofweek`, `day_of_year`→`dayofyear`,
+`daysinmonth`→`days_in_month`, `weekday`→`dayofweek`, `week`→`weekofyear`, verified by
+reading each body rather than assumed from the name. The ten genuine gaps are
+`tz`, `tz_convert`, `tz_localize` (+`_with_options`), `timetz` — **the entire timezone
+family** — plus `components`, `isocalendar`, `normalize`, `time`,
+`to_pydatetime_with_warn`, `to_timestamp_with_how`.
+
+Grepping the crate for `tz_localize` returns **zero** hits in conformance tests, **zero**
+in the oracle and **zero** fixtures. **The timezone surface has never been compared to
+pandas at all.** That is the actual explanation for `f2mlr`: the adjacent `to_datetime`
+path DOES have coverage and its divergence was caught the first time the suite really
+ran, while its sibling sat unmeasured.
+
+**A/A null control (same invocation):** not applicable — this entry reports dtype and
+handler counts from a live-pandas probe and a source census, not timings.
+
+```
+LOADAVG   17.50 / 18.80 / 20.75 ;  CPU IDLE 81.32%, iowait 0.01%, by mpstat
+```
+
+**WHY THIS IS FILED AND NOT FIXED, deliberately.** FrankenPandas has no tz-aware dtype —
+`DType::Datetime64` renders `datetime64[ns]` with no zone slot — so the two carriers
+genuinely trade off. `Utf8` preserves the zone (`format_aware_datetime` exists for
+exactly that) and breaks every downstream `.dt` op; a naive `Datetime64` holding the UTC
+instant preserves ordering and all ops and matches pandas' underlying nanos for any
+zone, but makes `tz_localize('UTC')` and `tz_localize('America/New_York')`
+indistinguishable in the result. `f2mlr` took the second option for `to_datetime` and the
+fixtures agreed; whether `tz_localize` should follow is a representation decision that
+may want a tz-aware dtype instead of either.
+
+**And it cannot be decided today, because there is no oracle to decide it with.** Adding
+handlers and differential cases for the timezone family comes FIRST — that is the move
+that made `f2mlr` obvious — and only then the carrier. Changing the representation now
+would just re-bank the four `dt_tz_*` unit tests to whatever I picked, on my own
+authority, which is the shape this campaign exists to prevent.
