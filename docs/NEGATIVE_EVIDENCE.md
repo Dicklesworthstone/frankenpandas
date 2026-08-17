@@ -30176,3 +30176,45 @@ band where the two arms now disagree about which path to take — and requires
 bit-identity with the scalar formula plus correct missingness, including deliberate
 NaN-makers so the per-chunk NaN reduction is exercised rather than uniformly false.
 `add` is checked at the same length to confirm the cheap ops are untouched.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the threshold fix delivers **4.08x on `pow @1M`**, measured against the old binary back-to-back; the vs-pandas row waits for a window
+
+`e7d87c811` gave the compute-bound f64 binary ops the campaign's `par_min` instead
+of `1 << 20`. Built it (ELF `77572f10`, `df` 132G immediately before, 127G after)
+and **the build took loadavg from 10.47 to 91.72** — precisely the effect frankenfs
+warned about, and the reason I did not then measure a vs-pandas row in the window my
+own build had destroyed.
+
+Load did not settle: eight polls over ~2 minutes read 86.97, 82.52, 77.83, 78.07,
+69.45, 62.63, 70.50, 77.83, with the 15-minute average at 77. Other tenants, not my
+build. **A gated row at loadavg 70 is not something I will take, having refused rows
+at half that all session.**
+
+**So I ran the check that load cannot corrupt: the same workload through both
+binaries, back to back, in identical conditions.**
+
+```
+  pow @1M, old ELF e94c077a (threshold 1 << 20)      p50 11667.4us
+  pow @1M, new ELF 77572f10 (op-aware threshold)     p50  2858.0us
+                                                     ------------
+                                                     4.08x faster
+```
+
+**4.08x is far outside the ±16% envelope I measured for two-ELF paired comparisons**
+in this same ledger, and it agrees with the independent evidence from crossing the
+threshold by size rather than by code (`pow @2M` at 3.965x on the OLD binary). Two
+different routes to the same number is why this is reportable at a load I would not
+certify at.
+
+**WHAT IT IMPLIES FOR THE ROW THAT EXPOSED THIS, stated as an implication and not as
+a result.** `pow @1M` certified as a **LOSS at 0.928x** two entries ago, with pandas
+at 10705.19us against FrankenPandas' 11530.07us. At 2858.0us FrankenPandas would sit
+roughly **3.7x ahead of that same pandas arm** — turning the only certified loss in
+this family into one of its larger wins. **That row is not claimed. It needs one
+invocation in a quiet window with both A/A nulls clean, and nothing here substitutes
+for it.**
+
+What is worth noting either way: the loss was real and correctly certified. The gate
+did its job — it recorded a genuine defeat with both nulls passing at cv 1.60%, and
+that clean loss is what made the thread count worth reading and the constant worth
+finding. **A gate that only ever confirms wins would have shown me nothing here.**
