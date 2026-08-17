@@ -29495,3 +29495,54 @@ during the conformance run. My three new target trees account for 5.4G
 (`target-sse41`) plus 2.2G (`target-v3`) against the repo's existing 33G `target`,
 so the bulk is other tenants, but I added ~7.6G tonight and I have stopped building.
 Nothing was deleted.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-4kig1) — the BINARY float family had the same three defects the unary family was fixed for, and nothing had looked
+
+Landed in `342cd07f6` under a hard stop, on mechanism plus tests, with no ratio
+claimed and none possible — disk was at 40G and falling, load at 344.
+
+`typed_float_binary_par` — the arm behind `pow`, `atan2` and `hypot` — took
+`f: fn(f64, f64) -> f64`. **A fn POINTER.** Every element went through an indirect
+call, so the kernel could not inline and the loop could not vectorize around it.
+This bead already contains the measurement that makes that concrete: a fn-pointer
+probe inflated a reading of the `copysign` lever from 1.08x to **1.647x**, purely
+because the arms were called rather than inlined, and I published the wrong number
+before catching it. The unary family was moved off pointer dispatch several commits
+ago. **Nobody thought to check whether the binary family had the same shape. It
+did.**
+
+Two more, both fixed on the unary side and both still present here:
+  * the map read BY INDEX (`|i| f(a[i], b[i])`) — bounds-checked twice per element,
+    across two slices;
+  * `from_f64_values_owned` then re-read the entire output asking `is_nan()`, the
+    pass measured at 505.1us per 1M when it was removed from `round()`.
+
+**WHERE THE BINARY CASE GENUINELY DIFFERS, and it is not a detail.** A binary op CAN
+mint NaN from finite inputs — `0/0`, `inf - inf`, `(-1).powf(0.5)` — so the unary
+domain-fused trick of proving the output all-valid from a predicate on the input
+does not transfer. Applying it anyway would mark NaN slots PRESENT. `saw_nan` is
+folded through the same pass instead: clear, and the all-valid constructor is exact;
+set, and the already-computed buffer goes to `from_f64_values`, which derives
+validity from NaN — the same rule the shared arm applies, without evaluating `f` a
+second time.
+
+**Noting explicitly that I checked whether the unary conclusion transferred rather
+than assuming it, because this ledger records three occasions in one session where I
+did assume**: `floor` → `sqrt`/`log`, f64 → i64 (which cost a certified 1.203x win),
+and `math_unary` → the whole repo. The binary family is the fourth opportunity to
+make that mistake and the first one I did not take.
+
+The test targets the NaN half, since a wrong `saw_nan` is silent in the dangerous
+direction: inputs chosen so each op actually produces NaN, asserting validity AND
+values together; a NaN-free pair of 300_000 rows required to come back all-valid as
+a contiguous typed slice, sized above the parallel threshold so the chunked arm and
+its OR-reduction actually run; and ONE NaN at row 200_000 of 300_000 required to be
+caught, because a per-chunk flag that failed to combine would pass every other
+assertion in the test.
+
+Gates, both completed before the stop: `cargo test -p fp-columnar` **644 passed / 0
+failed / 0 filtered out**, `clippy -D warnings` clean, `fmt --check` clean.
+`pow`/`atan2`/`hypot` have no lanes, so this cannot be measured against the incumbent
+until they get some — the same gap that made the `log10`/`log2`/`log1p` work
+unmeasurable until lanes were added, after which it certified four times on first
+use.
