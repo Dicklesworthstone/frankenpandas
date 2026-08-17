@@ -34424,3 +34424,65 @@ kko5z asked why sqrt/log carry a 66.5us fixed per-call cost while floor on the s
 per call, removed by a peer in 2a2aa6905. Confirmed on three workloads to within 2us. sqrt @10k
 (3.73x) and @100k (1.157x) are certified and locked; log is confirmed on the mechanism but
 uncertified on the ratio for the incumbent-side reason above.
+
+## br-frankenpandas-h67zz — THE REGRESSION-LOCK SYSTEM DEFENDS 4% OF WHAT IT APPEARS TO: 3 of 56 unique locked workloads sit on the live harness, and floordiv/mod @10M are among the orphans
+
+**Campaign result class:** instrument-audit (no lever; a defect in the defence, not in the code)
+
+I was asked to "defend floordiv/mod @10M with a regression lock". They are already locked —
+6.649x and 6.064x — so this looked like a no-op. It is not. **Those locks are banked against
+harness `4aa484cde23f`, and the live harness is `60ed3c58fdd5`.** A baseline only defends while
+the harness sha is unchanged, so the rows the standing orders single out for protection are
+currently protecting nothing.
+
+Auditing the whole `.bench-history/` set against the live harness sha:
+
+| baseline | harness | rows | status |
+|---|---|---|---|
+| standing_thinkstation1_6d884360e4df.json | 6d884360e4df | 17 | quarantined |
+| standing_thinkstation1_6d884360.json | 6d884360e4df | 17 | **stale duplicate of the above** |
+| standing_thinkstation1_669547f601ff.json | 669547f601ff | 9 | quarantined |
+| standing_thinkstation1_70edf3d74ce9.json | 70edf3d74ce9 | 5 | quarantined |
+| standing_thinkstation1_f0a5cef146a0.json | f0a5cef146a0 | 5 | quarantined |
+| standing_thinkstation1_5a0193f00b8a.json | 5a0193f00b8a | 3 | quarantined |
+| **standing_thinkstation1_60ed3c58fdd5.json** | **60ed3c58fdd5** | **3** | **LIVE** |
+| standing_frankenlibc-test_f0a5cef146a0.json | f0a5cef146a0 | 2 | quarantined |
+| standing_math_binary_10m.json | 4aa484cde23f | 2 | quarantined (floordiv/mod @10M) |
+| standing_thinkstation1_4aa484cde23f.json | 4aa484cde23f | 2 | quarantined (same two) |
+| standing_thinkstation1_1aa1137079d1.json | 1aa1137079d1 | 2 | quarantined |
+| standing_thinkstation1_a31a3054134e.json | a31a3054134e | 2 | quarantined |
+| standing_thinkstation1_226ed4059793.json | 226ed4059793 | 1 | quarantined |
+| standing_thinkstation1_3002dd69c8a2.json | 3002dd69c8a2 | 1 | quarantined |
+| standing_thinkstation1_ab595c325216.json | ab595c325216 | 1 | quarantined |
+| standing_vmi1167313_6d884360e4df.json | 6d884360e4df | 1 | quarantined |
+
+**3 live of 56 unique workloads — 4%.** (A naive scan says 73; 17 of those are the duplicate pair.
+`standing_thinkstation1_6d884360.json` and `..._6d884360e4df.json` hold IDENTICAL row sets under
+different invocation ids — an 8-hex leftover from the older naming scheme that the 12-hex writer
+never superseded. Nothing is deleted here; it is reported so the count is not read as 73.)
+
+### THIS IS NOT A GATE TO LOOSEN, AND I WANT THAT ON THE RECORD
+
+The obvious "fix" is to make `comparability_identity` tolerate benign harness edits — hash only
+the timing core, ignore comments and added lanes. **That would be gate self-weakening and the
+evidence says it is wrong.** `perf_ratchet.comparability_identity`'s own docstring records the
+fleet measurement: frankenlibc ran malloc/free on ONE worker under two separately-sanctioned
+harnesses and got **5.9459x and 12.385414x — a ~2x spread — with BOTH A/A nulls passing**. A
+passing null certifies neither the machine nor the instrument. Whole-file sha is deliberate
+conservatism, and it is correct.
+
+So the finding is operational, not architectural: **locks are perishable, and nobody has been
+paying the maintenance.** The assembler already prints the instruction ("re-run this after every
+edit to benches/vs_pandas_harness.py, and re-measure the rows it can no longer place") — it is
+simply never followed, because re-measuring costs a clean window per row while editing the harness
+costs nothing. The incentives point the wrong way and the artefact of that is a lock set that
+looks 56 strong and is 3.
+
+**What this means for reading any "STANDING" claim in this campaign, mine included:** a ratio being
+banked is not the same as it being defended. Before citing a standing row, check its
+`harness_source.sha256` against the live file — the same check this ledger adopted one entry ago
+for comparing two rows, applied now to the lock set itself.
+
+**The honest cost of repair** is 53 re-measurements in certifiable windows. I am not claiming that
+as work done; I am re-measuring the two the standing orders name (floordiv/mod @10M) and reporting
+the rest as a known, quantified debt.
