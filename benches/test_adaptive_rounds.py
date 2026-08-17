@@ -155,3 +155,101 @@ def test_it_uses_the_median_slot_not_the_first_or_the_mean():
     )
     clean = m.rounds_after_first_round([180.0] * 4, m.BALANCED_SQUARE_ROUNDS, enabled=True)
     assert with_straggler == clean
+
+
+# ---------------------------------------------------------------------------
+# The dispersion table is a hardcoded measurement. Measurements go stale.
+# ---------------------------------------------------------------------------
+
+
+def _measured_dispersion_by_bucket():
+    """Recompute relative between-slot dispersion from the banked corpus."""
+    import glob
+    import json
+    import statistics
+
+    buckets: dict[float, list[float]] = {}
+    m = _load()
+    edges = [upper for upper, _ in m.ADAPTIVE_DISPERSION_BY_P50_US]
+    for path in glob.glob(str(REPO / "artifacts" / "bench" / "*.json")):
+        try:
+            doc = json.load(open(path))
+        except Exception:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        for row in doc.get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            for arm in ("frankenpandas", "pandas"):
+                a = row.get(arm)
+                if not isinstance(a, dict):
+                    continue
+                samples = a.get("samples_us")
+                if not isinstance(samples, list) or len(samples) < 8:
+                    continue
+                vals = [v for v in samples if isinstance(v, (int, float)) and v > 0]
+                if len(vals) < 8:
+                    continue
+                med = statistics.median(vals)
+                rel = statistics.pstdev(vals) / med
+                for upper in edges:
+                    if med < upper:
+                        buckets.setdefault(upper, []).append(rel)
+                        break
+    return {k: statistics.median(v) for k, v in buckets.items() if len(v) >= 10}
+
+
+def test_the_hardcoded_dispersion_table_still_matches_the_corpus():
+    """REGRESSION GUARD on a constant that was measured, not chosen.
+
+    `ADAPTIVE_DISPERSION_BY_P50_US` decides how many rounds a workload gets. It was
+    derived from 463 arm-rows on one day; the corpus grows, the kernels change, and
+    a table that has drifted would silently mis-scale every adaptive run while
+    looking authoritative. This recomputes it and fails when it no longer describes
+    reality.
+
+    Deletion condition: when the table is computed at runtime instead of pinned.
+
+    ⚠ The `>= 3 buckets` assertion is deliberate. If the artifacts move or the
+    schema changes, every bucket goes empty, the comparison loop body never runs,
+    and a naive version of this test PASSES while checking nothing — the
+    absence-of-work-as-success failure this repo keeps re-finding.
+    """
+    m = _load()
+    measured = _measured_dispersion_by_bucket()
+    assert len(measured) >= 3, (
+        f"only {len(measured)} buckets had >=10 rows — the corpus scan found almost "
+        "nothing, so this test is not checking the table. Fix the scan, do not "
+        "relax the bound."
+    )
+    drifted = []
+    for upper, pinned in m.ADAPTIVE_DISPERSION_BY_P50_US:
+        if upper not in measured:
+            continue
+        now = measured[upper]
+        if not (0.6 * now <= pinned <= 1.6 * now):
+            drifted.append((upper, pinned, round(now, 4)))
+    assert not drifted, (
+        "ADAPTIVE_DISPERSION_BY_P50_US has drifted from the corpus it was measured "
+        f"from (bucket_upper_us, pinned, measured_now): {drifted}. Re-derive it and "
+        "say so in the ledger; do not widen this tolerance to make it pass."
+    )
+
+
+def test_the_reference_bucket_is_still_the_quietest_one():
+    """The yardstick must remain the quietest measured bucket.
+
+    `ADAPTIVE_REFERENCE_DISPERSION` is what every other bucket is scaled up to. If
+    some other bucket became quieter, the reference would be scaling ops DOWN toward
+    a noisier baseline — the multiplier would shrink and noisy ops would get fewer
+    rounds, which is the one direction this whole mechanism must never move.
+    """
+    m = _load()
+    measured = _measured_dispersion_by_bucket()
+    assert len(measured) >= 3
+    quietest = min(measured.values())
+    assert m.ADAPTIVE_REFERENCE_DISPERSION <= 1.35 * quietest, (
+        f"reference {m.ADAPTIVE_REFERENCE_DISPERSION} is no longer near the quietest "
+        f"measured bucket ({quietest:.4f}); re-derive it"
+    )
