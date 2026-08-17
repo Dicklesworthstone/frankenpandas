@@ -34739,3 +34739,87 @@ report that only ever runs against a static corpus cannot show this class of err
 to the next reporting script: change the state, re-run, and check the number MOVED in the
 direction you expect — I would not have found this by reading the code, because the code does
 exactly what I wrote.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-03fp5) — REJECTED: my "the 10k dot is over-parallelised" hypothesis (forcing 1 worker is 1.41x SLOWER); and the profile the bead asked for is inconclusive because 62% of it is fp-bench hashing its own ELF, so a scaling test carries the finding instead
+
+**NO INCUMBENT ARM RAN AND NO A/A NULL WAS TAKEN.** Every number below is FP-vs-FP or a cycle
+attribution. Nothing here is a win, nothing is quotable against pandas, and nothing is banked as a
+lock. This is diagnostic for 03fp5, whose stated next step was "Profile the WHOLE 10k dot call
+before touching any kernel", plus the rejection of a hypothesis I formed from that profile.
+
+Measured with the preserved ELF
+`bench_elf_sha256=a802073cf042d28d9807347acee416505a0af97e7e2c0e344877405ea1ef80c5 (82346192 bytes) /data/projects/.scratch/crimsonpine/fp-bench-MAIN-8b263954b`,
+no build taken.
+
+**Counted mechanism:** cycles, `perf record -g --call-graph dwarf -F 20000`, 2K samples, one
+`df_dot @10k` process: `sha2::sha256::x86_sha::compress` 51.99%, `_copy_to_iter` 7.67%,
+`filemap_get_read_batch` 1.79%, `filemap_read` 0.51% — that is 61.96% spent hashing and reading the
+82,346,192-byte binary itself. `materialize_float64_dot` 14.79% summed across the main thread and
+4 `fp-str` pool threads. `clear_page_erms` 5.37%. Construction symbols total 2.59%:
+`Column::from_f64_values` 0.64%, `LazyDataFrameColumns::index` 0.49%,
+`BTreeMap<String, Column>::insert` 0.47%, `__memcmp_avx2_movbe` 0.53%,
+`__memmove_avx_unaligned_erms` 0.46%.
+
+**THE PROFILE DOES NOT ANSWER THE BEAD, AND SAYING SO IS THE RESULT**
+
+fp-bench self-hashes its own ELF at startup to emit the mandatory `bench_elf_sha256=` line. On an
+82MB binary that is ~62% of the whole process profile, against ~15% for the actual kernel. The
+remaining user-space work is real but the instrument cannot separate **per-iteration construction
+inside the timed region** from **one-time startup outside it**, because both land in the same
+process. `ITERS` is a compile-time constant (25) in `fp-bench/src/main.rs`, so the workload cannot
+be lengthened to drown the startup without a rebuild.
+
+**So the flat profile is the wrong instrument for this question and I am not going to read a
+conclusion out of it.** Reading "GEMM 14.79% vs construction 2.59%" as "the GEMM dominates" would
+have been exactly the mistake — it compares a per-iteration cost against a per-iteration cost while
+62% of the sample budget sits in a one-time cost that inflates neither. What is needed is a profile
+restricted to the timed region, or a build with a larger ITERS.
+
+**THE SCALING TEST ANSWERS IT WITHOUT A BUILD, AND IT SUPPORTS THE BEAD**
+
+Same ELF, three sizes, medians of the binary's own 25 iterations:
+
+| size | dim | flops | median | us/Mflop |
+|---|---|---|---|---|
+| 10k | 100 | 1,000,000 | 161.09us | **161.09** |
+| 100k | 316 | 31,554,496 | 1094.91us | 34.70 |
+| 1M | 1000 | 1,000,000,000 | 19463.95us | 19.46 |
+
+**The 10k call costs 8.3x more per flop than the 1M call.** A two-point fit against 1M
+(`t = c + flops/r`) gives r = 51,754 flops/us and **c = 141.8us of fixed per-call cost against
+19.3us of arithmetic** — i.e. ~88% of the 10k call is not the GEMM. That is the bead's hypothesis
+("at this size FP's cost is NOT the GEMM: it is the per-call construction ... plus the frame/index
+rebuild"), and this is the first quantitative support for it.
+
+⚠️ **The model is imperfect and I am not going to pretend otherwise.** The same fit predicts 740us
+at 100k against 1094.91us measured, a 32% miss. A single additive constant does not describe this
+curve, because GEMM efficiency itself improves with dim (blocking, cache residency). So c = 141.8us
+is an ESTIMATE of the fixed term, not a measurement of it; what is solid is the direction and the
+magnitude of the per-flop gap, which no amount of kernel tuning explains.
+
+**AND MY OWN HYPOTHESIS FROM THE PROFILE WAS WRONG, KILLED IN 30 SECONDS**
+
+The profile showed `materialize_float64_dot` samples on FOUR `fp-str` pool threads plus main at
+dim=100, where the entire job is 1e6 multiply-adds. I suspected the parallel split was
+counterproductive at that size — and the bead's own text says "the worker-count question is already
+settled here (the work term correctly chooses 1 worker)", which the binary contradicts by reporting
+`operation_threads_used` of 3-4.
+
+`FP_DOT_MAX_WORKERS` exists, so testing it needed no build:
+
+    FP_DOT_MAX_WORKERS=1   median 215.95us   min 212.76
+    FP_DOT_MAX_WORKERS=2   median 220.71us   min 207.40
+    FP_DOT_MAX_WORKERS=4   median 153.39us   min 121.28
+
+**Forcing one worker is 1.41x SLOWER.** The parallel routing at 10k is helping, and my hypothesis
+is dead. The bead's parenthetical is wrong on the fact (the code picks 3-4, not 1) but harmless on
+the conclusion (what it picks is better than 1). Worth recording that `operation_threads_used` read
+1 for the `MAX_WORKERS=2` run and 3 for the `=4` run — consistent with the banked finding that this
+counter is unreliable in both directions on a persistent pool, which is why the per-thread profile
+samples, not the counter, are what established that the GEMM runs parallel here.
+
+**WHAT THIS LEAVES OPEN.** Where the ~142us actually goes. The candidates named by the bead
+(a_views collection, k Float64DotInput Arc bumps, n output Vec allocations, lazy-column plumbing,
+frame/index rebuild) are unseparated by a whole-process profile; `clear_page_erms` at 5.37% is
+suggestive of allocation but cannot be attributed between the 82MB self-hash read buffer and the
+workload. The next instrument is a timed-region-only profile, not another guess.
