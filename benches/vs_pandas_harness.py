@@ -3334,6 +3334,70 @@ def summarize_arm_cpus(
     return out
 
 
+class SlotClockSampler:
+    """Sample host state WHILE a slot runs, not after it.
+
+    br-frankenpandas-oxv4u. Post-slot sampling reads an arm's cores after its
+    threads have exited. FrankenPandas spawns a `thread::scope` per `df.dot`, so
+    its cores are already ramping down at that instant, while an incumbent with a
+    persistent pool is still hot — measured as a 1.2796x apparent clock skew that
+    was teardown, not frequency. Keying the flag on the busy core cut that to
+    1.0863, and this removes the rest of the cause rather than compensating for
+    it: the samples are taken mid-flight, when both arms are actually working.
+
+    Bounded on purpose. One background thread, `interval` seconds apart, at most
+    `max_samples`, reading the same sysfs files the post-slot path reads. At the
+    default 50 ms cadence a one-second slot costs ~20 snapshots on ONE core while
+    the measured arm holds 63, and the sampler never touches the timed region —
+    the timing happens inside the engine, which this thread does not enter.
+    """
+
+    def __init__(self, interval: float = 0.05, max_samples: int = 40) -> None:
+        self.interval = interval
+        self.max_samples = max_samples
+        self.samples: list[dict[str, Any]] = []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _run(self) -> None:
+        # WAIT FIRST, then sample. A snapshot taken at slot start catches the arm
+        # before it has ramped up, which is the same class of error as sampling
+        # after it has torn down. A slot shorter than one interval therefore
+        # yields no samples and falls back, rather than contributing a reading
+        # from the wrong instant.
+        while len(self.samples) < self.max_samples:
+            if self._stop.wait(self.interval):
+                return
+            self.samples.append(host_state_snapshot())
+
+    def __enter__(self) -> "SlotClockSampler":
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+
+def representative_slot_sample(
+    mid_slot: list[dict[str, Any]],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    """The mid-flight sample whose busy core was FASTEST, else the post-slot one.
+
+    br-frankenpandas-oxv4u. Taking the max over mid-flight snapshots answers "what
+    clock did this arm run at when it was running", which is the question the
+    like-for-like check needs. A slot that produced no samples — too short for one
+    interval — falls back to the post-slot reading rather than dropping the arm.
+    """
+    usable = [s for s in mid_slot if s.get("cpu_mhz")]
+    if not usable:
+        return fallback
+    return max(usable, key=lambda s: s["cpu_mhz"]["max"])
+
+
 def host_state_snapshot() -> dict[str, Any]:
     """Loadavg and observed CPU MHz at this instant.
 
@@ -3529,6 +3593,10 @@ def run_balanced_square_cell(
         fp_round: list[TimingResult] = []
         for slot_index, arm in enumerate(BALANCED_SQUARE):
             busy_before = cpu_busy_snapshot()
+            # Sample WHILE the slot runs (br-frankenpandas-oxv4u): a post-slot
+            # reading catches an arm whose threads have already exited.
+            slot_sampler = SlotClockSampler()
+            slot_sampler.__enter__()
             if arm == "A":
                 result, _ = run_pandas_workload(
                     category,
@@ -3552,6 +3620,7 @@ def run_balanced_square_cell(
                 )
                 fp_slots.append(result)
                 fp_round.append(result)
+            slot_sampler.__exit__()
             # Which CPUs were busiest while THIS arm ran, accumulated per arm.
             arm_name = "pandas" if arm == "A" else "frankenpandas"
             busy_after = cpu_busy_snapshot()
@@ -3566,7 +3635,10 @@ def run_balanced_square_cell(
             # neighbour. Still outside every timed region: the timing happens
             # inside the engine subprocess.
             host_state_samples.append(
-                ("pandas" if arm == "A" else "frankenpandas", host_state_snapshot())
+                (
+                    arm_name,
+                    representative_slot_sample(slot_sampler.samples, host_state_snapshot()),
+                )
             )
         if any(not result.is_valid for result in (*pandas_round, *fp_round)):
             # Match the legacy harness's behavior for a missing/invalid FP
@@ -3816,6 +3888,49 @@ def _row_persistence_self_test() -> None:
             "resolve_results_path must depend only on --output and the timestamp; "
             f"got {parameters}"
         )
+
+
+def _slot_sampler_self_test() -> None:
+    """The sampler must capture mid-flight samples and prefer the working clock.
+
+    br-frankenpandas-oxv4u. Written because the artifact it removes was invisible
+    to every other check: the post-slot reading is a VALID snapshot, just of the
+    wrong instant, so nothing failed while the clock attribution was wrong.
+    """
+    import time as _time
+
+    with SlotClockSampler(interval=0.02, max_samples=10) as sampler:
+        _time.sleep(0.12)
+    captured = len(sampler.samples)
+    if captured < 2:
+        raise RuntimeError(f"a 120ms slot at 20ms cadence must yield samples, got {captured}")
+    if captured > 10:
+        raise RuntimeError("max_samples must bound the sampler")
+    if any("loadavg" not in s for s in sampler.samples):
+        raise RuntimeError("each mid-slot sample must carry host state")
+
+    # A slot shorter than one interval yields nothing and must fall back rather
+    # than drop the arm.
+    with SlotClockSampler(interval=5.0, max_samples=4) as brief:
+        pass
+    fallback = {"loadavg": [1.0, 1, 1],
+                "cpu_mhz": {"min": 1.0, "median": 2.0, "max": 3.0, "cpus_sampled": 4}}
+    if representative_slot_sample(brief.samples, fallback) is not fallback:
+        raise RuntimeError("an unsampled slot must fall back to the post-slot reading")
+
+    # Among mid-flight samples, the one whose busy core was FASTEST wins — that is
+    # the arm running, not the arm winding down.
+    winding_down = {"cpu_mhz": {"min": 1429.0, "median": 1500.0, "max": 2100.0,
+                                "cpus_sampled": 64}}
+    working = {"cpu_mhz": {"min": 3800.0, "median": 3900.0, "max": 4100.0,
+                           "cpus_sampled": 64}}
+    picked = representative_slot_sample([winding_down, working, winding_down], fallback)
+    if picked is not working:
+        raise RuntimeError("the working sample must win over the winding-down ones")
+
+    # Samples without a clock reading must not be chosen over one that has it.
+    if representative_slot_sample([{"loadavg": [1.0, 1, 1]}, working], fallback) is not working:
+        raise RuntimeError("a sample lacking cpu_mhz must not be selected")
 
 
 def _like_for_like_self_test() -> None:
@@ -4826,6 +4941,11 @@ def main():
         ),
     )
     parser.add_argument(
+        "--slot-sampler-self-test",
+        action="store_true",
+        help="Exercise mid-slot clock sampling and its fallback",
+    )
+    parser.add_argument(
         "--like-for-like-self-test",
         action="store_true",
         help="Exercise the combined clock/minima like-for-like verdict",
@@ -4909,6 +5029,11 @@ def main():
     if args.like_for_like_self_test:
         _like_for_like_self_test()
         print("like_for_like_self_test=pass")
+        return
+
+    if args.slot_sampler_self_test:
+        _slot_sampler_self_test()
+        print("slot_sampler_self_test=pass")
         return
 
     if args.pin_cpus:
