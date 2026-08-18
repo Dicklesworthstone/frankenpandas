@@ -3718,6 +3718,10 @@ enum AsFreqUnit {
     BusinessYearEnd(u8),
     /// `BYS` — the first weekday of the anchored year (1..=12, default 1).
     BusinessYearStart(u8),
+    /// `SME` — TWO anchors a month: the given day (default 15) and the month end.
+    SemiMonthEnd(u8),
+    /// `SMS` — two anchors a month: the 1st and the given day (default 15).
+    SemiMonthStart(u8),
     /// Weekly, anchored on a WEEKDAY expressed as days-from-Sunday (0 = Sunday).
     ///
     /// br-frankenpandas-week-anchor-days. pandas has seven weekly frequencies —
@@ -3892,6 +3896,16 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
         "BQS" => AsFreqUnit::BusinessQuarterStart(1),
         "BYE" | "BY" | "BA" => AsFreqUnit::BusinessYearEnd(12),
         "BYS" | "BAS" => AsFreqUnit::BusinessYearStart(1),
+        // MEASURED, live pandas 2.2.3, date_range 2024-01-01..2024-04-30:
+        //     SME    -> 01-15, 01-31, 02-15, 02-29, 03-15, 03-31, ...
+        //     SMS    -> 01-01, 01-15, 02-01, 02-15, 03-01, 03-15, ...
+        //     SME-10 -> 01-10, 01-31, 02-10, 02-29, ...
+        //     SMS-20 -> 01-01, 01-20, 02-01, 02-20, ...
+        // So SME is (day, month end) and SMS is (1st, day), with the day defaulting
+        // to 15 in both. These are the only units that emit TWO anchors per month,
+        // which is why they get their own grid arm rather than joining the walk.
+        "SME" | "SM" => AsFreqUnit::SemiMonthEnd(15),
+        "SMS" => AsFreqUnit::SemiMonthStart(15),
         "QS" => AsFreqUnit::QuarterStart(1),
         "YS" | "AS" => AsFreqUnit::YearStart(1),
         "Q" | "QE" | "QUARTER" | "QUARTERS" => AsFreqUnit::QuarterEnd(12),
@@ -3912,6 +3926,27 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
         "B" | "BDAY" | "BUSINESS" => AsFreqUnit::BusinessDay,
         other => {
             // Anchored quarter/year suffixes: QE-NOV, Q-JAN, YE-MAR, A-JUN, ...
+            // The semi-monthly suffix is a DAY NUMBER, not a month name, so it is
+            // resolved before the month-name table rather than through it.
+            if let Some((head, day_text)) = other.split_once('-')
+                && let Ok(day) = day_text.parse::<u8>()
+                // pandas restricts the semi-monthly anchor to 2..=27, and BOTH bounds
+                // were measured rather than assumed — I had to narrow this twice:
+                //   SME-28 -> ValueError: day_of_month must be 1<=day_of_month<=27
+                //   SMS-1  -> ValueError: day_of_month must be 2<=day_of_month<=27
+                // The upper bound keeps the second anchor clear of short months; the
+                // lower one keeps SMS's pair from collapsing, since it already anchors
+                // on the 1st. Accepting a wider range would make FrankenPandas MORE
+                // permissive than the incumbent — a divergence in the quiet direction,
+                // where a frequency string pandas refuses silently produces a grid.
+                && (2..=27).contains(&day)
+            {
+                match head {
+                    "SME" | "SM" => return Ok((count, AsFreqUnit::SemiMonthEnd(day))),
+                    "SMS" => return Ok((count, AsFreqUnit::SemiMonthStart(day))),
+                    _ => {}
+                }
+            }
             if let Some((head, month_name)) = other.split_once('-')
                 && let Some(month) = asfreq_anchor_month(month_name)
             {
@@ -3932,7 +3967,7 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
                 }
             }
             return Err(FrameError::CompatibilityRejected(format!(
-                "asfreq: unsupported frequency '{freq}'; supported: ns, us, ms, S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC), MS, QS (and QS-JAN..QS-DEC), YS (and YS-JAN..YS-DEC), BME/BM, BMS, BQE/BQ, BQS, BYE/BY/BA, BYS/BAS (each with JAN..DEC anchors)"
+                "asfreq: unsupported frequency '{freq}'; supported: ns, us, ms, S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC), MS, QS (and QS-JAN..QS-DEC), YS (and YS-JAN..YS-DEC), BME/BM, BMS, BQE/BQ, BQS, BYE/BY/BA, BYS/BAS (each with JAN..DEC anchors), SME/SM, SMS (each with a 1..31 day anchor)"
             )));
         }
     };
@@ -4139,6 +4174,46 @@ fn anchored_asfreq_anchors(
                     push_in_range(&mut anchors, me);
                 }
                 if me > end {
+                    break;
+                }
+                if month == 12 {
+                    year = year.checked_add(1).ok_or_else(|| {
+                        FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+                    })?;
+                    month = 1;
+                } else {
+                    month += 1;
+                }
+            }
+        }
+        AsFreqUnit::SemiMonthEnd(day) | AsFreqUnit::SemiMonthStart(day) => {
+            // The ONLY units with two anchor points per month, so they walk months
+            // themselves instead of joining the single-anchor walk above.
+            // SME is (day, month end); SMS is (1st, day) — measured at the parser.
+            let ends = matches!(unit, AsFreqUnit::SemiMonthEnd(_));
+            let (mut year, mut month) = (start.year(), start.month());
+            loop {
+                let last = period_last_day_of_month(year, month).ok_or_else(|| {
+                    FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+                })?;
+                let (first_day, second_day) = if ends {
+                    (u32::from(day).min(last), last)
+                } else {
+                    (1, u32::from(day).min(last))
+                };
+                let mut past_end = false;
+                for candidate in [first_day, second_day] {
+                    let date = NaiveDate::from_ymd_opt(year, month, candidate).ok_or_else(|| {
+                        FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+                    })?;
+                    let dt = asfreq_midnight(date)?;
+                    if dt > end {
+                        past_end = true;
+                        break;
+                    }
+                    push_in_range(&mut anchors, dt);
+                }
+                if past_end {
                     break;
                 }
                 if month == 12 {
