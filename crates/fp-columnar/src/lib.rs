@@ -6668,11 +6668,11 @@ fn ptp_nullable_i64(data: &[i64], validity: Option<&ValidityMask>) -> Scalar {
 /// nanvar/nansem. `n == 0` ⇒ `(0, 0.0, 0.0)` (caller returns Null(NaN)).
 fn present_moments_f64(data: &[f64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
     // FAST PATH (br-frankenpandas-8s4mb, sem/var half). Identical guard to
-    // `present_central_moments_f64`: no validity mask means the present-filter
-    // collapses to the NaN test, and a non-NaN blocked sum PROVES no element was
-    // NaN because NaN propagates through addition. Anything else falls through to
-    // the scalar loop below, unchanged.
-    if validity.is_none() && !data.is_empty() {
+    // `present_central_moments_f64`: all-present means the filter collapses to the
+    // NaN test, and a non-NaN blocked sum PROVES no element was NaN because NaN
+    // propagates through addition. Anything else falls through to the scalar loop
+    // below, unchanged.
+    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
         let sum = blocked_sum_f64(data);
         if !sum.is_nan() {
             let n = data.len();
@@ -6711,15 +6711,21 @@ fn present_central_moments_f64(
     data: &[f64],
     validity: Option<&ValidityMask>,
 ) -> (usize, f64, f64, f64) {
-    // FAST PATH (br-frankenpandas-8s4mb): with no validity mask every element is
-    // a candidate, so the present-filter collapses to the NaN test and both
-    // passes can run 8-lane blocked.
+    // FAST PATH (br-frankenpandas-8s4mb): when every element is PRESENT the
+    // present-filter collapses to the NaN test and both passes run 8-lane blocked.
+    //
+    // ⚠️ THE GATE IS `is_none_or(all)`, NOT `is_none`, AND THAT IS THE WHOLE LEVER.
+    // Every one of the 8 production call sites passes `Some(validity)` — the typed
+    // nullable paths always carry a mask, even when nothing in it is unset. Gating
+    // on `is_none()` made this unreachable from the product: it would have measured
+    // ~1.00x and read as "blocked summation does not help here". `all()` is O(1)
+    // on the all-valid sentinel, so asking is free.
     //
     // A NaN anywhere PROPAGATES through the blocked sum, so a non-NaN total is
     // proof that no element was NaN — no separate scan is needed. Mixing +inf
     // and -inf also yields NaN, which costs only the fallback, never
     // correctness: the fallback IS the scalar loop below.
-    if validity.is_none() && !data.is_empty() {
+    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
         let sum = blocked_sum_f64(data);
         if !sum.is_nan() {
             let n = data.len();
@@ -6758,9 +6764,11 @@ fn present_central_moments_i64(
     data: &[i64],
     validity: Option<&ValidityMask>,
 ) -> (usize, f64, f64, f64) {
-    // FAST PATH (br-frankenpandas-8s4mb). Int64 has no NaN, so with no validity
-    // mask the present-filter is vacuous and both passes block unconditionally.
-    if validity.is_none() && !data.is_empty() {
+    // FAST PATH (br-frankenpandas-8s4mb). Int64 has no NaN, so once every element
+    // is present the filter is vacuous. Gate is `is_none_or(all)` rather than
+    // `is_none` because the production callers always pass a mask — see the f64
+    // sibling for why `is_none` made this inert.
+    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
         let n = data.len();
         let mean = blocked_sum_i64_as_f64(data) / n as f64;
         let (m2, m3, m4) = blocked_central_moments_i64(data, mean);
@@ -6948,9 +6956,9 @@ fn blocked_central_moments_i64(data: &[i64], mean: f64) -> (f64, f64, f64) {
 /// Int64 sibling of [`present_moments_f64`]: present iff validity-set; folds
 /// `v as f64` (matching nanvar's `to_f64`), so bit-identical.
 fn present_moments_i64(data: &[i64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
-    // FAST PATH (br-frankenpandas-8s4mb, sem/var half). Int64 has no NaN, so with
-    // no validity mask the present-filter is vacuous.
-    if validity.is_none() && !data.is_empty() {
+    // FAST PATH (br-frankenpandas-8s4mb, sem/var half). Int64 has no NaN, so once
+    // every element is present the filter is vacuous.
+    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
         let n = data.len();
         let mean = blocked_sum_i64_as_f64(data) / n as f64;
         return (n, mean, blocked_sum_sq_i64(data, mean));
@@ -42958,6 +42966,34 @@ mod tests {
             assert_eq!((n, mean, sum_sq), (2, 2.0, 2.0));
             let (n, mean, sum_sq) = crate::present_moments_i64(&[1, 2, 3, 4], None);
             assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
+
+            // ⚠️ NON-VACUITY. Every production caller passes Some(validity), so a
+            // gate of `is_none()` would make the blocked path unreachable and this
+            // lever inert while every assertion above still passed. These four
+            // exercise the path the PRODUCT actually takes: a mask that is present
+            // and entirely set. Same inputs, same answers as the None cases.
+            let full8 = ValidityMask::all_valid(8);
+            let full4 = ValidityMask::all_valid(4);
+            assert_eq!(
+                crate::present_central_moments_f64(&[7.0; 8], Some(&full8)),
+                (8, 0.0, 0.0, 0.0)
+            );
+            assert_eq!(
+                crate::present_central_moments_i64(&[5_i64; 8], Some(&full8)),
+                (8, 0.0, 0.0, 0.0)
+            );
+            let (n, mean, sum_sq) =
+                crate::present_moments_f64(&[1.0, 2.0, 3.0, 4.0], Some(&full4));
+            assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
+            let (n, mean, sum_sq) = crate::present_moments_i64(&[1, 2, 3, 4], Some(&full4));
+            assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
+
+            // A mask with a HOLE must still take the scalar path and exclude it.
+            let mut holed = ValidityMask::all_valid(4);
+            holed.set(1, false);
+            let (n, mean, sum_sq) = crate::present_moments_f64(&[1.0, 99.0, 2.0, 3.0], Some(&holed));
+            assert_eq!((n, mean), (3, 2.0));
+            assert_eq!(sum_sq, 2.0);
         }
 
         #[test]
