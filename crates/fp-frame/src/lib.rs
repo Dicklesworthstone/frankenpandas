@@ -16792,6 +16792,28 @@ impl Series {
     ///
     /// Matches `pd.Series.mode(dropna=...)`.
     pub fn mode_with_dropna(&self, dropna: bool) -> Result<Self, FrameError> {
+        // ⚠️ A CATEGORICAL COLUMN HOLDS CODES, and here that is wrong TWICE
+        // over. The tally itself is safe — codes and categories are a bijection,
+        // so the most frequent code is the most frequent value — but the output
+        // carries the codes, and the tie sort below orders by them.
+        //
+        // MEASURED, live pandas 2.2.3, on Categorical(['b','a','b','a']):
+        //     s.mode() -> ['a', 'b']        sorted by VALUE
+        //
+        // FrankenPandas returned the two codes, ordered first-seen (b before a),
+        // because `from_categorical` numbers categories in FIRST-SEEN order while
+        // pandas sorts them. Decoding here fixes both halves at once: the values
+        // are the labels, and the sort below then orders those labels.
+        //
+        // ⚠️ ONE THING THIS DOES NOT FIX: the result is no longer categorical,
+        // where pandas keeps `dtype: category`. Preserving the metadata instead
+        // of decoding would keep the dtype but re-break the tie order, because
+        // FP's category numbering is first-seen and pandas' is sorted. That
+        // ordering difference is the deeper defect and wants its own change;
+        // this one is deliberately the half that fixes the values a user reads.
+        if let Some(categorical) = self.cat() {
+            return categorical.to_values()?.mode_with_dropna(dropna);
+        }
         // High-cardinality typed sort-scan fast path (zero-free all-valid no-NaN
         // Float64). When distinct values dominate (the mode-of-a-near-unique-column
         // worst case), the ScalarKey hashmap tally below builds an n-entry
@@ -49221,7 +49243,33 @@ impl DatetimeAccessor<'_> {
         if !typed {
             self.validate_datetime_dtype()?;
         }
-        for v in self.series.column().values() {
+        let vals = self.series.column().values();
+        // ⚠️ THE ONE-FORMAT LOCK REACHES HERE TOO (br-frankenpandas-t2n6i, the
+        // doctrine from br-frankenpandas-hzayc). This loop parsed every STRING
+        // element on its own terms, so a column of mixed shapes answered for rows
+        // pandas refuses — the same leniency br-frankenpandas-mhygz fixed in
+        // `try_extract_component`, at a fourth site that pass missed because
+        // `isocalendar` returns a FRAME and never went through `extract_component`.
+        //
+        // MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), on
+        // ['2024-01-15 10:30:00', '2024-01-16', '2024-01-17 08:00:00']:
+        //   to_datetime(...) -> [Timestamp, NaT, Timestamp]   element 1 is DATE-ONLY
+        //                                                     where the guessed format
+        //                                                     carries a time
+        //   .dt.isocalendar() -> row 0 (2024, 3, 1)
+        //                        row 1 (<NA>, <NA>, <NA>)     ALL THREE columns
+        //                        row 2 (2024, 3, 3)
+        // FrankenPandas computed (2024, 3, 2) for row 1 — a confident wrong answer,
+        // not a miss.
+        //
+        // Typed Datetime64 input is exempt: the nanos are already resolved, so there
+        // is no format to guess and no row to refuse.
+        let shape_lock = if typed {
+            None
+        } else {
+            infer_datetime_shape_lock(vals)
+        };
+        for v in vals {
             let ymd = if typed {
                 match v {
                     Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT => {
@@ -49235,7 +49283,16 @@ impl DatetimeAccessor<'_> {
                 }
             } else {
                 match v {
-                    Scalar::Utf8(s) => Self::parse_ymd_from_datetime(s),
+                    Scalar::Utf8(s) => {
+                        if shape_lock
+                            .as_deref()
+                            .is_some_and(|lock| !datetime_shape_matches(s, lock))
+                        {
+                            None
+                        } else {
+                            Self::parse_ymd_from_datetime(s)
+                        }
+                    }
                     _ => None,
                 }
             };
@@ -161904,6 +161961,44 @@ mod tests {
             .unwrap();
         assert_eq!(hits.values()[0], Scalar::Utf8("hit".to_owned()));
         assert!(hits.values()[1].is_missing());
+    }
+
+    /// `mode` on a categorical returned CODES, ordered by code. From live
+    /// pandas 2.2.3: `Categorical(['b','a','b','a']).mode()` is `['a','b']` —
+    /// sorted by VALUE, which FP's first-seen code numbering does not give.
+    #[test]
+    fn mode_on_a_categorical_returns_values_sorted_by_value() {
+        let tied = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        // 'b' is seen first, so it is code 0 — ordering by code would put it
+        // first, and pandas puts 'a' first.
+        assert_eq!(tied.column().values()[0], Scalar::Int64(0));
+        assert_eq!(
+            tied.mode().unwrap().values(),
+            &[Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]
+        );
+
+        let numbers = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(10),
+                Scalar::Int64(30),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(numbers.mode().unwrap().values(), &[Scalar::Int64(10)]);
     }
 
     #[test]
