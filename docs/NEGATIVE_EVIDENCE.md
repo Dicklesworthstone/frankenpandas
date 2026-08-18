@@ -37327,3 +37327,34 @@ bounded-Int64 key → `int64_dense_grouping` instead of `build_groups` SipHash" 
 says explicitly "DO NOT re-attack build_groups. Its share is now measured three ways and
 it is not the floor." The other half of the lever — per-group agg inline over the raw
 slice, no per-group Series — targets the 79-90% and remains the right idea.
+
+**⚠️ A STANDING CORPUS PROPERTY, NOT A TODAY-AND-US PROBLEM: `artifacts/bench/` CONTAINS ROWS WHOSE
+INSTRUMENT NO LONGER EXISTS.** Flagging this at entry level rather than leaving it in a commit
+message, at the other pane's suggestion, because it changes how the whole corpus should be read.
+
+The uncommitted-harness guard, run over the corpus, refuses **6 artifacts across 3 distinct harness
+shas that appear in NO commit**:
+
+    a67f720ac1f8   4 rows   today, resolved — the other pane committed byte-for-byte (6df0cd9a8),
+                            so this sha now EXISTS and the guard correctly flipped to accepting it
+    a757f5cdd857   1 row    earlier session, unresolved
+    994379a475d3   1 row    earlier session, unresolved
+
+**Two of those predate both current panes.** So measuring against a working-tree instrument is not a
+mistake two agents made this afternoon; it is something the corpus has been accumulating across at
+least three separate episodes, by at least three different authors.
+
+**WHY THEY WERE INVISIBLE.** Every one of those rows is well-formed. Each carries a plausible
+64-hex `harness_source.sha256`, a real host fingerprint, real timings, and passes every existing
+gate — `perf_candidate_preflight`, the median-CI clauses, the A/A nulls. **Nothing in a row can
+reveal that its instrument was never committed; only git can, by failing to contain it.** The guard
+works because git remembers what the working tree forgot.
+
+**AND THE HONEST LIMIT: THE GUARD REFUSES SUCH ROWS FROM BANKING, IT CANNOT REPAIR THEM.** A row
+whose instrument no longer exists is not recoverable by re-measurement either — re-running produces
+a DIFFERENT instrument and therefore a different number, which is the correct outcome but means the
+original row is simply gone. `a67f720ac1f8` was recoverable only by the accident that its author
+still held the exact tree and chose to commit it unamended. The other two are not, and nobody can
+now say what they measured. **Six rows is a small loss; the process lesson is the asset, and the
+lesson is that "measure only against committed state" needs to be a precondition of running the
+harness, not a discipline applied afterwards by the person banking.**
