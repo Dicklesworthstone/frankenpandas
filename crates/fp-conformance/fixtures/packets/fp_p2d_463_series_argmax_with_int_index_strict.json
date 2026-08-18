@@ -1,0 +1,54 @@
+{
+  "packet_id": "FP-P2D-463",
+  "case_id": "series_argmax_with_int_index_strict",
+  "mode": "strict",
+  "operation": "series_argmax",
+  "left": {
+    "name": "vals",
+    "index": [
+      {
+        "kind": "int64",
+        "value": 100
+      },
+      {
+        "kind": "int64",
+        "value": 200
+      },
+      {
+        "kind": "int64",
+        "value": 300
+      },
+      {
+        "kind": "int64",
+        "value": 400
+      }
+    ],
+    "values": [
+      {
+        "kind": "float64",
+        "value": 5.0
+      },
+      {
+        "kind": "float64",
+        "value": 1.0
+      },
+      {
+        "kind": "float64",
+        "value": 3.0
+      },
+      {
+        "kind": "float64",
+        "value": 7.0
+      }
+    ]
+  },
+  "expected_scalar": {
+    "kind": "int64",
+    "value": 3
+  },
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
+    "generated_at": "2026-08-18T16:00:05Z"
+  }
+}

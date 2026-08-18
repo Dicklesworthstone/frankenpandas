@@ -1,0 +1,54 @@
+{
+  "packet_id": "FP-P2D-463",
+  "case_id": "series_idxmax_basic_strict",
+  "mode": "strict",
+  "operation": "series_idxmax",
+  "left": {
+    "name": "test_series",
+    "index": [
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "utf8",
+        "value": "b"
+      },
+      {
+        "kind": "utf8",
+        "value": "c"
+      },
+      {
+        "kind": "utf8",
+        "value": "d"
+      }
+    ],
+    "values": [
+      {
+        "kind": "float64",
+        "value": 3.5
+      },
+      {
+        "kind": "float64",
+        "value": 1.0
+      },
+      {
+        "kind": "float64",
+        "value": 2.5
+      },
+      {
+        "kind": "float64",
+        "value": 4.0
+      }
+    ]
+  },
+  "expected_scalar": {
+    "kind": "utf8",
+    "value": "d"
+  },
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
+    "generated_at": "2026-08-18T16:00:01Z"
+  }
+}
