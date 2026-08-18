@@ -18639,11 +18639,17 @@ impl Column {
             return None;
         }
         let chunks = self.values.float64_chunks_ref()?;
+        // Per-chunk BLOCKED sum (br-frankenpandas-8s4mb technique). The old inner
+        // `s += x` was a serial dependency chain LLVM cannot vectorize because f64
+        // addition is non-associative; `blocked_sum_f64` breaks it into 8 lanes and
+        // is already the summation used by the nullable reductions.
+        //
+        // NUMERICS: a chunk shorter than 8 flows entirely through that helper's
+        // remainder fold, so it stays bit-identical there; longer chunks re-associate
+        // WITHIN the chunk only. Chunk-to-chunk order is unchanged.
         let mut s = 0.0_f64;
         for chunk in chunks {
-            for &x in chunk.as_slice() {
-                s += x;
-            }
+            s += blocked_sum_f64(chunk.as_slice());
         }
         Some(s)
     }
@@ -18660,9 +18666,8 @@ impl Column {
         let mut count = 0usize;
         for chunk in chunks {
             let slice = chunk.as_slice();
-            for &x in slice {
-                s += x;
-            }
+            // Same blocked sum as `all_valid_f64_chunk_sum`; see the note there.
+            s += blocked_sum_f64(slice);
             count += slice.len();
         }
         if count == 0 {
@@ -18760,12 +18765,11 @@ impl Column {
             return None;
         }
         let chunks = self.values.float64_chunks_ref()?;
+        // `blocked_sum_sq_f64` is the same Sigma (x - mean)^2 the nullable sem/var
+        // path uses, so the two agree by construction rather than by coincidence.
         let mut s = 0.0_f64;
         for chunk in chunks {
-            for &v in chunk.as_slice() {
-                let d = v - mean;
-                s += d * d;
-            }
+            s += blocked_sum_sq_f64(chunk.as_slice(), mean);
         }
         Some(s)
     }
@@ -18777,12 +18781,11 @@ impl Column {
             return None;
         }
         let chunks = self.values.int64_chunks_ref()?;
+        // Int64 sibling of the blocked f64 path above; `blocked_sum_sq_i64` widens
+        // with `as f64` in exactly the same place the scalar fold did.
         let mut s = 0.0_f64;
         for chunk in chunks {
-            for &v in chunk.as_slice() {
-                let d = v as f64 - mean;
-                s += d * d;
-            }
+            s += blocked_sum_sq_i64(chunk.as_slice(), mean);
         }
         Some(s)
     }
