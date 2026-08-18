@@ -54539,6 +54539,33 @@ impl LazyDataFrameColumns {
         }
     }
 
+    /// Positional fast path for [`DataFrame::column_at`], bypassing the label
+    /// round trip entirely.
+    ///
+    /// br-frankenpandas-3ya6b. `get_one` reaches a lazily-transposed column by
+    /// PARSING a formatted label back into the position it was formatted from.
+    /// When the caller already has the position, all of that is waste, and it
+    /// is waste that scales with the data because a transposed frame has one
+    /// output column per source row.
+    ///
+    /// ⚠️ `None` MEANS "NO POSITIONAL FAST PATH HERE", NOT "no such column".
+    /// The `Eager` variant orders its columns by the frame's `column_order`,
+    /// which this type cannot see, and a `HomogeneousTranspose` that has
+    /// already materialized must read through its `ColumnStore` by name so the
+    /// two paths cannot diverge. Both cases fall back to the label route in
+    /// `column_at`, which is why this returning `None` must never be reported
+    /// to a caller as an absent column.
+    fn get_one_at(&self, position: usize) -> Option<&Column> {
+        match self {
+            Self::HomogeneousTranspose {
+                plan, materialized, ..
+            } if materialized.get().is_none() => {
+                (position < plan.output_columns).then(|| plan.cached_column(position))
+            }
+            _ => None,
+        }
+    }
+
     fn is_lazy_transpose(&self) -> bool {
         matches!(
             self,
@@ -59813,6 +59840,56 @@ impl DataFrame {
         }
         #[cfg(not(feature = "lazy-transpose-view"))]
         {
+            self.columns.get(name)
+        }
+    }
+
+    /// O(1) positional column access, the value counterpart to
+    /// [`Self::column_name_at`].
+    ///
+    /// br-frankenpandas-3ya6b. Reading every column of a frame had no route
+    /// that did not go through a label: callers had to ask
+    /// `column_name_at(i)` for an OWNED `String` and hand it straight back to
+    /// [`Self::column`]. On a transposed frame that label is a formatted
+    /// integer, so the round trip per column was
+    ///
+    /// * `i.to_string()` — one allocation to make the label,
+    /// * `name.parse::<i64>()` — to recover the position it came from, and
+    /// * `label.to_string() != name` — a SECOND allocation to validate the
+    ///   round trip (see `homogeneous_transpose_column_position`),
+    ///
+    /// to arrive back at the position the caller already had. A transposed
+    /// frame has one output column per SOURCE ROW, so this is the one shape in
+    /// the corpus where a per-column constant scales with the data: at 1M rows
+    /// the old route pays ~2M allocations and ~1M parses before any column is
+    /// materialized.
+    ///
+    /// ⚠️ THIS REMOVES A CONSTANT, NOT THE STRUCTURAL GAP. pandas answers
+    /// `df.T.to_numpy()` from its 2D BlockManager and measured FLAT at
+    /// 45.2/44.6/44.6us from 10k to 1M rows, while FrankenPandas must still
+    /// build one `Column` per output column however it is addressed
+    /// (br-frankenpandas-l4vzc). Do not expect this to change the SIGN of that
+    /// comparison; if a measurement ever shows it doing so, l4vzc's structural
+    /// account is wrong and that is the interesting result.
+    #[must_use]
+    pub fn column_at(&self, position: usize) -> Option<&Column> {
+        #[cfg(feature = "lazy-transpose-view")]
+        {
+            // The fast path answers only for a not-yet-materialized
+            // `HomogeneousTranspose`. Every other storage — `Eager`, an
+            // already-materialized transpose, `Float64Block` — is ordered by
+            // `column_order`, which the column store cannot see, so it MUST
+            // fall back to the label route. Returning the fast path's `None`
+            // directly would report real columns as absent.
+            if let Some(column) = self.columns.get_one_at(position) {
+                return Some(column);
+            }
+            let name = self.column_order.name_at(position)?;
+            self.columns.get_one(name.as_str())
+        }
+        #[cfg(not(feature = "lazy-transpose-view"))]
+        {
+            let name = self.column_order.get(position)?;
             self.columns.get(name)
         }
     }
@@ -179075,6 +179152,79 @@ mod tests {
             &transposed,
             &eager_source.transpose_materialized().unwrap(),
         );
+    }
+
+    #[test]
+    fn dataframe_column_at_matches_the_label_route_on_a_lazy_transpose_3ya6b() {
+        // br-frankenpandas-3ya6b. `column_at` exists to skip a label round
+        // trip: the old route formatted the position into a `String`, parsed
+        // it back into the same position, and formatted it a SECOND time to
+        // validate the parse.
+        let mut cols = BTreeMap::new();
+        cols.insert("a".to_owned(), Column::from_f64_values(vec![1.0, 2.0, 3.0]));
+        cols.insert("b".to_owned(), Column::from_f64_values(vec![4.0, 5.0, 6.0]));
+        let source = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 3),
+            cols,
+            vec!["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+
+        let transposed = source.transpose().unwrap();
+        assert!(transposed.is_lazy_transpose_storage());
+        assert_eq!(transposed.num_columns(), 3);
+
+        // NON-VACUITY WITNESS, and it is a real one rather than an equality
+        // that both routes would satisfy: call the private fast path itself
+        // and require it to answer. If `column_at` silently degraded to the
+        // label route this assertion fails while every equality below still
+        // passes.
+        for position in 0..transposed.num_columns() {
+            assert!(
+                transposed.columns.get_one_at(position).is_some(),
+                "positional fast path must be live at {position}"
+            );
+        }
+
+        // Equivalence with the route callers had to use before.
+        for position in 0..transposed.num_columns() {
+            let name = transposed.column_name_at(position).expect("label");
+            assert_eq!(
+                transposed.column_at(position),
+                transposed.column(name.as_str()),
+                "column_at disagrees with the label route at {position}"
+            );
+        }
+
+        assert_eq!(transposed.column_at(transposed.num_columns()), None);
+        assert_eq!(transposed.columns.get_one_at(usize::MAX), None);
+    }
+
+    #[test]
+    fn dataframe_column_at_falls_back_where_there_is_no_positional_fast_path_3ya6b() {
+        // br-frankenpandas-3ya6b. `get_one_at` returns `None` to mean "no
+        // positional fast path for this storage", NOT "no such column" — the
+        // `Eager` variant is ordered by the frame's `column_order`, which the
+        // column store cannot see. This test exists because confusing those
+        // two meanings would make `column_at` report real columns as absent,
+        // which is the one way this change can break a caller silently.
+        let mut cols = BTreeMap::new();
+        cols.insert("x".to_owned(), Column::from_f64_values(vec![1.0, 2.0]));
+        cols.insert("y".to_owned(), Column::from_i64_values_owned(vec![7, 8]));
+        let eager = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 2),
+            cols,
+            vec!["x".to_owned(), "y".to_owned()],
+        )
+        .unwrap();
+
+        assert!(!eager.is_lazy_transpose_storage());
+        // No fast path here...
+        assert_eq!(eager.columns.get_one_at(0), None);
+        // ...and yet every column is still reachable positionally.
+        assert_eq!(eager.column_at(0), eager.column("x"));
+        assert_eq!(eager.column_at(1), eager.column("y"));
+        assert_eq!(eager.column_at(2), None);
     }
 
     #[test]
