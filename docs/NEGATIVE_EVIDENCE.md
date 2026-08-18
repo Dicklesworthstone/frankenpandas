@@ -37192,3 +37192,40 @@ That is a fact worth telling them rather than discovering afterwards, and I have
 window was pristine for all three rows (load 6.67-11.03, arms clock-matched throughout). Window
 quality and instrument identity are independent failure modes, and this batch had a perfect one and
 a broken other.
+
+**⚠️ UNBLOCKED WITHOUT WAITING AND WITHOUT TOUCHING THE PEER'S TREE — MEASURE AGAINST THE COMMITTED
+HARNESS, NOT THE WORKING-TREE ONE.** The two rows above were stranded on `a67f720ac1f8`, a
+working-tree sha that may never enter history. The fix turned out to be one command:
+
+    git show 13c0caf1f:benches/vs_pandas_harness.py > <scratch>/harness_committed.py
+
+That file hashes to **`60ed3c58fdd5`** — the committed state — and **the harness self-reports that
+sha when run from the scratch path**, because it hashes its own CONTENT.
+`perf_ratchet.comparability_identity` keys on `harness_sha256` and explicitly never on path; its own
+docstring records why ("the same harness appears banked as both `/opt/fpbench/…` and
+`/data/projects/…`, so keying on the path would refuse a run against itself purely for having been
+staged somewhere else"). **That design decision, made for a different reason, is what makes this
+work.**
+
+Re-measured against it, clean window (load 6.95-8.81, arms clock-matched 4292.2-4296.8 MHz,
+build CPU 0%, disk 125G), ELF `a802073c`:
+
+| row | verdict | ratio | best-vs-best | nulls FP/pd | vs dirty-harness run | vs orphaned figure |
+|---|---|---|---|---|---|---|
+| `df_transpose_materialize @10k` | **FASTER** | **96.482x** | 95.8x agrees | 0.98717 / 1.00345 | 92.649x (+4.1%) | 81.639x |
+| `loc_labels @1M` | **FASTER** | **14.865x** | 14.6x agrees | 0.99309 / 0.99054 | 15.172x (-2.0%) | 14.817x |
+
+All clauses true on both, best-vs-best agreeing in direction, and both reproduce their dirty-harness
+counterparts within 4% — which is itself evidence the peer's additive lane did not change how these
+workloads are timed, exactly as its diff suggested but as no sha comparison could have shown.
+
+**BANKED. `standing_thinkstation1_60ed3c58fdd5` goes 6 -> 8 workloads**, totals 14 baselines / 60
+locked. Two orphans converted into live defences.
+
+**WHAT THIS DOES NOT FIX, AND I WILL NOT PRETEND OTHERWISE.** While the working tree stays dirty,
+anyone measuring with the tree's harness produces rows keyed `a67f720ac1f8` that cannot be checked
+against this baseline — **so a regression in these eight workloads is still silent for anyone but
+me.** The technique recovers MY rows; it does not restore the fleet's defence. That resolves only
+when the lane lands, and re-locking then is a separate pass. **Nor did I re-measure the standing pair
+to "restore" it: floordiv @10M and mod @10M are already banked on this exact sha, and re-running them
+would have been re-measuring a win.**
