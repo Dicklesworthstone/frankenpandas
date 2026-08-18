@@ -12158,9 +12158,26 @@ impl Series {
             return out;
         }
 
+        // ⚠️ A CATEGORICAL COLUMN HOLDS CODES, so this dedup would return
+        // distinct CODE positions. MEASURED, live pandas 2.2.3, on
+        // Categorical([10, 20, 10, 30]) whose codes are [0, 1, 0, 2]:
+        //     s.unique() -> [10, 20, 30]        the VALUES, first-appearance order
+        // Decoding BEFORE the dedup keeps that order (codes and categories are a
+        // bijection, so first appearance is the same either way) and leaves the
+        // NullKind-aware keying below untouched. Every typed fast path above
+        // already declines a categorical via `self.categorical.is_none()`, so a
+        // categorical always arrives here.
+        let decoded;
+        let source: &[Scalar] = match self.cat() {
+            Some(categorical) => {
+                decoded = categorical.resolved_values();
+                &decoded
+            }
+            None => self.column.values(),
+        };
         let mut seen: Vec<Scalar> = Vec::new();
         let mut seen_keys: FxHashMap<ScalarKey<'_>, ()> = FxHashMap::default();
-        for value in self.column.values() {
+        for value in source {
             let key = scalar_key_allow_missing(value);
             if seen_keys.insert(key, ()).is_none() {
                 seen.push(value.clone());
@@ -48570,10 +48587,30 @@ impl DatetimeAccessor<'_> {
                 if let Some(i) = s.find('T') {
                     let time_part = &s[i + 1..];
                     // Remove timezone info if present
+                    // ⚠️ '-' AND lowercase 'z' ARE STRIPPED TOO (br-frankenpandas-t2n6i).
+                    // This chain removed only '+' and 'Z', so a NEGATIVE offset or a
+                    // lowercase suffix stayed glued to the time, `parse_time` failed and
+                    // the element became Null — a MISSING value where pandas has a time.
+                    // Splitting on '-' is safe HERE and only here: `time_part` is what
+                    // follows the 'T' or the space, so the date separators are already
+                    // gone and any '-' left is an offset sign.
+                    //
+                    // MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18) — `.dt.time`
+                    // returns the wall clock and NEVER a suffix, whatever the zone:
+                    //   '2024-01-15 10:30:00'         -> '10:30:00'
+                    //   '2024-01-15T10:30:00Z'        -> '10:30:00'
+                    //   '2024-01-15T10:30:00z'        -> '10:30:00'
+                    //   '2024-01-15 10:30:00+05:30'   -> '10:30:00'
+                    //   '2024-01-15 10:30:00-05:00'   -> '10:30:00'
+                    //   '2024-01-15 10:30:00.500000'  -> '10:30:00.500000'
+                    // Contrast `.dt.timetz`, which KEEPS the offset — that is why the
+                    // two accessors clean the suffix differently rather than sharing.
                     let time_clean = time_part
                         .split('+')
                         .next()
+                        .and_then(|t| t.split('-').next())
                         .and_then(|t| t.split('Z').next())
+                        .and_then(|t| t.split('z').next())
                         .unwrap_or(time_part);
                     if Self::parse_time(time_clean).is_some() {
                         return Scalar::Utf8(Self::trim_zero_time_fraction(time_clean).to_string());
@@ -48582,10 +48619,30 @@ impl DatetimeAccessor<'_> {
                 // Try space-delimited: "YYYY-MM-DD HH:MM:SS"
                 if let Some(i) = s.find(' ') {
                     let time_part = &s[i + 1..];
+                    // ⚠️ '-' AND lowercase 'z' ARE STRIPPED TOO (br-frankenpandas-t2n6i).
+                    // This chain removed only '+' and 'Z', so a NEGATIVE offset or a
+                    // lowercase suffix stayed glued to the time, `parse_time` failed and
+                    // the element became Null — a MISSING value where pandas has a time.
+                    // Splitting on '-' is safe HERE and only here: `time_part` is what
+                    // follows the 'T' or the space, so the date separators are already
+                    // gone and any '-' left is an offset sign.
+                    //
+                    // MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18) — `.dt.time`
+                    // returns the wall clock and NEVER a suffix, whatever the zone:
+                    //   '2024-01-15 10:30:00'         -> '10:30:00'
+                    //   '2024-01-15T10:30:00Z'        -> '10:30:00'
+                    //   '2024-01-15T10:30:00z'        -> '10:30:00'
+                    //   '2024-01-15 10:30:00+05:30'   -> '10:30:00'
+                    //   '2024-01-15 10:30:00-05:00'   -> '10:30:00'
+                    //   '2024-01-15 10:30:00.500000'  -> '10:30:00.500000'
+                    // Contrast `.dt.timetz`, which KEEPS the offset — that is why the
+                    // two accessors clean the suffix differently rather than sharing.
                     let time_clean = time_part
                         .split('+')
                         .next()
+                        .and_then(|t| t.split('-').next())
                         .and_then(|t| t.split('Z').next())
+                        .and_then(|t| t.split('z').next())
                         .unwrap_or(time_part);
                     if Self::parse_time(time_clean).is_some() {
                         return Scalar::Utf8(Self::trim_zero_time_fraction(time_clean).to_string());
@@ -161685,6 +161742,46 @@ mod tests {
         assert_eq!(
             labels.isin(&[Scalar::Utf8("x".into())]).unwrap().values(),
             &[Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    /// `unique` returned distinct CODES. From live pandas 2.2.3 on
+    /// `Categorical([10, 20, 10, 30])`, whose codes are `[0, 1, 0, 2]`:
+    /// `s.unique()` is `[10, 20, 30]`.
+    #[test]
+    fn unique_on_a_categorical_returns_categories_not_codes() {
+        let numbers = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(10),
+                Scalar::Int64(30),
+            ],
+            false,
+        )
+        .unwrap();
+        // The codes are what the column holds, and they are NOT the answer.
+        assert_eq!(numbers.column().values()[3], Scalar::Int64(2));
+        assert_eq!(
+            numbers.unique(),
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+        );
+
+        // First-appearance order, which decoding before the dedup preserves.
+        let labels = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            labels.unique(),
+            vec![Scalar::Utf8("y".to_owned()), Scalar::Utf8("x".to_owned())]
         );
     }
 
