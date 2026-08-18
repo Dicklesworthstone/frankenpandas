@@ -36184,3 +36184,70 @@ anyone audits authorship of today's rows.
 **The check that catches this, and it costs nothing:** read preflight's entry COUNT before
 committing, and `git diff --cached -- docs/NEGATIVE_EVIDENCE.md | grep '^+### '` to see every
 heading you are about to ship.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-4lbaj) — `to_datetime(unit=…)` on an already-`Datetime64` column falls into a catch-all and returns ALL NaT; pandas passes the values through. Found by source reading, and my own fix raised its reachability
+
+Yesterday's finding produced a rule: *a catch-all arm in a conversion function is where a
+carrier decision hides*. Applying it to the sibling function found something worse than a
+carrier mismatch — silent data loss.
+
+**Counted mechanism.** `to_datetime_values_with_options` branches on whether a unit was
+given:
+
+```rust
+let result = if let Some(unit) = parsed_unit {
+    parse_datetime_scalar_with_unit(val, unit, origin, options.utc)   // UNIT path
+} else {
+    match val {
+        Scalar::Datetime64(nanos) => Scalar::Datetime64(nanos),       // pass-through EXISTS
+        ...
+    }
+};
+```
+
+`parse_datetime_scalar_with_unit`'s arms are exactly `Null | Int64 | Float64 | Utf8 |
+_ => Scalar::Null(NullKind::NaT)`. **There is no `Datetime64` arm.** The no-unit path
+handles an already-typed datetime; the with-unit path destroys it. Neither
+`to_datetime_with_options` nor `to_datetime_values_with_options` returns early for a typed
+column — the only early return is `normalize_mixed_timezone_values`, which fires solely
+when `parsed_unit.is_none()`.
+
+**MEASURED, live pandas 2.2.3 — idempotent pass-through, with or without a unit:**
+
+| call on an already-`datetime64[ns]` series | pandas |
+|---|---|
+| `to_datetime(s)` | `datetime64[ns]`, `Timestamp('2024-01-15 10:30:00')` |
+| `to_datetime(s, unit='s')` | `datetime64[ns]`, value preserved |
+| `to_datetime(s, unit='ns')` | `datetime64[ns]`, value preserved |
+
+So pandas preserves every value where FrankenPandas would return all-NaT. **Silent data
+loss, not an error.**
+
+⚠ **REACHABILITY WENT UP BECAUSE OF MY OWN FIX, and that is the part I most want on
+record.** Before `f2mlr` (`71971cda2`), `to_datetime(utc=True)` produced `Utf8` columns,
+which the unit path parses correctly. It now produces `Datetime64`. So the chain
+`to_datetime(x, utc=True)` → `to_datetime(that, unit=…)` newly lands in the catch-all.
+`read_csv(parse_dates=…)` and every other typed-datetime source were already exposed. My
+change did not create the bug; it widened the door to it, and nothing in the 3318-test
+suite or the conformance corpus covers the composition.
+
+⚠⚠ **THE FRANKENPANDAS SIDE IS READ, NOT RUN.** The build hold means no cargo this turn,
+so this is a mechanism derived from source plus a measured pandas side — not a
+demonstrated failure. I am recording it that way deliberately rather than asserting a
+result I did not execute. The bead carries a repro to run first.
+
+**A/A null control (same invocation):** not applicable — this entry reports pandas dtypes
+from a live probe and one source branch. No timing was taken and nothing was certified.
+
+```
+LOADAVG   4.86 / 5.18 / 10.00 ;  CPU IDLE 92.33%, iowait 0.02%, by mpstat
+DISK      /data 56G, flat, under the standing build hold; no cargo invoked
+```
+
+**THE PATTERN IS NOW TWICE PRODUCTIVE AND WORTH KEEPING.** Two turns, two defects, both
+found by reading the OTHER arms of a `match` I had already edited: `hp2ko` (the
+`other => other` that passes tz strings through) and this one (`_ => NaT` that swallows a
+typed datetime). Both were invisible to a green suite because each branch is individually
+covered and **nothing asserts what the branches do relative to each other**. A conversion
+function with a catch-all and a sibling that handles more cases than it does is a
+two-line grep away from the next one.
