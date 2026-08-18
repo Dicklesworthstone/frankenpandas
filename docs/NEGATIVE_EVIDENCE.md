@@ -37114,3 +37114,47 @@ malfunctioning — it is correctly reporting that it cannot resolve a 2us arm. T
 to measure such workloads at a size where FP's arm is large enough to time (the corpus already
 carries `@1M` variants for some), or to accept that a handful of orphans stay orphaned and record
 WHY, so nobody re-runs them monthly expecting a different answer.
+
+**⚠️ SOFTENING MY OWN CLAIM FROM 33af8e246: "UNRECOVERABLE BY CONSTRUCTION" IS TOO STRONG.** I wrote
+that orphans whose FP arm collapses to single-digit microseconds cannot certify, because the A/A
+null at that scale measures timer noise. The very next rows of the same batch refute the
+determinism:
+
+| row | FP p50 | FP A/A null | verdict |
+|---|---|---|---|
+| `df_transpose_materialize @100k` | 2.00us | 1.02489 | NULL_UNDECIDABLE |
+| `df_transpose_materialize @10k` | **1.71us** | **1.00785** | **FASTER, all clauses true** |
+
+**The SMALLER arm certified.** So it is not monotone in arm size and it is not a construction limit:
+at microsecond arms the null is dominated by timer and scheduling noise, which makes certification a
+COIN FLIP PER ATTEMPT rather than an impossibility. The practical difference matters for the
+re-lock bead — "unrecoverable" says don't try, "low probability per attempt" says retry in a clean
+window and expect some to land. My earlier wording would have written off recoverable rows.
+
+What survives from that entry: a large banked ratio still PREDICTS a small FP arm and therefore a
+low per-attempt success rate, so the top of the ranked orphan list is still the wrong place to
+start. `loc_labels @1M` — a 15x row with a 2205us arm — certified first time.
+
+**TWO ROWS MEASURED, CERTIFIED, AND DELIBERATELY NOT BANKED:**
+
+    df_transpose_materialize @10k   FASTER  92.649x  bvb 96.5x   nulls 1.00785/0.99210  load 7.51-9.47
+    loc_labels               @1M    FASTER  15.172x  bvb 15.2x   nulls 1.01655/1.00536  load 8.75-11.03
+
+Both all-clauses-true, best-vs-best agreeing in direction, arms clock-matched at 4292.2-4297.9 MHz,
+each judged on the window its OWN artifact records. They are banked orphans improving on their old
+figures (81.639x and 14.817x).
+
+**They are not banked because the harness moved under them.** A peer has an UNCOMMITTED 24-line lane
+addition in `benches/vs_pandas_harness.py`, taking the live sha `60ed3c58fdd5` -> `a67f720ac1f8`.
+Rows measured now would carry a sha that exists only in a working tree and may never enter history —
+the same unreproducibility as an ELF built from uncommitted source, one level up. **Banking against
+it would be worse than not banking**, because a lock nobody can reproduce is a lock that cannot be
+checked. They go in after the lane lands and I re-measure against a committed instrument.
+
+⚠️ **AND THE SAME EDIT ORPHANED EVERY EXISTING LOCK, INCLUDING THE STANDING PAIR.** All six rows on
+`60ed3c58fdd5` — floordiv @10M 8.787x and mod @10M 7.509x among them — are unplaceable against the
+current working tree, and `--orphans` went 42 -> 46. The lane is legitimate and purely additive; the
+cost is whole-file sha identity, which the fleet evidence says is the right conservatism. **The
+mitigation is not to loosen the identity but to BATCH harness edits**: each separate landing costs a
+full re-lock pass in a clean window, several lanes in one commit cost exactly one. Raised with the
+other pane rather than worked around.
