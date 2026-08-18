@@ -39530,10 +39530,22 @@ string-keyed groupby aggregations. `min(ratio)` returns the WORST HISTORICAL row
 workload showed those same workloads at 2.3x-2.7x FASTER at 100k. **Aggregate by LATEST, or you
 resurrect fixed defects and report a month-old success as a live failure.**
 
-**ONE ROW IS NOT BANKED AND IS BEING RE-MEASURED.** `groupby_min_str @1M` returned 16.628x with
-best-vs-best 17.217x agreeing, but NULL_UNDECIDABLE — FP's null landed 3.3% off — and loadavg went
-10.98 to 53.67 DURING the run. Its direction is beyond doubt; its row is not bankable, so it is
-being re-run in a clean window rather than published with a warning.
+**THE THIRD ROW WAS RE-MEASURED AND NOW CERTIFIES, SO ALL THREE FOSSILS ARE REFUTED AND BANKED.**
+`groupby_min_str @1M` first returned 16.628x with best-vs-best 17.217x agreeing but
+NULL_UNDECIDABLE — FP's null 3.3% off — with loadavg going 10.98 to 53.67 DURING the run. Re-run in
+a clean window (max loadavg 14.76) under
+invocation_id=vs-pandas-20260818T132549.545792Z-pid1009826 :
+
+| | ratio | FP null deviation | verdict | loadavg max |
+|---|---|---|---|---|
+| spiked | 16.628x | 3.3% | NULL_UNDECIDABLE | 53.67 |
+| **clean (banked)** | **16.757x** | **1.5%** | **FASTER** | 14.76 |
+
+effect median 16.7570x, CI [16.19070161, 17.01093914], claimed log effect 2.81884051 against a
+required threshold of 0.07825054 ; FP p50 2.09ms cv 4.1% against pandas 34.70ms cv 1.4%; arms
+clock-matched at ratio 1.001. **The ratio moved 0.8% while the null tightened from 3.3% to 1.5%** —
+the window was degrading the CONTROL, not the effect, which is the same pattern the affine row
+showed earlier tonight (3.8% ratio movement, null halved).
 
 ⚠️ **A WINDOW OBSERVATION THAT CUTS AGAINST THE OBVIOUS READING.** `groupby_sem_str` certified with
 clean nulls (1.00262 / 0.99562) despite a loadavg MAX of 70.37 — higher than the spike that
