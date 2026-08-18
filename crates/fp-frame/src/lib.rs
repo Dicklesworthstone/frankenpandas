@@ -3680,6 +3680,9 @@ enum AsFreqUnit {
     Hours,
     Minutes,
     Seconds,
+    Milliseconds,
+    Microseconds,
+    Nanoseconds,
     // Calendar-anchored offsets: the grid is every `count`-th anchor point that
     // falls within `[first_label, last_label]`, exactly like pandas
     // `date_range(start, end, freq)`. MonthEnd/QuarterEnd/YearEnd anchor on the
@@ -3728,9 +3731,19 @@ impl AsFreqUnit {
     /// Fixed-span offsets step a fixed duration from the first label; anchored
     /// offsets instead enumerate calendar anchor points within the span.
     const fn is_fixed(self) -> bool {
+        // ⚠️ THE SUB-SECOND UNITS MUST BE LISTED HERE. `is_fixed` is what routes a
+        // unit to the stepping helper instead of the calendar-anchor grid, and the
+        // grid's match has a catch-all — so a fixed unit missing from this list does
+        // not fail to compile, it silently produces an empty or wrong grid.
         matches!(
             self,
-            Self::Days | Self::Hours | Self::Minutes | Self::Seconds
+            Self::Days
+                | Self::Hours
+                | Self::Minutes
+                | Self::Seconds
+                | Self::Milliseconds
+                | Self::Microseconds
+                | Self::Nanoseconds
         )
     }
 
@@ -3820,11 +3833,29 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
         )));
     }
 
+    // ⚠️ CASE MATTERS FOR EXACTLY ONE ALIAS, and this parser uppercases everything.
+    // MEASURED, live pandas 2.2.3, date_range(periods=3):
+    //     'MS' -> 2024-01-01, 2024-02-01, 2024-03-01     MONTH START
+    //     'ms' -> ...00.000, ...00.001, ...00.002        MILLISECONDS
+    //     'Ms' -> milliseconds        'mS' -> milliseconds
+    //     'us' -> microseconds        'US' -> microseconds
+    //     'ns' -> nanoseconds         'NS' -> nanoseconds
+    // So ONLY the fully-capitalised `MS` is month start; every other casing of "ms"
+    // is milliseconds, while us/ns are case-insensitive. That is checked here,
+    // before the uppercase table below can collapse the distinction.
+    if unit_part.eq_ignore_ascii_case("ms") && unit_part != "MS" {
+        return Ok((count, AsFreqUnit::Milliseconds));
+    }
     let unit = match unit_part.to_ascii_uppercase().as_str() {
         "D" | "DAY" | "DAYS" => AsFreqUnit::Days,
         "H" | "HR" | "HOUR" | "HOURS" => AsFreqUnit::Hours,
         "T" | "MIN" | "MINS" | "MINUTE" | "MINUTES" => AsFreqUnit::Minutes,
         "S" | "SEC" | "SECS" | "SECOND" | "SECONDS" => AsFreqUnit::Seconds,
+        // us/ns are case-insensitive in pandas, so they belong in this table; "ms"
+        // does not, and is handled above.
+        "US" | "USEC" | "MICROSECOND" | "MICROSECONDS" => AsFreqUnit::Microseconds,
+        "NS" | "NSEC" | "NANOSECOND" | "NANOSECONDS" => AsFreqUnit::Nanoseconds,
+        "MILLISECOND" | "MILLISECONDS" => AsFreqUnit::Milliseconds,
         // `M`/`ME` are month-END anchored in pandas (the legacy `M` alias too),
         // not a day-of-month-preserving month step.
         "M" | "ME" | "MONTH" | "MONTHS" => AsFreqUnit::MonthEnd,
@@ -3901,7 +3932,7 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
                 }
             }
             return Err(FrameError::CompatibilityRejected(format!(
-                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC), MS, QS (and QS-JAN..QS-DEC), YS (and YS-JAN..YS-DEC), BME/BM, BMS, BQE/BQ, BQS, BYE/BY/BA, BYS/BAS (each with JAN..DEC anchors)"
+                "asfreq: unsupported frequency '{freq}'; supported: ns, us, ms, S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC), MS, QS (and QS-JAN..QS-DEC), YS (and YS-JAN..YS-DEC), BME/BM, BMS, BQE/BQ, BQS, BYE/BY/BA, BYS/BAS (each with JAN..DEC anchors)"
             )));
         }
     };
@@ -3959,6 +3990,9 @@ fn shift_asfreq_datetime(
         AsFreqUnit::Hours => Duration::hours(i64::from(count)),
         AsFreqUnit::Minutes => Duration::minutes(i64::from(count)),
         AsFreqUnit::Seconds => Duration::seconds(i64::from(count)),
+        AsFreqUnit::Milliseconds => Duration::milliseconds(i64::from(count)),
+        AsFreqUnit::Microseconds => Duration::microseconds(i64::from(count)),
+        AsFreqUnit::Nanoseconds => Duration::nanoseconds(i64::from(count)),
         // Anchored offsets never call this helper.
         _ => return Err(overflow()),
     };
