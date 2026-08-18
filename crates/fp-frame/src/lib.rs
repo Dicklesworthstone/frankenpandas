@@ -95105,8 +95105,8 @@ mod tests {
         SORTED_UNIQUE_UNION_FINGERPRINT_CACHE, SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX, Series,
         SortedUniqueUnionFingerprintKey, ToNumericErrors, ToNumericOptions, TzAmbiguousPolicy,
         TzLocalizeOptions, TzNonexistentPolicy, align_union, align_union_duplicate_aware,
-        align_union_sorted_unique, cut, datetime64_label_from_naive, index_to_frame,
-        index_to_series, int64_unit_range_alignment, parse_datetime64_nanos,
+        align_union_sorted_unique, cut, datetime64_label_from_naive, format_period_label,
+        index_to_frame, index_to_series, int64_unit_range_alignment, parse_datetime64_nanos,
         parse_naive_datetime_value, qcut, record_alignment_semantic_witness,
         semantic_index_identity, semantic_int64_unit_range_labels_fingerprint,
         semantic_integer_index_labels_fingerprint, semantic_sorted_unique_union_output_fingerprint,
@@ -147330,6 +147330,87 @@ mod tests {
         assert!(skew_v.abs() < 1e-10);
         let kurt_v = expect_float64(&kurt.column().values()[0]);
         assert!((kurt_v + 1.2).abs() < 1e-10);
+    }
+
+    /// ⚠️ TWO INDEPENDENT RENDERERS TURN A PERIOD INTO A LABEL, and until
+    /// 08363d42f they disagreed on EVERY weekly period.
+    ///
+    /// They take different inputs, which is why neither one's tests caught it:
+    ///
+    /// ```text
+    /// ordinal  -> fp_types::Period::write_calendar   (Display, PeriodIndex::format)
+    /// nanos    -> fp_frame::format_period_label      (to_period label building)
+    /// ```
+    ///
+    /// fp-frame produced the range form `2024-03-11/2024-03-17` while fp-types
+    /// fed a WEEK COUNT to a day-indexed calendar helper and produced
+    /// `1977-09-30`. Each side was internally consistent and separately tested.
+    /// This asserts the pair against each other AND against live pandas 2.2.3,
+    /// so a future divergence fails here rather than in whichever surface a user
+    /// happens to reach first.
+    #[test]
+    fn the_two_period_label_renderers_must_agree_08363d42f() {
+        // NaiveDate is not in the test module's import list; PeriodFreq is.
+        use chrono::NaiveDate;
+
+        // (y, m, d, H, M, S, nanos-since-epoch, weekly label, business label).
+        // Every string transcribed from live pandas 2.2.3
+        // `str(pd.Period(pd.Timestamp(...), freq=...))`.
+        let rows: Vec<(i32, u32, u32, u32, u32, u32, i64, &str, &str)> = vec![
+            // Monday, Friday, Saturday, Sunday — the weekend roll only shows up
+            // on the last two, and it moves business FORWARD to the Monday.
+            (2024, 3, 11, 9, 0, 0, 1_710_147_600_000_000_000,
+             "2024-03-11/2024-03-17", "2024-03-11"),
+            (2024, 3, 15, 12, 0, 0, 1_710_504_000_000_000_000,
+             "2024-03-11/2024-03-17", "2024-03-15"),
+            (2024, 3, 16, 23, 59, 59, 1_710_633_599_000_000_000,
+             "2024-03-11/2024-03-17", "2024-03-18"),
+            (2024, 3, 17, 0, 0, 0, 1_710_633_600_000_000_000,
+             "2024-03-11/2024-03-17", "2024-03-18"),
+            // The epoch and the instant before it: both fall in the SAME week,
+            // which straddles the ordinal-zero boundary.
+            (1970, 1, 1, 0, 0, 0, 0, "1969-12-29/1970-01-04", "1970-01-01"),
+            (1969, 12, 31, 23, 59, 59, -1_000_000_000,
+             "1969-12-29/1970-01-04", "1969-12-31"),
+            // A leap day, which the month walk gets wrong if it assumes 28.
+            (2024, 2, 29, 12, 34, 56, 1_709_210_096_000_000_000,
+             "2024-02-26/2024-03-03", "2024-02-29"),
+        ];
+
+        for (year, month, day, hour, minute, second, nanos, weekly, business) in rows {
+            let naive = NaiveDate::from_ymd_opt(year, month, day)
+                .expect("valid date")
+                .and_hms_opt(hour, minute, second)
+                .expect("valid time");
+
+            for (alias, freq, want) in [
+                ("W", PeriodFreq::Weekly, weekly),
+                ("B", PeriodFreq::Business, business),
+            ] {
+                // Renderer 1: nanos -> label, this crate's own path.
+                let from_nanos = format_period_label(naive, freq).expect("label from nanos");
+                // Renderer 2: nanos -> ordinal -> label, through fp-index and
+                // fp-types' Display.
+                let from_ordinal = fp_index::DatetimeIndex::new(vec![nanos])
+                    .to_period(alias)
+                    .expect("to_period")
+                    .format()
+                    .remove(0);
+
+                assert_eq!(
+                    from_nanos, want,
+                    "fp-frame label for {year}-{month:02}-{day:02} at {alias}"
+                );
+                assert_eq!(
+                    from_ordinal, want,
+                    "fp-types label for {year}-{month:02}-{day:02} at {alias}"
+                );
+                assert_eq!(
+                    from_nanos, from_ordinal,
+                    "the two renderers disagree for {year}-{month:02}-{day:02} at {alias}"
+                );
+            }
+        }
     }
 
     /// The six names `df.apply(name, axis=1)` accepts that this surface refused.
