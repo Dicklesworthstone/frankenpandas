@@ -1692,6 +1692,18 @@ pub struct FixtureSeries {
 pub struct FixtureExpectedSeries {
     pub index: Vec<IndexLabel>,
     pub values: Vec<Scalar>,
+    /// The result series' NAME, when the fixture pins one.
+    ///
+    /// br-frankenpandas-xi5li. This field did not exist, so the 28 fixtures that
+    /// carry a `name` key had it dropped at deserialization and then, of course,
+    /// never compared — dead twice over. The input struct immediately above has
+    /// carried `pub name: String` all along, so a fixture could state the name it
+    /// fed in and not the name it expected back.
+    ///
+    /// `Option` + `serde(default)` because ~569 fixtures legitimately omit it and
+    /// must keep meaning "not asserted" rather than "asserted absent".
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -18165,6 +18177,23 @@ fn compare_series_expected(
     actual: &Series,
     expected: &FixtureExpectedSeries,
 ) -> Result<(), String> {
+    // br-frankenpandas-xi5li: compared ONLY when the fixture pins one, so the
+    // ~569 fixtures that omit it keep meaning "not asserted".
+    //
+    // MEASURED before switching this on, live pandas 2.2.3 on a Series named
+    // "values": mode / rank / duplicated / drop_duplicates / where / mask /
+    // replace / map all return a result whose .name is "values", and update is
+    // in-place and leaves it "values". So the pinned names are pandas' answer,
+    // not an artifact of an older emitter.
+    if let Some(expected_name) = expected.name.as_deref()
+        && actual.name() != expected_name
+    {
+        return Err(format!(
+            "series name mismatch: actual={:?}, expected={expected_name:?}",
+            actual.name()
+        ));
+    }
+
     if actual.index().labels() != expected.index {
         return Err(format!(
             "index mismatch: actual={:?}, expected={:?}",
