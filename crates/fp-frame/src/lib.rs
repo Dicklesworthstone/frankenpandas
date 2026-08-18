@@ -94580,6 +94580,48 @@ impl GroupByEwm<'_> {
 ///
 /// Created by `DataFrameGroupBy::resample()`. Applies resampling
 /// operations within each group independently.
+/// Which value-column dtypes a grouped-resample aggregation admits.
+///
+/// br-frankenpandas-a7faz. `apply_grouped_resample` used to keep Int64/Float64 for
+/// EVERY aggregation, so a non-numeric column was dropped from the output entirely
+/// where pandas aggregates it. The correct filter is per-aggregation, not global,
+/// because pandas' own answer differs by (agg, dtype).
+///
+/// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), `df.groupby(k).resample('ME')`
+/// with one non-numeric value column, first three buckets shown:
+/// ```text
+///   agg     utf8              bool             datetime64        category
+///   count   [2, 1, 1]         [2, 1, 1]        [2, 1, 1]         [2, 1, 1]
+///   min     ['p', 'r', 's']   [F, T, T]        [Timestamp...]    TypeError
+///   max     ['q', 'r', 's']   [T, T, T]        [Timestamp...]    TypeError
+///   first   ['p', 'r', 's']   [T, T, T]        [Timestamp...]    ['p','r','s']
+///   last    ['q', 'r', 's']   [F, T, T]        [Timestamp...]    ['q','r','s']
+///   sum     ['pq', 'r', 's']  [1, 1, 1]        TypeError         TypeError
+///   mean    TypeError         [0.5, 1.0, 1.0]  [Timestamp...]    TypeError
+/// ```
+/// So five of FrankenPandas' seven grouped-resample aggregations accept a string
+/// column and two do not. The two exceptions are NOT symmetric and neither is a
+/// simple widening:
+///   * `sum` CONCATENATES strings in pandas ('p' + 'q' -> 'pq'). `fp_types::nansum`
+///     does not, so admitting Utf8 here would produce a different value rather than
+///     the missing column — worse than the gap. Left numeric until concatenation is
+///     implemented deliberately.
+///   * `mean` raises TypeError on strings, so dropping the column and emitting a
+///     value are BOTH wrong; matching pandas means raising, which is a separate
+///     error-parity decision.
+/// Bool/Datetime64/category widening is likewise left out: `nanmin`/`nanmax` already
+/// order Bool, but pandas' bool `sum`/`mean` promote to int/float and its category
+/// rules differ per agg, so each needs its own row of the table above honoured.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ResampleValueDomain {
+    /// Int64/Float64 only — the historical filter. Used where pandas either refuses
+    /// a string column or answers with a value FrankenPandas cannot yet produce.
+    Numeric,
+    /// Int64/Float64 plus Utf8, for the aggregations pandas answers on strings with
+    /// semantics `fp_types::nanmin`/`nanmax`/`nancount` already implement.
+    NumericAndUtf8,
+}
+
 pub struct GroupByResample<'a> {
     groupby: &'a DataFrameGroupBy<'a>,
     freq: String,
@@ -94587,7 +94629,11 @@ pub struct GroupByResample<'a> {
 
 impl GroupByResample<'_> {
     /// Apply a resampling aggregation per-group for all numeric columns.
-    fn apply_grouped_resample<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    fn apply_grouped_resample<F>(
+        &self,
+        agg: F,
+        domain: ResampleValueDomain,
+    ) -> Result<DataFrame, FrameError>
     where
         F: Fn(&Series, &str) -> Result<Series, FrameError>,
     {
@@ -94602,7 +94648,12 @@ impl GroupByResample<'_> {
                     return false;
                 }
                 let dt = self.groupby.df.columns[c.as_str()].dtype();
-                dt == DType::Int64 || dt == DType::Float64
+                match domain {
+                    ResampleValueDomain::Numeric => dt == DType::Int64 || dt == DType::Float64,
+                    ResampleValueDomain::NumericAndUtf8 => {
+                        dt == DType::Int64 || dt == DType::Float64 || dt == DType::Utf8
+                    }
+                }
             })
             .cloned()
             .collect();
@@ -94766,37 +94817,67 @@ impl GroupByResample<'_> {
 
     /// Grouped resample sum.
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_resample(|s, freq| s.resample(freq).sum())
+        // pandas CONCATENATES strings here; nansum does not, so a widened
+        // filter would emit a WRONG value instead of a missing column (a7faz).
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).sum(),
+            ResampleValueDomain::Numeric,
+        )
     }
 
     /// Grouped resample mean.
     pub fn mean(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_resample(|s, freq| s.resample(freq).mean())
+        // pandas raises TypeError on a string column; dropping it and
+        // answering are both wrong, so this needs error parity, not a filter (a7faz).
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).mean(),
+            ResampleValueDomain::Numeric,
+        )
     }
 
     /// Grouped resample count.
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_resample(|s, freq| s.resample(freq).count())
+        // pandas counts non-missing for every dtype (a7faz).
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).count(),
+            ResampleValueDomain::NumericAndUtf8,
+        )
     }
 
     /// Grouped resample min.
     pub fn min(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_resample(|s, freq| s.resample(freq).min())
+        // pandas orders strings lexicographically, as nanmin does (a7faz).
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).min(),
+            ResampleValueDomain::NumericAndUtf8,
+        )
     }
 
     /// Grouped resample max.
     pub fn max(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_resample(|s, freq| s.resample(freq).max())
+        // pandas orders strings lexicographically, as nanmax does (a7faz).
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).max(),
+            ResampleValueDomain::NumericAndUtf8,
+        )
     }
 
     /// Grouped resample first.
     pub fn first(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_resample(|s, freq| s.resample(freq).first())
+        // positional, dtype-independent in pandas (a7faz).
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).first(),
+            ResampleValueDomain::NumericAndUtf8,
+        )
     }
 
     /// Grouped resample last.
     pub fn last(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_resample(|s, freq| s.resample(freq).last())
+        // positional, dtype-independent in pandas (a7faz).
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).last(),
+            ResampleValueDomain::NumericAndUtf8,
+        )
     }
 }
 
@@ -158992,6 +159073,140 @@ mod tests {
             // single aggregated `grp` column, which the oracle's normalizer drops in
             // favour of restoring the key from the outer index level (3826s).
             assert_eq!(result.column_names(), vec!["grp"], "{label}: column set");
+        }
+    }
+
+    /// groupby().resample() on a NON-NUMERIC value column.
+    ///
+    /// ⚠️ REGRESSION WITNESS for br-frankenpandas-a7faz. `value_cols` admitted only
+    /// Int64/Float64 for every aggregation, so a utf8 column was dropped from the
+    /// output entirely — silently, and for aggregations pandas answers happily.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), on this exact frame:
+    /// ```text
+    ///   grp=[a,a,a,b,b]  buckets=[Jan-31, Feb-29, Mar-31, Jan-31, Feb-29]
+    ///     count -> [2, 1, 1, 1, 2]
+    ///     min   -> ['p', 'r', 's', 't', 'u']     lexicographic
+    ///     max   -> ['q', 'r', 's', 't', 'v']
+    ///     first -> ['p', 'r', 's', 't', 'u']
+    ///     last  -> ['q', 'r', 's', 't', 'v']
+    ///     sum   -> ['pq', 'r', 's', 't', 'uv']   CONCATENATION
+    ///     mean  -> TypeError: agg function failed [how->mean,dtype->object]
+    /// ```
+    /// The last two rows are why the filter is per-aggregation rather than global,
+    /// and why `sum`/`mean` deliberately still drop the column: emitting
+    /// `nansum`'s answer for `sum` would be a WRONG VALUE rather than a missing
+    /// one, and matching `mean` means raising, which is a separate decision.
+    #[test]
+    fn groupby_resample_aggregates_utf8_columns_where_pandas_does_a7faz() {
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "tag",
+                    vec![
+                        Scalar::Utf8("p".to_string()),
+                        Scalar::Utf8("q".to_string()),
+                        Scalar::Utf8("r".to_string()),
+                        Scalar::Utf8("s".to_string()),
+                        Scalar::Utf8("t".to_string()),
+                        Scalar::Utf8("u".to_string()),
+                        Scalar::Utf8("v".to_string()),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-10".into(),
+                "2024-03-05".into(),
+                "2024-01-20".into(),
+                "2024-02-02".into(),
+                "2024-02-25".into(),
+            ],
+        )
+        .unwrap();
+        let gb = df_with_idx.groupby(&["grp"]).unwrap();
+        let utf8 = |v: &str| Scalar::Utf8(v.to_string());
+
+        let counted = gb.resample("M").count().unwrap();
+        assert_eq!(
+            counted.column_names(),
+            vec!["grp", "tag"],
+            "the utf8 column must survive count, not be dropped"
+        );
+        assert_utf8_index_labels(
+            counted.index(),
+            &[
+                "2024-01-31",
+                "2024-02-29",
+                "2024-03-31",
+                "2024-01-31",
+                "2024-02-29",
+            ],
+        );
+        assert_eq!(
+            counted.column("tag").unwrap().values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ]
+        );
+
+        // Lexicographic, which is what `fp_types::nanmin`/`nanmax` already do for
+        // Utf8 — the machinery was always there; only the dtype filter blocked it.
+        assert_eq!(
+            gb.resample("M").min().unwrap().column("tag").unwrap().values(),
+            &[utf8("p"), utf8("r"), utf8("s"), utf8("t"), utf8("u")]
+        );
+        assert_eq!(
+            gb.resample("M").max().unwrap().column("tag").unwrap().values(),
+            &[utf8("q"), utf8("r"), utf8("s"), utf8("t"), utf8("v")]
+        );
+        assert_eq!(
+            gb.resample("M")
+                .first()
+                .unwrap()
+                .column("tag")
+                .unwrap()
+                .values(),
+            &[utf8("p"), utf8("r"), utf8("s"), utf8("t"), utf8("u")]
+        );
+        assert_eq!(
+            gb.resample("M").last().unwrap().column("tag").unwrap().values(),
+            &[utf8("q"), utf8("r"), utf8("s"), utf8("t"), utf8("v")]
+        );
+
+        // ⚠️ sum and mean STILL drop it, ON PURPOSE (see ResampleValueDomain). This
+        // assertion is not describing an oversight — if someone widens those two
+        // without implementing string concatenation and mean's TypeError, this is
+        // the test that should stop them.
+        for agg in ["sum", "mean"] {
+            let out = match agg {
+                "sum" => gb.resample("M").sum().unwrap(),
+                _ => gb.resample("M").mean().unwrap(),
+            };
+            assert_eq!(
+                out.column_names(),
+                vec!["grp"],
+                "{agg}: utf8 stays dropped until its pandas semantics are implemented"
+            );
+            // The bucket rows still exist — that is the no-value-column branch.
+            assert_eq!(out.len(), 5, "{agg}: bucket rows are still emitted");
         }
     }
 
