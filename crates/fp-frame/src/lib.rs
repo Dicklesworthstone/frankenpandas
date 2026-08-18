@@ -21356,6 +21356,32 @@ impl Series {
                 "kurt" | "kurtosis" => Scalar::Float64(self.kurt()?),
                 "nunique" => Scalar::Int64(self.nunique() as i64),
                 "size" => Scalar::Int64(self.len() as i64),
+                // br-frankenpandas-groupby-idxmax-idxmin, ninth surface. pandas'
+                // s.agg(str) accepts 28 names; this accepted 19. The three added
+                // here are the REDUCTION-shaped ones — this match yields a Scalar,
+                // so only names producing ONE value can live in it.
+                //
+                // MEASURED, live pandas 2.2.3 on [3,1,2,5,4] indexed a..e:
+                //     s.agg('product')  == s.prod()          True
+                //     s.agg('quantile') == s.quantile(0.5)   True
+                //     s.agg('idxmax')   == s.idxmax()        True  ('d')
+                //     s.agg('idxmin')   == s.idxmin()        True  ('b')
+                // and an all-NaN series returns nan from idxmax rather than raising
+                // — the edge worth knowing before reimplementing it. This routes to
+                // Series::idxmax, so it inherits whatever that already decided.
+                //
+                // `product` is pandas' documented alias of `prod`; it is added as a
+                // separate arm here rather than by editing the existing `"prod"`
+                // one, because that exact arm text occurs three times in this file
+                // and is not safe to anchor on.
+                //
+                // Left out, all Series-shaped rather than scalar: abs, cumsum, diff,
+                // nlargest, nsmallest, pct_change, rank, unique. Same shape rule
+                // that governed the eight surfaces before this one.
+                "product" => self.prod()?,
+                "quantile" => self.quantile(0.5)?,
+                "idxmax" => index_label_to_scalar(&self.idxmax()?),
+                "idxmin" => index_label_to_scalar(&self.idxmin()?),
                 "any" => Scalar::Bool(self.any()?),
                 "all" => Scalar::Bool(self.all()?),
                 "first" => {
