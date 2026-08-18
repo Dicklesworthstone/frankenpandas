@@ -47538,12 +47538,22 @@ impl DatetimeAccessor<'_> {
             2 => Scalar::Int64(day),
             3..=5 => {
                 if let Some(time_str) = time_part {
-                    // Remove timezone info if present
-                    let time_clean = time_str
-                        .split('+')
-                        .next()
-                        .and_then(|s| s.split('Z').next())
-                        .unwrap_or(time_str);
+                    // Remove timezone info if present.
+                    //
+                    // br-frankenpandas-00ze3: this used to be
+                    // `split('+').next().and_then(|s| s.split('Z').next())`, which
+                    // removes a POSITIVE offset and a trailing `Z` and silently leaves
+                    // a NEGATIVE one in place. `10:30:45-05:00` then splits on ':' into
+                    // ["10", "30", "45-05", "00"], so `.dt.second` parses "45-05",
+                    // fails, and falls through to the `0` default below — a wrong
+                    // VALUE, not a null and not an error, for every western offset.
+                    // Measured, live pandas 2.2.3, uniform -05:00:
+                    //   to_datetime([... 10:30:45-05:00]).dt.second -> 45
+                    // `strip_tz_suffix` handles all three spellings (+HH:MM, -HH:MM, Z)
+                    // plus a `[Zone]` annotation, which is why it is used instead of
+                    // adding a second `split('-')` — the date is already split off
+                    // above, so there is no hyphen left to protect.
+                    let time_clean = strip_tz_suffix(time_str);
                     let time_parts: Vec<&str> = time_clean.split(':').collect();
                     let idx = component - 3;
                     if idx < time_parts.len() {
@@ -48271,6 +48281,13 @@ impl DatetimeAccessor<'_> {
     /// Internal: parse hour, minute, second from a time string ("HH:MM:SS").
     fn parse_time(s: &str) -> Option<(i64, i64, i64)> {
         let s = s.trim();
+        // br-frankenpandas-00ze3: strip the zone BEFORE the fraction, because the
+        // offset trails it (`10:30:45.123-05:00`). Without this the seconds field
+        // parses as "45-05" and the whole call returns None, which
+        // `parse_time_of_day_seconds` maps to 0 — so the pandas-range gate in
+        // `parse_datetime_component` scored every negative-offset instant as if it
+        // were at midnight.
+        let s = strip_tz_suffix(s);
         // Handle fractional seconds
         let s = s.split('.').next().unwrap_or(s);
         let parts: Vec<&str> = s.split(':').collect();
@@ -196545,5 +196562,102 @@ mod to_datetime_mixed_offsets_00ze3 {
             "utc=true must change the result; if both arms agree the flag is inert and \
              the two tests above are pinning one behaviour twice"
         );
+    }
+}
+
+/// `.dt` COMPONENT ACCESSORS ON NEGATIVE UTC OFFSETS (br-frankenpandas-00ze3).
+///
+/// Found by auditing the tz-aware entry points that `tz_surface_audit_00ze3` said
+/// were unchecked. `parse_datetime_component` stripped the zone with
+/// `split('+') / split('Z')`, which removes a POSITIVE offset and a trailing `Z`
+/// and leaves a NEGATIVE one in place, so `.dt.second` on `10:30:45-05:00` parsed
+/// "45-05", failed, and returned the `0` default — a wrong VALUE, silently, for
+/// every offset west of Greenwich.
+///
+/// ⚠️ MY OWN `dt_timezone_census_gmp9c` MISSED THIS BECAUSE EVERY CASE IN IT USES
+/// `+05:30`. A census that only ever exercises one sign of a signed field is not a
+/// census; these tests carry both signs deliberately.
+///
+/// Expectations are live pandas 2.2.3, uniform offsets (mixed offsets give object
+/// dtype and have no `.dt` accessor at all):
+///   to_datetime(['2024-01-15 10:30:45-05:00', '2024-06-02 23:59:59-05:00'])
+///     -> datetime64[ns, UTC-05:00], .dt.hour [10, 23] .dt.minute [30, 59]
+///        .dt.second [45, 59]
+/// pandas reports the LOCAL wall clock, which is what the textual parse gives once
+/// the zone is removed — so the loud Utf8 carrier is not what was wrong here.
+#[cfg(test)]
+mod dt_component_offset_sign_00ze3 {
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    fn series(values: &[&str]) -> Series {
+        Series::from_values(
+            "ts",
+            (0..values.len() as i64).map(Into::into).collect(),
+            values
+                .iter()
+                .map(|v| Scalar::Utf8((*v).to_owned()))
+                .collect(),
+        )
+        .expect("datetime strings")
+    }
+
+    fn ints(series: &Series) -> Vec<i64> {
+        series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Int64(v) => *v,
+                other => panic!("expected Int64 component, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// THE BUG. Both signs, same wall clock, so the assertion cannot pass by
+    /// accident of the offset being zero.
+    #[test]
+    fn second_reads_the_local_wall_clock_for_both_offset_signs_00ze3() {
+        for spelling in [
+            "2024-01-15 10:30:45-05:00",
+            "2024-01-15 10:30:45+05:30",
+            "2024-01-15 10:30:45Z",
+            "2024-01-15 10:30:45",
+        ] {
+            let s = series(&[spelling]);
+            assert_eq!(
+                ints(&s.dt().second().expect("second")),
+                vec![45],
+                "`.dt.second` must report the local wall-clock second (45) for \
+                 {spelling}. pandas 2.2.3 gives 45 for all four spellings. A `0` here \
+                 means the zone survived the strip and the seconds field parsed as \
+                 \"45-05\" — the negative-offset bug, which is a WRONG VALUE rather \
+                 than a null."
+            );
+        }
+    }
+
+    /// Hour and minute were always right (they sit at split indices the offset never
+    /// reaches), so without this the fix above could be mistaken for having repaired
+    /// the whole accessor family when it only ever touched one field.
+    #[test]
+    fn hour_and_minute_were_already_correct_and_must_stay_so_00ze3() {
+        let s = series(&["2024-01-15 10:30:45-05:00", "2024-06-02 23:59:59-05:00"]);
+        assert_eq!(ints(&s.dt().hour().expect("hour")), vec![10, 23]);
+        assert_eq!(ints(&s.dt().minute().expect("minute")), vec![30, 59]);
+        assert_eq!(ints(&s.dt().second().expect("second")), vec![45, 59]);
+    }
+
+    /// ⚠️ THE DISCRIMINATOR THAT MAKES THIS BUG HARD TO SEE: with a FRACTION present
+    /// the old code was accidentally correct, because `"45.123-05"` splits on '.' to
+    /// `"45"` before the parse. So a fractional probe would have reported the surface
+    /// healthy. Both forms are pinned so a future rewrite cannot fix one and regress
+    /// the other unnoticed.
+    #[test]
+    fn fractional_seconds_were_accidentally_correct_and_stay_correct_00ze3() {
+        let with_fraction = series(&["2024-01-15 10:30:45.123456-05:00"]);
+        let without = series(&["2024-01-15 10:30:45-05:00"]);
+        assert_eq!(ints(&with_fraction.dt().second().expect("second")), vec![45]);
+        assert_eq!(ints(&without.dt().second().expect("second")), vec![45]);
     }
 }
