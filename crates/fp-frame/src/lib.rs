@@ -3688,7 +3688,12 @@ enum AsFreqUnit {
     MonthEnd,
     QuarterEnd,
     YearEnd,
-    Week,
+    /// Weekly, anchored on a WEEKDAY expressed as days-from-Sunday (0 = Sunday).
+    ///
+    /// br-frankenpandas-week-anchor-days. pandas has seven weekly frequencies —
+    /// W-MON through W-SUN — and bare `W` is `W-SUN`. This carried no anchor, so
+    /// only the Sunday one existed and the other six were rejected outright.
+    Week(u8),
     BusinessDay,
 }
 
@@ -3746,11 +3751,23 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
         "M" | "ME" | "MONTH" | "MONTHS" => AsFreqUnit::MonthEnd,
         "Q" | "QE" | "QUARTER" | "QUARTERS" => AsFreqUnit::QuarterEnd,
         "Y" | "A" | "YE" | "YEAR" | "YEARS" => AsFreqUnit::YearEnd,
-        "W" | "W-SUN" | "WEEK" | "WEEKS" => AsFreqUnit::Week,
+        // MEASURED, live pandas 2.2.3, from Wednesday 2024-01-03:
+        //     W-MON -> 2024-01-08   W-TUE -> 2024-01-09   W-WED -> 2024-01-10
+        //     W-THU -> 2024-01-04   W-FRI -> 2024-01-05   W-SAT -> 2024-01-06
+        //     W-SUN -> 2024-01-07   W     -> 2024-01-07   (bare W IS W-SUN)
+        // Note W-WED from a Wednesday advances a full week, the same on-anchor rule
+        // the period-end units use.
+        "W" | "W-SUN" | "WEEK" | "WEEKS" => AsFreqUnit::Week(0),
+        "W-MON" => AsFreqUnit::Week(1),
+        "W-TUE" => AsFreqUnit::Week(2),
+        "W-WED" => AsFreqUnit::Week(3),
+        "W-THU" => AsFreqUnit::Week(4),
+        "W-FRI" => AsFreqUnit::Week(5),
+        "W-SAT" => AsFreqUnit::Week(6),
         "B" | "BDAY" | "BUSINESS" => AsFreqUnit::BusinessDay,
         _ => {
             return Err(FrameError::CompatibilityRejected(format!(
-                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W, B, M/ME, Q/QE, Y/A/YE"
+                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE, Y/A/YE"
             )));
         }
     };
@@ -3876,11 +3893,23 @@ fn anchored_asfreq_anchors(
                 }
             }
         }
-        AsFreqUnit::Week => {
-            // Anchor on Sundays (`W`/`W-SUN`): roll forward to the first Sunday
-            // on/after start, then step 7 days.
-            let days_to_sunday = i64::from((7 - start.date().weekday().num_days_from_sunday()) % 7);
-            let mut date = add_period_label_days(start.date(), days_to_sunday)?;
+        AsFreqUnit::Week(anchor) => {
+            // Roll forward to the first occurrence of the anchor weekday ON OR AFTER
+            // start, then step 7 days. `anchor` is days-from-Sunday, matching
+            // chrono's num_days_from_sunday, so the arithmetic is a single modulo.
+            //
+            // ON-ANCHOR INCLUDES THE START, which is a GRID rule and deliberately
+            // unlike the `first`/`last` offset rule where landing on an anchor
+            // advances a whole period. MEASURED, live pandas 2.2.3:
+            //     date_range('2024-01-07' (Sun), '2024-01-28', 'W-SUN')
+            //       -> 01-07, 01-14, 01-21, 01-28      start KEPT
+            //     date_range('2024-01-03' (Wed), '2024-01-28', 'W-WED')
+            //       -> 01-03, 01-10, 01-17, 01-24      start KEPT
+            //     date_range('2024-01-03' (Wed), '2024-01-28', 'W-MON')
+            //       -> 01-08, 01-15, 01-22
+            let start_dow = start.date().weekday().num_days_from_sunday();
+            let days_to_anchor = i64::from((u32::from(anchor) + 7 - start_dow) % 7);
+            let mut date = add_period_label_days(start.date(), days_to_anchor)?;
             loop {
                 let dt = asfreq_midnight(date)?;
                 if dt > end {
