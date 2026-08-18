@@ -94547,20 +94547,25 @@ impl GroupByResample<'_> {
             let indices = &groups[gkey];
             let first_row = indices[0];
 
+            // perf (br-frankenpandas-vw0uu): build the group's index ONCE and share
+            // it across every value column through an Arc-backed `Index` clone,
+            // instead of deep-cloning a `Vec<IndexLabel>` per column (the old
+            // `group_idx.clone()` allocated one label per row PER COLUMN).
+            // NOTE: unlike grouped rolling/ewm, the positional 0..len unit-range
+            // shortcut does NOT apply here — resample buckets by TIME, so the real
+            // temporal labels are load-bearing and are preserved exactly as before.
+            //
+            // Hoisted out of the `if let` below (br-frankenpandas-nyjxf item 3): the
+            // no-value-column branch needs the same temporal index to derive its
+            // bucket grid, and building it twice would defeat the sharing above.
+            let group_index = Index::new(
+                indices
+                    .iter()
+                    .map(|&i| self.groupby.df.index.labels()[i].clone())
+                    .collect::<Vec<IndexLabel>>(),
+            );
+
             if let Some(first_col) = value_cols.first() {
-                // perf (br-frankenpandas-vw0uu): build the group's index ONCE and share
-                // it across every value column through an Arc-backed `Index` clone,
-                // instead of deep-cloning a `Vec<IndexLabel>` per column (the old
-                // `group_idx.clone()` allocated one label per row PER COLUMN).
-                // NOTE: unlike grouped rolling/ewm, the positional 0..len unit-range
-                // shortcut does NOT apply here — resample buckets by TIME, so the real
-                // temporal labels are load-bearing and are preserved exactly as before.
-                let group_index = Index::new(
-                    indices
-                        .iter()
-                        .map(|&i| self.groupby.df.index.labels()[i].clone())
-                        .collect::<Vec<IndexLabel>>(),
-                );
                 // perf (br-frankenpandas-vw0uu): gather each group's raw f64/i64 slice
                 // into a TYPED Column so the inner resample hits its typed reduce path
                 // (all 13 Resample aggs are Int64/Float64-typed) instead of the generic
@@ -94614,6 +94619,47 @@ impl GroupByResample<'_> {
                         .unwrap()
                         .extend(rs.values().iter().cloned());
                 }
+            } else {
+                // ⚠️ NO NUMERIC VALUE COLUMN (br-frankenpandas-nyjxf item 3).
+                // The entire body above used to sit under `if let Some(first_col)`
+                // with no else, so a frame whose only non-key columns are
+                // non-numeric — or which has no non-key column at all — pushed no
+                // labels and no rows, and the function returned an EMPTY DataFrame.
+                // The groups and their time buckets exist regardless of whether any
+                // column is numeric, and pandas emits one row per (group, bucket).
+                //
+                // MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), index
+                // 2024-01-01/01-15/02-10/03-05 for 'a' and 01-20/02-02/02-25 for 'b',
+                // frame = {'grp': [a,a,a,a,b,b,b]} and NO other column:
+                //     df.groupby('grp').resample('ME').count()  ->  shape (5, 1)
+                //     rows  (a, 2024-01-31) (a, 2024-02-29) (a, 2024-03-31)
+                //           (b, 2024-01-31) (b, 2024-02-29)
+                // min/max/first/last return the IDENTICAL row set — the bucket grid
+                // is a function of the group's index span and the freq, never of a
+                // value. FrankenPandas returned a 0-row frame for all five.
+                //
+                // So the labels come from resampling a PLACEHOLDER column over the
+                // group's real temporal index. Because bucketing is time-driven, any
+                // all-valid column of the group's length yields the same grid; the
+                // placeholder's aggregated VALUES are discarded and only `.index()`
+                // is read, so the choice of 0i64 is not observable.
+                //
+                // ⚠️ STILL DIVERGENT, deliberately out of scope here and filed
+                // separately: pandas also AGGREGATES non-numeric columns (a utf8
+                // column yields lexicographic min/max and a non-null count), while
+                // `value_cols` above admits only Int64/Float64, so such a column is
+                // dropped from the output entirely. This branch fixes the row set,
+                // not the column set.
+                let probe = Series::new(
+                    "__fp_bucket_probe",
+                    group_index.clone(),
+                    Column::from_i64_values(vec![0_i64; indices.len()]),
+                )?;
+                let bucketed = agg(&probe, &self.freq)?;
+                for _ in 0..bucketed.len() {
+                    group_first_rows.push(first_row);
+                }
+                all_labels.extend(bucketed.index().labels().iter().cloned());
             }
         }
 
@@ -158709,6 +158755,84 @@ mod tests {
                 Scalar::Int64(2),
             ]
         );
+    }
+
+    /// `groupby().resample()` when the frame has NO numeric value column.
+    ///
+    /// ⚠️ REGRESSION WITNESS for br-frankenpandas-nyjxf item 3. The entire body of
+    /// `apply_grouped_resample` sat under `if let Some(first_col) = value_cols.first()`
+    /// with no `else`, so this input pushed no labels and no rows and the function
+    /// returned a frame with ZERO rows. Every other grouped-resample test in this file
+    /// carries a numeric column, so all of them are blind to it by construction —
+    /// `assert_eq!(result.len(), 4)` below is the only thing that separates the fixed
+    /// behaviour from the broken one and must not be relaxed to `>= 0` or dropped.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18) — the same index as
+    /// `groupby_resample_count_counts_non_missing_values_per_bucket` above with the
+    /// `val` column removed:
+    /// ```text
+    ///   df.groupby('grp').resample('ME').count()   ->  4 rows
+    ///     grp      ['a', 'a', 'b', 'b']
+    ///     buckets  ['2024-01-31', '2024-02-29', '2024-01-31', '2024-02-29']
+    /// ```
+    /// count/min/max/first/last return that IDENTICAL row set, which is why the loop
+    /// below asserts one expectation against three aggregations: the bucket grid is a
+    /// function of the group's index span and the freq, never of a value.
+    #[test]
+    fn groupby_resample_with_no_value_columns_still_emits_group_buckets_nyjxf() {
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![(
+                "grp",
+                vec![
+                    Scalar::Utf8("a".to_string()),
+                    Scalar::Utf8("a".to_string()),
+                    Scalar::Utf8("a".to_string()),
+                    Scalar::Utf8("b".to_string()),
+                    Scalar::Utf8("b".to_string()),
+                    Scalar::Utf8("b".to_string()),
+                ],
+            )],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+                "2024-01-05".into(),
+                "2024-02-05".into(),
+                "2024-02-20".into(),
+            ],
+        )
+        .unwrap();
+
+        let gb = df_with_idx.groupby(&["grp"]).unwrap();
+        for (label, result) in [
+            ("count", gb.resample("M").count().unwrap()),
+            ("min", gb.resample("M").min().unwrap()),
+            ("max", gb.resample("M").max().unwrap()),
+        ] {
+            assert_eq!(
+                result.len(),
+                4,
+                "{label}: expected 4 (group, bucket) rows, got an empty frame"
+            );
+            assert_utf8_index_labels(
+                result.index(),
+                &["2024-01-31", "2024-02-29", "2024-01-31", "2024-02-29"],
+            );
+            assert_eq!(
+                result.column("grp").unwrap().values(),
+                &[
+                    Scalar::Utf8("a".to_string()),
+                    Scalar::Utf8("a".to_string()),
+                    Scalar::Utf8("b".to_string()),
+                    Scalar::Utf8("b".to_string()),
+                ],
+                "{label}: group key column"
+            );
+            // `grp` is the only column, matching pandas: its raw output carries a
+            // single aggregated `grp` column, which the oracle's normalizer drops in
+            // favour of restoring the key from the outer index level (3826s).
+            assert_eq!(result.column_names(), vec!["grp"], "{label}: column set");
+        }
     }
 
     #[test]
