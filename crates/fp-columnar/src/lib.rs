@@ -6552,11 +6552,161 @@ fn cum_accum_nullable_i64(
 /// by STRICT `<`/`>` so the FIRST original position wins on a tie, and the index is
 /// the original 0..n position (the enumerate index of the contiguous slice), byte-
 /// identical to the generic path. Empty / all-missing ⇒ `None`.
+/// Blocked 8-lane arg-extreme over an f64 slice: eight independent
+/// (best value, best index) chains instead of one, so the scan is not serialized
+/// on a single carried dependency. Companion to [`blocked_min_max_f64`], which
+/// cannot be reused because argmin/argmax must carry the INDEX.
+///
+/// ⚠️ FIRST-OCCURRENCE SEMANTICS ARE THE WHOLE DIFFICULTY, and they are preserved
+/// in two places, not one:
+///   * WITHIN a lane, the comparison is STRICT (`>` / `<`), so an equal value
+///     never displaces the earlier one — lanes are filled in increasing index.
+///   * ACROSS lanes, a tie on VALUE is broken by the SMALLER INDEX. Without that
+///     second rule the answer would be whichever lane happened to be scanned
+///     last, and `[2.0; 20]` would report an index other than 0.
+///
+/// `usize::MAX` is the "lane empty" sentinel rather than `Option`, and the
+/// emptiness test is load-bearing beyond initialization: a slice of all `+inf`
+/// under `want_max = false` never satisfies `x < +inf`, so without the sentinel
+/// check the lane would stay empty and the function would wrongly report None
+/// where the scalar loop reports index 0.
+///
+/// NaN is skipped exactly as the scalar loop skips it, so an all-NaN slice yields
+/// no lane and the function returns `None`.
+fn blocked_argextreme_f64(data: &[f64], want_max: bool) -> Option<usize> {
+    const EMPTY: usize = usize::MAX;
+    let init = if want_max { f64::NEG_INFINITY } else { f64::INFINITY };
+    let mut bv = [init; 8];
+    let mut bi = [EMPTY; 8];
+
+    let mut chunks = data.chunks_exact(8);
+    let mut base = 0usize;
+    for c in &mut chunks {
+        for l in 0..8 {
+            let x = c[l];
+            if x.is_nan() {
+                continue;
+            }
+            let better = if want_max { x > bv[l] } else { x < bv[l] };
+            if bi[l] == EMPTY || better {
+                bv[l] = x;
+                bi[l] = base + l;
+            }
+        }
+        base += 8;
+    }
+
+    let mut best: Option<(usize, f64)> = None;
+    for l in 0..8 {
+        if bi[l] == EMPTY {
+            continue;
+        }
+        best = Some(match best {
+            None => (bi[l], bv[l]),
+            Some((idx, cur)) => {
+                let better = if want_max { bv[l] > cur } else { bv[l] < cur };
+                if better || (bv[l] == cur && bi[l] < idx) {
+                    (bi[l], bv[l])
+                } else {
+                    (idx, cur)
+                }
+            }
+        });
+    }
+
+    for (offset, &x) in chunks.remainder().iter().enumerate() {
+        if x.is_nan() {
+            continue;
+        }
+        let idx = base + offset;
+        let better = match best {
+            None => true,
+            Some((_, cur)) => {
+                if want_max {
+                    x > cur
+                } else {
+                    x < cur
+                }
+            }
+        };
+        if better {
+            best = Some((idx, x));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Int64 sibling of [`blocked_argextreme_f64`]. Compares on `v as f64` exactly
+/// where the scalar loop does, so the >2^53 precision behaviour is unchanged; and
+/// Int64 has no NaN, so no lane can be skipped for that reason.
+fn blocked_argextreme_i64(data: &[i64], want_max: bool) -> Option<usize> {
+    const EMPTY: usize = usize::MAX;
+    let init = if want_max { f64::NEG_INFINITY } else { f64::INFINITY };
+    let mut bv = [init; 8];
+    let mut bi = [EMPTY; 8];
+
+    let mut chunks = data.chunks_exact(8);
+    let mut base = 0usize;
+    for c in &mut chunks {
+        for l in 0..8 {
+            let x = c[l] as f64;
+            let better = if want_max { x > bv[l] } else { x < bv[l] };
+            if bi[l] == EMPTY || better {
+                bv[l] = x;
+                bi[l] = base + l;
+            }
+        }
+        base += 8;
+    }
+
+    let mut best: Option<(usize, f64)> = None;
+    for l in 0..8 {
+        if bi[l] == EMPTY {
+            continue;
+        }
+        best = Some(match best {
+            None => (bi[l], bv[l]),
+            Some((idx, cur)) => {
+                let better = if want_max { bv[l] > cur } else { bv[l] < cur };
+                if better || (bv[l] == cur && bi[l] < idx) {
+                    (bi[l], bv[l])
+                } else {
+                    (idx, cur)
+                }
+            }
+        });
+    }
+
+    for (offset, &v) in chunks.remainder().iter().enumerate() {
+        let x = v as f64;
+        let idx = base + offset;
+        let better = match best {
+            None => true,
+            Some((_, cur)) => {
+                if want_max {
+                    x > cur
+                } else {
+                    x < cur
+                }
+            }
+        };
+        if better {
+            best = Some((idx, x));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 fn argextreme_nullable_f64(
     data: &[f64],
     validity: Option<&ValidityMask>,
     want_max: bool,
 ) -> Option<usize> {
+    // FAST PATH; gate is `is_none_or(all)` because four of this function's eight
+    // call sites pass `Some(validity)` even when nothing is unset.
+    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
+        return blocked_argextreme_f64(data, want_max);
+    }
     let mut best: Option<(usize, f64)> = None;
     for (i, &x) in data.iter().enumerate() {
         let present = validity.is_none_or(|v| v.get(i)) && !x.is_nan();
@@ -6587,6 +6737,10 @@ fn argextreme_nullable_i64(
     validity: Option<&ValidityMask>,
     want_max: bool,
 ) -> Option<usize> {
+    // FAST PATH; see the f64 sibling for the gate rationale.
+    if validity.is_none_or(|vm| vm.all()) && !data.is_empty() {
+        return blocked_argextreme_i64(data, want_max);
+    }
     let mut best: Option<(usize, f64)> = None;
     for (i, &v) in data.iter().enumerate() {
         if validity.is_none_or(|vm| vm.get(i)) {
@@ -43017,6 +43171,52 @@ mod tests {
         /// `assert_eq!` on them is a real equality check rather than a tolerance.
         /// The `ptp` blocked min/max must agree with the scalar fold it fronts,
         /// including the all-NaN sentinel and the mask shapes the PRODUCT passes.
+        /// Blocked arg-extreme must reproduce FIRST-OCCURRENCE semantics, which is
+        /// the only hard part: ties must resolve to the lowest index both within a
+        /// lane and across lanes.
+        #[test]
+        fn blocked_argextreme_matches_scalar_fold() {
+            let f = |d: &[f64], v: Option<&ValidityMask>, mx: bool| {
+                crate::argextreme_nullable_f64(d, v, mx)
+            };
+            assert_eq!(f(&[3.0, -1.0, 7.5, -1.0, 2.0], None, false), Some(1));
+            assert_eq!(f(&[3.0, -1.0, 7.5, -1.0, 2.0], None, true), Some(2));
+
+            // ⚠️ TIES: 20 identical values must give index 0, not "whichever lane
+            // was combined last". This is what the across-lane index tie-break buys.
+            assert_eq!(f(&[2.0; 20], None, false), Some(0));
+            assert_eq!(f(&[2.0; 20], None, true), Some(0));
+            // A tie SPANNING lanes: minimum 1.0 occurs at 1,3,5,7,8 -> first is 1.
+            let spread = [5.0, 1.0, 3.0, 1.0, 9.0, 1.0, 4.0, 1.0, 1.0, 7.0];
+            assert_eq!(f(&spread, None, false), Some(1));
+            assert_eq!(f(&spread, None, true), Some(4));
+
+            // NaN skipped; all-NaN yields None.
+            assert_eq!(f(&[f64::NAN, 4.0, f64::NAN, -2.0], None, false), Some(3));
+            assert_eq!(f(&[f64::NAN; 9], None, false), None);
+
+            // ⚠️ ALL +inf under want_max=false never satisfies `x < +inf`, so the
+            // lane-empty sentinel is what keeps this from returning None.
+            assert_eq!(f(&[f64::INFINITY; 8], None, false), Some(0));
+
+            // NON-VACUITY: an all-set mask must reach the same blocked path.
+            let full = ValidityMask::all_valid(8);
+            assert_eq!(f(&[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0], Some(&full), false), Some(7));
+            // A hole must fall back and be skipped.
+            let mut holed = ValidityMask::all_valid(4);
+            holed.set(1, false);
+            assert_eq!(f(&[3.0, -9.0, 1.0, 2.0], Some(&holed), false), Some(2));
+
+            assert_eq!(
+                crate::argextreme_nullable_i64(&[5, 1, 9, 2, 8, 3, 7, 4], None, true),
+                Some(2)
+            );
+            assert_eq!(
+                crate::argextreme_nullable_i64(&[5, 1, 9, 2, 8, 3, 7, 4], Some(&full), false),
+                Some(1)
+            );
+        }
+
         #[test]
         fn blocked_ptp_matches_scalar_fold() {
             let f = |d: &[f64], v: Option<&ValidityMask>| crate::ptp_nullable_f64(d, v);
