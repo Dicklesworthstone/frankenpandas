@@ -37707,3 +37707,56 @@ three gate edges found today that is a property of the WORKLOAD rather than of t
 per slot), so per-slot warmup does not cover it; the effect persists across rounds. Why `mod` shows
 it and `floordiv` — same size, same binary, same window — does not, I have not established, and I am
 not going to guess at it a fourth time.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-uza04) — A CORPUS SURVEY INSTEAD OF A GUESS: on a CURRENT instrument only THREE workloads still measure below parity, all elementwise f64 at 1M, and all three are the ones the `+sse4.1` flag addresses
+
+**NO NEW MEASUREMENT — this mines the 691 rows already on disk.** It exists because I refused to put
+an aggregate number in the `+sse4.1` recommendation, on the grounds that my three workloads were
+chosen BECAUSE they looked ISA-bound and any corpus-wide figure from them would be selection bias
+wearing a corpus costume. This is the survey I said was missing.
+
+**FIRST, THE UNFILTERED ANSWER IS WRONG, AND IT IS WRONG IN THE WAY THIS LEDGER KEEPS FINDING.**
+Scanning all 691 banked rows for certified `SLOWER` verdicts yields **20 distinct workload@size**,
+led by `floor @1M` 0.072x, `ceil @1M` 0.098x, `trunc @1M` 0.098x, `df_dot @1M` 0.136x. **Most of
+that list is stale.** I have personally re-measured four of its entries this session:
+
+    sqrt   @10k    0.588x  ->  3.73x  CERTIFIED WIN, banked
+    sqrt   @100k   0.717x  ->  1.157x CERTIFIED WIN, banked
+    log    @10k    0.594x  ->  1.65x  (uncertified, incumbent-side null)
+    df_dot @10k    0.530x  ->  0.979-0.991x, parity
+
+The 66.5us cgroup-walk constant removed in `2a2aa6905` accounts for the small-n entries; other work
+accounts for the rest. **Publishing the unfiltered list would have handed the campaign a
+loss-inventory that is mostly archaeology.**
+
+**FILTERED TO A CURRENT INSTRUMENT** (`60ed3c58fdd5` or `a67f720ac1f8`), the picture is small and
+sharp:
+
+    workload@size measured on a current harness : 19
+      certified WINS                            : 12
+      certified LOSSES                          :  3
+      undecidable only                          :  5
+
+    THE ENTIRE VERIFIED CURRENT LOSS SURFACE:
+        floor @1M   0.493x
+        div   @1M   0.496x
+        sqrt  @1M   0.930x
+
+**ALL THREE ARE ELEMENTWISE f64 AT 1M, AND ALL THREE ARE ISA-BOUND.** That inverts the caveat I
+attached to the `+sse4.1` recommendation. I worried my sample was biased toward ISA-bound ops; the
+survey says those ops are **not a biased subset of the loss surface — on the current instrument they
+are essentially the whole of it.** The flag does not address a corner of the problem; it addresses
+what is verifiably left of it.
+
+⚠️ **AND THE HONEST LIMIT, WHICH IS LARGE.** Only **19** workload@size have been measured on a
+current harness at all. **The other 20 loss entries are not proven fine — they are unverified**, and
+every one of them is exactly the kind of stale figure I have caught three times today. **"Three
+losses" is a statement about what has been RE-MEASURED, not about what is SLOW.** The corpus carries
+609 artifacts and the current instrument covers a small fraction of them, which is the same
+under-coverage the orphaned-lock bead
+(`br-frankenpandas-relock-orphaned-standing-rows-85clb`) already tracks from the other direction.
+
+**WHAT THIS GIVES uza04, whose whole scope is "close ALL vs-upstream perf gaps":** the gap list is
+not 20 items and it is not 3. It is 3 known plus 20 unverified, and the cheapest next action is not
+optimisation — **it is re-measuring the 20 on the current instrument to find out which still exist**,
+because four of the four I checked had already closed themselves.
