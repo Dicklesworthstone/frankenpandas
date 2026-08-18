@@ -13421,6 +13421,28 @@ impl Series {
     ///
     /// Matches `series.astype(dtype)` for scalar dtypes.
     pub fn astype(&self, dtype: DType) -> Result<Self, FrameError> {
+        // ⚠️ A CATEGORICAL SERIES' COLUMN HOLDS CODES, NOT VALUES. Casting it
+        // directly casts the integer positions, so a category column came out as
+        // "0", "1", "0" instead of its labels. MEASURED, live pandas 2.2.3:
+        //
+        //   c = pd.Categorical(['x', 'y', 'x'])
+        //   list(c.codes)            -> [0, 1, 0]
+        //   list(pd.Series(c).astype(str)) -> ['x', 'y', 'x']   <- the CATEGORIES
+        //
+        // and the same holds for every target, not just str:
+        //   Categorical([1, 2, None]).astype('float64') -> [1.0, 2.0, nan]
+        //   Categorical([True, False, None]).astype(str)
+        //     -> ['True', 'False', 'nan']
+        //
+        // `to_values` is the crate's existing code->category materializer and
+        // already maps an out-of-range or negative code to `Null(NullKind::NaN)`
+        // — which is what makes `astype(str)` render pandas' 'nan' rather than
+        // 'None'. Delegating to it rather than re-walking the codes here keeps
+        // one implementation of that mapping. The result is not categorical, so
+        // the recursive call takes the ordinary path below and terminates.
+        if let Some(categorical) = self.cat() {
+            return categorical.to_values()?.astype(dtype);
+        }
         let column = self.column.astype(dtype)?;
         Self::new(self.name.clone(), self.index.clone(), column)
     }
@@ -13431,6 +13453,15 @@ impl Series {
     /// - `errors="raise"` (default): same as `astype()`
     /// - `errors="coerce"`: values that fail conversion become NaN
     pub fn astype_safe(&self, dtype: DType, errors: &str) -> Result<Self, FrameError> {
+        // Same code-vs-value trap as `astype`, and it has to be caught HERE too:
+        // the "coerce" arm below reads `self.column.values()` directly, so it
+        // would coerce the integer codes rather than the categories. The guard
+        // sits above the `errors` match so all three arms are covered, and it is
+        // placed after nothing — an invalid `errors` string must still be
+        // rejected, which the recursive call does.
+        if let Some(categorical) = self.cat() {
+            return categorical.to_values()?.astype_safe(dtype, errors);
+        }
         // Per br-frankenpandas-3d30a: pandas validates errors ∈
         // {raise, ignore, coerce}. Was silently treating any non-
         // {ignore, coerce} value as "raise".
@@ -161407,6 +161438,109 @@ mod tests {
         // Rule 2 and the wrong rule here. (br-frankenpandas-nywa8)
         assert_eq!(values.values()[1], Scalar::Null(NullKind::NaN));
         assert_eq!(values.values()[2], Scalar::Utf8("high".into()));
+    }
+
+    /// ⚠️ `astype` ON A CATEGORICAL MUST CAST THE CATEGORIES, NOT THE CODES.
+    /// The column holds integer positions, so casting it directly produced
+    /// "0", "1", "0" for a column whose labels are 'x', 'y', 'x'. Every expected
+    /// value transcribed from live pandas 2.2.3.
+    #[test]
+    fn astype_on_a_categorical_casts_the_categories_not_the_codes() {
+        // codes [0, 1, 0] over categories ['x', 'y'] — the pair that makes the
+        // two answers visibly different.
+        let labels = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("x".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            labels.astype(DType::Utf8).unwrap().values(),
+            &[
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+            ],
+            "the CODES would render as 0, 1, 0"
+        );
+
+        // Integer categories: Int64 -> Utf8 is a real cast, so the missing is
+        // stringified. pandas: ['1', '2', 'nan'].
+        let numbers = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            numbers.astype(DType::Utf8).unwrap().values(),
+            &[
+                Scalar::Utf8("1".to_owned()),
+                Scalar::Utf8("2".to_owned()),
+                Scalar::Utf8("nan".to_owned()),
+            ]
+        );
+        // ...and to a numeric target. pandas: [1.0, 2.0, nan].
+        let widened = numbers.astype(DType::Float64).unwrap();
+        assert_eq!(widened.values()[0], Scalar::Float64(1.0));
+        assert_eq!(widened.values()[1], Scalar::Float64(2.0));
+        assert!(widened.values()[2].is_missing());
+
+        // Boolean categories render pandas' spellings, not Rust's.
+        let flags = Series::from_categorical(
+            "c",
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            flags.astype(DType::Utf8).unwrap().values(),
+            &[
+                Scalar::Utf8("True".to_owned()),
+                Scalar::Utf8("False".to_owned()),
+            ]
+        );
+
+        // astype_safe reads the column directly in its "coerce" arm, so it needs
+        // the same guard — without it this coerces the codes.
+        assert_eq!(
+            numbers
+                .astype_safe(DType::Float64, "coerce")
+                .unwrap()
+                .values()[0],
+            Scalar::Float64(1.0)
+        );
+
+        // ⚠️ ONE RESIDUAL DIVERGENCE, and it is NOT introduced here: for STRING
+        // categories the resolved column is already Utf8, so `astype(Utf8)` is a
+        // same-dtype no-op and the missing stays missing, where pandas renders
+        // the string 'nan'. That is the pre-existing behaviour of astype(Utf8)
+        // on any already-Utf8 column with nulls — pandas stringifies there too
+        // (`pd.Series(['a', None]).astype(str)` -> ['a', 'None']) — so fixing it
+        // changes every Utf8 astype, not just this path. Pinned as-is so the
+        // difference is recorded rather than discovered again.
+        let with_missing = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("b".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        let cast = with_missing.astype(DType::Utf8).unwrap();
+        assert_eq!(cast.values()[0], Scalar::Utf8("a".to_owned()));
+        assert_eq!(cast.values()[2], Scalar::Utf8("b".to_owned()));
+        assert!(cast.values()[1].is_missing());
     }
 
     #[test]
