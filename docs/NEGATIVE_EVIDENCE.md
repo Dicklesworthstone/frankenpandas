@@ -39829,3 +39829,77 @@ told me a sort was hot and I supplied the caller from memory. One `perf report`
 with a call graph — the same command either way — would have shown `MixedKey` before
 I wrote a line of code. And build the witness BEFORE the measurement, not after: a
 null result and a lever that never ran are the same number.
+
+---
+
+## METHOD — the false-absence taxonomy: nine distinct ways a probe reported nothing when it should have reported something (CrimsonPine, 2026-08-18)
+
+**Date:** 2026-08-18 · **Agent:** CrimsonPine · **Status:** method entry, no
+measurement, no build (build freeze, /data 38G at 99%). `uptime` 1-min 9.71 against
+5-min 9.80. Locks defended BY INSPECTION rather than execution this turn — see the end.
+
+**THE CAMPAIGN'S STANDING WARNING IS "THE ABSENCE OF WORK IS RENDERED AS THE SUCCESS OF
+WORK". In one session I hit NINE structurally different instances of it.** Each produced
+a clean-looking zero, empty output, or a green test. Cataloguing them together is worth
+more than the individual corrections, because the remedy turns out to be the same for all
+nine and it is cheap.
+
+| # | the probe | what it printed | why it was wrong |
+|---|---|---|---|
+| 1 | `grep`/`strings` on an ELF for a lane name | not found | the lane runs; the symbol is not a literal string |
+| 2 | `find … \| sort -rn \| head -8` | 8 files | it was the TOP 8 of **33**; I reported 8 as the total |
+| 3 | `grep -r --include=*.rs` under zsh | `count: 0` | the glob expands before grep; the command FAILED |
+| 4 | `sed 's|…|…|'` mutating `\|=` | mutation applied, 4 tests pass | the `\|` delimiter collided; the file was never edited |
+| 5 | brace-depth scan of a function body | "spans 2 lines" | the `where` clause has no braces; depth tripped at once (3 failures) |
+| 6 | `grep "mul_scalar("` | 14 call sites | every one was a DIFFERENT type's method of the same name |
+| 7 | `groupby(.dt.date).size()` compared | SAME | compared COUNTS `[1,1,1]`; could not see a key change |
+| 8 | `pivot_table` blank CSV line | no missing value introduced | `skip_blank_lines` defaults True |
+| 9 | flat profile showing `sort::sort_by` hot | "my sort is hot" | it names a FUNCTION, not a CALLER; a different sort |
+
+**THE REMEDY IS ONE LINE OF EXTRA WORK: EVERY PROBE NEEDS A POSITIVE CONTROL.** Before
+believing that a search found nothing, make the same search find something you know is
+there. It caught real errors repeatedly here:
+
+* the harness genuinely lacks `compiled_target_features` — established only because the
+  same scan first confirmed the file exists at 252KB and `"adaptive"` occurs 12 times;
+* the corpus genuinely has zero float-shaped labels — established only because the same
+  scan reported the 6148 int64 / 1832 utf8 / 2 bool labels it DID find;
+* `0 of 8` pivot fixtures change under `dropna=True` — established only because the same
+  comparison, given a fixture WITH a NaN key, reported WOULD CHANGE.
+
+**AND A SECOND RULE THAT PAID FOR ITSELF: WHEN TWO METHODS DISAGREE, BOTH ARE SUSPECT.**
+Counting one set of call sites three ways gave 40, 14 and 0. The instinct is to take the
+largest as a lower bound. That is wrong — the reconciliation (printing the 14 lines and
+READING them) is what revealed they were a different function entirely, and the true
+answer was 12, exactly matching the estimate I had set out to correct.
+
+⚠️ **THE COSTLIEST ONE WAS NOT A ZERO — IT WAS A GREEN TEST.** #4 reported four passing
+tests for a mutation that never reached the file. A mutation test that fails to apply is
+indistinguishable from a test suite that survives mutation, and the whole point of the
+mutation was to prove the suite could fail. Assert the anchor count inside the applier.
+
+**WHERE THIS BIT HARDEST, ranked by what it nearly published:**
+1. **#9** — built, wired and compiled a lever that ran ZERO times, on a mechanism I had
+   attributed from a generic symbol. Caught only by a non-vacuity witness compiled into
+   the arm; a lever that never runs and a lever that does nothing both measure ~1.00x.
+2. **#2** — under-reported my own disk footprint by 5x (2.49 GB across 33 files reported
+   as ~560 MB across 7) while /data sat within a few GB of a hard brake.
+3. **#6** — nearly filed a correction claiming a bead's cost estimate was a large
+   undercount. The bead was right.
+
+**THE CONVERSE FAILURE ALSO HAPPENED TWICE AND IS WORTH THE SAME VIGILANCE:** twice I was
+about to report a bead STALE because the tree had moved around it — `8s4mb` (restructured
+into a no-alloc two-pass, but the left-fold mean it names survives inside the new helper)
+and `u5cg4` (I found the activation threshold and inferred the parallel path was inert; the
+bead never claimed inertness, it claimed the path RUNS and buys nothing). Reading the bead
+before filing the correction is what stopped both. **A tree that changed near a claim is
+not the same as a claim that changed.**
+
+**LOCKS THIS TURN WERE DEFENDED BY INSPECTION, NOT EXECUTION, and that distinction is
+itself an instance of the above** — a lock I did not run is not a lock that passed. Under
+the freeze (`No cargo`) I verified instead that both `4kig1` lock tests are still defined,
+that `BINARY_BANDWIDTH_PARALLEL_MIN_LEN` is unchanged at `1 << 20`, and that
+`binary_parallel_min_len` still routes `Pow|Mod|FloorDiv` to `elementwise_witness_policy().1`
+and everything else to the bandwidth constant — the two-arm split whose collapse the lock
+exists to catch. That is evidence the SUBJECT is intact; it is not evidence the tests pass,
+and it should not be recorded as the latter.
