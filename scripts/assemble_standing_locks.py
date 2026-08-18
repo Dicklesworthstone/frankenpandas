@@ -235,7 +235,13 @@ def identity_slug(identity: dict[str, Any]) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", f"standing_{host}_{harness}")
 
 
-def collect() -> dict[str, dict[str, Any]]:
+def collect(*, report_refusals: bool = True) -> dict[str, dict[str, Any]]:
+    """Group certified rows by comparability identity.
+
+    `report_refusals` exists because `--orphans` is a READ-ONLY listing that banks
+    nothing, and printing "REFUSED ..." above it reads as though the listing were
+    rejecting rows. The refusals belong to the banking path that acts on them.
+    """
     ratchet = load_ratchet()
     groups: dict[str, dict[str, Any]] = {}
     for path in sorted(REPO.glob(BENCH_GLOB)):
@@ -259,20 +265,22 @@ def collect() -> dict[str, dict[str, Any]]:
             if is_thread_capped(result):
                 continue
             if is_non_shipping_build(result):
-                print(
-                    f"    !! REFUSED {result.get('workload')} @{result.get('size')}: "
-                    f"compiled_target_features="
-                    f"{(result.get('thread_provenance') or {}).get('compiled_target_features')}"
-                    f" — not the shipping build, so a lock from it would assert a "
-                    f"defence the shipped binary does not provide"
-                )
+                if report_refusals:
+                        print(
+                        f"    !! REFUSED {result.get('workload')} @{result.get('size')}: "
+                        f"compiled_target_features="
+                        f"{(result.get('thread_provenance') or {}).get('compiled_target_features')}"
+                        f" — not the shipping build, so a lock from it would assert a "
+                        f"defence the shipped binary does not provide"
+                    )
                 continue
             if best_vs_best_contradicts(result):
-                print(
-                    f"    !! REFUSED {result.get('workload')} @{result.get('size')}: "
-                    f"p50 says {result.get('ratio')}x but best-vs-best disagrees in "
-                    f"direction — the incumbent's spread, not the engine"
-                )
+                if report_refusals:
+                        print(
+                        f"    !! REFUSED {result.get('workload')} @{result.get('size')}: "
+                        f"p50 says {result.get('ratio')}x but best-vs-best disagrees in "
+                        f"direction — the incumbent's spread, not the engine"
+                    )
                 continue
             row_key = (result.get("workload"), result.get("size"), result.get("dtype"))
             current = bucket["best"].get(row_key)
@@ -451,7 +459,8 @@ def main() -> int:
     if args.self_test:
         return _self_test()
 
-    groups = collect()
+    # --orphans lists; it does not bank, so refusals are not its business.
+    groups = collect(report_refusals=not args.orphans)
     if not groups:
         print("no certified rows found — nothing to lock")
         return 0
