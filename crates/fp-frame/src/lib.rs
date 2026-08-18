@@ -157054,6 +157054,51 @@ mod tests {
     ///
     /// Each case is its own single-element series: `.dt` takes pandas' one-format
     /// lock, so mixing spellings in one column NaTs everything after the first.
+    /// `.dt.isocalendar()` refuses the rows pandas refuses.
+    ///
+    /// br-frankenpandas-t2n6i, applying the br-frankenpandas-hzayc one-format
+    /// doctrine at a FOURTH site. `isocalendar` returns a DataFrame and so never
+    /// went through `extract_component`, which is why the mhygz pass that locked
+    /// the other dt accessors did not reach it: it parsed each string on its own
+    /// terms and produced a confident wrong answer for a row pandas NaTs.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), on
+    /// ['2024-01-15 10:30:00', '2024-01-16', '2024-01-17 08:00:00']:
+    /// ```text
+    ///   to_datetime(...)  -> [Timestamp, NaT, Timestamp]
+    ///   .dt.isocalendar() -> (2024, 3, 1) / (NA, NA, NA) / (2024, 3, 3)
+    /// ```
+    /// Element 1 is DATE-ONLY where the format guessed from element 0 carries a
+    /// time. FrankenPandas returned (2024, 3, 2) for it.
+    #[test]
+    fn isocalendar_takes_the_one_format_lock_t2n6i() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00".to_string()),
+                Scalar::Utf8("2024-01-16".to_string()),
+                Scalar::Utf8("2024-01-17 08:00:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let iso = s.dt().isocalendar().unwrap();
+        assert_eq!(iso.column_names(), vec!["year", "week", "day"]);
+
+        // ⚠️ ALL THREE columns go missing together for the refused row. A fix that
+        // NaT'd only `year` would still be wrong, and this is what catches it.
+        for col in ["year", "week", "day"] {
+            let v = iso.column(col).unwrap().values();
+            assert!(!v[0].is_missing(), "{col}: row 0 matches the locked shape");
+            assert!(v[1].is_missing(), "{col}: row 1 is DATE-ONLY, pandas refuses it");
+            assert!(!v[2].is_missing(), "{col}: row 2 matches the locked shape");
+        }
+        assert_eq!(iso.column("year").unwrap().values()[0], Scalar::Int64(2024));
+        assert_eq!(iso.column("week").unwrap().values()[0], Scalar::Int64(3));
+        assert_eq!(iso.column("day").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(iso.column("day").unwrap().values()[2], Scalar::Int64(3));
+    }
+
     #[test]
     fn dt_time_drops_every_offset_spelling_t2n6i() {
         let one = |value: &str| {
