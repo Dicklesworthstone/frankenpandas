@@ -38927,6 +38927,15 @@ rather than a correctable systematic offset.
 **CORRECTNESS.** `cargo test -p fp-frame --lib`: **3333 passed, 0 failed**, 32 ignored — identical
 to baseline, before and after.
 
+**PROVENANCE NOTE, because the commit trail is not what it looks like.** The SOURCE change landed in
+`361802602`, not in the commit carrying this entry. Both panes share the git identity `cod-pandas`,
+and that commit was made from the shared checkout while my build was still running — so my own
+commit contained only the ledger. **I verified the committed hunk is byte-for-byte the code I
+built and measured, and that the working tree equals HEAD**, so the numbers above do describe HEAD.
+Recorded because a reader following this entry to its commit would otherwise find no source change,
+and because "the code I measured is the code that shipped" is exactly the kind of assumption this
+ledger exists to stop people making.
+
 **WHAT REMAINS ON THIS BEAD.** The per-group Series materialisation (~15% of the profile) is
 untouched, and a CSR layout (counts, then offsets, then ONE flat `Vec<usize>` of length n) is the
 remaining allocation lever — it removes the Vec-of-Vecs entirely but changes `build_groups`' return
