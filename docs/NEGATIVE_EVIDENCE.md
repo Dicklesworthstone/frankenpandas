@@ -35760,6 +35760,15 @@ drives the explicit override, bypassing the gate. Any other test can be affected
 through VALUES, and the bit-identity test proves values identical at every worker count.
 Re-run the full suite when the fleet recovers.
 
+**GATE DEBT CLOSED 2026-08-17, same day.** The fleet stayed unavailable
+(`critical_pressure=1, insufficient_slots=1, insufficient_total_slots=7` on every
+retry), so the suite was run LOCALLY under `RCH_CARGO_WRAPPER_BYPASS=1` with `df`
+checked immediately before (80G, above the 42G floor) and one build spent:
+**`cargo test -p fp-frame --lib` = 3318 passed, 0 failed, 0 filtered out.** The bounded
+risk argued above is now discharged by measurement rather than by argument. The build
+cost 6G of local disk (80G -> 74G), which is recorded because the slope is steep and a
+remote worker had already hit ENOSPC.
+
 **Two fixtures had to move, and the reason is the finding in miniature:** the bit-identity
 fixture (20k rows) and the divisor lock (64k rows) both sat BELOW the new floor, so they
 would have tested the serial path on both arms and their "the parallel arm actually ran"
