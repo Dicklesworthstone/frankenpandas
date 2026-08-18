@@ -38144,3 +38144,46 @@ NO VERDICT, NO RATIO, NO ROW BANKED — a method note, not a measurement.
 LOADAVG   6.04 / 9.89 / 10.40; no cargo invoked for this entry.
 DISK      /data 99G.
 ```
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-uza04) — RE-MEASUREMENT IS HIGH-YIELD: of EIGHT stale sub-parity entries re-run today, SIX had already closed and one reversed to 24.8x. The campaign's remaining-gap picture is mostly archaeology
+
+**Three more of the unverified entries, measured on committed harness `1aad84193717`, preserved ELF
+`a802073c`, clean window (load 6.54-7.93, no builds):**
+
+| workload | stale figure | re-measured | outcome |
+|---|---|---|---|
+| `sqrt @1k` | 0.162x | **24.773x** | reversed — bvb 23.848x agrees |
+| `round2 @1M` | 0.463x | **0.952x** | gap essentially closed, CI now spans unity |
+| `sort_values_single @10k` | 0.616x | **0.595x** | unchanged, still slow |
+
+**NONE OF THE THREE CERTIFIES, AND THE REASONS DIFFER — WHICH IS THE USEFUL PART.** `round2` fails
+`effect_ci_excludes_unity` because at 0.952x it is genuinely near parity and the interval covers 1.0
+— the correct answer for a gap that has closed. `sqrt @1k` fails on BOTH nulls (0.96147, 0.96168) at
+a **1.26us** FP arm: the third instance today of the microsecond-arm regime where the A/A control
+measures timer noise rather than the engine. `sort_values_single` fails on FP's null (0.95356) while
+its ratio barely moved. **Three failures, three different causes, and only one of them is about
+FrankenPandas being slow.**
+
+**THE EIGHT-ENTRY TALLY, all re-measured by me today from the stale sub-parity list:**
+
+    CLOSED or REVERSED (6):  sqrt @10k 0.588 -> 3.73x        sqrt @100k 0.717 -> 1.157x
+                             sqrt @1k  0.162 -> 24.773x      log @10k   0.594 -> 1.65x
+                             round2 @1M 0.463 -> 0.952x      df_dot @10k 0.530 -> ~0.98x
+    STILL SUB-PARITY (2):    ceil @1M 0.098 -> 0.297x        trunc @1M 0.098 -> 0.319x
+    STILL SLOW, UNDECIDABLE: sort_values_single @10k 0.616 -> 0.595x
+
+**Six of eight had already fixed themselves before anyone looked.** The 66.5us cgroup-walk removal in
+`2a2aa6905` explains the small-n reversals; other landed work explains the rest. **The corpus's
+inventory of what FrankenPandas is bad at is, in the majority, a record of what it WAS bad at.**
+
+**WHAT THIS SETTLES FOR uza04, whose scope is "close ALL vs-upstream perf gaps":** the cheapest
+action is not optimisation and it is not profiling — **it is re-measurement**, which today returned
+six closed gaps for eight rows of effort and cost no build. It also surfaced two REAL gaps
+(`ceil`/`trunc`) that were invisible because their stale figures were wrong in the other direction:
+0.098x looked catastrophic and archived, 0.297x is a live target.
+
+⚠️ **AND THE LIMIT, RESTATED AS THE FINDING RATHER THAN THE CAVEAT** — the other pane's correction,
+which I am adopting. Roughly **24 of ~600** workload@size have now been measured on a current
+harness. Every number I have given about the "current loss surface" describes that 24. **The
+unmeasured remainder is where the campaign's actual unknowns live**, and eight-of-eight-changed is
+the evidence that measuring it changes answers rather than confirming them.
