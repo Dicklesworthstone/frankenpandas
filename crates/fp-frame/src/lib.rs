@@ -3703,6 +3703,10 @@ enum AsFreqUnit {
     /// Annual, anchored on the first day of the year's first month
     /// (1..=12, default 1 = January, i.e. `YS` == `YS-JAN`).
     YearStart(u8),
+    /// `BME` — the last WEEKDAY of each month.
+    BusinessMonthEnd,
+    /// `BMS` — the first WEEKDAY of each month.
+    BusinessMonthStart,
     /// Weekly, anchored on a WEEKDAY expressed as days-from-Sunday (0 = Sunday).
     ///
     /// br-frankenpandas-week-anchor-days. pandas has seven weekly frequencies —
@@ -3802,6 +3806,8 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
         // last — so the defaults differ (QS is January, QE is December) even though
         // both reduce to the same modulo-3 test.
         "MS" => AsFreqUnit::MonthStart,
+        "BME" | "BM" => AsFreqUnit::BusinessMonthEnd,
+        "BMS" => AsFreqUnit::BusinessMonthStart,
         "QS" => AsFreqUnit::QuarterStart(1),
         "YS" | "AS" => AsFreqUnit::YearStart(1),
         "Q" | "QE" | "QUARTER" | "QUARTERS" => AsFreqUnit::QuarterEnd(12),
@@ -3834,7 +3840,7 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
                 }
             }
             return Err(FrameError::CompatibilityRejected(format!(
-                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC), MS, QS (and QS-JAN..QS-DEC), YS (and YS-JAN..YS-DEC)"
+                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC), MS, QS (and QS-JAN..QS-DEC), YS (and YS-JAN..YS-DEC), BME/BM, BMS"
             )));
         }
     };
@@ -3905,6 +3911,34 @@ fn asfreq_midnight(date: NaiveDate) -> Result<NaiveDateTime, FrameError> {
 }
 
 /// Last calendar day of `(year, month)` at midnight.
+/// Roll `date` off a weekend, forward for period starts and backward for ends.
+///
+/// br-frankenpandas-week-anchor-days, business slice. pandas' BME/BMS anchor on the
+/// last/first WEEKDAY of the month rather than the calendar boundary. MEASURED,
+/// live pandas 2.2.3 over 2024:
+///     BME -> 03-29 Fri (31st is a Sunday), 06-28 Fri (30th is a Sunday),
+///            11-29 Fri (30th is a Saturday), and 01-31 Wed unchanged
+///     BMS -> 06-03 Mon (1st is a Saturday), 09-02 Mon (1st is a Sunday),
+///            12-02 Mon (1st is a Sunday), and 01-01 Mon unchanged
+/// A weekend is at most two days, so this steps at most twice.
+fn roll_off_weekend(date: NaiveDate, forward: bool) -> Option<NaiveDate> {
+    let mut date = date;
+    for _ in 0..2 {
+        // chrono: 0 = Sunday .. 6 = Saturday.
+        match date.weekday().num_days_from_sunday() {
+            0 | 6 => {
+                date = if forward {
+                    date.succ_opt()?
+                } else {
+                    date.pred_opt()?
+                };
+            }
+            _ => return Some(date),
+        }
+    }
+    Some(date)
+}
+
 /// Midnight on the FIRST day of `month`, the period-start mirror of
 /// [`asfreq_month_end`].
 fn asfreq_month_start(year: i32, month: u32) -> Result<NaiveDateTime, FrameError> {
@@ -3943,22 +3977,35 @@ fn anchored_asfreq_anchors(
         | AsFreqUnit::YearEnd(_)
         | AsFreqUnit::MonthStart
         | AsFreqUnit::QuarterStart(_)
-        | AsFreqUnit::YearStart(_) => {
+        | AsFreqUnit::YearStart(_)
+        | AsFreqUnit::BusinessMonthEnd
+        | AsFreqUnit::BusinessMonthStart => {
             let (mut year, mut month) = (start.year(), start.month());
             // Walk month-ends from the start month up to (and including) the end
             // month, keeping only the ones the unit anchors on and in range.
             loop {
                 // Period STARTS anchor on day 1, ends on the last day; the month
                 // walk and the range logic are identical either way.
-                let me = if matches!(
-                    unit,
+                let me = match unit {
                     AsFreqUnit::MonthStart
-                        | AsFreqUnit::QuarterStart(_)
-                        | AsFreqUnit::YearStart(_)
-                ) {
-                    asfreq_month_start(year, month)?
-                } else {
-                    asfreq_month_end(year, month)?
+                    | AsFreqUnit::QuarterStart(_)
+                    | AsFreqUnit::YearStart(_) => asfreq_month_start(year, month)?,
+                    // Business anchors take the calendar boundary and then step off
+                    // a weekend, outward from the month.
+                    AsFreqUnit::BusinessMonthStart | AsFreqUnit::BusinessMonthEnd => {
+                        let forward = matches!(unit, AsFreqUnit::BusinessMonthStart);
+                        let boundary = if forward {
+                            NaiveDate::from_ymd_opt(year, month, 1)
+                        } else {
+                            period_last_day_of_month(year, month)
+                                .and_then(|last| NaiveDate::from_ymd_opt(year, month, last))
+                        };
+                        let rolled = boundary.and_then(|date| roll_off_weekend(date, forward));
+                        asfreq_midnight(rolled.ok_or_else(|| {
+                            FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+                        })?)?
+                    }
+                    _ => asfreq_month_end(year, month)?,
                 };
                 if me > end && me.year() > end.year() {
                     break;
@@ -3971,7 +4018,9 @@ fn anchored_asfreq_anchors(
                     // which is the `month % 3 == 0` this line used to hard-code.
                     AsFreqUnit::QuarterEnd(anchor) => month % 3 == u32::from(anchor) % 3,
                     AsFreqUnit::YearEnd(anchor) => month == u32::from(anchor),
-                    AsFreqUnit::MonthStart => true,
+                    AsFreqUnit::MonthStart
+                    | AsFreqUnit::BusinessMonthEnd
+                    | AsFreqUnit::BusinessMonthStart => true,
                     AsFreqUnit::QuarterStart(anchor) => month % 3 == u32::from(anchor) % 3,
                     AsFreqUnit::YearStart(anchor) => month == u32::from(anchor),
                     _ => unreachable!(),
