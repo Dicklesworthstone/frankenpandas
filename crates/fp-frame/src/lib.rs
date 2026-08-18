@@ -51080,6 +51080,24 @@ fn parse_datetime_scalar_with_unit(
 ) -> Scalar {
     match value {
         Scalar::Null(_) => Scalar::Null(NullKind::NaT),
+        // ALREADY A TIMESTAMP: pass it through. br-frankenpandas-4lbaj.
+        //
+        // Without this arm a `Datetime64` fell to the `_ => NaT` catch-all below
+        // and EVERY ROW of an already-typed column became NaT — silent data
+        // loss, not an error. OBSERVED before it was fixed, not predicted:
+        //   left:  [Null(NaT), Null(NaT)]
+        //   right: [Datetime64(1705314600000000000), Datetime64(1718892000000000000)]
+        //
+        // A unit is meaningless on a value that is already nanoseconds since the
+        // epoch — it describes how to interpret a NUMBER, and there is no number
+        // left to interpret. pandas agrees by being idempotent: measured on 2.2.3,
+        // `to_datetime(dt_series)`, `unit='s'` and `unit='ns'` all return
+        // datetime64[ns] with every value unchanged.
+        //
+        // The no-unit path in `to_datetime_values_with_options` already had this
+        // pass-through; the two arms of one function disagreed, which is why a
+        // fully green suite could not see it.
+        Scalar::Datetime64(nanos) => Scalar::Datetime64(*nanos),
         Scalar::Int64(epoch) => parse_epoch_i64_with_unit(*epoch, unit, origin, utc),
         Scalar::Float64(epoch) => parse_epoch_f64_with_unit(*epoch, unit, origin, utc),
         Scalar::Utf8(raw) => {
@@ -159443,6 +159461,56 @@ mod tests {
     ///     -> 1970-01-01 00:00:01.705312200+00:00
     ///        2024-01-01 00:00:00+00:00        (dtype datetime64[ns, UTC])
     /// ```
+    /// br-frankenpandas-4lbaj. `to_datetime(unit=…)` on an ALREADY-`Datetime64`
+    /// column must preserve its values; pandas is an idempotent pass-through.
+    ///
+    /// MEASURED, live pandas 2.2.3 — `to_datetime(dt_series)`,
+    /// `to_datetime(dt_series, unit='s')` and `unit='ns'` all return
+    /// `datetime64[ns]` with every value unchanged.
+    ///
+    /// The failure this pins is SILENT DATA LOSS, not an error:
+    /// `parse_datetime_scalar_with_unit`'s arms are
+    /// `Null | Int64 | Float64 | Utf8 | _ =` NaT, with no `Datetime64` arm, so a
+    /// typed column falls into the catch-all and every row becomes NaT. The
+    /// no-unit path in the same function DOES have a `Datetime64` pass-through —
+    /// the two arms of one function disagree.
+    ///
+    /// Reachable from `read_csv(parse_dates=…)` and, since
+    /// br-frankenpandas-f2mlr made `to_datetime(utc=True)` emit `Datetime64`,
+    /// from chaining the two `to_datetime` forms.
+    #[test]
+    fn to_datetime_with_unit_preserves_an_already_datetime_column_4lbaj() {
+        let source = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00".into()),
+                Scalar::Utf8("2024-06-20 14:00:00".into()),
+            ],
+        )
+        .unwrap();
+
+        // Establish the precondition rather than assume it: this must really be
+        // a Datetime64 column, or the test proves nothing about the catch-all.
+        let typed = super::to_datetime(&source).unwrap();
+        let expected: Vec<Scalar> = typed.values().to_vec();
+        assert!(
+            matches!(expected[0], Scalar::Datetime64(_)),
+            "precondition: to_datetime must yield Datetime64, got {:?}",
+            expected[0]
+        );
+
+        for unit in ["s", "ms", "us", "ns"] {
+            let out = super::to_datetime_with_unit(&typed, unit).unwrap();
+            assert_eq!(
+                out.values(),
+                expected.as_slice(),
+                "to_datetime(unit={unit:?}) must pass an already-Datetime64 column \
+                 through unchanged, as pandas does; a NaT here is silent data loss"
+            );
+        }
+    }
+
     #[test]
     fn to_datetime_bare_integer_with_utc_is_nanoseconds_too() {
         let s = Series::from_values(
