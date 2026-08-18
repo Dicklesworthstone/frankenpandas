@@ -3102,6 +3102,59 @@ fn run(
                     .expect("df grouped rolling mean");
             })
         }
+        ("rolling", "df_groupby_expanding_mean") | ("rolling", "df_groupby_ewm_mean") => {
+            // br-frankenpandas-vw0uu, the two siblings of df_groupby_rolling_mean_w10.
+            //
+            // Batched into ONE harness landing with each other on purpose: every
+            // harness edit moves the whole-file sha and orphans every live lock,
+            // including the STANDING floordiv/mod pair, so N separate landings
+            // cost N re-lock passes and one landing costs one.
+            //
+            // vw0uu names GroupByEwm as a remaining engine, but dde7be739 already
+            // fixed it in-tree. So the open question is not "is it on the slow
+            // path" — it is whether these two, like grouped rolling (7.251x
+            // certified), are already AHEAD of the incumbent, which decides
+            // whether this bead has a gap left at all.
+            //
+            // Same fixture as the rolling lane, for the same reasons: THREE value
+            // columns because this family parallelises per-COLUMN and a
+            // one-column frame routes serial, and a key from the row index so all
+            // three lanes group identically.
+            let keys: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
+            let mut columns = BTreeMap::new();
+            columns.insert("key".to_string(), Column::from_i64_values(keys));
+            let mut order = vec!["key".to_string()];
+            for (c, column) in raw.iter().enumerate().take(3) {
+                let n = format!("v{c}");
+                columns.insert(n.clone(), Column::from_f64_values(column.clone()));
+                order.push(n);
+            }
+            let gdf = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                columns,
+                order,
+            )
+            .expect("df grouped window frame");
+            if workload == "df_groupby_expanding_mean" {
+                time_us(|| {
+                    let _ = gdf
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .expanding(Some(1))
+                        .mean()
+                        .expect("df grouped expanding mean");
+                })
+            } else {
+                time_us(|| {
+                    let _ = gdf
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .ewm(Some(10.0), None)
+                        .mean()
+                        .expect("df grouped ewm mean");
+                })
+            }
+        }
         ("rolling", "expanding_skew") => {
             let series = df.get_column("col_0");
             time_us(|| {

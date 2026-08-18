@@ -2420,6 +2420,41 @@ def bench_rolling_std_w50_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df["col_0"].rolling(50).std())
 
 
+def bench_df_groupby_expanding_mean_pandas(df: pd.DataFrame) -> list[float]:
+    """DataFrameGroupBy grouped EXPANDING mean over three value columns.
+
+    br-frankenpandas-vw0uu, sibling of the grouped-rolling lane and landed in the
+    same harness commit — every harness edit orphans all live locks, so batching
+    costs one re-lock pass instead of two.
+
+    ``min_periods=1`` matches FrankenPandas' ``expanding(Some(1))``. Fixture and
+    flattening are identical to the rolling lane so the three are comparable.
+    """
+    key = pd.Series(np.arange(len(df)) % 100, index=df.index)
+    values = df[["col_0", "col_1", "col_2"]]
+    return time_operation(
+        lambda: values.groupby(key).expanding(min_periods=1).mean().droplevel(0).sort_index()
+    )
+
+
+def bench_df_groupby_ewm_mean_pandas(df: pd.DataFrame) -> list[float]:
+    """DataFrameGroupBy grouped EWM mean over three value columns.
+
+    br-frankenpandas-vw0uu names ``GroupByEwm`` as a remaining engine, but
+    ``dde7be739`` already fixed it in-tree — so the open question is whether it is
+    ahead of the incumbent, not whether it is on the slow path.
+
+    ``span=10`` matches FrankenPandas' ``ewm(Some(10.0), None)``. pandas' grouped
+    ewm returns the same two-level index as the rolling/expanding forms, so it
+    gets the same ``droplevel(0).sort_index()`` flattening.
+    """
+    key = pd.Series(np.arange(len(df)) % 100, index=df.index)
+    values = df[["col_0", "col_1", "col_2"]]
+    return time_operation(
+        lambda: values.groupby(key).ewm(span=10).mean().droplevel(0).sort_index()
+    )
+
+
 def bench_df_groupby_rolling_mean_w10_pandas(df: pd.DataFrame) -> list[float]:
     """DataFrameGroupBy grouped rolling mean over THREE value columns.
 
@@ -3006,6 +3041,8 @@ PANDAS_WORKLOADS = {
         "rolling_std_w50": bench_rolling_std_w50_pandas,
         "groupby_rolling_mean_w10": bench_groupby_rolling_mean_w10_pandas,
         "df_groupby_rolling_mean_w10": bench_df_groupby_rolling_mean_w10_pandas,
+        "df_groupby_expanding_mean": bench_df_groupby_expanding_mean_pandas,
+        "df_groupby_ewm_mean": bench_df_groupby_ewm_mean_pandas,
         "rolling_apply_stateful": bench_rolling_apply_stateful_pandas,
         "expanding_sum": bench_expanding_sum_pandas,
         "expanding_apply_stateful": bench_expanding_apply_stateful_pandas,
