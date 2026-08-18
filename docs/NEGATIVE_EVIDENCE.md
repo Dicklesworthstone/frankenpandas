@@ -36838,3 +36838,48 @@ correction lives here and on the bead as a comment, because a wrong count that g
 quietly overwritten teaches nobody why it was wrong. **The count was whole-binary and I
 described it as per-symbol** — the same error shape as reading an artifact as identity:
 a real measurement, generalised past what it measured.
+
+### 2026-08-18 CrimsonPine + SlateHeron (br-frankenpandas-3qpj4, br-frankenpandas-oxv4u) — THE SPLIT IS CLOSED: `+sse4.1` ALONE is 4.00x of the 4.334x. The `roundpd` lowering is ~92% of the effect and the wider lanes are ~7%
+
+**JOINT RESULT — two panes, three build arms.** I held default(sse2) and `+avx2`; SlateHeron held
+the `+sse4.1`-only arm (ELF `ded4edcb`) that neither of my binaries could substitute for. Their
+rows, their window; mine as recorded above.
+
+| arm | FP p50 floor @1M | self-speedup vs default |
+|---|---|---|
+| default (sse2) | 555.95 / 569.94 / 564.95 us | — |
+| **`+sse4.1` only** | 152.57 / 141.20 / 135.19 us | **4.00x** |
+| `+avx2` (implies sse4.1) | 131.1 us (my arm) | 4.334x |
+
+**Residual attributable to the wider lanes: 141.2 / 131.1 = 1.077x, about 7%.** So the SSE4.1
+`roundpd` lowering carries ~92% of the gain and AVX2's extra width adds a small increment. **My
+confounded measurement could not have told us this**; the third arm was the only way, and it existed
+already rather than needing a build.
+
+**WHY SELF-SPEEDUP AND NOT THE vs-PANDAS RATIO.** All six of their rows are NULL_UNDECIDABLE on the
+incumbent comparison — CI width at a ~141us arm, not null failures (every FP null inside 2%,
+0.9916-1.0814). And the incumbent itself differed roughly 2x between our two windows: their pandas
+arm ran 175.97-201.79us across all six runs where mine read 364us. **That is exactly the cross-window
+incumbent variation this ledger has been burned by**, and it is why the sound statistic here is FP
+against its own other build, measured in one window, rather than either pane's ratio against pandas.
+SlateHeron banked the self-speedup and explicitly did not present 1.37x as certified. That is the
+right call and I am recording that I agree with it.
+
+**A COUNT CORRECTED, AND THE SHAPE OF THE ERROR IS FAMILIAR.** 3qpj4 states floor carries no rounding
+instruction in any flagged binary. Recounted on the exact ELF the bead cites: **91 rounding
+instructions whole-binary — the bead's figure, confirmed — but 7 inside `Column::floor` alone.** The
+original count was WHOLE-BINARY and written up as PER-SYMBOL. A real measurement generalised past
+what it measured, which is the same shape as several corrections in this ledger today, including two
+of mine.
+
+**WHAT THIS MAKES THE RECOMMENDATION.** Not a blanket `x86-64-v3`. The evidence now supports the
+NARROW flag: `-C target-feature=+sse4.1`, scoped to `[target.x86_64-unknown-linux-gnu]`, buying ~92%
+of the measured effect on floor. Two further findings from SlateHeron bear on it: `x86-64-v3` emits
+**ZERO FMA in any FP kernel** (all four builds carry exactly 2, both inside `compiler_builtins`), so
+the FMA-rounding objection recorded in cu22b is empty; and **rustc warns on `+sse4.1` for
+aarch64-apple-darwin**, so a bare `[build] rustflags` is wrong and the target scoping is load-bearing,
+not cosmetic.
+
+**NEITHER OF US IS MAKING THIS CHANGE.** Both oxv4u and cu22b state the build-policy decision is not
+the agents'. It is escalated to the user as a recommendation with the evidence attached, and it stays
+a recommendation until they answer.
