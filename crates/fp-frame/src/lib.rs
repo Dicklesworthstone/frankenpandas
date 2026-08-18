@@ -49479,41 +49479,67 @@ impl DatetimeAccessor<'_> {
         // accessors have a defined answer for it (missing) rather than needing
         // the Scalar path's fallback.
         if let Some(nanos) = self.series.column().as_timedelta64_slice() {
-            let out: Vec<Scalar> = nanos
+            let raw: Vec<Option<i64>> = nanos
                 .iter()
                 .map(|&n| {
                     if n == fp_types::Timedelta::NAT {
-                        Scalar::Null(NullKind::NaN)
+                        None
                     } else {
-                        Scalar::Float64(component(n) as f64)
+                        Some(component(n))
                     }
                 })
                 .collect();
             let index = self.series.index().clone();
-            let column = Column::from_values(out)?;
+            let column = Column::from_values(Self::promote_components(&raw))?;
             return Series::new(self.series.name(), index, column);
         }
 
-        let vals = self.series.column().values();
-        let mut out = Vec::with_capacity(vals.len());
-        for v in vals {
-            match v {
+        let raw: Vec<Option<i64>> = self
+            .series
+            .column()
+            .values()
+            .iter()
+            .map(|v| match v {
                 Scalar::Timedelta64(nanos) if *nanos != fp_types::Timedelta::NAT => {
-                    out.push(Scalar::Float64(component(*nanos) as f64));
+                    Some(component(*nanos))
                 }
                 Scalar::Utf8(text) => match fp_types::Timedelta::parse(text) {
-                    Ok(nanos) if nanos != fp_types::Timedelta::NAT => {
-                        out.push(Scalar::Float64(component(nanos) as f64));
-                    }
-                    _ => out.push(Scalar::Null(NullKind::NaN)),
+                    Ok(nanos) if nanos != fp_types::Timedelta::NAT => Some(component(nanos)),
+                    _ => None,
                 },
-                _ => out.push(Scalar::Null(NullKind::NaN)),
-            }
-        }
+                _ => None,
+            })
+            .collect();
 
         let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
+        let column = Column::from_values(Self::promote_components(&raw))?;
         Series::new(self.series.name(), index, column)
+    }
+
+    /// Render component values under pandas' int64 -> float64 promotion rule.
+    ///
+    /// ⚠️ THE DTYPE IS NOT A FIXED CHOICE. MEASURED, pandas 2.2.3:
+    /// ```text
+    ///   pd.to_timedelta([1, -1],       unit='s').dt.days -> int64   [0, -1]
+    ///   pd.to_timedelta([1, None, -1], unit='s').dt.days -> float64 [0.0, nan, -1.0]
+    /// ```
+    /// pandas promotes ONLY when a missing value forces it, because numpy int64
+    /// cannot hold NA — the same rule measured across seven producers for the
+    /// br-frankenpandas-09ygw / b8n0q cluster. An earlier version of these
+    /// accessors emitted Float64 unconditionally, handing a clean column the
+    /// promoted dtype pandas reserves for the NaT case.
+    ///
+    /// (pandas gives `.dt.seconds` int32 and `.dt.days` int64; FrankenPandas has no
+    /// Int32, so Int64 is the nearest representable — a separate, known gap.)
+    fn promote_components(raw: &[Option<i64>]) -> Vec<Scalar> {
+        let any_missing = raw.iter().any(Option::is_none);
+        raw.iter()
+            .map(|slot| match slot {
+                Some(v) if any_missing => Scalar::Float64(*v as f64),
+                Some(v) => Scalar::Int64(*v),
+                None => Scalar::Null(NullKind::NaN),
+            })
+            .collect()
     }
 
     /// Whole days of each Timedelta. Matches `pd.Series.dt.days`.
