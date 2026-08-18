@@ -37533,3 +37533,37 @@ fired on me rather than on the corpus.
 
 Neither number is comparable to the 8.787x/7.509x banked on `60ed3c58fdd5`: different instrument,
 same rule I have applied to everyone else's rows including my own retractions.
+
+**A FAILURE FAMILY WORTH NAMING: CHECKS THAT REPORT ON SOMETHING THEY NEVER EXAMINED.** Two findings
+from opposite ends of this project turn out to be the same shape, and naming it is cheaper than
+rediscovering it a third time.
+
+* **My six orphaned rows** (3 uncommitted harness shas) carry a plausible 64-hex
+  `harness_source.sha256`, real timings, a real host fingerprint, and pass preflight, all three
+  median-CI clauses and both A/A nulls. They are "reproducible" against nothing.
+* **The other pane's 15-of-67 error packets** bottom out in the conformance ADAPTER's own validation,
+  so pandas is never invoked. They are "verified" against nothing.
+
+In both cases the artifact looks complete and the gate looks green. **In both cases the tell was
+only visible from OUTSIDE the artifact** — I had to ask whether git contained the sha; they had to
+ask whether pandas was ever called. No amount of reading the row, or the packet, could have shown it.
+
+**THE SHARPEST INSTANCE IS THEIRS.** Four of those packets pin "unsupported constructor dtype" for
+`object`, `datetime64[ns]`, `uint64` and `boolean[pyarrow]` — and live pandas 2.2.3 constructs all
+four. The fixture, the oracle and the Rust harness all encode the same restriction, and **none of
+them asked pandas**. Three independent-LOOKING sources agreeing because they inherited one
+assumption. Those packets are not unverified; they are **verified against a shared error**, which is
+strictly worse because the agreement reads as corroboration.
+
+**AND A GENERALISABLE RULE THEY EXTRACTED, WHICH COVERS THREE OF MY OWN FAILURES TODAY.** They first
+reported "58 of 67 error packets fail" by reading the oracle's EXIT CODE — which exits 1 whenever the
+operation errored, the correct outcome for an error-expectation packet. Their rule:
+**classify by `error_origin`, never by exit status.** The same mistake in my session:
+
+    "Finished in 0.13s"  proved nothing; the ELF sha proved the bytes were stale
+    a test exit code read through a pipe returned the exit of `tail`, not of cargo
+    an rch refusal exits NON-ZERO and prints NO test output — indistinguishable from
+      a clean run if you only check for the absence of failures
+
+Every one is the status channel answering a different question than the one asked. **Classify by the
+field that encodes the semantics, not by the one that encodes "did the process end badly".**
