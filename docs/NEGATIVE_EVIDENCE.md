@@ -37158,3 +37158,37 @@ cost is whole-file sha identity, which the fleet evidence says is the right cons
 mitigation is not to loosen the identity but to BATCH harness edits**: each separate landing costs a
 full re-lock pass in a clean window, several lanes in one commit cost exactly one. Raised with the
 other pane rather than worked around.
+
+**⚠️ A SINGLE BATCH STRADDLED A HARNESS EDIT, AND THE ROWS IN IT CARRY DIFFERENT INSTRUMENTS.**
+Checking what my three re-lock rows actually RECORD, rather than assuming they share the harness the
+batch started with:
+
+    relock_df_transpose_materialize_100k   harness=60ed3c58fdd5   <- COMMITTED (== 13c0caf1f)
+    relock_df_transpose_materialize_10k    harness=a67f720ac1f8   <- dirty working tree
+    relock_loc_labels_1M                   harness=a67f720ac1f8   <- dirty working tree
+
+A peer's uncommitted lane landed in the working tree **between my first row and my later two**. One
+batch, one command, three rows, two instruments. Every prior instrument-crossing this ledger has
+caught was BETWEEN sessions or BETWEEN commands; this one is inside a single invocation loop, and
+nothing about the batch's output would have shown it. **The discipline is not "check the harness sha
+when comparing two rows" — it is "read it on every row", because a batch is not a guarantee of a
+shared instrument.**
+
+**My withholding was right, but my stated reason was imprecise.** I said "rows measured now carry a
+sha that may never enter history". Sharper: the two CERTIFIED rows carry `a67f720ac1f8`, which is a
+working-tree state; the row that FAILED is the one on the committed sha. So the arithmetic of the
+situation is the reverse of convenient — the rows I wanted are the unreproducible ones.
+
+**AND THERE IS A CONCRETE, TIME-LIMITED CONSEQUENCE WORTH ACTING ON.** `a67f720ac1f8` is not
+inherently unreproducible — it becomes reproducible the moment that working tree is committed
+UNCHANGED. So:
+
+* if the other pane commits its current tree byte-for-byte, `df_transpose_materialize @10k` 92.649x
+  and `loc_labels @1M` 15.172x become bankable immediately, with no re-measurement;
+* if they amend the lane before committing, both rows are dead and I re-measure.
+
+That is a fact worth telling them rather than discovering afterwards, and I have. **It also means
+"measure only against committed state" is the rule, not "measure only in a clean window"** — the
+window was pristine for all three rows (load 6.67-11.03, arms clock-matched throughout). Window
+quality and instrument identity are independent failure modes, and this batch had a perfect one and
+a broken other.
