@@ -1382,9 +1382,11 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
 /// coerce float values to integers"), but the temporal dtypes silently truncate.
 /// MEASURED side by side, live pandas 2.2.3, on the single value `1.5`:
 ///
-///     pd.DataFrame([[1.5]], dtype="int64")           -> ValueError
-///     pd.DataFrame([[1.5]], dtype="datetime64[ns]")  -> 1ns
-///     pd.DataFrame([[1.5]], dtype="timedelta64[ns]") -> 1ns
+/// ```text
+/// pd.DataFrame([[1.5]], dtype="int64")           -> ValueError
+/// pd.DataFrame([[1.5]], dtype="datetime64[ns]")  -> 1ns
+/// pd.DataFrame([[1.5]], dtype="timedelta64[ns]") -> 1ns
+/// ```
 ///
 /// TRUNCATION IS TOWARD ZERO, NOT FLOOR. Measured on both signs, where the two
 /// disagree: 0.9 -> 0 and -0.9 -> 0; 1.5 -> 1 and -1.5 -> -1; -2.5 -> -2 (a
@@ -2665,10 +2667,12 @@ pub struct Timestamp {
 /// and — unlike [`DatetimeStringResolution`] — THE SUB-SECOND WIDTH IS PER
 /// VALUE, not per column. MEASURED, live pandas 2.2.3:
 ///
-///     [1 days, 2 days]              -> ['1 days', '2 days']
-///     [1 days, 5 ms]                -> ['1 days 00:00:00', '0 days 00:00:00.005000']
-///     [1 days 02:03:04.005, 1 ns]   -> ['1 days 02:03:04.005000',
-///                                       '0 days 00:00:00.000000001']
+/// ```text
+/// [1 days, 2 days]              -> ['1 days', '2 days']
+/// [1 days, 5 ms]                -> ['1 days 00:00:00', '0 days 00:00:00.005000']
+/// [1 days 02:03:04.005, 1 ns]   -> ['1 days 02:03:04.005000',
+///                                   '0 days 00:00:00.000000001']
+/// ```
 ///
 /// That last row is the whole distinction: a millisecond value keeps its SIX
 /// digits while its neighbour prints NINE. On the datetime side the same pair
@@ -2691,10 +2695,12 @@ pub enum TimedeltaStringResolution {
 /// formatter. MEASURED, live pandas 2.2.3 — the SAME midnight timestamp renders
 /// three different ways depending only on what it shares a column with:
 ///
-///     Series([midnight, midnight]).astype(str)   -> '2024-03-15'
-///     Series([midnight, one_nanosecond]).astype(str)
-///                                                -> '2024-03-15 00:00:00.000000000'
-///     str(Timestamp(midnight))                   -> '2024-03-15 00:00:00'
+/// ```text
+/// Series([midnight, midnight]).astype(str)   -> '2024-03-15'
+/// Series([midnight, one_nanosecond]).astype(str)
+///                                            -> '2024-03-15 00:00:00.000000000'
+/// str(Timestamp(midnight))                   -> '2024-03-15 00:00:00'
+/// ```
 ///
 /// pandas picks the coarsest rung that is lossless for EVERY element and
 /// imposes it on all of them. The `Ord` derive is the fold: scan the column
@@ -3753,12 +3759,14 @@ impl Timestamp {
     /// a SPACE separator, and a width imposed on every element alike. MEASURED,
     /// live pandas 2.2.3, one column per rung:
     ///
-    ///     all midnight       -> '2024-03-15'
-    ///     all whole seconds  -> '2024-03-15 10:30:45'
-    ///     all whole millis   -> '2024-03-15 10:30:45.123'
-    ///     all whole micros   -> '2024-03-15 10:30:45.123456'
-    ///     anything finer     -> '2024-03-15 10:30:45.123456789'
-    ///     NaT                -> 'NaT'          (a STRING, not a missing value)
+    /// ```text
+    /// all midnight       -> '2024-03-15'
+    /// all whole seconds  -> '2024-03-15 10:30:45'
+    /// all whole millis   -> '2024-03-15 10:30:45.123'
+    /// all whole micros   -> '2024-03-15 10:30:45.123456'
+    /// anything finer     -> '2024-03-15 10:30:45.123456789'
+    /// NaT                -> 'NaT'          (a STRING, not a missing value)
+    /// ```
     ///
     /// There is NO minute rung: a column of whole minutes still renders its
     /// seconds (`'2024-01-01 00:05:00'`).
@@ -7040,6 +7048,37 @@ mod tests {
                         matches!(cast, Scalar::Utf8(_)),
                         "cast(missing {dt:?} -> Utf8) yields a string, got {cast:?}"
                     );
+                } else if matches!(dt, DType::Timedelta64 | DType::Datetime64)
+                    && matches!(target, DType::Bool | DType::Int64)
+                {
+                    // ⚠️ TWO MORE PLACES pandas BREAKS this invariant, and both
+                    // are the same underlying fact: NaT is not a separate
+                    // representation, it IS i64::MIN, and the numpy casts read
+                    // the bits. MEASURED, live pandas 2.2.3:
+                    //
+                    //   pd.Series([pd.NaT], dtype='datetime64[ns]').astype('int64')
+                    //     -> -9223372036854775808      the SENTINEL, not a missing
+                    //   pd.Series([pd.NaT], dtype='timedelta64[ns]').astype('bool')
+                    //     -> True                      nonzero, so truthy
+                    //
+                    // Same shape as the Utf8 carve-out above: the invariant is
+                    // FrankenPandas' own, and pandas does not honour it wherever
+                    // a cast is defined to reinterpret rather than to convert.
+                    // Narrowly scoped on purpose — every other missing, and these
+                    // two toward every other target, still stay missing.
+                    match target {
+                        DType::Bool => assert_eq!(
+                            cast,
+                            Scalar::Bool(true),
+                            "cast(missing {dt:?} -> Bool) is pandas' nonzero-truthy \
+                             read of the NaT bits"
+                        ),
+                        _ => assert_eq!(
+                            cast,
+                            Scalar::Int64(i64::MIN),
+                            "cast(missing {dt:?} -> Int64) is the NaT sentinel itself"
+                        ),
+                    }
                 } else {
                     // Every other target preserves missingness via cast_scalar's
                     // value.is_missing() -> missing_for_dtype(target) branch.
