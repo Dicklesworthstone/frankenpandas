@@ -1,0 +1,1744 @@
+{
+  "schema_version": "v4",
+  "timestamp": "2026-08-18T05:08:14.591448+00:00",
+  "invocation_id": "vs-pandas-20260818T050814.591466Z-pid2231888",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.2",
+      "profile": "release-perf",
+      "role": "Subject",
+      "build_worker": null
+    },
+    "frankenpandas_reference": null,
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle",
+      "executable": {
+        "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+        "bytes": 6894448,
+        "path": "/usr/bin/python3.13"
+      },
+      "artifact": {
+        "sha256": "c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f",
+        "bytes": 70681559,
+        "files": 2922,
+        "path": "/home/ubuntu/.local/lib/python3.13/site-packages/pandas/__init__.py",
+        "scheme": "importlib-metadata-content-tree-v1"
+      },
+      "optional_backends": {
+        "pyarrow": {
+          "version": "24.0.0",
+          "artifact": {
+            "sha256": "cc070ad58b3c3e9e5e2a79b07883ddc705a74d11e30883688ee78425a33f3114",
+            "bytes": 157863360,
+            "files": 861,
+            "path": "/home/ubuntu/.local/lib/python3.13/site-packages/pyarrow/__init__.py",
+            "scheme": "importlib-metadata-content-tree-v1"
+          }
+        }
+      }
+    }
+  },
+  "harness_source": {
+    "sha256": "60ed3c58fdd5139af719230c696597079cd3cb70892d556fc456e30ca27b7ffe",
+    "bytes": 245491,
+    "path": "/data/projects/frankenpandas/benches/vs_pandas_harness.py"
+  },
+  "host_fingerprint": {
+    "host_identity": "thinkstation1",
+    "platform_node": "thinkstation1",
+    "architecture": "x86_64",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "physical_cores": 32,
+    "logical_threads": 64,
+    "threads_per_core": 2,
+    "ram_bytes": 231692279808,
+    "numa_nodes": 1,
+    "kernel": "6.17.0-41-generic",
+    "git_sha": "b1001d7b6206cd8361fbecccf65e15ed39de8515",
+    "cpu_governors": [
+      "powersave"
+    ],
+    "smt_active": "1",
+    "frequency_boost": "1",
+    "affinity_cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63
+    ],
+    "affinity_logical_cpu_cap": 64,
+    "runtime_detected_isa_features": [
+      "sse2",
+      "avx",
+      "avx2",
+      "fma",
+      "bmi1",
+      "bmi2",
+      "aes",
+      "vaes"
+    ],
+    "runtime_absent_isa_features": [
+      "avx512f"
+    ]
+  },
+  "host_wide_exclusivity": {
+    "required": false,
+    "replacement": "balanced-square-abbaabba-v1",
+    "valid": true
+  },
+  "parameters": {
+    "sizes": [
+      "1M"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "math_unary"
+    ],
+    "paired_rounds": 25,
+    "measurement_mode": "balanced-square",
+    "balanced_square": {
+      "order": "ABBAABBA",
+      "rounds": 9,
+      "same_invocation_incumbent": true,
+      "paired_effect_ci": "bootstrap median of per-round pandas/FP ratios",
+      "outer_aa_null": "first two versus final two placements per arm"
+    },
+    "warmup_iterations": 3,
+    "bootstrap_resamples": 10000,
+    "null_ci_confidence": 0.95,
+    "decidability_margin": 2.0,
+    "gate": "corrected_three_clause_median_bootstrap_ci",
+    "null_median_maximum_absolute_deviation": 0.02,
+    "cv_role": "provenance_only",
+    "frankenpandas_binary_requested": "/data/projects/.scratch/crimsonpine/fp-bench-AVX2-fc793a3b7",
+    "frankenpandas_reference_binary_requested": null,
+    "whole_binary_order_policy": null,
+    "host_wide_exclusivity_contract": {
+      "required": false,
+      "scope": "all_online_host_cpus",
+      "maximum_busy_fraction": 0.2,
+      "sample_interval_ms": 1000,
+      "post_setup_settle_ms": 1000,
+      "post_provenance_hash_settle_ms": 5000,
+      "readiness_wait_maximum_attempts": 20,
+      "readiness_wait_retry_ms": 500,
+      "checks": "replaced by paired ABBAABBA slots on the shared host; foreign load is paired instead of used as admission"
+    },
+    "pandas_string_backend_policy": {
+      "unsuffixed_workloads": "object",
+      "explicit_workload_suffixes": {
+        "_object": "object",
+        "_arrow": "string[pyarrow]"
+      }
+    },
+    "workload_allocator_policy": {
+      "astype_str_f64_telemetry_batches": {
+        "frankenpandas_mimalloc_purge_delay_ms": 0
+      }
+    },
+    "shared_invocation_id": "vs-pandas-20260818T050814.591466Z-pid2231888",
+    "thread_provenance_contract": {
+      "thread_count_requested": null,
+      "expected_hostname": null,
+      "expected_physical_cores": null,
+      "expected_logical_threads": null,
+      "affinity_or_cpuset_cap": {
+        "logical_cpu_count": 64,
+        "cpu_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63
+        ]
+      }
+    }
+  },
+  "results": [
+    {
+      "workload": "floor",
+      "category": "math_unary",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 139.71,
+        "p95_us": 175.8,
+        "p99_us": 179.18,
+        "mean_us": 146.54,
+        "stddev_us": 14.12,
+        "cv_pct": 9.64,
+        "throughput_rows_sec": 7157530080,
+        "checksum": "8630d5994e01253e0e4dc55237af192d07c15fdeaeca648a0d2ce1b488d974e8",
+        "thread_count_actually_used": 1,
+        "runtime_available_parallelism": 64,
+        "process_threads_before_probe": 1,
+        "peak_process_threads": 2,
+        "runtime_detected_isa_features": [
+          "scalar",
+          "sse2",
+          "avx2",
+          "fma",
+          "bmi2",
+          "vaes"
+        ],
+        "samples_us": [
+          143.553,
+          139.97700000000003,
+          145.89749999999998,
+          142.2905,
+          139.77100000000002,
+          134.075,
+          133.439,
+          159.81900000000002,
+          134.7465,
+          136.10899999999998,
+          139.17950000000002,
+          139.0695,
+          132.6225,
+          140.467,
+          167.62849999999997,
+          168.776,
+          141.3085,
+          168.9965,
+          139.4455,
+          145.8325,
+          131.81099999999998,
+          136.13899999999998,
+          163.40550000000002,
+          166.572,
+          139.7405,
+          139.6855,
+          131.10399999999998,
+          133.1735,
+          135.798,
+          139.39499999999998,
+          135.638,
+          137.2065,
+          137.49200000000002,
+          139.961,
+          177.713,
+          138.2585,
+          138.178,
+          137.942,
+          176.26,
+          139.741,
+          138.4135,
+          138.1175,
+          168.45600000000002,
+          139.4405,
+          136.5345,
+          159.363,
+          143.24249999999998,
+          137.647,
+          138.6285,
+          140.227,
+          167.939,
+          181.23499999999999,
+          138.834,
+          137.887,
+          174.43200000000002,
+          140.73250000000002,
+          143.122,
+          168.4805,
+          138.86399999999998,
+          139.5855,
+          154.128,
+          138.8495,
+          150.902,
+          167.619,
+          137.672,
+          139.51,
+          137.2665,
+          139.42000000000002,
+          138.20799999999997,
+          134.75650000000002,
+          165.921,
+          169.437,
+          137.18599999999998,
+          166.066,
+          137.862,
+          138.058,
+          135.027,
+          165.495,
+          178.9655,
+          136.239,
+          141.835,
+          141.224,
+          166.622,
+          164.71300000000002,
+          131.76600000000002,
+          141.444,
+          138.168,
+          139.33550000000002,
+          170.59949999999998,
+          136.4995,
+          142.86650000000003,
+          168.701,
+          140.3625,
+          136.31900000000002,
+          150.0455,
+          177.0215,
+          150.61149999999998,
+          179.26100000000002,
+          140.76800000000003,
+          140.22699999999998,
+          139.4,
+          139.6055,
+          132.05599999999998,
+          133.62400000000002,
+          139.81599999999997,
+          139.64499999999998,
+          137.06099999999998,
+          164.107,
+          131.6405,
+          174.94299999999998,
+          132.18649999999997,
+          136.99,
+          137.447,
+          139.1495,
+          137.63150000000002,
+          139.946,
+          139.9665,
+          142.75150000000002,
+          135.002,
+          168.43,
+          169.057,
+          135.9135,
+          164.2175,
+          140.563,
+          142.937,
+          138.5635,
+          178.4545,
+          139.4305
+        ],
+        "executable": {
+          "sha256": "162f821c9c094a16ee97a9f29aa7986f89753b0012208452e8f5b37659f7d2f4",
+          "bytes": 82851952,
+          "path": "/data/projects/.scratch/crimsonpine/fp-bench-AVX2-fc793a3b7"
+        },
+        "null_control": {
+          "rounds": 32,
+          "arm_a_times_us": [
+            141.76500000000001,
+            136.923,
+            135.42775,
+            136.54475000000002,
+            155.1525,
+            133.97499999999997,
+            139.713,
+            137.5965,
+            138.72650000000002,
+            138.06,
+            138.2655,
+            147.94875000000002,
+            139.42775,
+            138.3605,
+            155.80125,
+            146.48874999999998,
+            138.591,
+            136.48225,
+            151.62599999999998,
+            150.261,
+            141.52949999999998,
+            136.60500000000002,
+            153.5495,
+            138.34075,
+            164.93625,
+            139.50275,
+            139.73049999999998,
+            153.29174999999998,
+            138.29825,
+            141.359,
+            152.48525,
+            140.75025
+          ],
+          "arm_b_times_us": [
+            144.094,
+            146.62900000000002,
+            139.1245,
+            168.20225,
+            142.639,
+            164.98875,
+            132.13875,
+            136.42225000000002,
+            157.98575,
+            158.0005,
+            153.94825,
+            140.44475,
+            174.587,
+            157.58225000000002,
+            139.22474999999997,
+            159.26049999999998,
+            138.34325,
+            167.679,
+            137.95999999999998,
+            157.60225,
+            165.66750000000002,
+            138.75175000000002,
+            155.78375,
+            163.5335,
+            140.4975,
+            132.84,
+            150.584,
+            134.58825,
+            138.78875,
+            151.716,
+            152.39024999999998,
+            158.9425
+          ],
+          "ratios": [
+            0.9838369397754245,
+            0.9338057273799861,
+            0.9734284759334265,
+            0.8117890812994477,
+            1.0877284613604974,
+            0.8120250623148545,
+            1.0573204302295882,
+            1.0086074668904814,
+            0.8780950180633381,
+            0.8737947031813191,
+            0.8981297286588188,
+            1.053430263502196,
+            0.7986147307646045,
+            0.8780208430835325,
+            1.1190628821384132,
+            0.9198059154655424,
+            1.001790835476252,
+            0.8139495703099374,
+            1.0990576978834445,
+            0.9534191294857782,
+            0.8542985196251526,
+            0.9845281230687181,
+            0.9856580034823914,
+            0.8459474664212532,
+            1.1739443762344526,
+            1.0501562029509184,
+            0.9279239494235774,
+            1.13896829775259,
+            0.9964658518792049,
+            0.9317342930211712,
+            1.0006233994628924,
+            0.8855419412680686
+          ],
+          "median_ratio": 0.963424,
+          "median_ci_95": [
+            0.902674,
+            0.998545
+          ],
+          "log_half_width": 0.10239389,
+          "two_x_decidable_interval": [
+            0.81482,
+            1.227265
+          ]
+        },
+        "iterations": 128,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 193.68,
+        "p95_us": 256.24,
+        "p99_us": 308.64,
+        "mean_us": 203.78,
+        "stddev_us": 29.73,
+        "cv_pct": 14.59,
+        "throughput_rows_sec": 5163062419,
+        "checksum": "c4b12fd0d081f860ec14f664b11da1cd992a36e93544f2e9d4307dda9e107348",
+        "thread_count_actually_used": 1,
+        "runtime_available_parallelism": 64,
+        "process_threads_before_probe": 66,
+        "peak_process_threads": 67,
+        "runtime_detected_isa_features": [
+          "sse2",
+          "avx",
+          "avx2",
+          "fma",
+          "bmi1",
+          "bmi2",
+          "aes",
+          "vaes"
+        ],
+        "samples_us": [
+          286.28499999999997,
+          221.7465,
+          257.47450000000003,
+          244.525,
+          210.5555,
+          175.0725,
+          173.57,
+          175.91449999999998,
+          228.45999999999998,
+          207.0695,
+          175.599,
+          218.741,
+          236.014,
+          179.462,
+          184.2855,
+          188.904,
+          192.5565,
+          181.6455,
+          180.01799999999997,
+          188.48899999999998,
+          166.1565,
+          178.8505,
+          173.7655,
+          177.5775,
+          182.8625,
+          182.3625,
+          183.71949999999998,
+          195.8675,
+          195.5315,
+          195.2765,
+          184.2955,
+          181.4205,
+          237.702,
+          232.6925,
+          180.288,
+          196.9495,
+          176.4705,
+          206.56799999999998,
+          198.5075,
+          190.958,
+          227.26749999999998,
+          193.57350000000002,
+          217.278,
+          209.98950000000002,
+          186.83550000000002,
+          215.315,
+          215.901,
+          195.5475,
+          230.298,
+          179.591,
+          221.96300000000002,
+          178.5145,
+          186.7055,
+          240.512,
+          184.075,
+          194.17450000000002,
+          233.6045,
+          182.6825,
+          219.428,
+          220.284,
+          180.70350000000002,
+          218.6515,
+          179.44150000000002,
+          178.825,
+          231.2305,
+          180.20800000000003,
+          261.6325,
+          184.92149999999998,
+          177.30700000000002,
+          184.451,
+          213.316,
+          227.643,
+          190.778,
+          211.472,
+          210.846,
+          216.24099999999999,
+          227.1365,
+          180.478,
+          194.8865,
+          192.4865,
+          217.4985,
+          182.938,
+          178.4545,
+          214.7735,
+          180.2825,
+          186.91,
+          253.94299999999998,
+          301.5435,
+          311.2715,
+          182.77300000000002,
+          186.72500000000002,
+          184.32049999999998,
+          345.307,
+          182.71249999999998,
+          215.5655,
+          217.5235,
+          260.215,
+          181.07,
+          181.7955,
+          220.94549999999998,
+          211.337,
+          231.80599999999998,
+          184.6865,
+          217.9945,
+          180.2525,
+          192.762,
+          248.087,
+          177.9635,
+          221.30599999999998,
+          176.2755,
+          173.2495,
+          186.9305,
+          225.65949999999998,
+          204.82,
+          193.7935,
+          192.5915,
+          194.70049999999998,
+          227.0865,
+          205.6215,
+          185.2725,
+          183.715,
+          177.7875,
+          180.623,
+          213.98149999999998,
+          178.535,
+          182.036,
+          209.5035,
+          238.4735
+        ],
+        "executable": {
+          "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+          "bytes": 6894448,
+          "path": "/usr/bin/python3.13"
+        },
+        "null_control": {
+          "rounds": 32,
+          "arm_a_times_us": [
+            254.01574999999997,
+            192.814,
+            217.76475,
+            207.738,
+            187.101,
+            172.5035,
+            182.6125,
+            195.404,
+            235.19725,
+            191.51925,
+            210.4205,
+            201.07525,
+            204.9445,
+            213.60875,
+            208.14350000000002,
+            199.6775,
+            205.71925000000002,
+            180.87900000000002,
+            201.125,
+            203.80725,
+            200.21825,
+            183.59625,
+            247.02225,
+            264.00975,
+            220.64249999999998,
+            221.5715,
+            186.50725,
+            198.79075,
+            215.23975,
+            210.8935,
+            180.75125,
+            180.2855
+          ],
+          "arm_b_times_us": [
+            250.99975,
+            174.74224999999998,
+            197.17000000000002,
+            186.59475,
+            184.25349999999997,
+            175.67149999999998,
+            189.7935,
+            182.858,
+            188.61875,
+            194.73275,
+            213.63375000000002,
+            205.72425,
+            200.23875,
+            189.12475,
+            219.856,
+            179.13325,
+            223.277,
+            220.4795,
+            213.5435,
+            193.68650000000002,
+            196.614,
+            277.74325,
+            185.52275,
+            216.5445,
+            201.3705,
+            201.3405,
+            213.02525,
+            180.09,
+            193.1925,
+            195.447,
+            197.30225,
+            223.9885
+          ],
+          "ratios": [
+            1.012015948223056,
+            1.1034194649548121,
+            1.1044517421514428,
+            1.113311065825807,
+            1.0154542518866672,
+            0.9819663405845571,
+            0.9621641415538468,
+            1.068610615887738,
+            1.246945226813347,
+            0.9834978964760678,
+            0.9849590713077871,
+            0.9774017890452875,
+            1.0235006960440973,
+            1.1294595234098128,
+            0.9467264937049706,
+            1.114686971849168,
+            0.9213633737465123,
+            0.8203891971815974,
+            0.9418455724477682,
+            1.052253254615061,
+            1.0183316040566797,
+            0.6610286658631668,
+            1.3314930379158352,
+            1.2191939762958652,
+            1.0957041870581838,
+            1.1004815225948084,
+            0.8755171041930475,
+            1.1038411349880615,
+            1.1141206309768754,
+            1.0790316556406596,
+            0.9161134756446012,
+            0.8048873044821498
+          ],
+          "median_ratio": 1.020916,
+          "median_ci_95": [
+            0.981966,
+            1.099562
+          ],
+          "log_half_width": 0.09491176,
+          "two_x_decidable_interval": [
+            0.827105,
+            1.209036
+          ]
+        },
+        "iterations": 128,
+        "valid": true
+      },
+      "ratio": 1.384,
+      "median_ci_gate": {
+        "decidable": false,
+        "effect_median_ratio_ci_95": [
+          1.31890426,
+          1.45377607
+        ],
+        "clauses": {
+          "effect_ci_excludes_unity": true,
+          "effect_exceeds_two_x_null_margin": true,
+          "null_medians_within_2pct_unity": false
+        },
+        "null_median_unity": {
+          "maximum_absolute_deviation": 0.02,
+          "frankenpandas": 0.9634238,
+          "frankenpandas_within_limit": false,
+          "pandas": 1.02091615,
+          "pandas_within_limit": false
+        },
+        "claim_log_effect": 0.32527335,
+        "required_log_effect": 0.20478778,
+        "margin_multiplier": 2.0,
+        "combined_two_x_null_interval": [
+          0.81482,
+          1.227265
+        ],
+        "effect_ci_method": "paired-bootstrap-median-of-round-ratios",
+        "cv_is_provenance_only": true
+      },
+      "verdict": "NULL_UNDECIDABLE",
+      "dispersion_warning": false,
+      "best_vs_best": {
+        "frankenpandas_min_us": 131.104,
+        "pandas_min_us": 166.1565,
+        "ratio": 1.2674,
+        "definition": "pandas_min_us / frankenpandas_min_us, over every timed sample in this invocation",
+        "gate_input": false,
+        "median_ratio": 1.384,
+        "direction_agrees_with_median": true
+      },
+      "balanced_square": {
+        "design": "balanced-square-abbaabba-v1",
+        "incumbent_arm": "A=pandas",
+        "subject_arm": "B=frankenpandas",
+        "rounds": 32,
+        "slots_per_arm_per_round": 4,
+        "round_ratio_pandas_over_frankenpandas": [
+          1.7562040067379527,
+          1.2816948211768657,
+          1.5473974165859616,
+          1.2112786457445823,
+          1.2890339589261024,
+          1.172924223279012,
+          1.3434850966982947,
+          1.3903507085048048,
+          1.5442555248643604,
+          1.401363346874449,
+          1.5377410438575656,
+          1.4627193255710875,
+          1.303044463049136,
+          1.3623949936777116,
+          1.5553602221377218,
+          1.1806871455266696,
+          1.5018549795735712,
+          1.3078890865389359,
+          1.5305813279211367,
+          1.2838228373335454,
+          1.2973873585865836,
+          1.5886394225658411,
+          1.190899243342133,
+          1.4913122228037794,
+          1.3821871476888388,
+          1.572504614978903,
+          1.3347640636797264,
+          1.3493228420757386,
+          1.4401765294583082,
+          1.415976343918675,
+          1.1954111237431528,
+          1.3866308976776718
+        ],
+        "rounds_detail": [
+          {
+            "round": 0,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              286.28499999999997,
+              221.7465,
+              257.47450000000003,
+              244.525
+            ],
+            "frankenpandas_slot_p50_us": [
+              143.553,
+              139.97700000000003,
+              145.89749999999998,
+              142.2905
+            ],
+            "ratio_pandas_over_frankenpandas": 1.7562040067379527
+          },
+          {
+            "round": 1,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              210.5555,
+              175.0725,
+              173.57,
+              175.91449999999998
+            ],
+            "frankenpandas_slot_p50_us": [
+              139.77100000000002,
+              134.075,
+              133.439,
+              159.81900000000002
+            ],
+            "ratio_pandas_over_frankenpandas": 1.2816948211768657
+          },
+          {
+            "round": 2,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              228.45999999999998,
+              207.0695,
+              175.599,
+              218.741
+            ],
+            "frankenpandas_slot_p50_us": [
+              134.7465,
+              136.10899999999998,
+              139.17950000000002,
+              139.0695
+            ],
+            "ratio_pandas_over_frankenpandas": 1.5473974165859616
+          },
+          {
+            "round": 3,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              236.014,
+              179.462,
+              184.2855,
+              188.904
+            ],
+            "frankenpandas_slot_p50_us": [
+              132.6225,
+              140.467,
+              167.62849999999997,
+              168.776
+            ],
+            "ratio_pandas_over_frankenpandas": 1.2112786457445823
+          },
+          {
+            "round": 4,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              192.5565,
+              181.6455,
+              180.01799999999997,
+              188.48899999999998
+            ],
+            "frankenpandas_slot_p50_us": [
+              141.3085,
+              168.9965,
+              139.4455,
+              145.8325
+            ],
+            "ratio_pandas_over_frankenpandas": 1.2890339589261024
+          },
+          {
+            "round": 5,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              166.1565,
+              178.8505,
+              173.7655,
+              177.5775
+            ],
+            "frankenpandas_slot_p50_us": [
+              131.81099999999998,
+              136.13899999999998,
+              163.40550000000002,
+              166.572
+            ],
+            "ratio_pandas_over_frankenpandas": 1.172924223279012
+          },
+          {
+            "round": 6,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              182.8625,
+              182.3625,
+              183.71949999999998,
+              195.8675
+            ],
+            "frankenpandas_slot_p50_us": [
+              139.7405,
+              139.6855,
+              131.10399999999998,
+              133.1735
+            ],
+            "ratio_pandas_over_frankenpandas": 1.3434850966982947
+          },
+          {
+            "round": 7,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              195.5315,
+              195.2765,
+              184.2955,
+              181.4205
+            ],
+            "frankenpandas_slot_p50_us": [
+              135.798,
+              139.39499999999998,
+              135.638,
+              137.2065
+            ],
+            "ratio_pandas_over_frankenpandas": 1.3903507085048048
+          },
+          {
+            "round": 8,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              237.702,
+              232.6925,
+              180.288,
+              196.9495
+            ],
+            "frankenpandas_slot_p50_us": [
+              137.49200000000002,
+              139.961,
+              177.713,
+              138.2585
+            ],
+            "ratio_pandas_over_frankenpandas": 1.5442555248643604
+          },
+          {
+            "round": 9,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              176.4705,
+              206.56799999999998,
+              198.5075,
+              190.958
+            ],
+            "frankenpandas_slot_p50_us": [
+              138.178,
+              137.942,
+              176.26,
+              139.741
+            ],
+            "ratio_pandas_over_frankenpandas": 1.401363346874449
+          },
+          {
+            "round": 10,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              227.26749999999998,
+              193.57350000000002,
+              217.278,
+              209.98950000000002
+            ],
+            "frankenpandas_slot_p50_us": [
+              138.4135,
+              138.1175,
+              168.45600000000002,
+              139.4405
+            ],
+            "ratio_pandas_over_frankenpandas": 1.5377410438575656
+          },
+          {
+            "round": 11,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              186.83550000000002,
+              215.315,
+              215.901,
+              195.5475
+            ],
+            "frankenpandas_slot_p50_us": [
+              136.5345,
+              159.363,
+              143.24249999999998,
+              137.647
+            ],
+            "ratio_pandas_over_frankenpandas": 1.4627193255710875
+          },
+          {
+            "round": 12,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              230.298,
+              179.591,
+              221.96300000000002,
+              178.5145
+            ],
+            "frankenpandas_slot_p50_us": [
+              138.6285,
+              140.227,
+              167.939,
+              181.23499999999999
+            ],
+            "ratio_pandas_over_frankenpandas": 1.303044463049136
+          },
+          {
+            "round": 13,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              186.7055,
+              240.512,
+              184.075,
+              194.17450000000002
+            ],
+            "frankenpandas_slot_p50_us": [
+              138.834,
+              137.887,
+              174.43200000000002,
+              140.73250000000002
+            ],
+            "ratio_pandas_over_frankenpandas": 1.3623949936777116
+          },
+          {
+            "round": 14,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              233.6045,
+              182.6825,
+              219.428,
+              220.284
+            ],
+            "frankenpandas_slot_p50_us": [
+              143.122,
+              168.4805,
+              138.86399999999998,
+              139.5855
+            ],
+            "ratio_pandas_over_frankenpandas": 1.5553602221377218
+          },
+          {
+            "round": 15,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              180.70350000000002,
+              218.6515,
+              179.44150000000002,
+              178.825
+            ],
+            "frankenpandas_slot_p50_us": [
+              154.128,
+              138.8495,
+              150.902,
+              167.619
+            ],
+            "ratio_pandas_over_frankenpandas": 1.1806871455266696
+          },
+          {
+            "round": 16,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              231.2305,
+              180.20800000000003,
+              261.6325,
+              184.92149999999998
+            ],
+            "frankenpandas_slot_p50_us": [
+              137.672,
+              139.51,
+              137.2665,
+              139.42000000000002
+            ],
+            "ratio_pandas_over_frankenpandas": 1.5018549795735712
+          },
+          {
+            "round": 17,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              177.30700000000002,
+              184.451,
+              213.316,
+              227.643
+            ],
+            "frankenpandas_slot_p50_us": [
+              138.20799999999997,
+              134.75650000000002,
+              165.921,
+              169.437
+            ],
+            "ratio_pandas_over_frankenpandas": 1.3078890865389359
+          },
+          {
+            "round": 18,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              190.778,
+              211.472,
+              210.846,
+              216.24099999999999
+            ],
+            "frankenpandas_slot_p50_us": [
+              137.18599999999998,
+              166.066,
+              137.862,
+              138.058
+            ],
+            "ratio_pandas_over_frankenpandas": 1.5305813279211367
+          },
+          {
+            "round": 19,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              227.1365,
+              180.478,
+              194.8865,
+              192.4865
+            ],
+            "frankenpandas_slot_p50_us": [
+              135.027,
+              165.495,
+              178.9655,
+              136.239
+            ],
+            "ratio_pandas_over_frankenpandas": 1.2838228373335454
+          },
+          {
+            "round": 20,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              217.4985,
+              182.938,
+              178.4545,
+              214.7735
+            ],
+            "frankenpandas_slot_p50_us": [
+              141.835,
+              141.224,
+              166.622,
+              164.71300000000002
+            ],
+            "ratio_pandas_over_frankenpandas": 1.2973873585865836
+          },
+          {
+            "round": 21,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              180.2825,
+              186.91,
+              253.94299999999998,
+              301.5435
+            ],
+            "frankenpandas_slot_p50_us": [
+              131.76600000000002,
+              141.444,
+              138.168,
+              139.33550000000002
+            ],
+            "ratio_pandas_over_frankenpandas": 1.5886394225658411
+          },
+          {
+            "round": 22,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              311.2715,
+              182.77300000000002,
+              186.72500000000002,
+              184.32049999999998
+            ],
+            "frankenpandas_slot_p50_us": [
+              170.59949999999998,
+              136.4995,
+              142.86650000000003,
+              168.701
+            ],
+            "ratio_pandas_over_frankenpandas": 1.190899243342133
+          },
+          {
+            "round": 23,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              345.307,
+              182.71249999999998,
+              215.5655,
+              217.5235
+            ],
+            "frankenpandas_slot_p50_us": [
+              140.3625,
+              136.31900000000002,
+              150.0455,
+              177.0215
+            ],
+            "ratio_pandas_over_frankenpandas": 1.4913122228037794
+          },
+          {
+            "round": 24,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              260.215,
+              181.07,
+              181.7955,
+              220.94549999999998
+            ],
+            "frankenpandas_slot_p50_us": [
+              150.61149999999998,
+              179.26100000000002,
+              140.76800000000003,
+              140.22699999999998
+            ],
+            "ratio_pandas_over_frankenpandas": 1.3821871476888388
+          },
+          {
+            "round": 25,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              211.337,
+              231.80599999999998,
+              184.6865,
+              217.9945
+            ],
+            "frankenpandas_slot_p50_us": [
+              139.4,
+              139.6055,
+              132.05599999999998,
+              133.62400000000002
+            ],
+            "ratio_pandas_over_frankenpandas": 1.572504614978903
+          },
+          {
+            "round": 26,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              180.2525,
+              192.762,
+              248.087,
+              177.9635
+            ],
+            "frankenpandas_slot_p50_us": [
+              139.81599999999997,
+              139.64499999999998,
+              137.06099999999998,
+              164.107
+            ],
+            "ratio_pandas_over_frankenpandas": 1.3347640636797264
+          },
+          {
+            "round": 27,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              221.30599999999998,
+              176.2755,
+              173.2495,
+              186.9305
+            ],
+            "frankenpandas_slot_p50_us": [
+              131.6405,
+              174.94299999999998,
+              132.18649999999997,
+              136.99
+            ],
+            "ratio_pandas_over_frankenpandas": 1.3493228420757386
+          },
+          {
+            "round": 28,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              225.65949999999998,
+              204.82,
+              193.7935,
+              192.5915
+            ],
+            "frankenpandas_slot_p50_us": [
+              137.447,
+              139.1495,
+              137.63150000000002,
+              139.946
+            ],
+            "ratio_pandas_over_frankenpandas": 1.4401765294583082
+          },
+          {
+            "round": 29,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              194.70049999999998,
+              227.0865,
+              205.6215,
+              185.2725
+            ],
+            "frankenpandas_slot_p50_us": [
+              139.9665,
+              142.75150000000002,
+              135.002,
+              168.43
+            ],
+            "ratio_pandas_over_frankenpandas": 1.415976343918675
+          },
+          {
+            "round": 30,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              183.715,
+              177.7875,
+              180.623,
+              213.98149999999998
+            ],
+            "frankenpandas_slot_p50_us": [
+              169.057,
+              135.9135,
+              164.2175,
+              140.563
+            ],
+            "ratio_pandas_over_frankenpandas": 1.1954111237431528
+          },
+          {
+            "round": 31,
+            "order": "ABBAABBA",
+            "pandas_slot_p50_us": [
+              178.535,
+              182.036,
+              209.5035,
+              238.4735
+            ],
+            "frankenpandas_slot_p50_us": [
+              142.937,
+              138.5635,
+              178.4545,
+              139.4305
+            ],
+            "ratio_pandas_over_frankenpandas": 1.3866308976776718
+          }
+        ],
+        "host_wide_quiescence_required": false,
+        "host_state": {
+          "gate_input": false,
+          "arm_core_placement": {
+            "cpu_mask": "0-63",
+            "cpus": 64,
+            "mask_source": "inherited",
+            "same_cores_ensured_by": "identical CPU mask applied to both arms (inherited); the pandas arm runs in this process and the FrankenPandas child is launched under `taskset -c 0-63`, so neither arm can be scheduled onto cores the other was excluded from",
+            "mask_composition": {
+              "logical": 64,
+              "physical_cores": 32,
+              "smt_folded_cores": 32,
+              "smt_sibling_pairs": [
+                [
+                  0,
+                  32
+                ],
+                [
+                  1,
+                  33
+                ],
+                [
+                  2,
+                  34
+                ],
+                [
+                  3,
+                  35
+                ],
+                [
+                  4,
+                  36
+                ],
+                [
+                  5,
+                  37
+                ],
+                [
+                  6,
+                  38
+                ],
+                [
+                  7,
+                  39
+                ]
+              ],
+              "one_thread_per_core": false,
+              "topology_available": true
+            }
+          },
+          "loadavg_1min": {
+            "first": 28.46,
+            "last": 25.59,
+            "min": 25.59,
+            "max": 28.46
+          },
+          "busy_core_mhz_by_arm": {
+            "frankenpandas": 4072.5,
+            "pandas": 4070.6
+          },
+          "host_median_mhz_after_arm": {
+            "frankenpandas": 3143.5,
+            "pandas": 3195.2
+          },
+          "arm_core_mhz_top_k": {
+            "frankenpandas": {
+              "k": 1,
+              "median": 4072.5,
+              "slowest": 4072.5,
+              "fastest": 4072.5
+            },
+            "pandas": {
+              "k": 1,
+              "median": 4070.6,
+              "slowest": 4070.6,
+              "fastest": 4070.6
+            }
+          },
+          "arms_saw_same_clock": true,
+          "arm_clock_ratio": 1.0005,
+          "same_clock_basis": "busy_core_max",
+          "arm_core_spread_ratio": {
+            "frankenpandas": 1.0,
+            "pandas": 1.0
+          },
+          "same_clock_note": "sampled after each slot; an arm whose threads exit leaves cores ramping down, so the top-k median understates it",
+          "observed_cpu_mhz": {
+            "min": 1778.7,
+            "median": 3154.5,
+            "max": 4043.1,
+            "samples": 257
+          },
+          "arm_cpu_attribution": {
+            "attribution": "busiest CPUs WITHIN THE ARM MASK by /proc/stat delta across the arm's slots; a proxy on a shared host, exact only for arms whose mask excludes other tenants",
+            "confined_to_mask": "0-63",
+            "frankenpandas": {
+              "threads": 1,
+              "cpus": [
+                40
+              ],
+              "physical_cores": 1,
+              "cores": [
+                8
+              ]
+            },
+            "pandas": {
+              "threads": 1,
+              "cpus": [
+                40
+              ],
+              "physical_cores": 1,
+              "cores": [
+                8
+              ]
+            },
+            "harness_process_thread_cpus": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              8,
+              9,
+              10,
+              15,
+              18,
+              19,
+              21,
+              22,
+              24,
+              27
+            ],
+            "arms_shared_physical_cores": [
+              8
+            ],
+            "arms_shared_any_core": true,
+            "arms_shared_logical_cpus": [
+              40
+            ],
+            "arms_on_smt_siblings": false
+          }
+        }
+      },
+      "like_for_like": {
+        "ok": true,
+        "reasons": [],
+        "gate_input": false
+      },
+      "host_wide_quiescence": {
+        "required": false,
+        "replacement": "balanced-square-abbaabba-v1",
+        "valid": true
+      },
+      "thread_provenance": {
+        "host_identity": "thinkstation1",
+        "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+        "physical_cores": 32,
+        "logical_threads": 64,
+        "thread_count_requested": null,
+        "thread_count_actually_used": {
+          "frankenpandas": 1,
+          "pandas": 1
+        },
+        "runtime_available_parallelism": {
+          "frankenpandas": 64,
+          "pandas": 64
+        },
+        "runtime_detected_isa_features": {
+          "host": [
+            "sse2",
+            "avx",
+            "avx2",
+            "fma",
+            "bmi1",
+            "bmi2",
+            "aes",
+            "vaes"
+          ],
+          "frankenpandas": [
+            "scalar",
+            "sse2",
+            "avx2",
+            "fma",
+            "bmi2",
+            "vaes"
+          ],
+          "pandas": [
+            "sse2",
+            "avx",
+            "avx2",
+            "fma",
+            "bmi1",
+            "bmi2",
+            "aes",
+            "vaes"
+          ]
+        },
+        "affinity_or_cpuset_cap": {
+          "logical_cpu_count": 64,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39,
+            40,
+            41,
+            42,
+            43,
+            44,
+            45,
+            46,
+            47,
+            48,
+            49,
+            50,
+            51,
+            52,
+            53,
+            54,
+            55,
+            56,
+            57,
+            58,
+            59,
+            60,
+            61,
+            62,
+            63
+          ]
+        },
+        "contract_errors": [],
+        "valid": true
+      },
+      "invocation_id": "vs-pandas-20260818T050814.591466Z-pid2231888"
+    }
+  ],
+  "summary": {
+    "total_workloads": 1,
+    "contract_valid_workloads": 1,
+    "decidable_workloads": 0,
+    "null_undecidable_workloads": 1,
+    "category_scores": {},
+    "weighted_score": 1.3,
+    "claim_validated": false
+  },
+  "invocation_rejection": null
+}

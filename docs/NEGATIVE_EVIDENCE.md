@@ -36601,3 +36601,53 @@ Both from bit-identical arithmetic — `+fma` was deliberately excluded, and `vf
 builds. **I am still not proposing the policy change.** What I am doing is making it a decision with
 two measured sign-flips behind it instead of one, so whoever makes the call is not guessing at the
 size of what is being left on the table.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-3qpj4) — REFUTED: floor does NOT "cancel out" the flag. It gains 4.334x from `+avx2`, the largest self-speedup measured in this campaign, and `Column::floor` DOES carry 10 rounding instructions in a flagged build
+
+**NOT BANKED.** The winning arm is a `-C target-feature=+avx2` build, refused by the assembler's ELF
+sha list; the live baseline stays at 6. Nothing here is a shipping claim.
+
+**Counted mechanism:** rounding and packed-arithmetic instructions inside `Column::floor`,
+disassembled from two ELFs:
+
+| build | `roundpd`/`roundsd` | packed arithmetic | libm floor calls |
+|---|---|---|---|
+| default (sse2) | **0** | 20 x `%xmm` | 1 |
+| `+avx2` (implies sse4.1) | **5 `vroundpd` + 5 `vroundsd`** | 2 x `%xmm` | 1 |
+
+**THIS CONTRADICTS THE BEAD'S CENTRAL COUNT.** 3qpj4 states `Column::floor` "does NOT appear in the
+rounding-instruction symbol list of ANY flagged binary - not +sse4.1, not +sse4.1,+avx2, not
+x86-64-v3". In my `+avx2` binary it carries **ten**. And the packed-arithmetic count collapsing from
+20 to 2 is the signature of LLVM recognising the hand-rolled `abs / or_sign / nearest_even_magnitude
+/ compare / subtract` sequence and lowering it to `roundpd` once the instruction is available —
+i.e. the hand-rolled kernel does NOT hide the operation from the flag the way the bead concludes.
+
+**MEASURED**, harness `60ed3c58fdd5`, pandas incumbent same invocation, loadavg 21.39-28.46 across
+both rows, idle 79.0%, iowait 1.2%, arms clock-matched (3992.6/3966.9 and 4072.5/4070.6 MHz),
+disk 130G:
+
+| build | verdict | ratio | FP p50 / min | pandas p50 | nulls FP/pd |
+|---|---|---|---|---|---|
+| default | **SLOWER, all clauses true** | **0.493x** | 646.0 / 568.2 us | 364.0 us | 0.98229 / 1.00398 |
+| `+avx2` | NULL_UNDECIDABLE | 1.384x | 139.7 / **131.1** us | 193.7 us | **0.96342 FAIL** / 1.02092 |
+
+**FP's own best goes 568.2us -> 131.1us: 4.334x.** That is far beyond the ~2x a lane doubling
+explains, which is consistent with the instruction change rather than the width alone — a
+multi-instruction emulation sequence replaced by one `roundpd`.
+
+⚠️ **WHAT I CANNOT SEPARATE, AND WILL NOT CLAIM.** `+avx2` implies sse4.1, so this single comparison
+confounds TWO changes: the `roundpd` lowering (sse4.1) and the wider lanes (avx2). The bead is
+specifically about the sse4.1 lowering. **I cannot attribute the 4.334x between them with the two
+binaries I hold**, and the clean third arm is an `+sse4.1`-only build — which the other pane
+(SlateHeron) already has as `target-sse41` / ELF `ded4edcb`, counted at 91 `roundpd` against 0. I
+have asked them for it rather than spending a build to duplicate one that exists.
+
+⚠️ **AND THE WINNING ROW DOES NOT CERTIFY.** The `+avx2` arm's FP A/A null is 0.96342, outside the 2%
+band, so **1.384x is not a claim.** The LOSS row certifies cleanly (0.493x, all three clauses true),
+and the 4.334x self-speedup is a min-against-min FP-vs-FP figure taken under comparable load and
+clock. Those two stand; the vs-pandas win does not, and wants a re-run in a quieter window.
+
+**FOR oxv4u**: this is a THIRD workload where the blanket flag changes the sign, and by far the
+largest margin — `df_dot @10k` 0.98x -> 1.153x, `sqrt @1M` 0.93x -> 1.725x, and now `floor @1M`
+0.493x -> 1.384x (uncertified). The 0.493x certified loss is the one to weigh: floor is currently
+**2x slower than pandas** on the shipping build.
