@@ -1179,6 +1179,38 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     {
         return Ok(Scalar::Bool(true));
     }
+    // TEMPORAL -> NUMPY int64 IS RAW NANOSECONDS, and this sits ABOVE the
+    // missing-value branch on purpose.
+    //
+    // MEASURED, live pandas 2.2.3:
+    //     pd.Series([Timestamp('2024-03-15 10:30:45.123456789')]).astype('int64')
+    //       -> 1710498645123456789
+    //     pd.Series([Timedelta('1 days 02:03:04.005006007')]).astype('int64')
+    //       -> 93784005006007
+    //     pd.Series([pd.NaT], dtype='datetime64[ns]').astype('int64')
+    //       -> -9223372036854775808        <- THE SENTINEL, not a missing value
+    //
+    // ⚠️ NaT IS WHY THE ORDER MATTERS. Below this point `value.is_missing()`
+    // would turn NaT into `Null(Null)`, and pandas emphatically does not: it
+    // hands back i64::MIN, which is the same bit pattern NaT already IS. Doing
+    // the cast here makes the sentinel round-trip by construction rather than by
+    // a second special case.
+    //
+    // ⚠️ NUMPY `int64` ONLY — the NULLABLE `Int64` REFUSES this, and so must we:
+    //     .astype('Int64')   -> TypeError: datetime64[ns] cannot be converted
+    //                          to IntegerDtype
+    //     .astype('float64') -> TypeError: Cannot cast DatetimeArray to dtype
+    //                          float64
+    // which is why this is guarded on the exact target rather than folded into
+    // the `Int64 | Int64Nullable` arm below, and why no Float64 arm is added.
+    if target == DType::Int64 {
+        match &value {
+            Scalar::Datetime64(nanos) | Scalar::Timedelta64(nanos) => {
+                return Ok(Scalar::Int64(*nanos));
+            }
+            _ => {}
+        }
+    }
     if value.is_missing() {
         return Ok(Scalar::missing_for_dtype(target));
     }
@@ -1260,6 +1292,17 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         DType::Utf8 => Ok(Scalar::Utf8(scalar_to_string_for_astype(value))),
         DType::Categorical => Err(TypeError::InvalidCast { from, to: target }),
         DType::Timedelta64 => match &value {
+            // A BOOL IS 0 OR 1 NANOSECONDS on the astype path. Measured:
+            //     pd.Series([True]).astype('timedelta64[ns]') -> 1ns
+            //     pd.Series([True]).astype('datetime64[ns]')  -> 1970-01-01 ...001
+            // ⚠️ The CONSTRUCTOR refuses the same thing —
+            //     pd.DataFrame([[True]], dtype='datetime64[ns]')
+            //       -> TypeError: dtype bool cannot be converted to datetime64[ns]
+            // -- the same astype/constructor split `float_to_temporal_nanos`
+            // documents for non-finite input. This cast is shared, so it takes
+            // astype's answer and the constructor's refusal belongs in
+            // `DataFrame::with_constructor_dtype`.
+            Scalar::Bool(v) => Ok(Scalar::Timedelta64(i64::from(*v))),
             Scalar::Int64(v) => Ok(Scalar::Timedelta64(*v)),
             Scalar::Float64(v) => Ok(Scalar::Timedelta64(float_to_temporal_nanos(*v))),
             Scalar::Utf8(s) => Timedelta::parse(s)
@@ -1268,6 +1311,9 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Datetime64 => match &value {
+            // See the Timedelta64 arm above for the measurement and for why the
+            // constructor's stricter refusal is not encoded here.
+            Scalar::Bool(v) => Ok(Scalar::Datetime64(i64::from(*v))),
             Scalar::Int64(v) => Ok(Scalar::Datetime64(*v)),
             Scalar::Float64(v) => Ok(Scalar::Datetime64(float_to_temporal_nanos(*v))),
             Scalar::Utf8(s) => Timestamp::parse(s)
@@ -6898,6 +6944,73 @@ mod tests {
             "the SHARED cast truncates here too; it is the explicit constructor \
              that refuses, via Column::new's LossyFloatToInt pre-check"
         );
+    }
+
+    /// The MIRROR direction: `datetime64[ns]` / `timedelta64[ns]` -> numpy
+    /// `int64` is the raw nanosecond count, and a bool is 0 or 1 nanoseconds
+    /// going the other way. Every value transcribed from live pandas 2.2.3
+    /// `astype`.
+    #[test]
+    fn cast_scalar_temporal_to_int64_is_raw_nanoseconds() {
+        use super::{Timedelta, Timestamp, cast_scalar};
+
+        // Timestamp('2024-03-15 10:30:45.123456789') and
+        // Timedelta('1 days 02:03:04.005006007').
+        for nanos in [1_710_498_645_123_456_789_i64, 93_784_005_006_007, 0, -1] {
+            assert_eq!(
+                cast_scalar(&Scalar::Datetime64(nanos), DType::Int64).unwrap(),
+                Scalar::Int64(nanos),
+                "datetime64 -> int64 must be the raw nanos ({nanos})"
+            );
+            assert_eq!(
+                cast_scalar(&Scalar::Timedelta64(nanos), DType::Int64).unwrap(),
+                Scalar::Int64(nanos)
+            );
+        }
+
+        // ⚠️ NaT BECOMES THE SENTINEL, NOT A MISSING VALUE. pandas:
+        //     pd.Series([pd.NaT], dtype='datetime64[ns]').astype('int64')
+        //       -> -9223372036854775808
+        // This is the assertion that pins the cast ABOVE the is_missing()
+        // branch; move it below and both of these become Null.
+        assert_eq!(
+            cast_scalar(&Scalar::Datetime64(Timestamp::NAT), DType::Int64).unwrap(),
+            Scalar::Int64(i64::MIN),
+            "NaT -> int64 is the sentinel i64::MIN, not a missing value"
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Timedelta64(Timedelta::NAT), DType::Int64).unwrap(),
+            Scalar::Int64(i64::MIN)
+        );
+
+        // ⚠️ THE NULLABLE Int64 REFUSES WHAT numpy int64 ACCEPTS:
+        //     .astype('Int64')   -> TypeError: datetime64[ns] cannot be
+        //                          converted to IntegerDtype
+        //     .astype('float64') -> TypeError: Cannot cast DatetimeArray
+        // Both must stay refused, which is what makes the guard on the exact
+        // target load-bearing rather than cosmetic.
+        for target in [DType::Int64Nullable, DType::Float64, DType::Float64Nullable] {
+            assert!(
+                cast_scalar(&Scalar::Datetime64(1_710_498_645_123_456_789), target).is_err(),
+                "datetime64 -> {target:?} must stay refused"
+            );
+            assert!(
+                cast_scalar(&Scalar::Timedelta64(93_784_005_006_007), target).is_err(),
+                "timedelta64 -> {target:?} must stay refused"
+            );
+        }
+
+        // A bool is 0 or 1 NANOSECONDS on the astype path.
+        for (flag, want) in [(true, 1_i64), (false, 0)] {
+            assert_eq!(
+                cast_scalar(&Scalar::Bool(flag), DType::Datetime64).unwrap(),
+                Scalar::Datetime64(want)
+            );
+            assert_eq!(
+                cast_scalar(&Scalar::Bool(flag), DType::Timedelta64).unwrap(),
+                Scalar::Timedelta64(want)
+            );
+        }
     }
 
     #[test]
