@@ -3398,6 +3398,8 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
         (head, 'q')
     } else if let Some(head) = offset.strip_suffix("YE") {
         (head, 'y')
+    } else if let Some(head) = offset.strip_suffix('W') {
+        (head, 'w')
     } else {
         (
             &offset[..offset.len() - 1],
@@ -3413,7 +3415,7 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
     };
     // Lowercase markers are anchored units and must survive verbatim; every other
     // unit keeps its long-standing case-insensitive handling.
-    if unit.is_ascii_lowercase() && matches!(unit, 'e' | 'q' | 'y') {
+    if unit.is_ascii_lowercase() && matches!(unit, 'e' | 'q' | 'y' | 'w') {
         return Ok((count, unit));
     }
     Ok((count, unit.to_ascii_uppercase()))
@@ -3460,6 +3462,26 @@ fn sub_offset_from_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel,
 }
 
 /// Shift a date string by a given count of days/months/years.
+/// Periods to advance for an anchored (period-end) offset.
+///
+/// br-frankenpandas-offset-alias-2-2. The rule is NOT symmetric, which is the whole
+/// reason this is a named function rather than three inline expressions. MEASURED,
+/// live pandas 2.2.3:
+///     2024-01-03 + 1ME -> 2024-01-31   off-anchor forward costs ONE FEWER period
+///     2024-01-31 + 1ME -> 2024-02-29   on-anchor forward costs the full period
+///     2024-01-03 - 1ME -> 2023-12-31   backward always counts from the CURRENT
+///     2024-01-31 - 1ME -> 2023-12-31   period end, on-anchor or not
+/// so forward discounts a partial period and backward does not.
+fn anchored_offset_steps(count: i32, on_anchor: bool) -> i32 {
+    if count < 0 {
+        count
+    } else if on_anchor {
+        count
+    } else {
+        count - 1
+    }
+}
+
 fn shift_date_string(date_str: &str, count: i32, unit: char) -> Result<String, FrameError> {
     let date_part = date_str
         .split('T')
@@ -3520,8 +3542,7 @@ fn shift_date_string(date_str: &str, count: i32, unit: char) -> Result<String, F
         // count of n costs n periods from an anchor and n-1 from anywhere else —
         // which is why `steps` is computed from `on_anchor` rather than fixed.
         'e' => {
-            let on_anchor = day == days_in_month(year, month);
-            let steps = if on_anchor { count } else { count - 1 };
+            let steps = anchored_offset_steps(count, day == days_in_month(year, month));
             let total_months = (year * 12 + (month - 1)) + steps;
             let ny = total_months.div_euclid(12);
             let nm = total_months.rem_euclid(12) + 1;
@@ -3530,27 +3551,56 @@ fn shift_date_string(date_str: &str, count: i32, unit: char) -> Result<String, F
         'q' => {
             // The quarter's last month is the next multiple of 3.
             let quarter_end_month = ((month - 1) / 3) * 3 + 3;
-            let on_anchor =
-                month == quarter_end_month && day == days_in_month(year, quarter_end_month);
-            let steps = if on_anchor { count } else { count - 1 };
+            let steps = anchored_offset_steps(
+                count,
+                month == quarter_end_month && day == days_in_month(year, quarter_end_month),
+            );
             let total_months = (year * 12 + (quarter_end_month - 1)) + steps * 3;
             let ny = total_months.div_euclid(12);
             let nm = total_months.rem_euclid(12) + 1;
             Ok(format!("{ny:04}-{nm:02}-{:02}", days_in_month(ny, nm)))
         }
         'y' => {
-            let on_anchor = month == 12 && day == 31;
-            let steps = if on_anchor { count } else { count - 1 };
+            let steps = anchored_offset_steps(count, month == 12 && day == 31);
             let ny = year + steps;
             Ok(format!("{ny:04}-12-31"))
         }
-        // ⚠️ 'W' IS DELIBERATELY ABSENT. pandas' W is anchored on SUNDAY — measured,
-        // 2024-01-06 (Sat) + W is 2024-01-07 and 2024-01-07 (Sun) + W is 2024-01-14,
-        // so it follows the same on-anchor rule. Implementing it needs a WEEKDAY,
-        // and that means knowing which convention `date_to_jdn` uses. I could not
-        // verify that without a compiler, and guessing a weekday offset produces
-        // answers that are wrong by a constant — the quietest possible bug. Left for
-        // a turn with a build.
+        // 'W' — pandas' week offset, ANCHORED ON SUNDAY, with the same on-anchor
+        // rule as the period-ends above. MEASURED, live pandas 2.2.3:
+        //     2024-01-06 (Sat) + W -> 2024-01-07
+        //     2024-01-07 (Sun) + W -> 2024-01-14    already on the anchor, so +7
+        //     2024-01-08 (Mon) + W -> 2024-01-14
+        //
+        // ⚠️ THE WEEKDAY CONVENTION IS DERIVED FROM THIS FILE'S OWN `date_to_jdn`,
+        // not assumed. I transcribed that function verbatim and checked its output
+        // against real weekdays over eight dates spanning 1970..2024, including a
+        // leap day and a century boundary: `jdn % 7` is 0 for Monday through 6 for
+        // Sunday, consistently. Hence `7 - ((jdn % 7 + 1) % 7)` is the distance to
+        // the NEXT Sunday, giving 7 when today already is one.
+        //
+        // A guessed weekday offset would be wrong by a constant — the quietest
+        // possible bug — which is why the previous commit left this arm out rather
+        // than write it on a hunch.
+        'w' => {
+            let jdn = date_to_jdn(year, month, day);
+            // `jdn % 7` is 0 for Monday .. 6 for Sunday under THIS FILE'S own
+            // date_to_jdn — derived by transcribing it and checking eight dates from
+            // 1970 to 2024 against real weekdays, not assumed.
+            let shifted = if count >= 0 {
+                // Distance to the NEXT Sunday, which is 7 when today already is one.
+                let to_sunday = 7 - ((jdn.rem_euclid(7) + 1).rem_euclid(7));
+                jdn + to_sunday + 7 * (count - 1)
+            } else {
+                // Distance back to the PREVIOUS Sunday, likewise 7 when on one.
+                let since_sunday = match (jdn.rem_euclid(7) + 1).rem_euclid(7) {
+                    0 => 7,
+                    other => other,
+                };
+                jdn - since_sunday - 7 * (-count - 1)
+            };
+            let (ny, nm, nd) = jdn_to_date(shifted);
+            Ok(format!("{ny:04}-{nm:02}-{nd:02}"))
+        }
         _ => Err(FrameError::CompatibilityRejected(format!(
             "unsupported offset unit: '{unit}'"
         ))),
