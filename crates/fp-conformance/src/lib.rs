@@ -28373,3 +28373,107 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
         assert_eq!(provenance.generated_at, "2026-04-22T21:00:00Z");
     }
 }
+
+/// REGRESSION LOCK for the tiered constructor-dtype match (br-frankenpandas-jozfk).
+///
+/// The corpus CANNOT defend this. Confirmed by running it: after the fix, all 1259
+/// packet fixtures still pass, because the one fixture that passes a cased spelling
+/// pins only VALUES and asserts no `expected_dtype`. So changing which dtype a spec
+/// resolves to is invisible to the entire packet suite, and a revert would be
+/// invisible too. These unit locks are the only thing standing between the fix and
+/// a silent regression.
+#[cfg(test)]
+mod constructor_dtype_tier_locks_jozfk {
+    use fp_types::DType;
+
+    use super::parse_constructor_dtype_spec;
+
+    /// TIER 1. pandas' nullable extension dtypes differ from the numpy ones BY CASE
+    /// ALONE, and the difference is observable: live pandas 2.2.3 constructs
+    /// `dtype='Int64'` over data containing a missing entry and RAISES TypeError for
+    /// `dtype='int64'` over the same data.
+    #[test]
+    fn cased_pandas_spellings_must_resolve_to_the_nullable_extension_dtypes_jozfk() {
+        assert_eq!(
+            parse_constructor_dtype_spec("Int64"),
+            Ok(DType::Int64Nullable),
+            "'Int64' is pandas' NULLABLE extension spelling; resolving it to the numpy \
+             DType::Int64 is the bug this lock exists for"
+        );
+        assert_eq!(
+            parse_constructor_dtype_spec("Float64"),
+            Ok(DType::Float64Nullable),
+            "'Float64' is the extension dtype; 'float64' is numpy's"
+        );
+    }
+
+    /// TIER 2, and the half a naive fix breaks. Four fixtures deliberately pin
+    /// case-insensitive alias handling, so "just make the match case-sensitive"
+    /// is NOT the fix — these spellings must keep resolving to the numpy dtypes.
+    #[test]
+    fn corpus_pinned_aliases_must_still_resolve_case_insensitively_jozfk() {
+        for spec in ["int64", "INT64", "  INT64  ", "int", "i64"] {
+            assert_eq!(
+                parse_constructor_dtype_spec(spec),
+                Ok(DType::Int64),
+                "{spec:?} is an ALIAS, not a pandas dtype, and must stay on numpy Int64"
+            );
+        }
+        for spec in ["float64", "Float", "FLOAT64", "f64"] {
+            assert_eq!(
+                parse_constructor_dtype_spec(spec),
+                Ok(DType::Float64),
+                "{spec:?} must stay on numpy Float64"
+            );
+        }
+        for spec in ["BOOLEAN", "boolean"] {
+            assert_eq!(parse_constructor_dtype_spec(spec), Ok(DType::BoolNullable));
+        }
+        for spec in ["STRING", "string", "str", "utf8"] {
+            assert_eq!(parse_constructor_dtype_spec(spec), Ok(DType::Utf8));
+        }
+    }
+
+    /// THE NEGATIVE CASE, which is the whole point of the pair above.
+    ///
+    /// Re-adding a leading `.to_ascii_lowercase()` — the exact shape of the code this
+    /// replaced, and the obvious "simplification" — makes `Int64` and `int64`
+    /// indistinguishable. That change passes every packet fixture (verified: 1259 of
+    /// 1259 pass either way) and would silently un-fix this. It cannot pass BOTH
+    /// assertions here, because they demand different answers for two specs that
+    /// differ only in case.
+    #[test]
+    fn the_two_tiers_must_disagree_on_specs_differing_only_in_case_jozfk() {
+        let cased = parse_constructor_dtype_spec("Int64");
+        let lower = parse_constructor_dtype_spec("int64");
+        assert_ne!(
+            cased, lower,
+            "'Int64' and 'int64' must NOT resolve to the same dtype; if they do, the \
+             match has been flattened back to a single case-insensitive tier and the \
+             nullable constructor path is unreachable again"
+        );
+        let cased_f = parse_constructor_dtype_spec("Float64");
+        let lower_f = parse_constructor_dtype_spec("float64");
+        assert_ne!(
+            cased_f, lower_f,
+            "'Float64' and 'float64' must not collapse either"
+        );
+    }
+
+    /// The four spellings the corpus pins as UNSUPPORTED stay unsupported. Two are
+    /// harness gaps (`datetime64[ns]` — `DType::Datetime64` exists; `object` — needs
+    /// a semantics decision) and two are REAL PRODUCT GAPS (`uint64` and
+    /// `boolean[pyarrow]`: fp-types has no unsigned integer and no arrow-backed
+    /// variants at all). Pinned so that widening the parser is a DECISION rather than
+    /// a side effect of touching this function.
+    #[test]
+    fn the_unsupported_set_must_not_widen_by_accident_jozfk() {
+        for spec in ["uint64", "object", "boolean[pyarrow]", "datetime64[ns]"] {
+            assert!(
+                parse_constructor_dtype_spec(spec).is_err(),
+                "{spec:?} must still be refused; widening this set changes what four \
+                 corpus fixtures assert and is a decision, not a refactor"
+            );
+        }
+    }
+}
