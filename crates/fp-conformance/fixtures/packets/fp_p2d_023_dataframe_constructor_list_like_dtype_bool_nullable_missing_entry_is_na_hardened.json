@@ -1,0 +1,72 @@
+{
+  "packet_id": "FP-P2D-023",
+  "case_id": "dataframe_constructor_list_like_dtype_bool_nullable_missing_entry_is_na_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_list_like",
+  "constructor_dtype": "boolean",
+  "matrix_rows": [
+    [
+      {
+        "kind": "bool",
+        "value": true
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      }
+    ],
+    [
+      {
+        "kind": "bool",
+        "value": false
+      },
+      {
+        "kind": "bool",
+        "value": true
+      }
+    ]
+  ],
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "831ca4bcd268e33ed0b052633195e00452bd41b22756dc1b42d82d6acf82e379",
+    "generated_at": "2026-08-18T13:44:05Z"
+  },
+  "expected_frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "columns": {
+      "0": [
+        {
+          "kind": "bool",
+          "value": true
+        },
+        {
+          "kind": "bool",
+          "value": false
+        }
+      ],
+      "1": [
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "bool",
+          "value": true
+        }
+      ]
+    },
+    "column_order": [
+      "0",
+      "1"
+    ]
+  }
+}
