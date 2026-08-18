@@ -62806,6 +62806,12 @@ impl DataFrame {
     /// | `Float64` | `[1.0, <NA>]` | extension dtype |
     /// | `str` | `['True', None]` | the missing value SURVIVES the cast |
     /// | `string` | `['True', <NA>]` | ditto, as the extension dtype |
+    /// | `bool` | `[True, False]` | COERCED by truthiness; `bool` has no NA |
+    /// | `boolean` | `[True, <NA>]` | extension dtype |
+    ///
+    /// **THE THREE FAMILIES RESOLVE THE SAME PROBLEM THREE DIFFERENT WAYS**, which
+    /// is why there is no single "non-nullable dtypes reject missing values" rule:
+    /// `int64` RAISES, `bool` COERCES, `float64` has NaN as its own missing value.
     ///
     /// **A STRING CAST PRESERVES MISSINGNESS HERE AND ONLY HERE.** `astype(str)`
     /// genuinely does stringify - measured, `pd.Series([True, None]).astype(str)`
@@ -62858,6 +62864,19 @@ impl DataFrame {
                 // Every element is now Utf8-or-Null, which is the arm of
                 // `Column::new` that preserves a missing value instead of
                 // coercing it.
+                Column::new(dtype, values)?
+            } else if dtype == DType::Bool {
+                // numpy `bool` HAS NO NA, and pandas resolves that by COERCING
+                // rather than by raising (as `int64` does) or by carrying a null.
+                // The coercion is Python truthiness of whatever the missing value
+                // IS, which is why the two NullKinds go opposite ways.
+                // br-frankenpandas-constructor-bool-null-not-coerced-sgugy.
+                let mut values = original.to_vec();
+                for slot in values.iter_mut() {
+                    if let Scalar::Null(kind) = slot {
+                        *slot = Scalar::Bool(!matches!(kind, NullKind::Null));
+                    }
+                }
                 Column::new(dtype, values)?
             } else {
                 Column::new(dtype, original.to_vec())?
@@ -95127,6 +95146,61 @@ mod tests {
         with_missing()
             .with_constructor_dtype(DType::Float64)
             .expect("float64 represents a missing value as NaN");
+    }
+
+    /// `dtype='bool'` COERCES a missing value by truthiness; `dtype='boolean'`
+    /// keeps it. br-frankenpandas-constructor-bool-null-not-coerced-sgugy.
+    ///
+    /// MEASURED, live pandas 2.2.3 — note the two directions, which is the part a
+    /// "coerce missing to false" rule would get wrong:
+    ///   pd.DataFrame([[True, None], [False, True]], dtype='bool')  -> [[True, False], ...]
+    ///   pd.DataFrame([[1.0, nan], [0.0, 1.0]],      dtype='bool')  -> [[True, True],  ...]
+    ///   bool(None) is False; bool(float('nan')) and bool(pd.NaT) are True.
+    ///
+    /// FrankenPandas normalizes a float column's missing value to `NullKind::NaN`
+    /// on construction, so the kind is a faithful proxy for pandas' rule.
+    #[test]
+    fn constructor_dtype_bool_coerces_missing_by_truthiness_sgugy() {
+        use fp_types::NullKind;
+        let cast = |v: Vec<Scalar>| {
+            DataFrame::from_dict(&["a"], vec![("a", v)])
+                .expect("frame")
+                .with_constructor_dtype(DType::Bool)
+                .expect("bool coerces rather than raising")
+                .columns["a"]
+                .values()
+                .to_vec()
+        };
+
+        // None is FALSY.
+        assert_eq!(
+            cast(vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)]),
+            vec![Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        // NaN and NaT are TRUTHY — the opposite direction, from the same code.
+        assert_eq!(
+            cast(vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]),
+            vec![Scalar::Bool(true), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            cast(vec![Scalar::Bool(true), Scalar::Null(NullKind::NaT)]),
+            vec![Scalar::Bool(true), Scalar::Bool(true)]
+        );
+
+        // The NULLABLE dtype is untouched: it can represent NA, so it keeps it.
+        let kept = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)])],
+        )
+        .expect("frame")
+        .with_constructor_dtype(DType::BoolNullable)
+        .expect("boolean accepts a missing value");
+        assert_eq!(
+            kept.columns["a"].values(),
+            &[Scalar::Bool(true), Scalar::Null(NullKind::Null)],
+            "the nullable bool dtype must NOT coerce"
+        );
     }
 
     /// `dtype='str'` at the CONSTRUCTOR preserves a missing value; `astype(str)`
