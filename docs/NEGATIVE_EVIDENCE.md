@@ -36651,3 +36651,53 @@ clock. Those two stand; the vs-pandas win does not, and wants a re-run in a quie
 largest margin — `df_dot @10k` 0.98x -> 1.153x, `sqrt @1M` 0.93x -> 1.725x, and now `floor @1M`
 0.493x -> 1.384x (uncertified). The 0.493x certified loss is the one to weigh: floor is currently
 **2x slower than pandas** on the shipping build.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-oxv4u, br-frankenpandas-3qpj4) — THE INCUMBENT DISPATCHES ISA AT RUNTIME AND WE SHIP THE 2003 BASELINE. numpy's floor/sqrt kernels run AVX2 chosen at load time; ours are compiled for plain sse2
+
+**NO NEW MEASUREMENT — this is a property of the two artifacts, read from numpy's own build metadata
+and from our compiled_target_features. It costs nothing to check and it reframes three beads.**
+
+**Counted mechanism:** `numpy._core._multiarray_umath` build configuration, numpy 2.4.3, this host:
+
+    __cpu_baseline__   ['X86_V2']                                  <- ALWAYS compiled in
+    __cpu_dispatch__   ['X86_V3', 'X86_V4', 'AVX512_ICL', 'AVX512_SPR']   <- chosen at RUNTIME
+    CPU reports        SSE41, AVX, FMA3, AVX2  -> dispatches X86_V3
+
+against FrankenPandas' shipping build, measured from its own artifact:
+
+    compiled_target_features  ["sse2"]
+
+**X86_V2 INCLUDES SSE4.1.** So `roundpd` — the instruction br-frankenpandas-3qpj4 is entirely about —
+is in numpy's ALWAYS-COMPILED baseline, not even its dispatched path. And X86_V3 is AVX2+FMA, which
+numpy selects at load time on this CPU. **The incumbent therefore runs 4-wide with hardware rounding
+while our shipping binary runs 2-wide and emulates floor in ~20 packed sse2 operations.**
+
+**THIS EXPLAINS THE MEASURED SIGN-FLIPS RATHER THAN COMPETING WITH THEM.** Every case where `+avx2`
+flipped a verdict is a case where the flag put us on roughly the ISA footing numpy already had:
+
+| workload | shipping (sse2) | `+avx2` | numpy's kernel |
+|---|---|---|---|
+| floor @1M | **0.493x** certified LOSS | 1.384x (uncertified) | V2 baseline + V3 dispatch |
+| sqrt @1M | **0.93x** certified LOSS | **1.725x** certified | V2 baseline + V3 dispatch |
+| df_dot @10k | 0.979-0.991x | **1.153x** certified | OpenBLAS, separately dispatched |
+
+**WHAT THIS DOES TO THE "TARGETED, NOT BLANKET" FRAMING OF oxv4u.** That bead asks for per-kernel
+AVX2 without a blanket policy. **numpy solves exactly this problem with runtime dispatch** — compile
+several kernel variants, select on `__cpu_dispatch__` at load. We established earlier that this
+route is closed to us: `#![forbid(unsafe_code)]` bars calling a `#[target_feature]` function, and
+the dependency ban bars a multiversioning crate. So the incumbent has a mechanism we have
+structurally forbidden ourselves, and the only substitute available is the blanket flag the bead is
+trying to avoid.
+
+**AND IT SHARPENS 3qpj4 RATHER THAN JUST CONTRADICTING IT.** That bead concluded the hand-rolled
+`floor_fast` and `+sse4.1` "cancel each other". The deeper fact is that **the shipping build never
+has sse4.1 to cancel against**: `compiled_target_features` is `["sse2"]`, so `roundpd` is
+unavailable at any call site, hand-rolled or not. The hand-rolled kernel was measured as a 2.1-2.4x
+WIN precisely because on a baseline build `f64::floor` becomes a libm CALL — that decision was
+correct for the build we actually ship, and remains correct until the baseline moves.
+
+⚠️ **WHAT I HAVE NOT ESTABLISHED.** That numpy's dispatched kernel is what pandas actually calls for
+these ops (pandas delegates to numpy ufuncs, but I have not traced `Series.floor` to a specific
+dispatched symbol), nor that adopting `+avx2` would be free of correctness or portability cost — a
+blanket flag makes the binary unrunnable on pre-AVX2 hardware, which is a deployment decision and
+not a perf one. **Both are reasons this is a finding for a human to weigh, not a change to make.**
