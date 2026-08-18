@@ -36883,3 +36883,99 @@ not cosmetic.
 **NEITHER OF US IS MAKING THIS CHANGE.** Both oxv4u and cu22b state the build-policy decision is not
 the agents'. It is escalated to the user as a recommendation with the evidence attached, and it stays
 a recommendation until they answer.
+
+### 2026-08-18 CrimsonPine + SlateHeron (br-frankenpandas-oxv4u, br-frankenpandas-3qpj4, br-frankenpandas-cu22b) — RECOMMENDATION TO THE USER, NOT A CHANGE: adopt `-C target-feature=+sse4.1` scoped to `[target.x86_64-unknown-linux-gnu]`. Evidence, costs and unchecked assumptions all stated
+
+**THIS IS A RECOMMENDATION AND IT STAYS ONE.** oxv4u and cu22b both record that the build-policy
+decision is not the agents'. Neither pane has changed a build flag, and nothing below is banked as a
+standing lock — every winning row here comes from a non-shipping binary and the assembler refuses
+them by ELF sha.
+
+**THE MEASUREMENT, three build arms, two panes.** SlateHeron ran the `+sse4.1`-only arm; I ran
+default and `+avx2`. `floor @1M`, FP p50:
+
+| arm | ELF | FP p50 | self-speedup |
+|---|---|---|---|
+| default (sse2) | `e85e724e` / `a802073c` | 555.95 / 569.94 / 564.95 us (theirs), 646.0 us (mine) | — |
+| **`+sse4.1` only** | `ded4edcb` | **152.57 / 141.20 / 135.19 us** | **4.00x** |
+| `+avx2` (implies 4.1) | `162f821c` | 131.1 us | 4.334x |
+
+Their six invocations were genuinely interleaved at ~5s (cand/ref alternating), 05:27:06 to 05:27:32
+on 2026-08-18, window load 13.98-15.17, CPU idle 87.91%, iowait 1.14% by mpstat, MHz mean
+3106.9-3488.9, /data 130G, FP threads 1 on every row.
+
+**Residual attributable to the wider AVX2 lanes: 141.2 / 131.1 = 1.077x, about 7%.** The SSE4.1
+`roundpd` lowering carries ~92% of the effect.
+
+**INDEPENDENTLY CORROBORATED FROM YESTERDAY'S CORPUS, which neither of us went looking for.** Rows
+banked 2026-08-17 by an earlier session give the same split on a DIFFERENT ELF pair:
+`3qpj4_ref_floor_1M_r0/r1` on `d370a302` read 575.6 / 563.1 us against `3qpj4_cand_floor_1M_r0/r1`
+on `ded4edcb` at 144.5 / 140.4 us — **4.10x**. Two days, two panes, three ELF pairs, 4.00-4.334x.
+
+**THE WIDER PATTERN.** Three workloads where the flag changes the SIGN of the verdict, not the
+margin:
+
+| workload | shipping (sse2) | flagged |
+|---|---|---|
+| `df_dot @10k` | 0.979-0.991x | **1.153x certified** |
+| `sqrt @1M` | **0.93x certified LOSS** | **1.725x certified** |
+| `floor @1M` | **0.493x certified LOSS** | 1.37x uncertified / 4.00x self-speedup |
+
+**WHY THE FLAG AND NOT A CODE FIX.** numpy 2.4.3 reports `__cpu_baseline__ ['X86_V2']` — which
+INCLUDES SSE4.1 — and `__cpu_dispatch__ ['X86_V3','X86_V4',...]`, selecting AVX2 at load time on this
+CPU. We ship `compiled_target_features ["sse2"]`. The incumbent has hardware rounding in its
+always-compiled baseline; we emulate it, and pay twice because SSE2 also lacks `blendvpd`, so each
+select inside the emulation costs three ops. **Runtime dispatch — numpy's actual solution — is
+structurally closed to us:** `#![forbid(unsafe_code)]` bars calling a `#[target_feature]` function
+and the standing dependency ban bars a multiversioning crate. The flag is the only substitute
+available.
+
+**NARROW, NOT `x86-64-v3`, FOR TWO SEPARATE REASONS.** First, +sse4.1 buys ~92% of the measured
+effect. Second, cu22b's stated objection to v3 — FMA changing rounding — is EMPTY, and knowing that
+still does not make v3 right. Recounted across all four builds: **exactly 2 FMA instructions in
+EVERY build including the SSE2 default**, both in the same two `compiler_builtins` symbols
+(`...libm_math4arch3x863fma12fma_with_fma` and `..._fma4`). Those are compiler_builtins' own
+runtime-dispatched `fma()`, not contraction. **Enabling FMA in the ISA makes the instruction
+available; it does not make rustc contract `a*b+c`, which Rust does not do without fast-math.** v3
+is still not recommended, because CyanLynx measured sqrt/log REGRESSIONS under it — a separate live
+reason that survives the FMA objection collapsing.
+
+**THE SCOPING IS LOAD-BEARING, AND THE PRECISE CLAIM MATTERS.** Verbatim:
+
+    $ rustc --print cfg --target aarch64-apple-darwin -C target-feature=+sse4.1
+    warning: unknown and unstable feature specified for `-Ctarget-feature`: `sse4.1`
+    warning: 1 warning emitted
+    $ rustc --print cfg --target x86_64-unknown-linux-gnu -C target-feature=+sse4.1
+    target_feature="sse4.1"          # no warning
+
+rustc 1.98.0-nightly (c397dae80 2026-07-02); `ci.yml` matrix is `os: [ubuntu-latest, macos-latest]`
+and macos-latest is aarch64. **Exit status is 0 — this is a WARNING on every crate compile in the
+macOS leg, not a build failure.** Saying "it breaks CI" would be an overclaim. It is why
+`[target.x86_64-unknown-linux-gnu]` scoping is required rather than a bare `[build] rustflags`.
+
+**THE COSTS AND THE THINGS WE DID NOT CHECK**
+
+**`+sse4.1` raises the minimum CPU to Penryn-era (2008) x86_64, and NEITHER PANE HAS CHECKED THE
+DEPLOYMENT TARGET.** That is a fact about the user's environment, not about our benchmarks. We are
+not in a position to say it is safe.
+
+⚠️ **One adjacent fact that is NOT that claim, kept separate deliberately:** rch's `workers.toml`
+carries an inline survey of `/proc/cpuinfo` across all 12 workers finding `ovh-b` the only one
+without avx2+fma, and `ovh-b` is `enabled=false`. So the BUILD FLEET is AVX2-universal and therefore
+SSE4.1-universal. **That covers where we compile, not where anyone deploys.** Conflating the two
+would be exactly the generalisation-past-the-measurement that produced 3qpj4's wrong instruction
+count in the first place.
+
+**LIMITATIONS OF THE EVIDENCE, STATED SO A READER DOES NOT MISUSE IT**
+
+1. **All six `+sse4.1` rows are NULL_UNDECIDABLE against pandas** — CI width at a ~141us arm, not
+   null failures (every FP null inside 2%, 0.9916-1.0814). The banked figure is the SELF-speedup,
+   not a certified vs-incumbent ratio, and 1.37x must not be quoted as certified.
+2. **Our two panes' incumbent differed ~2x on the same host hours apart** — their pandas arm read
+   175.97-201.79us where mine read 364us. **Neither pane's vs-pandas floor ratio is comparable to
+   the other's.** A reader who diffs my 0.493x against their 1.37x gets a number that means nothing.
+   The within-window self-speedup is the only sound statistic across our two sets.
+3. **pandas' `peak_process_threads` is 67 even at `threads_used` 1** on their rows, so the
+   multithreaded-incumbent caveat this ledger raised at `df_dot @1M` applies here too.
+4. The `floor @1M` sign-flip row is uncertified; only `sqrt @1M` 1.725x and `df_dot @10k` 1.153x
+   carry all three clauses on the flagged side.
