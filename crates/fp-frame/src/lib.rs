@@ -48296,6 +48296,25 @@ impl DatetimeAccessor<'_> {
     ///
     /// Similar to `pd.Series.dt.components` for Timedelta, but for datetime values.
     pub fn components(&self) -> Result<DataFrame, FrameError> {
+        // ⚠️ pandas' `.dt.components` is TIMEDELTA-ONLY and returns
+        // days/hours/minutes/seconds/milliseconds/microseconds/nanoseconds; on a
+        // datetime series it has no such attribute. The datetime behaviour below is
+        // a FrankenPandas invention that took pandas' name — see this method's
+        // original doc, which says so. A Timedelta column reaching it fell into the
+        // datetime STRING parser and produced year/month/day nonsense.
+        //
+        // Dispatching restores parity for the timedelta case without altering the
+        // datetime case, so nothing already pinned on the invented behaviour moves.
+        if self.series.column().dtype() == DType::Timedelta64
+            || self
+                .series
+                .column()
+                .values()
+                .iter()
+                .any(|v| matches!(v, Scalar::Timedelta64(_)))
+        {
+            return self.timedelta_components_frame();
+        }
         self.validate_datetime_dtype()?;
         let n = self.series.column().values().len();
         let mut years = Vec::with_capacity(n);
@@ -49590,6 +49609,102 @@ impl DatetimeAccessor<'_> {
                 None => Scalar::Null(NullKind::NaN),
             })
             .collect()
+    }
+
+    /// Split each Timedelta into its calendar parts. Matches
+    /// `pd.Series.dt.components`, returning a 7-column DataFrame.
+    ///
+    /// MEASURED, pandas 2.2.3:
+    /// ```text
+    ///   90061.5s -> days 1, hours 1, minutes 1, seconds 1, ms 500, us 0, ns 0
+    ///   -1s      -> days -1, hours 23, minutes 59, seconds 59, ms 0,   us 0, ns 0
+    ///   -1ns     -> days -1, hours 23, minutes 59, seconds 59, ms 999, us 999, ns 999
+    ///   NaT      -> every column missing on that row
+    /// ```
+    ///
+    /// The split is EUCLIDEAN, which is what makes `-1s` come out as
+    /// `-1 day + 23:59:59` rather than a negative hour field. That is the same
+    /// convention `.dt.days`/`.dt.seconds` use, so this delegates to the same
+    /// `div_euclid`/`rem_euclid` on `fp_types::Timedelta`'s constants instead of
+    /// re-deriving the boundaries.
+    ///
+    /// Column dtypes follow pandas' promotion rule via [`Self::promote_components`]:
+    /// Int64 when no value is missing, Float64 + null when a NaT forces it. The
+    /// decision is made PER COLUMN over the same input, so all seven promote
+    /// together exactly as pandas' DataFrame does.
+    fn timedelta_components_frame(&self) -> Result<DataFrame, FrameError> {
+        use fp_types::Timedelta as Td;
+        const NAMES: [&str; 7] = [
+            "days",
+            "hours",
+            "minutes",
+            "seconds",
+            "milliseconds",
+            "microseconds",
+            "nanoseconds",
+        ];
+
+        let nanos: Vec<Option<i64>> =
+            if let Some(slice) = self.series.column().as_timedelta64_slice() {
+                slice
+                    .iter()
+                    .map(|&n| if n == Td::NAT { None } else { Some(n) })
+                    .collect()
+            } else {
+                self.series
+                    .column()
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Timedelta64(n) if *n != Td::NAT => Some(*n),
+                        Scalar::Utf8(text) => match Td::parse(text) {
+                            Ok(n) if n != Td::NAT => Some(n),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect()
+            };
+
+        let mut parts: Vec<Vec<Option<i64>>> = vec![Vec::with_capacity(nanos.len()); 7];
+        for slot in &nanos {
+            match slot {
+                None => {
+                    for part in &mut parts {
+                        part.push(None);
+                    }
+                }
+                Some(ns) => {
+                    let days = ns.div_euclid(Td::NANOS_PER_DAY);
+                    let mut rem = ns.rem_euclid(Td::NANOS_PER_DAY);
+                    let hours = rem / Td::NANOS_PER_HOUR;
+                    rem %= Td::NANOS_PER_HOUR;
+                    let minutes = rem / Td::NANOS_PER_MIN;
+                    rem %= Td::NANOS_PER_MIN;
+                    let seconds = rem / Td::NANOS_PER_SEC;
+                    rem %= Td::NANOS_PER_SEC;
+                    let millis = rem / Td::NANOS_PER_MILLI;
+                    rem %= Td::NANOS_PER_MILLI;
+                    let micros = rem / Td::NANOS_PER_MICRO;
+                    let nanos_rem = rem % Td::NANOS_PER_MICRO;
+                    for (part, value) in parts.iter_mut().zip([
+                        days, hours, minutes, seconds, millis, micros, nanos_rem,
+                    ]) {
+                        part.push(Some(value));
+                    }
+                }
+            }
+        }
+
+        let mut columns = BTreeMap::new();
+        for (name, part) in NAMES.iter().zip(&parts) {
+            columns.insert(
+                (*name).to_string(),
+                Column::from_values(Self::promote_components(part))?,
+            );
+        }
+        let order: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
+        DataFrame::new_with_column_order(self.series.index().clone(), columns, order)
     }
 
     /// Whole days of each Timedelta. Matches `pd.Series.dt.days`.
