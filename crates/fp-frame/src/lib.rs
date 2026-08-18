@@ -40819,9 +40819,40 @@ impl SeriesGroupByRolling<'_, '_> {
         // O(n) against a compute-bound O(n*window) rolling — so buying it back
         // would be the wrong trade even if it were expressible.
         //
-        // The 64-group floor mirrors `value_counts`' group-parallel arm, this
-        // crate's existing sanctioned shape for the same decision.
-        const SGBROLL_PAR_MIN_GROUPS: usize = 64;
+        // THE FLOOR GATES ON ROWS, NOT GROUP COUNT, AND THAT IS A CORRECTION.
+        // br-frankenpandas-u5cg4, CrimsonPine 2026-08-17.
+        //
+        // It used to be `n_groups >= 64`, mirroring `value_counts`. Group count
+        // is the wrong variable: it both BLOCKED wins and ADMITTED losses.
+        // Measured FP-vs-FP, self-speedup against a forced-serial baseline, ABBA
+        // over 15 rounds, group count varied at fixed rows (load 13.4-17.9, CPU
+        // idle 81.7%):
+        //
+        //   rows  groups   auto (old gate)      2       4       8      16
+        //    10k     100   0.234x PARALLEL   0.652x  0.444x  0.463x  0.293x
+        //    10k      64   0.391x PARALLEL   0.613x  0.678x  0.493x  0.264x
+        //    10k      32   1.023x serial     0.643x  0.749x  0.623x  0.446x
+        //   100k       8   0.952x serial     0.997x  1.197x  1.378x  1.456x
+        //   100k      16   1.014x serial     1.042x  1.075x  1.288x  1.324x
+        //   100k      32   0.977x serial     1.175x  1.561x  1.492x  1.608x
+        //     1M       8   0.998x serial     1.052x  1.269x  1.393x  1.407x
+        //     1M      16   0.991x serial     1.101x  1.330x  1.463x  1.436x
+        //     1M      32   1.005x serial     1.079x  1.265x  1.486x  1.502x
+        //
+        // Read the `auto` column against the rest. At 10k rows EVERY worker count
+        // loses, and the old gate let 64+ groups through anyway — a shipped
+        // 2.6-4.3x REGRESSION on small frames with ordinary group counts. At 100k
+        // and 1M rows every worker count from 4 up wins, and the old gate refused
+        // below 64 groups — so a groupby on a boolean, a month, or any handful of
+        // levels never parallelised at any size.
+        //
+        // Total rows is the discriminator because it is what the per-call
+        // `thread::scope` spawn is amortised against; group count only decides
+        // how the work is split, not how much there is. 100_000 is where the wins
+        // are PROVEN — the 10k..100k band was not measured, and gating there
+        // keeps the pre-existing serial behaviour rather than guessing.
+        const SGBROLL_PAR_MIN_ROWS: usize = 100_000;
+        const SGBROLL_PAR_MIN_GROUPS: usize = 2;
 
         // 8, NOT `value_counts`' 16, AND THE DIFFERENCE IS MEASURED.
         // br-frankenpandas-u5cg4, CrimsonPine 2026-08-17.
@@ -40860,7 +40891,7 @@ impl SeriesGroupByRolling<'_, '_> {
         let n_groups = order_keys.len();
         let workers = match sgb_rolling_max_workers_override() {
             Some(forced) => forced.max(1),
-            None if n_groups >= SGBROLL_PAR_MIN_GROUPS => {
+            None if n >= SGBROLL_PAR_MIN_ROWS && n_groups >= SGBROLL_PAR_MIN_GROUPS => {
                 fp_columnar::cached_available_parallelism()
                     .min(16)
                     .min(n_groups / SGBROLL_PAR_MIN_PER_WORKER)
@@ -193766,7 +193797,10 @@ mod sgb_rolling_group_parallel_u5cg4 {
 
     // Enough groups to clear SGBROLL_PAR_MIN_GROUPS (64) and to give
     // n_groups / SGBROLL_PAR_MIN_PER_WORKER (16) at least two workers.
-    const ROWS: usize = 20_000;
+    // Above SGBROLL_PAR_MIN_ROWS (100_000): the parallel arm is gated on ROWS
+    // now, so a 20k fixture would silently test the serial path on both arms and
+    // the "actually runs" assertion below would be vacuous. br-frankenpandas-u5cg4.
+    const ROWS: usize = 200_000;
     const GROUPS: i64 = 200;
     const WINDOW: usize = 10;
 
@@ -193882,7 +193916,9 @@ mod sgb_rolling_group_parallel_u5cg4 {
         if available < 8 {
             return; // a small host cannot demonstrate the divisor's effect
         }
-        let rows = 64_000_usize;
+        // 128_000, not 64_000: the arm is gated on rows >= 100_000 now, so the
+        // old fixture would route serial and this lock would assert nothing.
+        let rows = 128_000_usize;
         let index = Index::new((0..rows).map(|r| IndexLabel::Int64(r as i64)).collect());
         let values = Series::new(
             "v",
@@ -193914,24 +193950,69 @@ mod sgb_rolling_group_parallel_u5cg4 {
         );
     }
 
-    /// Below the group-count threshold the arm must stay serial — the negative
-    /// half of the routing, and the one a "just parallelise everything" change
-    /// would break. 8 groups is under SGBROLL_PAR_MIN_GROUPS (64).
+    /// REGRESSION LOCK on the shipped bug the ROWS floor exists to fix.
+    /// br-frankenpandas-u5cg4.
+    ///
+    /// The old gate was `n_groups >= 64` with no row condition, so a 10k-row
+    /// frame with an ordinary group count parallelised and lost 2.6-4.3x
+    /// (measured: auto 0.234x at 100 groups, 0.391x at 64, against a
+    /// forced-serial baseline). Group count decides how work is SPLIT; total
+    /// rows decides how much there is to amortise the per-call `thread::scope`
+    /// spawn against. A small frame must stay serial no matter how many groups
+    /// it has, and no correctness test can see this — the output is
+    /// bit-identical either way, only the thread count changes.
+    #[test]
+    fn a_small_frame_must_stay_serial_however_many_groups_u5cg4() {
+        let rows = 10_000_usize;
+        for groups in [64_i64, 100, 200] {
+            let index = Index::new((0..rows).map(|r| IndexLabel::Int64(r as i64)).collect());
+            let values = Series::new(
+                "v",
+                index.clone(),
+                Column::from_i64_values(
+                    (0..rows)
+                        .map(|r| ((r as i64 * 7919) % 1009) - 504)
+                        .collect(),
+                ),
+            )
+            .expect("value series");
+            let keys = Series::new(
+                "k",
+                index,
+                Column::from_i64_values((0..rows).map(|r| (r as i64) % groups).collect()),
+            )
+            .expect("key series");
+
+            set_sgb_rolling_max_workers(None);
+            let grouped = values.groupby(&keys).expect("groupby");
+            let _ = grouped.rolling(10).mean().expect("mean");
+            assert_eq!(
+                sgb_rolling_last_worker_count(),
+                1,
+                "{rows} rows / {groups} groups must stay SERIAL: the old n_groups>=64                  gate parallelised exactly this shape and measured 0.234x-0.391x"
+            );
+        }
+    }
+
+    /// A frame with too few groups to split must stay serial even when it is
+    /// large enough to clear the rows floor — the other half of the gate.
     #[test]
     fn few_groups_must_not_spawn_workers_u5cg4() {
-        let index = Index::new((0..64).map(|r| IndexLabel::Int64(r as i64)).collect());
+        // 200_000 rows so the ROWS floor is cleared and only the group condition
+        // can decide: a single group cannot be split across workers at all.
+        // Sized this way deliberately — the previous fixture was 64 rows AND 8
+        // groups, so it was refused by the rows floor and proved nothing about
+        // groups. br-frankenpandas-u5cg4.
+        let rows = 200_000_usize;
+        let index = Index::new((0..rows).map(|r| IndexLabel::Int64(r as i64)).collect());
         let values = Series::new(
             "v",
             index.clone(),
-            Column::from_i64_values((0..64).map(|r| (r as i64 * 13) % 7).collect()),
+            Column::from_i64_values((0..rows).map(|r| (r as i64 * 13) % 7).collect()),
         )
         .expect("value series");
-        let keys = Series::new(
-            "k",
-            index,
-            Column::from_i64_values((0..64).map(|r| (r as i64) % 8).collect()),
-        )
-        .expect("key series");
+        let keys = Series::new("k", index, Column::from_i64_values(vec![0_i64; rows]))
+            .expect("key series");
 
         set_sgb_rolling_max_workers(None);
         let grouped = values.groupby(&keys).expect("groupby");
@@ -193939,7 +194020,7 @@ mod sgb_rolling_group_parallel_u5cg4 {
         assert_eq!(
             sgb_rolling_last_worker_count(),
             1,
-            "8 groups is below the 64-group threshold and must stay serial"
+            "one group must stay serial however large the frame — there is nothing              to split"
         );
     }
 }
