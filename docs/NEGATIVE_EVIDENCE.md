@@ -38666,3 +38666,63 @@ evidence at all that its numbers are real. Every figure in a marker block has to
 artifact by the author, and on this row I nearly failed to do that while writing a section about
 being honest with the numbers.
 
+
+### 2026-08-18 SlateHeron (br-frankenpandas-jozfk, br-frankenpandas-yr8ro) — I added the fixture that was supposed to close jozfk's coverage hole, MUTATION-TESTED IT, AND IT WAS VACUOUS — which is how a real parity divergence surfaced
+
+`jozfk`'s remaining scope item read: "add the missing-entry fixture, which is the only thing
+that can ever detect a regression here". Every constructor fixture in the corpus is
+all-valid, and a MISSING ENTRY is the one input that separates pandas' `Int64` from `int64`.
+So I added exactly that fixture. **It passed, 18 of 18, with FrankenPandas' values matching
+pandas exactly. Then I mutation-tested it and it passed under the bug too.**
+
+**THE MUTATION:** flatten `parse_constructor_dtype_spec` back to a single case-insensitive
+tier — the exact change `jozfk` reverted — rebuild the CLI, re-run the packet. Result:
+`fixtures=18 passed=18 failed=0 green=true`, identical. The fixture cannot detect the bug it
+was written for. **A second green that proves nothing, in the same session in which I wrote
+up "a non-vacuity witness needs its own witness".** I would have committed it as the
+regression witness `jozfk` asked for.
+
+**WHY IT IS VACUOUS IS THE ACTUAL FINDING.** Measured, live pandas 2.2.3, cross-checked
+against the oracle (`error_origin=pandas`, so attestable rather than an adapter refusal):
+
+```
+pd.DataFrame([[True,None],[False,True]], dtype='int64') -> TypeError: int() argument must be
+                                                            ... not 'NoneType'
+pd.DataFrame([[True,None],[False,True]], dtype='Int64') -> SUCCEEDS, Int64Dtype, [[1,0],[<NA>,1]]
+```
+
+The numpy dtype cannot hold a missing value so pandas refuses at construction; the extension
+dtype can, so it succeeds. **FrankenPandas succeeds for BOTH.** A fixture pinning pandas'
+refusal for `int64` fails against FP — packet `FP-P2D-023` went `19 fixtures / 18 passed /
+1 failed / green=false` with it in place.
+
+So FP treats the two spellings identically on missing-bearing input, and the dtype
+resolution has no observable consequence. **NO CONSTRUCTOR FIXTURE CAN DISCRIMINATE `Int64`
+FROM `int64` UNTIL THAT IS DECIDED.** `jozfk`'s parser fix is correct and is defended solely
+by its unit locks; the corpus cannot corroborate it, and that is a property of
+FrankenPandas' behaviour rather than a gap in the corpus. Filed as `yr8ro` with the three
+options and a lean toward matching pandas — unlike `n8aqm`, where FP's permissiveness is
+merely friendlier, here it erases a distinction pandas treats as meaningful and that
+`fp-types` goes to trouble to encode.
+
+**THE DIVERGENCE WAS PROBED, NOT SHIPPED.** The demonstrating fixture was placed, run, and
+REMOVED in a `finally` block, so the corpus is untouched and nobody's `--require-green` is
+broken by a red row whose decision has not been taken. Dropping a red fixture into a suite
+everyone gates on, to prove a point I could prove and then clean up, would have been the
+lazy version of this.
+
+**WHAT I DID LAND:** the `Int64` missing-entry fixture, because FP's answer there is CORRECT
+and the case had no coverage at all. It is honest coverage. **It is NOT a regression witness
+for `jozfk`, and its own filename and this entry say so** — describing it as one would have
+been the false part, not the fixture.
+
+```
+NO VERDICT, NO RATIO, NO ROW BANKED — a parity probe and a vacuity finding.
+LOADAVG   7.33 / 9.29 / 10.27, CPU idle 88.5% by my own mpstat — a clean window, though
+          nothing here needed one.
+DISK      /data 88G.
+METHOD    Fixture generated from the ORACLE rather than typed, then cross-checked against
+          live pandas directly, because the oracle is a program that can be wrong and has
+          been. Mutation applied and reverted inside one script with the restore in a
+          finally block, and the CLI rebuilt from restored source afterwards.
+```
