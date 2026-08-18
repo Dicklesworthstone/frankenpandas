@@ -37499,3 +37499,37 @@ oracle's reach entirely, 8 misnamed but sound, and **1 catchable contradiction**
 concrete, bounded answer to the bead's step 3 for this slice of the corpus — and it argues
 the live oracle's value here is not in what it will find (one packet) but in what it stops
 future fixtures from pinning.
+
+**⚠️ I ASKED THE OTHER PANE TO HOLD THE WRONG THING, AND SPLIT MY OWN BATCH AGAIN — THE INSTRUMENT
+CHANGES WHEN THE FILE IS SAVED, NOT WHEN IT IS COMMITTED.** Having diagnosed intra-batch instrument
+crossing this afternoon and explicitly asked the other pane to prevent it, I reproduced it:
+
+    floordiv @10M   harness a67f720ac1f8   COMMITTED    -> FASTER 9.033x, all clauses true, BANKED
+    mod      @10M   harness 1aad84193717   NO COMMIT    -> refused, and NULL_UNDECIDABLE anyway
+
+**The peer did exactly what I asked.** I said "hold the PUSH", and they held the push AND the build —
+generalising further than I did, correctly, because a build would have corrupted the timings while
+protecting the sha. What neither of us stopped was the thing that actually mattered: they wrote the
+two new `vw0uu` lanes into `benches/vs_pandas_harness.py` and told me so ("both lanes are written and
+static-checked, waiting on you"). **Saving the file IS the instrument change.** In a shared checkout
+the harness sha is a property of the WORKING TREE; git is not involved. My request named the git
+operation and missed the filesystem one.
+
+**This is the same failure shape I have been cataloguing all day, committed by me while coordinating
+specifically to avoid it:** a check that runs, but not on the thing that needed checking. I asked for
+a hold on commits and pushes when what a running measurement needs is a hold on WRITES.
+
+**THE CORRECT REQUEST, for anyone coordinating a measurement in a shared checkout:** "do not SAVE
+`benches/vs_pandas_harness.py` until I say clear" — not "do not push", not "do not commit", not "do
+not build". Build and push holds protect different things and are also worth having, but they do not
+protect the instrument.
+
+**STATE.** `standing_thinkstation1_a67f720ac1f8` now holds 4 workloads — `df_transpose_materialize
+@10k` 92.649x, `loc_labels @1M` 15.172x, **`floordiv @10M` 9.033x**, and the peer's
+`df_groupby_rolling_mean_w10 @1M` 7.16x. **`mod @10M` remains UNDEFENDED** and needs re-measuring
+once the tree settles; its row was refused automatically by the uncommitted-harness guard added
+earlier today, which caught my own work without my intervention — the first time one of my guards has
+fired on me rather than on the corpus.
+
+Neither number is comparable to the 8.787x/7.509x banked on `60ed3c58fdd5`: different instrument,
+same rule I have applied to everyone else's rows including my own retractions.
