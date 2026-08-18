@@ -151277,6 +151277,98 @@ mod tests {
         assert_eq!(result.values()[1], Scalar::Utf8("Saturday".to_string()));
     }
 
+    /// `DataFrame::query` against pandas' measured row sets, and the refusals.
+    ///
+    /// MEASURED, pandas 2.2.3, on `{a: [1,5,3,NaN], b: ['x','y','x','z']}`:
+    /// ```text
+    ///   "a > 2"                 -> rows 1, 2
+    ///   "a >= 3 and b == \"x\"" -> row 2
+    ///   "b != \"x\""            -> rows 1, 3
+    ///   "a < 5 or b == \"z\""   -> rows 0, 2, 3
+    ///   "a == 1"                -> row 0
+    ///   "b == \"1\""            -> no rows
+    /// ```
+    #[test]
+    fn dataframe_query_matches_pandas_and_refuses_the_rest() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(5),
+                        Scalar::Int64(3),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+        )
+        .expect("frame");
+
+        let rows = |expr: &str| -> Vec<i64> {
+            df.query(expr)
+                .unwrap_or_else(|e| panic!("query({expr}) failed: {e}"))
+                .index()
+                .labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Int64(v) => *v,
+                    other => panic!("unexpected index label {other:?}"),
+                })
+                .collect()
+        };
+
+        // ⚠️ The NaN row (3) must NOT survive `a > 2` — a comparison mask excludes
+        // missing, and an implementation that treated missing as false-but-present
+        // or as zero would still pass every other case here.
+        assert_eq!(rows("a > 2"), vec![1, 2]);
+        assert_eq!(rows("a >= 3 and b == \"x\""), vec![2]);
+        assert_eq!(rows("b != \"x\""), vec![1, 3]);
+        assert_eq!(rows("a < 5 or b == \"z\""), vec![0, 2, 3]);
+        assert_eq!(rows("a == 1"), vec![0]);
+
+        // ⚠️ A QUOTED literal stays a STRING. `b == "1"` matches nothing; if the
+        // parser coerced it to Int64 this would either match or fail to compile a
+        // mask, and on a mixed column it would silently select different rows.
+        assert!(rows("b == \"1\"").is_empty());
+
+        // >= must not be parsed as > followed by a stray '='.
+        assert_eq!(rows("a >= 5"), vec![1]);
+        assert_eq!(rows("a <= 1"), vec![0]);
+
+        // ⚠️ REFUSALS. pandas ACCEPTS mixed and/or and returns rows [0, 2] here;
+        // this subset declines instead of folding left-to-right, which would give
+        // a different set with no error. Each of these must be Err, not a guess.
+        for bad in [
+            "a < 5 or b == \"z\" and a == 3", // mixed and/or
+            "(a > 1) and (a < 5)",           // parentheses
+            "a + 1 > 2",                     // arithmetic
+            "@limit > 2",                    // @variable
+            "a",                             // no operator
+            "a > ",                          // empty literal
+            "a > banana",                    // unparseable literal
+            "",                              // empty expression
+        ] {
+            assert!(
+                df.query(bad).is_err(),
+                "query({bad:?}) must be refused, not approximated"
+            );
+        }
+
+        // A column that does not exist is an error, not an empty frame.
+        assert!(df.query("missing > 1").is_err());
+    }
+
     /// `.dt.to_period(freq)` on VALUES, against pandas' measured labels.
     ///
     /// MEASURED, pandas 2.2.3, on ['2024-03-10 01:30:45', '2024-12-31 23:59:59', NaT] —
