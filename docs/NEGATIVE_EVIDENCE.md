@@ -35939,3 +35939,50 @@ answer and had to refute it; and the `read_csv` promotion probe, where
 `skip_blank_lines=True` silently removed the gap I thought I was measuring. **A cost
 estimate used to justify NOT doing something deserves the same evidence as a result used
 to justify doing it** — it is exactly as load-bearing, and nothing forces it to be checked.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-4kig1) — the sqrt/log pair is SPLIT: log runs 8 workers at 1M, sqrt runs 1. The shared-thread::scope attribution cannot be the mechanism for sqrt today, and I overstated my own previous comment
+
+**NO INCUMBENT ARM, NO A/A NULL, NOTHING CERTIFIED OR BANKED.** Thread-provenance probes on a
+preserved ELF, run under a build hold with /data at 56G — they write nothing to disk, which is why
+they were takeable when a harness row was not.
+
+**Counted mechanism:** operation threads and peak process threads, `fp-bench --category math_unary
+--size 1M`, preserved ELF
+`bench_elf_sha256=a802073cf042d28d9807347acee416505a0af97e7e2c0e344877405ea1ef80c5 (82346192 bytes) /data/projects/.scratch/crimsonpine/fp-bench-MAIN-8b263954b`,
+against `ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN = 200_000` and
+`ELEMENTWISE_WITNESS_DEFAULT_WORKERS = 8`:
+
+| op @1M | operation_threads_used | peak_process_threads | on the parallel witness arm |
+|---|---|---|---|
+| **log** | **8** | **10** | **YES** |
+| sqrt | 1 | 2 | no |
+| floor | 1 | 2 | no — moved off, per this bead |
+| ceil | 1 | 2 | no — moved off |
+| trunc | 1 | 2 | no — moved off |
+
+**THE CONTROL IS THE POINT.** `peak_process_threads = 2` means nothing unless that counter is shown
+to MOVE when parallelism engages, and `operation_threads_used` is already banked in this ledger as
+unreliable in BOTH directions. log reading 8/10 is what makes the four 2s evidence rather than a
+broken instrument. I ran the control precisely because my previous comment on this bead rested on
+the uncontrolled version of this number.
+
+**CONSEQUENCE.** 4kig1 states "Every op still ON it fails. sqrt and log are the two left" and records
+`sqrt @1M` FP A/A null 0.913921 FAIL on ELF 62c9a184. On the current ELF **sqrt is not on that arm**,
+so the shared `thread::scope` cannot be the mechanism for sqrt today. The likely cause is
+`44700c04b` ("fuse sqrt/log domain check so a non-negative column stays all-valid"), an ancestor of
+`8b263954b` — i.e. this bead's own fix may already have landed for half its pair.
+
+⚠️ **AND I OVERSTATED MY OWN PREVIOUS COMMENT, WHICH IS THE PART WORTH RECORDING.** I reported clean
+FP A/A nulls for `log @10k` and `log @100k` as though they bore on this bead. **They do not.**
+`PAR_MIN` is 200,000, so log at those sizes is SERIAL and never touched the arm under investigation.
+I had the threshold constant in front of me and still generalised from rows that could not test the
+claim. The sqrt rows survive (sqrt is serial at every size now, and certified twice at 3.73x and
+1.157x); the log rows are simply off-target. **Checking which regime a row is in is part of reading
+it, not a refinement afterwards.**
+
+**PRE-REGISTERED, FALSIFIABLE, no build needed, one clean window:** `log @1M` should STILL fail its
+FP A/A null (8 workers, still on the arm); `sqrt @1M` should now PASS it (serial, like
+floor/ceil/trunc). Both as predicted narrows this bead to log alone, with the fix being the move
+already applied to sqrt. **If sqrt @1M fails its null while provably running on one thread, the
+shared-scope attribution is wrong for reasons that outlive this bead and the diagnosis reopens
+entirely.** Not taken this turn: large-artifact benches are barred at 56G.
