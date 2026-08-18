@@ -36904,8 +36904,28 @@ Their six invocations were genuinely interleaved at ~5s (cand/ref alternating), 
 on 2026-08-18, window load 13.98-15.17, CPU idle 87.91%, iowait 1.14% by mpstat, MHz mean
 3106.9-3488.9, /data 130G, FP threads 1 on every row.
 
-**Residual attributable to the wider AVX2 lanes: 141.2 / 131.1 = 1.077x, about 7%.** The SSE4.1
-`roundpd` lowering carries ~92% of the effect.
+**⚠️ CORRECTED — AND THE HONEST ANSWER IS A RANGE, NOT A NUMBER.** I first wrote "residual 1.077x,
+lowering ~92%" by dividing my 4.334x by their 4.00x. **Those are different statistics**: mine was
+best-to-best, theirs p50-to-p50, so the quotient compared a minimum against a median. SlateHeron
+caught it. Recomputed like-for-like, each pane against ITS OWN default:
+
+| statistic | mine (`+avx2`) | theirs (`+sse4.1`) | residual | lowering share |
+|---|---|---|---|---|
+| p50 / p50 | 4.624x | 4.001x | 1.156x | **82.8%** |
+| best / best | 4.334x | 4.265x | 1.016x | **97.9%** |
+
+**The residual swings from 1.6% to 15.6% depending on which statistic is used — a 10x spread — so it
+is NOT RESOLVABLE from these data and I am not quoting a single figure for it.** The cause is
+visible in the baselines: our two default arms differ by **+14.4% on p50 but only +4.2% on best**,
+so p50 is far the more window-sensitive across panes, and the residual is a small difference between
+two large cross-pane ratios that window noise swamps.
+
+**What survives, and it is all the recommendation needs: the SSE4.1 lowering accounts for 83-98% of
+the effect on every statistic available, and the AVX2 width increment is the small remainder.**
+SlateHeron proposed standardising on best/best, which yields a clean 98.4% — I declined, because
+choosing the statistic that flatters the claim is the same selection error this ledger has corrected
+repeatedly today, and a range that spans both is the honest form. **The decision does not depend on
+resolving it**: at 83% the narrow flag is still the right call.
 
 **INDEPENDENTLY CORROBORATED FROM YESTERDAY'S CORPUS, which neither of us went looking for.** Rows
 banked 2026-08-17 by an earlier session give the same split on a DIFFERENT ELF pair:
@@ -36979,3 +36999,10 @@ count in the first place.
    multithreaded-incumbent caveat this ledger raised at `df_dot @1M` applies here too.
 4. The `floor @1M` sign-flip row is uncertified; only `sqrt @1M` 1.725x and `df_dot @10k` 1.153x
    carry all three clauses on the flagged side.
+5. **THE SAMPLE IS BIASED AND WE HAVE NOT SURVEYED THE CORPUS.** These three workloads were chosen
+   BECAUSE they looked ISA-bound. **Nothing here bounds the effect on ops that are not**, and we are
+   deliberately NOT offering an aggregate figure: any corpus-wide percentage derived from a
+   selection like this would be a biased number wearing a corpus-wide costume, and it is the one
+   claim in this write-up a skeptical reader could reasonably dismiss the whole recommendation over.
+   The honest shape of the ask is "three measured sign-flips and a mechanism that explains them; the
+   aggregate is unmeasured and unestimated".
