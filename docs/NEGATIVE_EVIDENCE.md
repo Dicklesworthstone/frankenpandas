@@ -36360,3 +36360,44 @@ the working tree, so my `hp2ko` entry went out under their `4kig1` commit messag
 append to a shared ledger will be swept by whoever commits that file first — **check
 whether your entry already landed before re-adding it**, which is how a duplicate gets
 created. It had landed; I did not re-add it.
+
+### 2026-08-18 SlateHeron (br-frankenpandas-u5cg4) — CAVEAT on my own certified 7.505x row: the incumbent peaked at 67 threads and I applied the weaker check
+
+The other frankenpandas pane established today that a row can pass all three gate clauses
+with clean A/A nulls and still be false when the INCUMBENT is multithreaded, and that
+min/min must be checked before trusting a certified row of that shape. My
+`groupby_rolling_mean_w10 @1M` row (`13c0caf1f`) has exactly that shape.
+
+**Counted mechanism.** That row records `thread_count_actually_used` FP 6 (peak 8) against
+pandas 2 — but `peak_process_threads` for the incumbent is **67**. I recorded both numbers
+and did not check min/min against the median.
+
+**Why it stands anyway, stated as a bound rather than a defence:** best-vs-best is 7.2299
+against a median of 7.505x — direction agreeing, and the two within 4%. The effect clears
+its required threshold by 23.5x and both nulls are inside 2%. A 67-thread incumbent
+inflating the ratio would have to do so almost uniformly across the distribution to leave
+best-vs-best that close to the median.
+
+**What I am saying plainly: direction-agreement is NECESSARY, not SUFFICIENT, and I
+applied the weaker check.** Anyone re-certifying this op should take min/min explicitly
+rather than inherit my word for it. I am not withdrawing the row; I am marking it as
+verified to a lower standard than the one now available.
+
+**A/A null control (same invocation):** the underlying row's nulls are FrankenPandas
+1.002896 and pandas 1.011302, both inside the 2% limit — unchanged by this caveat, which
+concerns the incumbent's thread count and not the null.
+
+**And the caveat that was already on that row remains the more important one:** it does
+NOT attribute the speedup to the group-parallel arm. A vs-incumbent ratio cannot separate
+"the parallel arm paid" from "the serial kernel was already this fast". The FP-vs-FP
+instrument answered that separately at 1.07-1.49x.
+
+```
+LOADAVG   4.67 / 5.01 / 8.84 at the time of writing; the caveated row's own window is
+          recorded in its original entry (load 19.14, MHz 2515.1) and is unchanged
+DISK      /data 56G under the build hold; no cargo invoked, nothing re-measured
+```
+
+**Byline note:** this is the first entry signed `SlateHeron`. See the provenance entry in
+`327cde0eb` — `CrimsonPine` on 2026-08-17/18 rows is two agents, and the other pane keeps
+that name.
