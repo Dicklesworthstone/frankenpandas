@@ -23307,6 +23307,36 @@ impl Series {
     /// - `Last`: keep the last occurrence of each value
     /// - `None`: drop all duplicated values entirely
     pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
+        // ⚠️ A CATEGORICAL COLUMN HOLDS CODES — but here, unlike the rest of this
+        // family, the ROW SELECTION is already right: codes and categories are a
+        // bijection, so deduping codes keeps exactly the rows deduping values
+        // would. Only the OUTPUT was wrong, carrying codes as a plain Int64
+        // Series. MEASURED, live pandas 2.2.3, on Categorical([10, 20, 10, 30]):
+        //
+        //   drop_duplicates()            -> [10, 20, 30]  dtype category, index [0,1,3]
+        //   drop_duplicates(keep='last') -> [20, 10, 30]  index [1,2,3]
+        //   drop_duplicates(keep=False)  -> [20, 30]      index [1,3]
+        //
+        // So this one RE-ATTACHES the metadata instead of decoding, which is
+        // strictly better than what `mode` could do (25b915d6a): the surviving
+        // codes still index the same category list, so the result keeps pandas'
+        // `dtype: category` AND reads correctly through the accessors already
+        // fixed for it. Decoding would have thrown the dtype away for nothing.
+        //
+        // The recursion is on a copy with `categorical: None`, so it terminates
+        // and the typed fast paths below still see a plain Int64 column.
+        if let Some(meta) = &self.categorical {
+            let bare = Series {
+                name: self.name.clone(),
+                index: self.index.clone(),
+                column: self.column.clone(),
+                categorical: None,
+                sparse: self.sparse.clone(),
+            };
+            let mut out = bare.drop_duplicates_keep(keep)?;
+            out.categorical = Some(meta.clone());
+            return Ok(out);
+        }
         // Hash-free dense seen-bitset fast path for all-valid bounded Int64:
         // the kept rows are exactly the positions whose duplicate-flag is false
         // (First/Last keep the first/last occurrence; None keeps the count==1
@@ -162075,6 +162105,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(numbers.mode().unwrap().values(), &[Scalar::Int64(10)]);
+    }
+
+    /// `drop_duplicates` picked the right ROWS on a categorical (codes and
+    /// categories are a bijection) but returned them as a plain Int64 Series of
+    /// codes. pandas keeps `dtype: category`. Values from live pandas 2.2.3 on
+    /// `Categorical([10, 20, 10, 30])`.
+    #[test]
+    fn drop_duplicates_on_a_categorical_stays_categorical() {
+        let numbers = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(10),
+                Scalar::Int64(30),
+            ],
+            false,
+        )
+        .unwrap();
+
+        let first = numbers.drop_duplicates().unwrap();
+        assert_eq!(first.dtype(), DType::Categorical, "pandas keeps category");
+        // Read through the accessor: the values, not the codes.
+        assert_eq!(
+            first.to_list(),
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+        );
+        // ...and the surviving rows are the first occurrences.
+        assert_eq!(first.index().labels().len(), 3);
+
+        // keep=Last selects different ROWS; the metadata must survive that too.
+        let last = numbers.drop_duplicates_keep(DuplicateKeep::Last).unwrap();
+        assert_eq!(last.dtype(), DType::Categorical);
+        assert_eq!(
+            last.to_list(),
+            vec![Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(30)]
+        );
     }
 
     #[test]
