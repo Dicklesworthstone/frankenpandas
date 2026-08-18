@@ -38936,6 +38936,16 @@ Recorded because a reader following this entry to its commit would otherwise fin
 and because "the code I measured is the code that shipped" is exactly the kind of assumption this
 ledger exists to stop people making.
 
+⚠️ **TWO REFINEMENTS ADDED AFTER THE FACT, BOTH OF WHICH MATTER TO ANYONE RE-VERIFYING THIS.**
+First: `361802602` carries `Co-Authored-By: Grok <noreply@x.ai>`. **There is a THIRD agent in this
+checkout**, not just the two Claude panes — so an unexplained change must not be attributed to "the
+other pane" by elimination. All panes commit as `cod-pandas`, and the `Co-Authored-By` trailer is
+currently the ONLY field that separates them. Second: **the byte-identity check above is necessary
+but not sufficient on its own** — it proves the file matched *at the moment I ran it*, and it is
+airtight only because I ran it WHILE STILL HOLDING THE TREE I BUILT FROM (verified 2026-08-18
+~06:45, working tree equal to HEAD). A reader re-running `git show 361802602:…` later obtains a
+strictly weaker guarantee and should not read it as reproducing this check.
+
 **WHAT REMAINS ON THIS BEAD.** The per-group Series materialisation (~15% of the profile) is
 untouched, and a CSR layout (counts, then offsets, then ONE flat `Vec<usize>` of length n) is the
 remaining allocation lever — it removes the Vec-of-Vecs entirely but changes `build_groups`' return
