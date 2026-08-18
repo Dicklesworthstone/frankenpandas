@@ -2600,7 +2600,7 @@ fn sort_group_order_by_rank(group_order: &mut [GroupKey<'_>]) -> bool {
     let mut ranks: Vec<FxHashMap<ScalarKey<'_>, u32>> = Vec::with_capacity(width);
     for position in 0..width {
         let mut distinct: Vec<ScalarKey<'_>> =
-            group_order.iter().map(|k| k[position].clone()).collect();
+            group_order.iter().map(|k| k[position]).collect();
         distinct.sort_by(scalar_key_cmp);
         distinct.dedup();
         if u32::try_from(distinct.len()).is_err() {
@@ -62804,6 +62804,15 @@ impl DataFrame {
     /// | `Int64` | `[1, <NA>]` | the nullable extension dtype can |
     /// | `float64` | `[1.0, nan]` | NaN IS float64's missing value |
     /// | `Float64` | `[1.0, <NA>]` | extension dtype |
+    /// | `str` | `['True', None]` | the missing value SURVIVES the cast |
+    /// | `string` | `['True', <NA>]` | ditto, as the extension dtype |
+    ///
+    /// **A STRING CAST PRESERVES MISSINGNESS HERE AND ONLY HERE.** `astype(str)`
+    /// genuinely does stringify - measured, `pd.Series([True, None]).astype(str)`
+    /// is `['True', 'None']` - so the shared cast in `Column::new` is RIGHT for
+    /// `astype` and wrong only for the constructor, which is why this method
+    /// restores the missing values rather than the cast being changed.
+    /// br-frankenpandas-constructor-utf8-null-stringified-r1bbv.
     ///
     /// Before this check FrankenPandas returned `[1, Null]` for BOTH spellings, so
     /// `int64` and `Int64` were behaviourally identical at the constructor and no
@@ -62818,10 +62827,12 @@ impl DataFrame {
     pub fn with_constructor_dtype(&self, dtype: DType) -> Result<Self, FrameError> {
         let mut columns = BTreeMap::new();
         for (name, column) in &self.columns {
-            // Checked in the SAME pass that builds the columns, so a lazy column
+            // Bound once: `values()` may materialize a lazy column representation.
+            let original = column.values();
+            // Checked in the SAME pass that builds the columns, so that lazy
             // representation is walked once rather than twice.
             if dtype == DType::Int64
-                && column.values().iter().any(|v| matches!(v, Scalar::Null(_)))
+                && original.iter().any(|v| matches!(v, Scalar::Null(_)))
             {
                 // pandas' own message, verbatim - it surfaces from int(None).
                 return Err(FrameError::CompatibilityRejected(
@@ -62829,7 +62840,28 @@ impl DataFrame {
                         .to_string(),
                 ));
             }
-            let coerced = Column::new(dtype, column.values().to_vec())?;
+            let coerced = if dtype == DType::Utf8 {
+                // A STRING CAST PRESERVES MISSINGNESS AT THE CONSTRUCTOR.
+                // br-frankenpandas-constructor-utf8-null-stringified-r1bbv.
+                //
+                // Cast through the ordinary rules first (so `true` still becomes
+                // pandas' "True" rather than Rust's "true"), then put the missing
+                // values back where they were. Restoring is what makes this
+                // different from `astype`, NOT the casting.
+                let cast = Column::new(dtype, original.to_vec())?;
+                let mut values = cast.values().to_vec();
+                for (slot, source) in values.iter_mut().zip(original.iter()) {
+                    if let Scalar::Null(kind) = source {
+                        *slot = Scalar::Null(*kind);
+                    }
+                }
+                // Every element is now Utf8-or-Null, which is the arm of
+                // `Column::new` that preserves a missing value instead of
+                // coercing it.
+                Column::new(dtype, values)?
+            } else {
+                Column::new(dtype, original.to_vec())?
+            };
             columns.insert(name.clone(), coerced);
         }
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
@@ -95095,6 +95127,53 @@ mod tests {
         with_missing()
             .with_constructor_dtype(DType::Float64)
             .expect("float64 represents a missing value as NaN");
+    }
+
+    /// `dtype='str'` at the CONSTRUCTOR preserves a missing value; `astype(str)`
+    /// stringifies it. Both are pandas 2.2.3, measured:
+    ///   pd.DataFrame([[True, None]], dtype='str')      -> [['True', None]]
+    ///   pd.Series([True, None]).astype(str)            -> ['True', 'None']
+    /// FrankenPandas used to give `Utf8("None")` for the constructor too, which
+    /// made a genuine "None" string and a missing value indistinguishable.
+    /// br-frankenpandas-constructor-utf8-null-stringified-r1bbv.
+    #[test]
+    fn constructor_dtype_str_preserves_a_missing_value_r1bbv() {
+        use fp_types::NullKind;
+        let cast = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)])],
+        )
+        .expect("frame")
+        .with_constructor_dtype(DType::Utf8)
+        .expect("str accepts a missing value");
+
+        assert_eq!(
+            cast.columns["a"].values(),
+            &[Scalar::Utf8("True".to_string()), Scalar::Null(NullKind::Null)],
+            "the missing value must survive, and true must render as pandas' 'True'"
+        );
+
+        // NON-VACUITY: a real "None" STRING must stay an ordinary string, so the
+        // two are distinguishable. This is the whole point of the bead - a fix
+        // that turned every "None" into a null would pass the assertion above.
+        let literal = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Utf8("None".to_string()),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )],
+        )
+        .expect("frame")
+        .with_constructor_dtype(DType::Utf8)
+        .expect("str cast");
+        assert_eq!(
+            literal.columns["a"].values(),
+            &[Scalar::Utf8("None".to_string()), Scalar::Null(NullKind::Null)],
+            "a literal \"None\" string and a missing value must stay distinct"
+        );
     }
 
     /// The constructor's `dtype=` REFUSES a lossy float->int; pandas' `astype`
