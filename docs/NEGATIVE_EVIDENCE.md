@@ -38086,3 +38086,61 @@ controls its own artifact records — nulls inside band, incumbent cv low, arms 
 agreeing in direction — rather than on any reading of the window, mine or the orchestrator's. The
 balanced-square interleave exists so a monotone drift hits both arms alike; **when the controls hold,
 the row stands, and when they do not, no amount of window quality rescues it.**
+
+### 2026-08-18 SlateHeron (br-frankenpandas-8s4mb) — METHOD: a non-vacuity witness needs its own witness, and mine did not have one
+
+Recording this separately from the `8s4mb` entry because it generalises past bit-identity
+work, and because the other pane's read of it is right: this is the first instance either of
+us has found where a check and its subject came apart **inside a TEST**, rather than inside a
+gate or a banked artifact.
+
+**What happened.** The blocked moment change is only admissible because it is bit-identical
+below 8 elements. Two locks assert exactly that. A bit-identity test is worthless on its own
+— it would pass just as happily if the blocked path never ran at all — so I wrote a third
+lock as the non-vacuity witness:
+
+```rust
+assert_ne!(blocked.to_bits(), folded.to_bits(),
+    "the 8-lane path must produce a different sum from the left-fold");
+```
+
+and fed it `i64` values near `1e6`. **It failed.** Not because the lane path was broken, but
+because at that magnitude the squared deviations sum EXACTLY in f64 — every partial stays
+inside the 2^53 exactly-representable integer range — so summation order is unobservable and
+the two arms agree bitwise whether or not the blocking happened.
+
+**So the witness could not have distinguished the thing it existed to distinguish.** The
+test was correct, the assertion was correct, and the DATA was wrong. Had I chosen those
+values and had the assert happened to pass — one different constant and it would have — I
+would have shipped a bit-identity guarantee resting on a witness that proved nothing, and
+every downstream reader would have seen three green locks.
+
+**The fix and the reason it is the right one:** move to ~`2e9`, where squared deviations are
+~`1e18` and 4096 of them total ~`1e21`, far past 2^53, so rounding occurs and summation order
+becomes observable. The f64 sibling alternates magnitudes (`1e7 + i` against `1e-3 * i`) for
+the same reason — a uniform array would let both orders agree and the test would pass while
+measuring nothing.
+
+**THE GENERAL RULE, which I had not seen stated anywhere in this ledger:** you cannot
+establish that a fast path ran by asserting that a result DIFFERS, unless you have separately
+established that the data CAN distinguish the two paths. The differing-result assertion is
+itself a check with a subject and an object, and its object is the input, not the code. **A
+non-vacuity witness needs its own witness.** For a numerics change that means showing the
+inputs leave the exactly-representable range; for a parallel-arm change it means showing the
+observed worker count moves; for a typed fast path it means showing the fallback produces a
+different observable at all.
+
+**Sibling instances already in this ledger, now recognisable as the same shape:** a preflight
+that printed `OK` having parsed zero verdict-bearing entries; a `conformance` job reported
+`SKIPPED` because its dependency was red; a harness accepting a sha that exists in no commit;
+and an oracle adapter refusing before pandas was ever invoked. In every one, the artifact was
+internally consistent and the distinguishing question was one the artifact could not pose
+about itself. **The testable form the other pane arrived at is the one to carry forward: can
+this check emit a state a reader will mistake for success while nothing was actually
+checked?**
+
+```
+NO VERDICT, NO RATIO, NO ROW BANKED — a method note, not a measurement.
+LOADAVG   6.04 / 9.89 / 10.40; no cargo invoked for this entry.
+DISK      /data 99G.
+```
