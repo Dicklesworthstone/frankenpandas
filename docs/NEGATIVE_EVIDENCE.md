@@ -36529,3 +36529,75 @@ MHz, disk 131G):
 Both reproduce the stdout-only figures to within 1.4%, and best-vs-best agrees in direction on both
 — so the win is not the incumbent-spread artefact this ledger caught at `df_dot @1M`. **`log @1M` is
 now banked**; `sqrt @1M` is a real, decidable 0.93x LOSS and stands as 4kig1's remaining target.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-oxv4u) — `+avx2` flips sqrt @1M from a CERTIFIED 0.93x LOSS to a CERTIFIED 1.725x WIN, a 1.861x self-speedup; second workload where the blanket flag changes the verdict's sign
+
+**Campaign result class:** `incumbent-win`.
+
+The ratio is measured against pandas running in the same invocation, so it carries the incumbent
+contract. It is a win of the BUILD FLAG, not of a code change, and it is not banked — see below.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=162f821c9c094a16ee97a9f29aa7986f89753b0012208452e8f5b37659f7d2f4 (82851952 bytes) /data/projects/.scratch/crimsonpine/fp-bench-AVX2-fc793a3b7`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260818T045653.009814Z-pid2173863 measured_ratio=1.725x — arm A of the
+same balanced square.
+
+**A/A null control (same invocation):** null median ratio frankenpandas=1.00014 and null median
+ratio pandas=0.99878 maximum_absolute_deviation=0.02 — both medians inside the band.
+
+**Median-CI decision:** median effect ratio 1.725x with CI [1.70814034, 1.73198558];
+claim_log_effect=0.54504378 cleared the required threshold required_log_effect=0.08842828 at
+margin_multiplier=2.0; decidable=true and all three clauses true.
+
+**CV role:** provenance-only, no vote (`cv_is_provenance_only=true`). FP 8.18%, pandas 5.28%.
+
+**NOT BANKED — and this time the tool refused it, not me.** The row comes from
+`fp-bench-AVX2-fc793a3b7` (`162f821c9c09`), a `-C target-feature=+avx2` build, which is not the
+shipping configuration. `assemble_standing_locks.py` now refuses it by ELF sha and the live baseline
+stays at 6 workloads. Two turns ago I had to withhold `--apply` by hand to prevent exactly this;
+the guard added since does it without me.
+
+**Counted mechanism:** `sqrt` instructions inside `Column::sqrt`, disassembled from both ELFs:
+default **6 packed `sqrtpd` on `%xmm` (2 doubles)** + 8 scalar; `+avx2` **17 packed `sqrtpd` on
+`%ymm` (4 doubles)** + 6 scalar. Doubled lane count on a sqrt-bound loop.
+
+**MEASURED**, harness `60ed3c58fdd5`, pandas incumbent in the same invocation, arms clock-matched at
+4292.2 MHz on every arm of both rows, disk 131G:
+
+| build | verdict | ratio | FP p50 / min | pandas p50 | best-vs-best | nulls FP/pd | loadavg |
+|---|---|---|---|---|---|---|---|
+| default (sse2) | SLOWER | **0.93x** | 1.150 / 1.136 ms | 1.069 ms | 0.931x agrees | 0.99625 / 0.99834 | 7.54-7.73 |
+| `+avx2` | **FASTER** | **1.725x** | 0.621 / 0.610 ms | 1.074 ms | 1.730x agrees | 1.00014 / 0.99878 | 9.96-10.62 |
+
+**All three clauses true on BOTH rows, and best-vs-best agrees in direction on both** — so neither is
+the incumbent-spread artefact this ledger caught at `df_dot @1M`. **The incumbent barely moved
+between the two runs (1.069 ms against 1.074 ms, 0.5%)**, which is the control that makes the
+cross-run comparison legitimate here where it was not at `df_dot`: FP's own best went 1.136 ms ->
+0.610 ms, a **1.861x self-speedup**, close to the 2x the lane doubling predicts.
+
+**A HYPOTHESIS I KILLED BY READING BEFORE MEASURING.** My first idea was that sqrt @1M loses because
+it runs on ONE thread while log @1M runs on EIGHT and wins 2.096x. The source answers it: sqrt pins
+`par_min_override = usize::MAX` deliberately, and the comment records the measurement —
+**parallelism is worth 1.038x at 10M on the float path, inside its own noise** — together with a
+self-correction that the int64 arm DOES pay (parallel 1.203x against serial 0.771x, a 1.56x swing)
+and therefore keeps the shared threshold. At 0.93x, a 1.038x gain reaches 0.965x and is still a
+loss. **Parallelism is not sqrt's lever and I would have spent a build finding that out.** The one
+part of that comment now stale is its claim that parallelism "costs it the A/A null it needs to
+certify": sqrt certifies cleanly serial today, and log certifies cleanly on 8 threads, so the null
+is no longer the constraint — but the 1.038x is, and it stands.
+
+**WHAT THIS DOES TO THE BUILD-POLICY QUESTION.** oxv4u asks for targeted AVX2 and I established that
+targeted dispatch is unreachable here (`forbid(unsafe_code)` bars `#[target_feature]` calls, the
+dependency ban bars multiversioning). The blanket flag now has a second workload where it changes
+the SIGN of the verdict, not merely the margin:
+
+    df_dot @10k   0.979-0.991x  ->  1.153x certified
+    sqrt   @1M    0.93x         ->  1.725x certified
+
+Both from bit-identical arithmetic — `+fma` was deliberately excluded, and `vfmadd` is 0 in both
+builds. **I am still not proposing the policy change.** What I am doing is making it a decision with
+two measured sign-flips behind it instead of one, so whoever makes the call is not guessing at the
+size of what is being left on the table.
