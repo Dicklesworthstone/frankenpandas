@@ -1985,6 +1985,30 @@ fn run(
             // materialises the transposed result in its best available form, and
             // pandas' best form is structurally cheaper". Forcing pandas onto a
             // per-column route to even the work up would be choosing a bad opponent.
+            //
+            // ⚠️ SECOND CONFOUND, AND IT IS THE ONE THAT FLATTERS US — added after
+            // the other pane read the source (br-frankenpandas-3ya6b). The caveat
+            // above names the REPRESENTATIONAL gap and stops there. This arm ALSO
+            // pays an ordinary addressable constant: there is no positional column
+            // accessor, so the only public route from a position to a column is
+            //     column_name_at(i) -> owned String -> column(name.as_str())
+            // and `name_at` on the Int64UnitRange variant is `start + i` followed by
+            // `.to_string()`. Worse, it is a ROUND TRIP: `get_one` then parses the
+            // name back to an i64 and re-formats it to validate, so it is TWO
+            // allocations and a parse per column to get from a position back to the
+            // same position. At 1M source rows the transposed frame has 1,000,000
+            // columns, so this arm pays ~2M allocations and ~1M parses BEFORE any
+            // materialization. This is the only shape in the corpus where column
+            // COUNT scales with data size, which is why a per-column constant that
+            // is invisible everywhere else can dominate here.
+            //
+            // THE LANE IS STILL RIGHT AND SHOULD NOT BE "FIXED" TO AVOID IT. The
+            // name route was the only public one when this lane was written, so it
+            // measures what the API actually costs a caller. The finding is that the
+            // API had a hole, not that the lane chose badly. But a reader must not
+            // attribute the whole ratio to representation: it is representation PLUS
+            // an addressable constant, and `3ya6b` predicts removing the constant
+            // cuts a large ABSOLUTE cost with NO sign change.
             let transposed = df.transpose().expect("transpose");
             let mut touched = 0usize;
             for position in 0..transposed.num_columns() {
