@@ -64565,6 +64565,49 @@ impl DataFrame {
                         .to_string(),
                 ));
             }
+            // ⚠️ THE timedelta64 CONSTRUCTOR REFUSES A NON-FINITE FLOAT WHERE
+            // astype ACCEPTS ONE. This is the constructor-only strictness that
+            // `float_to_temporal_nanos` (fp-types) documents and deliberately
+            // does NOT encode, because that cast is shared with astype and the
+            // two pandas paths disagree. Same reason the int64 check above lives
+            // here rather than in `Column::new`.
+            //
+            // MEASURED, live pandas 2.2.3, constructor beside astype:
+            //
+            //   dtype='timedelta64[ns]'   ctor                    astype
+            //     inf / -inf / 1e30       OverflowError           NaT
+            //     NaN                     NaT                     NaT
+            //     exactly  2^63           OverflowError           NaT
+            //     exactly -2^63           NaT                     NaT
+            //
+            // ⚠️ THE TWO 2^63 ENDS DISAGREE, and that is not a typo: -2^63 IS
+            // i64::MIN, which is the NaT sentinel, so Python's int conversion
+            // succeeds and lands exactly on NaT. +2^63 does not fit.
+            //
+            // ⚠️ datetime64 HAS NO SUCH REFUSAL — its constructor yields NaT for
+            // inf too — so this is guarded on Timedelta64 alone.
+            if dtype == DType::Timedelta64 {
+                for value in original.iter() {
+                    let Scalar::Float64(raw) = value else {
+                        continue;
+                    };
+                    if raw.is_nan() {
+                        continue;
+                    }
+                    if !raw.is_finite() {
+                        // pandas' own message, verbatim.
+                        return Err(FrameError::CompatibilityRejected(
+                            "cannot convert float infinity to integer".to_string(),
+                        ));
+                    }
+                    if *raw >= 9_223_372_036_854_775_808.0 || *raw < -9_223_372_036_854_775_808.0
+                    {
+                        return Err(FrameError::CompatibilityRejected(
+                            "Python int too large to convert to C long".to_string(),
+                        ));
+                    }
+                }
+            }
             let coerced = if dtype == DType::Utf8 {
                 // A STRING CAST PRESERVES MISSINGNESS AT THE CONSTRUCTOR.
                 // br-frankenpandas-constructor-utf8-null-stringified-r1bbv.
@@ -97501,6 +97544,57 @@ mod tests {
     /// `[[True, None], [False, True]]`: `int64` -> TypeError, `Int64` ->
     /// `[[1, <NA>], [0, 1]]`. Before the fix FrankenPandas returned `[1, Null]`
     /// for both, so the two dtypes were behaviourally identical here.
+    /// The timedelta64 constructor refuses a non-finite float where `astype`
+    /// accepts one — the constructor-only strictness `float_to_temporal_nanos`
+    /// documents and deliberately leaves to this layer. From live pandas 2.2.3.
+    #[test]
+    fn constructor_dtype_timedelta64_refuses_a_non_finite_float() {
+        let one_value = |v: f64| {
+            DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Float64(v)])]).expect("frame")
+        };
+
+        for (value, fragment) in [
+            (f64::INFINITY, "infinity"),
+            (f64::NEG_INFINITY, "infinity"),
+            (1e30, "too large"),
+            (-1e30, "too large"),
+            (9_223_372_036_854_775_808.0, "too large"), // exactly 2^63
+        ] {
+            let err = one_value(value)
+                .with_constructor_dtype(DType::Timedelta64)
+                .expect_err("timedelta64 must refuse a non-finite float");
+            assert!(
+                format!("{err}").contains(fragment),
+                "expected pandas' {fragment} message for {value}, got: {err}"
+            );
+        }
+
+        // ⚠️ NaN IS ACCEPTED (it is a missing value, not an overflow), and so is
+        // exactly -2^63, because that IS the NaT sentinel — Python's int
+        // conversion succeeds and lands on NaT. The two 2^63 ends disagree.
+        for value in [f64::NAN, -9_223_372_036_854_775_808.0] {
+            let built = one_value(value)
+                .with_constructor_dtype(DType::Timedelta64)
+                .expect("NaN and -2^63 are accepted");
+            assert!(built.column("a").expect("column").values()[0].is_missing());
+        }
+
+        // A finite float still truncates to nanoseconds.
+        let finite = one_value(1.5)
+            .with_constructor_dtype(DType::Timedelta64)
+            .expect("finite float");
+        assert_eq!(
+            finite.column("a").expect("column").values()[0],
+            Scalar::Timedelta64(1)
+        );
+
+        // ⚠️ datetime64 HAS NO SUCH REFUSAL: its constructor yields NaT for inf.
+        let datetime = one_value(f64::INFINITY)
+            .with_constructor_dtype(DType::Datetime64)
+            .expect("datetime64 accepts inf");
+        assert!(datetime.column("a").expect("column").values()[0].is_missing());
+    }
+
     #[test]
     fn constructor_dtype_int64_refuses_a_missing_value_but_nullable_int64_keeps_it_v1zy1() {
         use fp_types::NullKind;
