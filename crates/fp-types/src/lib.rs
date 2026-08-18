@@ -2087,6 +2087,42 @@ impl Timedelta {
         nanos.rem_euclid(Self::NANOS_PER_MICRO)
     }
 
+    /// The coarsest [`TimedeltaStringResolution`] that renders `nanos`
+    /// losslessly. Fold over a column with `max`.
+    ///
+    /// `NaT` reports `Days`, the identity of that fold, because pandas excludes
+    /// it from the scan: `[1 days, NaT]` still renders `['1 days', 'NaT']`.
+    #[must_use]
+    pub const fn string_resolution(nanos: i64) -> TimedeltaStringResolution {
+        if nanos == Self::NAT || nanos.rem_euclid(Self::NANOS_PER_DAY) == 0 {
+            TimedeltaStringResolution::Days
+        } else {
+            TimedeltaStringResolution::Full
+        }
+    }
+
+    /// Render `nanos` the way `astype(str)` does, at a resolution chosen for the
+    /// whole column by [`Self::string_resolution`].
+    ///
+    /// The `Full` arm is [`Self::format`] verbatim — the per-value sub-second
+    /// width was already right. Only the `Days` arm is new, and it exists
+    /// because a column of whole days drops its time part completely:
+    /// `'1 days'`, not `'1 days 00:00:00'`.
+    #[must_use]
+    pub fn format_at_resolution(nanos: i64, resolution: TimedeltaStringResolution) -> String {
+        if nanos == Self::NAT {
+            return "NaT".to_string();
+        }
+        match resolution {
+            TimedeltaStringResolution::Full => Self::format(nanos),
+            // Euclidean division, so a negative whole-day value keeps pandas'
+            // spelling: -2 days is "-2 days", never "-1 days -24:00:00".
+            TimedeltaStringResolution::Days => {
+                format!("{} days", nanos.div_euclid(Self::NANOS_PER_DAY))
+            }
+        }
+    }
+
     pub fn format(nanos: i64) -> String {
         use std::fmt::Write as _;
 
@@ -2620,6 +2656,32 @@ pub struct Timestamp {
     /// Phase 3 wires chrono_tz interpretation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tz: Option<String>,
+}
+
+/// How `astype(str)` renders a `timedelta64[ns]` COLUMN.
+///
+/// ⚠️ THE TIMEDELTA LADDER IS NOT THE DATETIME ONE, and copying the sibling
+/// across is the mistake this type exists to prevent. It has exactly TWO rungs,
+/// and — unlike [`DatetimeStringResolution`] — THE SUB-SECOND WIDTH IS PER
+/// VALUE, not per column. MEASURED, live pandas 2.2.3:
+///
+///     [1 days, 2 days]              -> ['1 days', '2 days']
+///     [1 days, 5 ms]                -> ['1 days 00:00:00', '0 days 00:00:00.005000']
+///     [1 days 02:03:04.005, 1 ns]   -> ['1 days 02:03:04.005000',
+///                                       '0 days 00:00:00.000000001']
+///
+/// That last row is the whole distinction: a millisecond value keeps its SIX
+/// digits while its neighbour prints NINE. On the datetime side the same pair
+/// would have been widened to a common nine. So the only column-wide question
+/// here is whether the time-of-day part can be dropped entirely, which is what
+/// [`Timedelta::string_resolution`] answers; [`Timedelta::format`] already gets
+/// the per-value part right and is reused unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TimedeltaStringResolution {
+    /// `1 days` / `-2 days` / `0 days` — every value is a whole day.
+    Days,
+    /// `1 days 02:03:04.005000` — the full rendering, sub-second width per value.
+    Full,
 }
 
 /// How wide `astype(str)` renders a `datetime64[ns]` value.

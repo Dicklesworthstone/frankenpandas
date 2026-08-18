@@ -58,8 +58,8 @@ use std::sync::{Arc, OnceLock};
 
 use fp_types::{
     DType, DatetimeStringResolution, Interval, IntervalClosed, NullKind, Period, PeriodFreq,
-    Scalar, SparseDType, Timedelta, Timestamp, TypeError, cast_scalar, cast_scalar_owned,
-    common_dtype, infer_dtype, nanall,
+    Scalar, SparseDType, Timedelta, TimedeltaStringResolution, Timestamp, TypeError, cast_scalar,
+    cast_scalar_owned, common_dtype, infer_dtype, nanall,
     nanany, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nankurt, nanmax,
     nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd,
     nansum, nanvar,
@@ -24264,6 +24264,44 @@ impl Column {
                     ),
                     // A validity-mask missing in a datetime column is the same
                     // NaT the sentinel spells.
+                    _ => bytes.extend_from_slice(b"NaT"),
+                }
+                offsets.push(bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(bytes, offsets));
+        }
+        // Timedelta64 -> Utf8: the sibling of the datetime path above, with ONE
+        // column-wide question instead of five rungs — can the time-of-day part
+        // be dropped entirely?
+        //
+        // ⚠️ THE SUB-SECOND WIDTH IS PER VALUE HERE, the opposite of the
+        // datetime side, so `Timedelta::format` is reused unchanged for it.
+        // MEASURED, live pandas 2.2.3:
+        //
+        //   [1 days, 2 days]            -> ['1 days', '2 days']
+        //   [1 days, 5 ms]              -> ['1 days 00:00:00',
+        //                                   '0 days 00:00:00.005000']
+        //   [1 days 02:03:04.005, 1 ns] -> ['1 days 02:03:04.005000',
+        //                                   '0 days 00:00:00.000000001']
+        //
+        // The last row is the distinction: six digits beside nine, where the
+        // datetime formatter would have widened both to nine.
+        if target == DType::Utf8 && self.dtype == DType::Timedelta64 {
+            let values = self.values();
+            let resolution = values
+                .iter()
+                .fold(TimedeltaStringResolution::Days, |acc, v| match v {
+                    Scalar::Timedelta64(nanos) => acc.max(Timedelta::string_resolution(*nanos)),
+                    _ => acc,
+                });
+            let mut bytes: Vec<u8> = Vec::with_capacity(values.len() * 12);
+            let mut offsets: Vec<usize> = Vec::with_capacity(values.len() + 1);
+            offsets.push(0);
+            for value in values {
+                match value {
+                    Scalar::Timedelta64(nanos) => bytes.extend_from_slice(
+                        Timedelta::format_at_resolution(*nanos, resolution).as_bytes(),
+                    ),
                     _ => bytes.extend_from_slice(b"NaT"),
                 }
                 offsets.push(bytes.len());
@@ -51286,6 +51324,113 @@ mod tests {
             );
 
             // An empty column has no rung to pick and must not panic.
+            assert!(strings(&column(vec![])).is_empty());
+        }
+
+        /// The timedelta twin, which has a DIFFERENT ladder — two rungs, and a
+        /// sub-second width chosen per VALUE rather than per column. Every
+        /// string is transcribed from live pandas 2.2.3
+        /// `pd.Series([...], dtype='timedelta64[ns]').astype(str)`.
+        #[test]
+        fn astype_timedelta64_to_utf8_drops_the_time_only_for_a_whole_day_column() {
+            const DAY: i64 = 86_400_000_000_000;
+            let strings = |col: &Column| -> Vec<String> {
+                col.values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Utf8(text) => text.clone(),
+                        other => panic!("expected Utf8, got {other:?}"),
+                    })
+                    .collect()
+            };
+            let column = |nanos: Vec<i64>| {
+                Column::new(
+                    DType::Timedelta64,
+                    nanos.into_iter().map(Scalar::Timedelta64).collect(),
+                )
+                .expect("timedelta col")
+                .astype(DType::Utf8)
+                .expect("astype utf8")
+            };
+
+            // Rung 1: all whole days -> the day count alone, sign and zero
+            // included.
+            assert_eq!(
+                strings(&column(vec![DAY, 2 * DAY])),
+                vec!["1 days".to_owned(), "2 days".to_owned()]
+            );
+            assert_eq!(
+                strings(&column(vec![0, 3 * DAY])),
+                vec!["0 days".to_owned(), "3 days".to_owned()]
+            );
+            assert_eq!(
+                strings(&column(vec![-2 * DAY, 3 * DAY])),
+                vec!["-2 days".to_owned(), "3 days".to_owned()]
+            );
+
+            // ...and the SAME one-day value beside a single nanosecond gets its
+            // time part back.
+            assert_eq!(
+                strings(&column(vec![DAY, 1])),
+                vec![
+                    "1 days 00:00:00".to_owned(),
+                    "0 days 00:00:00.000000001".to_owned(),
+                ]
+            );
+
+            // ⚠️ THE SUB-SECOND WIDTH IS PER VALUE, NOT PER COLUMN — six digits
+            // beside nine. The datetime sibling would have widened both to nine,
+            // which is exactly why the two ladders are separate types.
+            assert_eq!(
+                strings(&column(vec![DAY + 7_384_005_000_000, 1])),
+                vec![
+                    "1 days 02:03:04.005000".to_owned(),
+                    "0 days 00:00:00.000000001".to_owned(),
+                ]
+            );
+
+            // Negative values normalize the Python way: a negative day count
+            // with a NON-negative time remainder, joined by a '+'.
+            assert_eq!(
+                strings(&column(vec![-1])),
+                vec!["-1 days +23:59:59.999999999".to_owned()]
+            );
+            assert_eq!(
+                strings(&column(vec![-90_000_000_000])),
+                vec!["-1 days +23:58:30".to_owned()]
+            );
+            assert_eq!(
+                strings(&column(vec![-2 * DAY, 1])),
+                vec![
+                    "-2 days +00:00:00".to_owned(),
+                    "0 days 00:00:00.000000001".to_owned(),
+                ]
+            );
+
+            // NaT does not force the column off the Days rung, and renders as a
+            // STRING.
+            let with_nat = Column::new(
+                DType::Timedelta64,
+                vec![Scalar::Timedelta64(DAY), Scalar::Null(NullKind::NaT)],
+            )
+            .expect("timedelta col")
+            .astype(DType::Utf8)
+            .expect("astype utf8");
+            assert_eq!(
+                strings(&with_nat),
+                vec!["1 days".to_owned(), "NaT".to_owned()]
+            );
+
+            // Both ends of pandas' timedelta64[ns] range.
+            assert_eq!(
+                strings(&column(vec![-9_223_372_036_854_775_807])),
+                vec!["-106752 days +00:12:43.145224193".to_owned()]
+            );
+            assert_eq!(
+                strings(&column(vec![9_223_372_036_854_775_807])),
+                vec!["106751 days 23:47:16.854775807".to_owned()]
+            );
+
             assert!(strings(&column(vec![])).is_empty());
         }
 
