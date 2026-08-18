@@ -48685,6 +48685,25 @@ impl DatetimeAccessor<'_> {
                         return Scalar::Utf8(Self::trim_zero_time_fraction(time_clean).to_string());
                     }
                 }
+                // ⚠️ DATE-ONLY INPUT IS MIDNIGHT, NOT MISSING (br-frankenpandas-t2n6i).
+                // Both branches above need a 'T' or a space to find a time part, so a
+                // bare date fell through to Null — a MISSING value where pandas has a
+                // time. MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18):
+                //   ['2024-01-15', '2024-01-16'] -> .dt.time ['00:00:00', '00:00:00']
+                //   ['2024-02-29', '2023-12-31'] -> ['00:00:00', '00:00:00']
+                //   ['not a date']               -> [NaT]        still missing
+                //
+                // Guarded on the string carrying NEITHER separator, deliberately: it
+                // reuses `parse_ymd_from_datetime`, which reads the DATE part and would
+                // also answer Some for '2024-01-15 25:99:99' — a malformed TIME that
+                // pandas turns into NaT and that the space branch above has already
+                // rejected. Without the guard this arm would resurrect it as midnight.
+                if !s.contains('T')
+                    && !s.contains(' ')
+                    && Self::parse_ymd_from_datetime(s).is_some()
+                {
+                    return Scalar::Utf8("00:00:00".to_string());
+                }
                 Scalar::Null(NullKind::NaN)
             },
             self.series.name(),
@@ -157127,6 +157146,18 @@ mod tests {
             one("2024-01-15 10:30:00.500000"),
             Scalar::Utf8("10:30:00.500000".into())
         );
+
+        // ⚠️ A BARE DATE IS MIDNIGHT, NOT MISSING. Both parsing branches need a 'T'
+        // or a space to find a time part, so this fell through to Null.
+        // MEASURED: to_datetime('2024-01-15') -> Timestamp, .dt.time '00:00:00'.
+        assert_eq!(one("2024-01-15"), Scalar::Utf8("00:00:00".into()));
+
+        // ⚠️ AND THE GUARD ON THAT ARM: a malformed TIME must stay missing rather
+        // than being resurrected as midnight by the date parser. MEASURED, both NaT:
+        //   to_datetime('2024-01-15 25:99:99') -> NaT
+        //   to_datetime('not a date')          -> NaT
+        assert!(one("2024-01-15 25:99:99").is_missing());
+        assert!(one("not a date").is_missing());
     }
 
     #[test]
