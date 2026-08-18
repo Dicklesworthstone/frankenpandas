@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import functools
+import json
 import re
 import shutil
 import subprocess
@@ -526,6 +528,13 @@ def validate_entries(entries: list[LedgerEntry]) -> list[PolicyViolation]:
                 PolicyViolation("cv-role", entry, "CV must be provenance-only and have no vote")
             )
 
+        # NUMERIC TRUTH, not just numeric shape. Only CONTRADICTED blocks: a row
+        # whose CI matches a measured artifact while its log effects do not is
+        # quoting numbers that did not come from that measurement.
+        status, detail = median_ci_artifact_status(entry.body)
+        if status == "CONTRADICTED":
+            violations.append(PolicyViolation("median-ci-truth", entry, detail))
+
         blob = f"{entry.title}\n{entry.body}"
         if classification == "maintenance-self-speedup":
             if re.search(
@@ -543,6 +552,112 @@ def validate_entries(entries: list[LedgerEntry]) -> list[PolicyViolation]:
                 violations.append(PolicyViolation("incumbent-contract", entry, detail))
     return violations
 
+
+
+# --- numeric-truth check against the measured artifacts -----------------------
+#
+# Everything above validates marker PRESENCE and numeric SHAPE. None of it opens
+# an artifact, so none of it can tell an accurate number from a plausible one. A
+# draft carrying claim_log_effect 2.14675 against a real 0.06315603 — wrong by
+# more than 2x — passed as "policy contract satisfied — OK".
+#
+# The check below reads the Median-CI marker's numbers and looks for a measured
+# row that actually produced them. It reports THREE states, because the two-state
+# version is what let the invented numbers through:
+#
+#   VERIFIED     a row in artifacts/bench matches these numbers
+#   CONTRADICTED a row matches the CI but NOT the log effects -> hard failure
+#   UNLOCATABLE  no row matches at all -> reported, NOT failed
+#
+# UNLOCATABLE is not a failure because a legitimate row may have been measured on
+# another host, or its artifact may not be committed here. But it is never folded
+# into "OK" either: a gate that cannot distinguish "checked" from "not checked" is
+# the failure mode this whole check exists to close.
+
+ARTIFACT_DIR = REPO / "artifacts" / "bench"
+_LOG_EFFECT = re.compile(
+    r"claimed\s+log\s+effect\s+([0-9.]+).{0,80}?required[^0-9]{0,40}([0-9.]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+_CI_PAIR = re.compile(r"CI\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]", re.IGNORECASE)
+
+
+@functools.lru_cache(maxsize=1)
+def _artifact_gate_rows() -> tuple[dict, ...]:
+    """Every median-CI gate block in the committed bench corpus, loaded ONCE.
+
+    Cached because the corpus is ~600 files and the check runs per entry; without
+    this a five-entry commit would re-read and re-parse the whole corpus five
+    times for an answer that cannot change within one invocation.
+    """
+    rows: list[dict] = []
+    if not ARTIFACT_DIR.is_dir():
+        return rows
+    for path in sorted(ARTIFACT_DIR.glob("*.json")):
+        try:
+            doc = json.loads(path.read_text(errors="replace"))
+        except Exception:
+            continue
+        for result in doc.get("results", []) or []:
+            # Some artifacts in the corpus carry `results` as a list of STRINGS
+            # rather than row objects, so the shape cannot be assumed. Skipping
+            # them is right: a row with no gate block has no numbers to check.
+            if not isinstance(result, dict):
+                continue
+            gate = result.get("median_ci_gate")
+            if isinstance(gate, dict):
+                rows.append(gate)
+    return tuple(rows)
+
+
+def _close(a: float, b: float) -> bool:
+    return abs(a - b) <= max(1e-6, abs(b) * 1e-6)
+
+
+def median_ci_artifact_status(body: str) -> tuple[str, str]:
+    """VERIFIED / CONTRADICTED / UNLOCATABLE for one entry's Median-CI marker."""
+    values = marker_values(body, MEDIAN_MARKER)
+    if len(values) != 1:
+        return ("UNLOCATABLE", "no single median-CI marker to check")
+    text = _flat(values[0])
+
+    effect = _LOG_EFFECT.search(text)
+    if not effect:
+        return ("UNLOCATABLE", "no claimed/required log-effect pair to check")
+    claim = float(effect.group(1))
+    required = float(effect.group(2))
+
+    ci = _CI_PAIR.search(text)
+    ci_pair = (float(ci.group(1)), float(ci.group(2))) if ci else None
+
+    ci_only_match = False
+    for gate in _artifact_gate_rows():
+        got_claim = gate.get("claim_log_effect")
+        got_required = gate.get("required_log_effect")
+        got_ci = gate.get("effect_median_ratio_ci_95")
+        if not isinstance(got_claim, (int, float)) or not isinstance(
+            got_required, (int, float)
+        ):
+            continue
+        if _close(claim, got_claim) and _close(required, got_required):
+            return ("VERIFIED", f"claim {claim} / required {required} found in the corpus")
+        if (
+            ci_pair
+            and isinstance(got_ci, list)
+            and len(got_ci) == 2
+            and _close(ci_pair[0], got_ci[0])
+            and _close(ci_pair[1], got_ci[1])
+        ):
+            ci_only_match = True
+
+    if ci_only_match:
+        return (
+            "CONTRADICTED",
+            f"a measured row matches the quoted CI {ci_pair} but NOT the quoted "
+            f"log effects (claim {claim}, required {required}) — the numbers do not "
+            f"come from that row",
+        )
+    return ("UNLOCATABLE", f"no measured row carries claim {claim} / required {required}")
 
 def check_new_rows(base: str, *, cached: bool) -> int:
     entries = changed_ledger_entries(base, cached=cached)
@@ -570,9 +685,19 @@ def check_new_rows(base: str, *, cached: bool) -> int:
         return 2
 
     verdict_count = sum(any(verdict_flags(entry)) for entry in entries)
+    statuses = [median_ci_artifact_status(entry.body)[0] for entry in entries]
+    verified = statuses.count("VERIFIED")
+    unlocatable = statuses.count("UNLOCATABLE")
     print(
         f"preflight: {len(entries)} added/modified entries across both ledgers; "
         f"{verdict_count} verdict-bearing; policy contract satisfied — OK"
+    )
+    # Reported separately and always, so "OK" can never be read as "the numbers
+    # were checked". UNLOCATABLE is a legitimate state — another host, or an
+    # uncommitted artifact — but it is not verification and must not look like it.
+    print(
+        f"preflight: median-CI numbers vs artifacts/bench — {verified} VERIFIED, "
+        f"{unlocatable} UNLOCATABLE (unlocatable is not a failure and not a check)"
     )
     return 0
 
