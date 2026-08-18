@@ -1970,6 +1970,71 @@ def bench_df_melt_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df.melt())
 
 
+def bench_series_skew_pandas(df: pd.DataFrame) -> list[float]:
+    """Series.skew — counterpart to fp-bench dataframe_ops/series_skew.
+
+    br-frankenpandas-8s4mb: the only skew/kurt lanes in this harness were the
+    GROUPBY ones, which route through a different kernel entirely, so the Series
+    moment path had no incumbent arm at all. One column, matching the Rust row,
+    because these are Series methods and the typed fast path the change touches
+    needs a contiguous all-valid f64 backing.
+    """
+    values = df["col_0"]
+    return time_operation(lambda: values.skew())
+
+
+def bench_series_kurtosis_pandas(df: pd.DataFrame) -> list[float]:
+    """Series.kurtosis — sibling of the skew lane, same fixture and same reason."""
+    values = df["col_0"]
+    return time_operation(lambda: values.kurtosis())
+
+
+def bench_df_skew_pandas(df: pd.DataFrame) -> list[float]:
+    """DataFrame.skew — fp-bench has had a `df_skew` lane with NO pandas arm.
+
+    A Rust-side lane without a counterpart here is not a half-built lane, it is an
+    unmeasurable one: the harness can time FrankenPandas but has no incumbent to
+    compare against, so the row can never certify. Same for `df_sem` below.
+    """
+    return time_operation(lambda: df.skew())
+
+
+def bench_df_sem_pandas(df: pd.DataFrame) -> list[float]:
+    """DataFrame.sem — the other fp-bench lane that had no incumbent arm."""
+    return time_operation(lambda: df.sem())
+
+
+def bench_df_transpose_full_materialize_pandas(df: pd.DataFrame) -> list[float]:
+    """Transpose and read EVERY output column, not just the first.
+
+    br-frankenpandas-l4vzc. `df_transpose` times the shell and
+    `df_transpose_materialize` reads ONE column — and at these shapes the frame is
+    rows x 10, so the transposed frame is 10 rows x `rows` COLUMNS and "one column"
+    is ten numbers. Both existing lanes mirror each other honestly and both stop
+    short of the boundary l4vzc is about: pandas' `.T` is an O(1) view of its 2D
+    BlockManager while FrankenPandas must build one column per output.
+
+    `to_numpy()` forces the whole transposed frame across that boundary in a single
+    call, which is the fairest full materialisation pandas offers — a per-column
+    sweep written in Python would time the loop rather than the engine, and pushing
+    pandas onto a slower route to flatter FrankenPandas would be choosing a bad
+    opponent.
+
+    ⚠️ READ THE RESULTING ROW AS A COMPARISON OF REPRESENTATIONS, NOT OF EQUAL WORK.
+    Measured here before landing: this call costs ~177us at 100k rows and does not
+    grow with row count the way a per-column build would (179us @1k, 114us @10k,
+    177us @100k), because pandas answers it from its 2D block without ever
+    constructing the transposed frame's `rows`-long column index. FrankenPandas has
+    no whole-frame array output at all, so its arm must build one Column per output
+    column. That asymmetry IS l4vzc's claim rather than a flaw in the lane — but a
+    reader who takes the ratio as "our transpose kernel is N times slower" will have
+    misread it. The honest reading is: each engine produces a fully materialised
+    transposed result in its best available form, and pandas' best form is
+    structurally cheaper.
+    """
+    return time_operation(lambda: df.T.to_numpy().shape)
+
+
 def bench_df_transpose_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation_repeated(lambda: df.T, TRANSPOSE_BATCH)
 
@@ -2986,6 +3051,11 @@ PANDAS_WORKLOADS = {
         "df_melt": bench_df_melt_pandas,
         "df_transpose": bench_df_transpose_pandas,
         "df_transpose_materialize": bench_df_transpose_materialize_pandas,
+        "df_transpose_full_materialize": bench_df_transpose_full_materialize_pandas,
+        "series_skew": bench_series_skew_pandas,
+        "series_kurtosis": bench_series_kurtosis_pandas,
+        "df_skew": bench_df_skew_pandas,
+        "df_sem": bench_df_sem_pandas,
         "df_to_dict_index_materialize": bench_df_to_dict_index_materialize_pandas,
         "astype_str_f64": bench_astype_str_f64_pandas,
         "astype_str_f64_telemetry_batches": (

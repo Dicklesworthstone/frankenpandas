@@ -1930,6 +1930,72 @@ fn run(
             // pandas: df.quantile(0.5)
             let _ = df.quantile(0.5).expect("quantile");
         }),
+        ("dataframe_ops", "series_skew") | ("dataframe_ops", "series_kurtosis") => {
+            // br-frankenpandas-8s4mb. `Series::skew`/`kurtosis` had NO lane — the
+            // only skew/kurt lanes in this binary are the GROUPBY ones, which route
+            // through a different kernel entirely. So the blocked-moment change
+            // (8-lane mean + 8-lane m2/m3/m4 replacing the left-fold and the ordered
+            // scalar loop) shipped with no way to measure it, exactly the gap
+            // `4kig1` records for the Int64 math_unary arms.
+            //
+            // One column, not the ten-column frame: these are Series methods, and
+            // the typed fast path this change touches is `as_f64_slice`, which needs
+            // a contiguous all-valid f64 backing. Built OUTSIDE the timed closure so
+            // the clone is not in the measurement.
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_f64_values(raw[0].clone()),
+            )
+            .expect("moment series");
+            if workload == "series_skew" {
+                time_us(|| {
+                    let _ = series.skew().expect("skew");
+                })
+            } else {
+                time_us(|| {
+                    let _ = series.kurtosis().expect("kurtosis");
+                })
+            }
+        }
+        ("dataframe_ops", "df_transpose_full_materialize") => time_us(|| {
+            // br-frankenpandas-l4vzc, requested by the other pane, and it exists
+            // because the two lanes that look like they cover this DO NOT.
+            //
+            // `df_transpose` times the shell and `df_transpose_materialize` reads
+            // ONE column — and at these shapes the frame is rows x 10, so the
+            // transposed frame is 10 rows x `rows` COLUMNS and "one column" is ten
+            // numbers. Both arms mirror each other honestly and both stop short of
+            // the boundary l4vzc is actually about: pandas' `.T` is an O(1) view of
+            // its 2D BlockManager, while FrankenPandas must build one column per
+            // output. That claim (fp 80ms vs pandas 52us, 2026-06-21) has never been
+            // re-tested, because nothing in this harness crosses the boundary.
+            //
+            // So: read EVERY output column. Named to be unmistakable — a third
+            // `*_materialize` would have been read as a variant of the existing one.
+            //
+            // ⚠️ THE TWO ARMS DO NOT DO EQUAL WORK, AND THAT IS THE POINT RATHER
+            // THAN A DEFECT. The pandas arm is `df.T.to_numpy()`, which it answers
+            // from its 2D block without ever building the transposed frame's
+            // `rows`-long column index — measured flat at ~114-179us from 1k to
+            // 100k rows before this lane landed. FrankenPandas has no whole-frame
+            // array output, so this arm must build one Column per output column.
+            // That asymmetry is exactly l4vzc's claim. Do NOT read the ratio as
+            // "our transpose kernel is N times slower"; read it as "each engine
+            // materialises the transposed result in its best available form, and
+            // pandas' best form is structurally cheaper". Forcing pandas onto a
+            // per-column route to even the work up would be choosing a bad opponent.
+            let transposed = df.transpose().expect("transpose");
+            let mut touched = 0usize;
+            for position in 0..transposed.num_columns() {
+                let name = transposed
+                    .column_name_at(position)
+                    .expect("transposed frame column");
+                let col = transposed.column(name.as_str()).expect("named column");
+                touched += col.values().len();
+            }
+            black_box((&transposed, touched));
+        }),
         ("dataframe_ops", "df_skew") => time_us(|| {
             // pandas: df.skew()
             let _ = df.skew().expect("skew");
