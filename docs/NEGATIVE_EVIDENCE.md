@@ -39556,3 +39556,149 @@ judging a window; I have been quoting loadavg all session and it is the weaker s
 **REMAINING ON THIS LIST, unmeasured since a fix and worth the same treatment:**
 `str_startswith_arrow @10M` (0.434x, 2026-07-29), `str_contains_arrow @10M` (0.665x, 2026-07-29),
 `ewm_mean @100k` (0.771x, 2026-07-23), `df_groupby_2strkey_sum @10k` (0.830x, 2026-07-24).
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-uza04) — WIN `str_contains_arrow @10M` 15.667x, and the mined list is RESOLVED: of seven recorded losses, FIVE were fossils and TWO are live — both of which this gate cannot certify
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=7414864069469f80471fa2afc5eb4addc76889f176932049c54b7ca79f7c7b80 (83278512 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-BEFORE-exppar`
+— pinned artifact matching HEAD, reused rather than rebuilt (/data at the 58G floor). Harness
+`50d3c3ffad4d`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f (2922 files), run
+in the SAME process as the subject under
+invocation_id=vs-pandas-20260818T133616.468139Z-pid1155073 , giving measured_ratio=15.667x for this
+row.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.99208 and pandas null
+median ratio 1.00235, both inside the 0.02 maximum absolute deviation.
+
+**Median-CI decision:** effect median 15.6670x, CI [14.7047767, 15.83094936], claimed log effect
+2.75157105 against a required threshold of 0.12153075 at margin multiplier 2.0 . Best-vs-best
+16.7674x agrees.
+
+**CV role:** provenance-only, no vote. FP p50 11.26ms cv 4.6% against pandas 175.50ms cv 1.6%. Arms
+clock-matched 4297.7 / 4296.8 MHz, ratio 1.0002. loadavg max 21.62, verified CPU idle 88-90%.
+
+**THE MINED LIST IS NOW FULLY RESOLVED — SEVEN RECORDED LOSSES, SEVEN ANSWERS.**
+
+| workload | recorded | dated | measured 2026-08-18 | verdict |
+|---|---|---|---|---|
+| `groupby_min_str @1M` | 0.155x | 07-23 | **16.757x** | fossil, certified |
+| `groupby_sem_str @1M` | 0.227x | 07-23 | **7.206x** | fossil, certified |
+| `groupby_var_str @1M` | 0.258x | 07-23 | **11.000x** | fossil, certified |
+| `str_startswith_arrow @10M` | 0.434x | 07-29 | **5.147x** | fossil, null 2.2% — not banked |
+| `str_contains_arrow @10M` | 0.665x | 07-29 | **15.667x** | fossil, certified (this row) |
+| `ewm_mean @100k` | 0.771x | 07-23 | **0.788x** | ⚠️ LIVE |
+| `df_groupby_2strkey_sum @10k` | 0.830x | 07-24 | **0.858x** | ⚠️ LIVE |
+
+**FIVE OF SEVEN WERE FOSSILS.** Swings of 108x, 32x, 43x, 12x and 24x. Each was a real defect when
+recorded and each was fixed without the corpus being updated — the contiguous-Utf8 dense bypass for
+the groupby family, and whatever closed the arrow-string paths. **A "current losses" list that is
+71% stale is worse than no list**, because it directs effort at solved problems and hides the
+solved-ness of the solutions.
+
+**THE TWO SURVIVORS ARE THE ANSWER TO uza04, AND THIS GATE CANNOT STATE THEM.** Both reproduce four
+weeks apart on a different harness, both have CLEAN nulls, and both have a CI that EXCLUDES UNITY —
+so the regressions are real and the controls are sound. Both are refused on the MARGIN clause alone:
+
+    ewm_mean               @100k   claim_log 0.23872550 vs required 0.24507649   97% of the bar
+    df_groupby_2strkey_sum @10k    claim_log 0.15351724 vs required 0.19260527   80% of the bar
+
+`ewm_mean` misses by 2.6%. A 21% regression, reproducible, cleanly controlled, and unstateable.
+
+⚠️ **SO THE CAMPAIGN'S LOSS LIST IS BIASED IN BOTH DIRECTIONS AT ONCE.** It is inflated by fossils
+nobody re-measured, and it is deflated by a margin clause that refuses modest effects. Those errors
+do not cancel — they hide different things. The fossils made the surface look worse than it is; the
+margin clause makes the remaining real defects invisible.
+
+**THIS IS THE SECOND STRUCTURAL BLIND SPOT RECORDED TODAY AND THEY COMPOUND.** `d4cs8`: arms under
+100us fail their own null ~60% of the time, so fixed-cost losses at small n cannot certify. This
+one: modest losses cannot certify at any size. Fixed-cost regressions are SMALL BY CONSTRUCTION, so
+a defect that is both small-n and modest is refused twice over — which is a plausible account of why
+FIFTEEN gap-hunt probes chosen by intuition found nothing at all.
+
+**METHOD, stated because it is the transferable part.** Fifteen probes chosen by guessing which
+operations or sizes would be weak: zero gaps. Seven probes chosen by mining the corpus for recorded
+sub-parity rows and re-measuring them: five fossils cleared and two live defects found. Mining costs
+one query over artifacts already on disk. **MINE FIRST, PROBE SECOND, AGGREGATE BY LATEST** — my
+first mining query used `min(ratio)`, which returns the worst historical row, and produced a
+"systematic loss family" that was in fact fixed a month ago.
+
+**NOT BANKED, DELIBERATELY:** `str_startswith_arrow @10M` at 5.147x with best-vs-best 6.327x — the
+margin and CI clauses pass but FP's null landed 2.2% off, so it is a direction rather than a row.
+It needs a clean re-run like the two rows re-measured earlier tonight, both of which held direction
+while their nulls tightened.
+
+**PENDING:** `--adaptive-rounds` on both live gaps, with the outcome pre-registered before the run
+(`d47dcc26d`): ewm_mean expected to certify, df_groupby_2strkey_sum expected not to, both certifying
+would mean the threshold was sample-count dominated, neither certifying would mean these effects are
+below this gate's reach at any sample count.
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-uza04) — SLOWER x2 CERTIFIED: `ewm_mean @100k` 0.780x and `df_groupby_2strkey_sum @10k` 0.853x. The campaign's first certified regressions, and my "modest losses cannot certify" claim was WRONG
+
+**These are certified LOSSES — FrankenPandas slower than pandas — and banking them is the point.**
+uza04 cannot close gaps the instrument refuses to record, and after fifteen intuition-probes found
+nothing, these are the two defects that survived every check.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=7414864069469f80471fa2afc5eb4addc76889f176932049c54b7ca79f7c7b80 (83278512 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-BEFORE-exppar`
+— pinned artifact matching HEAD, reused rather than rebuilt (/data at the 58G floor). Harness
+`50d3c3ffad4d`, pandas 2.2.3 pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f (2922 files) in the
+same invocation.
+
+**A/A null control (same invocation):** `ewm_mean` FrankenPandas null median ratio 0.99951 and
+pandas 1.00198; `df_groupby_2strkey_sum` FrankenPandas 1.00242 and pandas 0.99786. All four inside
+the 0.02 maximum absolute deviation.
+
+| row | ratio | CI | claim vs required | FP p50 | pandas p50 | bvb |
+|---|---|---|---|---|---|---|
+| `ewm_mean @100k` | **0.7800x** | [0.774609, 0.79076779] | 0.24909587 vs 0.12852199 | 0.727ms cv 6.0% | 0.567ms cv 18.0% | 0.7686 |
+| `df_groupby_2strkey_sum @10k` | **0.8530x** | [0.7904815, 0.8573633] | 0.15867190 vs 0.02712756 | 1.619ms cv 29.9% | 1.422ms cv 24.5% | 0.8464 |
+
+All three clauses TRUE on both. Best-vs-best agrees with the gated median in direction and magnitude
+on both (0.7686 against 0.7800; 0.8464 against 0.8530), which is the check that caught a false WIN
+of mine earlier tonight and it passes here. `ewm_mean` measured in a quiet window (loadavg max
+6.55); `df_groupby_2strkey_sum` at max 15.74 with arms clock-matched to 1.0113.
+
+**BOTH REPRODUCE ACROSS FOUR WEEKS AND A DIFFERENT HARNESS**, which is why they survived the fossil
+filter that cleared five of their seven neighbours:
+
+    ewm_mean               @100k   0.771x (2026-07-23)  ->  0.788x default  ->  0.780x adaptive
+    df_groupby_2strkey_sum @10k    0.830x (2026-07-24)  ->  0.858x default  ->  0.853x adaptive
+
+⚠️ **AND I HAVE TO WITHDRAW A CLAIM I MADE TWO ENTRIES AGO.** I wrote that these were refused by the
+margin clause and concluded that "modest losses cannot certify at any size", filing it as a
+structural blind spot compounding with `d4cs8`. **That was wrong.** `--adaptive-rounds` certified
+BOTH, and the reason is visible in the numbers:
+
+    ewm_mean                required threshold 0.24507649  ->  0.12852199   (down 48%, 15 rounds)
+    df_groupby_2strkey_sum  required threshold 0.19260527  ->  0.02712756   (down 86%, 19 rounds)
+
+The threshold was dominated by SAMPLE COUNT, not by real dispersion. So the blind spot is a
+DEFAULT-CONFIGURATION artifact, not a property of the gate: modest losses are certifiable, they
+simply are not certifiable at the default round count.
+
+**I PRE-REGISTERED THIS OUTCOME AND HALF OF IT WAS WRONG** (`d47dcc26d`, before the run): I
+predicted `ewm_mean` would certify (it did, needing 2.6%) and that `df_groupby_2strkey_sum`
+probably would NOT (it did, having needed 20%). I also pre-registered the interpretation of the
+both-certify branch — "the threshold was dominated by sample count rather than real dispersion" —
+which is exactly what the numbers now show. **The prediction was wrong and the interpretation
+written beside it was right**, which is the whole reason for recording both before seeing data.
+
+**WHAT THIS MEANS FOR THE OTHER BLIND SPOT.** `d4cs8` (arms under 100us fail their own null ~60% of
+the time) is NOT rescued by this: adaptive rounds tightens the null MEDIAN estimate, which helps a
+noisy-but-centred control, whereas a 3.3us arm's null is off-centre by 11%. Those are different
+failures and I am not going to let this result imply the other one is solved. But my claim that they
+COMPOUND is weakened — one of the two is now a knob, not a wall.
+
+**THE TWO DEFECTS THEMSELVES, so this entry is not purely methodological:** `ewm_mean @100k` is 21%
+slower with FP at 0.727ms against pandas' 0.567ms, and `df_groupby_2strkey_sum @10k` is 15% slower
+at 1.619ms against 1.422ms. Both are small-n rows where fixed costs dominate — consistent with
+`d4cs8`'s account of where FrankenPandas is structurally weakest — and neither has a mechanism yet.
+Finding the mechanism is the next step and is NOT done here.
