@@ -39903,3 +39903,59 @@ that `BINARY_BANDWIDTH_PARALLEL_MIN_LEN` is unchanged at `1 << 20`, and that
 and everything else to the bandwidth constant — the two-arm split whose collapse the lock
 exists to catch. That is evidence the SUBJECT is intact; it is not evidence the tests pass,
 and it should not be recorded as the latter.
+
+---
+
+## NEGATIVE RESULT — audited every load-bearing "pandas raises" premise behind FP's reduction refusals; ALL 20 ARE ACCURATE (CrimsonPine, 2026-08-18)
+
+**Date:** 2026-08-18 · **Agent:** CrimsonPine · **Status:** parity audit, no defect
+found. Build freeze (/data 34G at 99%): no cargo, no artifact writes, live pandas
+2.2.3 probing and source reading only. `uptime` 1-min 5.70 against 5-min 5.89. Locks
+defended BY INSPECTION, not execution — see the end.
+
+**THE HUNT.** Under a freeze the one method that has produced real defects here is
+source reading plus live-pandas probing — it is how `br-frankenpandas-hp2ko` was found.
+FrankenPandas REFUSES a number of reductions on the documented premise that "pandas
+raises". Every such refusal is a behaviour built on a claim about another library, and a
+false premise there is a real defect: FP would be more restrictive than pandas and no
+value fixture would notice, because the refusal returns missing rather than a wrong
+number. 46 candidate claims carry that shape; I took the five reduction clusters.
+
+**EVERY ONE CHECKED OUT.** Measured, live pandas 2.2.3:
+
+| dtype | pandas ALLOWS | pandas RAISES | FP matches? |
+|---|---|---|---|
+| `datetime64[ns]` | std (Timedelta), mean, median, min, max | **var, sem, sum, prod** | YES — allows std, refuses var/sem |
+| `period[M]` same freq | median, min, max | **mean, std, var, sem, sum** | YES — `d7zjp` refuses exactly those |
+| `period` MIXED freq | — | **IncompatibleFrequency on min/max** | YES — not one family, never typed |
+| `interval[int64]` | min, max | **median, mean, std, sum, quantile, cummax** | YES — `srqdo` refuses exactly those |
+| `interval` w/ NaN bound | (unconstructible) | IntervalArray refuses to build | YES — reports missing, does not order |
+
+**THE TWO SUBTLE ONES ARE THE REASON THIS WAS WORTH DOING.** `datetime64` std is
+ALLOWED while var and sem RAISE — a distinction that looks arbitrary and is exactly the
+kind of thing an implementation flattens by accident. FP gets it right, and
+`datetime64_std_skips_nat_and_var_sem_stay_unsupported_40ujm` locks it. And Interval
+min/max order by `right` when `left` ties — pandas has `Interval(0,2) < Interval(0,5)`
+— which an implementation comparing `left` alone would get wrong while still passing a
+casual test; `interval_ties_on_left_order_by_right_srqdo` locks that too.
+
+**WHY A NULL RESULT IS WORTH BANKING.** These premises are load-bearing for ~20
+refusals, and a refusal is invisible: it returns missing, so a wrong refusal cannot be
+caught by comparing values. Before this audit the refusals rested on comments; they now
+rest on measurement. **The next agent should not re-probe them** — that is the whole
+value of the entry, and re-mining a cleared surface is precisely the waste the fossil
+sweep found earlier in this campaign (five of seven "current losses" were fixed a month
+before anyone re-measured).
+
+⚠️ **I EXPECTED TO FIND A DEFECT AND SAID SO BEFORE PROBING.** My stated suspicion was
+that "pandas raises std" was false, on the grounds that datetime64 std returns a
+Timedelta. It IS true that datetime std works — but the FP claim I doubted was about
+`var`/`sem`, not `std`, and reading the surrounding doc comment before testing is what
+kept me from filing a refutation of a claim nobody made. Same near-miss as `fyr1z`'s
+"~12 call sites" and `u5cg4`'s activation threshold: **three times this session the tree
+or the bead said something narrower than the headline I was about to argue with.**
+
+**LOCKS: BY INSPECTION, NOT EXECUTION.** The freeze forbids cargo, so I verified the
+subject rather than the tests — both `4kig1` lock tests still defined,
+`BINARY_BANDWIDTH_PARALLEL_MIN_LEN` unchanged at `1 << 20`. A lock I did not run is not
+a lock that passed, and this entry does not claim otherwise.
