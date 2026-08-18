@@ -71,6 +71,8 @@ from typing import Any
 REPO = pathlib.Path(__file__).resolve().parent.parent
 BENCH_GLOB = "artifacts/bench/*.json"
 BASELINE_DIR = REPO / ".bench-history"
+HARNESS_RELPATH = "benches/vs_pandas_harness.py"
+_COMMITTED_HARNESS_SHAS: frozenset[str] | None = None
 
 
 def load_ratchet():
@@ -187,6 +189,59 @@ def is_non_shipping_build(result: dict[str, Any]) -> bool:
     return any(f in NON_SHIPPING_TARGET_FEATURES for f in features if isinstance(f, str))
 
 
+def committed_harness_shas() -> frozenset[str]:
+    """Every harness sha256 that EXISTS IN GIT HISTORY, computed once per run."""
+    global _COMMITTED_HARNESS_SHAS
+    if _COMMITTED_HARNESS_SHAS is None:
+        import hashlib
+        import subprocess
+
+        found: set[str] = set()
+        try:
+            commits = subprocess.run(
+                ["git", "log", "--all", "--format=%H", "--", HARNESS_RELPATH],
+                cwd=REPO, capture_output=True, text=True, check=False,
+            ).stdout.split()
+            for commit in commits:
+                blob = subprocess.run(
+                    ["git", "show", f"{commit}:{HARNESS_RELPATH}"],
+                    cwd=REPO, capture_output=True, check=False,
+                ).stdout
+                if blob:
+                    found.add(hashlib.sha256(blob).hexdigest())
+        except OSError:
+            return frozenset()  # no git: cannot prove absence, so refuse nothing
+        _COMMITTED_HARNESS_SHAS = frozenset(found)
+    return _COMMITTED_HARNESS_SHAS
+
+
+def harness_is_uncommitted(document: dict[str, Any]) -> bool:
+    """Was this row measured against a harness that exists only in a working tree?
+
+    MEASURED 2026-08-18. A peer held an uncommitted 24-line lane addition, moving
+    the live harness sha to `a67f720ac1f8`. Rows measured during that window — two
+    of mine and one of theirs — were banked by `--apply` into a baseline keyed to
+    that sha, which matches NONE of the 86 harness versions in git history. **A
+    baseline nobody can reproduce is a baseline nobody can check**, and it is worse
+    than no baseline because it looks like a defence in the file listing.
+
+    Refuses only when git answers and the sha is absent. If git is unavailable the
+    absence cannot be proven, so nothing is refused — the same
+    do-not-quarantine-on-missing-evidence rule as the build-flag guard.
+
+    Deletion condition: delete when the harness refuses to run from a dirty tree,
+    at which point unreproducible rows cannot be produced in the first place.
+    """
+    harness = document.get("harness_source")
+    sha = harness.get("sha256") if isinstance(harness, dict) else None
+    if not isinstance(sha, str) or not sha:
+        return False
+    known = committed_harness_shas()
+    if not known:
+        return False
+    return sha not in known
+
+
 def is_thread_capped(result: dict[str, Any]) -> bool:
     """Did the subject see fewer logical CPUs than the host has? See rule 2."""
     provenance = result.get("thread_provenance") or {}
@@ -280,6 +335,14 @@ def collect(*, report_refusals: bool = True) -> dict[str, dict[str, Any]]:
         identity = ratchet.comparability_identity(document)
         if identity is None:
             continue  # unplaceable runs cannot ratchet against anything
+        if harness_is_uncommitted(document):
+            if report_refusals:
+                print(
+                    f"    !! REFUSED {path.name}: harness sha "
+                    f"{str((document.get('harness_source') or {}).get('sha256'))[:12]} is in NO "
+                    f"commit — a baseline from a working-tree instrument cannot be reproduced"
+                )
+            continue
         key = json.dumps(identity, sort_keys=True)
         bucket = groups.setdefault(
             key,

@@ -37229,3 +37229,34 @@ me.** The technique recovers MY rows; it does not restore the fleet's defence. T
 when the lane lands, and re-locking then is a separate pass. **Nor did I re-measure the standing pair
 to "restore" it: floordiv @10M and mod @10M are already banked on this exact sha, and re-running them
 would have been re-measuring a win.**
+
+**⚠️ AND `--apply` BANKED A BASELINE AGAINST AN UNCOMMITTED HARNESS — MINE, CAUSED BY THE VERY RUN
+ABOVE.** Immediately after recovering the two rows, I checked what else `--apply` had written and
+found `.bench-history/standing_thinkstation1_a67f720ac1f8.json`, keyed to the peer's WORKING-TREE
+harness sha. It holds three rows: my two pre-recovery ones and, notably, **one of the peer's**
+(`df_groupby_rolling_mean_w10 @1M 6.908x`) — so both panes were banking against an instrument that
+exists in no commit.
+
+Verified against history rather than assumed: **`a67f720ac1f8` matches NONE of the 86 distinct
+harness versions in git.** `60ed3c58fdd5` does.
+
+**GUARD ADDED — refuse any row whose harness sha is in no commit.** It walks
+`git log --all -- benches/vs_pandas_harness.py`, hashes each blob once per run, and refuses on
+absence. If git is unavailable it refuses nothing, since absence cannot then be proven — the same
+do-not-quarantine-on-missing-evidence rule as the build-flag guard.
+
+**This one did NOT need a synthetic test to be believable, unlike the last guard I added.** Run
+against the real corpus it refuses **6 artifacts across 3 distinct uncommitted shas** —
+`a67f720ac1f8` (4 rows, today), plus `a757f5cdd857` and `994379a475d3` from EARLIER SESSIONS I had
+no idea about. Totals move 14 baselines / 60 workloads -> 13 / 57, and
+`standing_thinkstation1_60ed3c58fdd5` survives intact at 8. **So this is not a today problem: the
+corpus has been accumulating rows measured against working-tree instruments for at least three
+separate episodes.**
+
+⚠️ **THE STALE FILE IS STILL ON DISK AND I HAVE NOT DELETED IT.** The assembler writes baselines and
+never removes them, so `standing_thinkstation1_a67f720ac1f8.json` remains — committed by me in
+`ddcd58dc8`, now provably unreproducible. **A wrong baseline is worse than a missing one because it
+looks like a defence in the directory listing.** Reclaim and deletion are the user's call under the
+standing orders, so I am flagging it rather than removing it, and I did NOT give the assembler a
+delete path — a banking tool that can erase baselines is a worse hazard than the stale file it would
+clean up.
