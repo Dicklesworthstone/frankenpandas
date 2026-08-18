@@ -26798,16 +26798,38 @@ impl Column {
 
     #[inline]
     fn floor_fast(value: f64) -> f64 {
-        let abs = value.abs();
-        // `nearest_even_magnitude(abs)` is non-negative (its input is), so the
-        // 2-op OR is exactly `copysign` here — see `Self::or_sign`.
-        let nearest = Self::or_sign(Self::nearest_even_magnitude(abs), value);
-        let adjusted = if nearest > value {
-            nearest - 1.0
-        } else {
-            nearest
-        };
-        if abs < TWO_POW_52 { adjusted } else { value }
+        // br-frankenpandas-3qpj4: under +sse4.1 the f64::floor intrinsic
+        // lowers to ONE `roundpd`, and the hand-rolled magnitude trick below
+        // becomes the SLOW path — a dozen ops against one instruction. Counted
+        // on the flagged binaries: `Column::floor` appears in the rounding-
+        // instruction list of NONE of them, while `Column::round` (std
+        // `round_ties_even`) collects `roundsd` in every one.
+        //
+        // ⚠️ GATED, NOT SWAPPED. Without the flag `f64::floor` lowers to a libm
+        // CALL, which is the whole reason the trick exists and why the ledger
+        // banks it at 2.1-2.4x on an unflagged build — today's default. An
+        // unconditional swap would regress every such build.
+        //
+        // Bit-identity is not assumed: `floor_ceil_trunc_fast_are_bit_identical_o57rj`
+        // already compares these kernels against `f64::floor` over an edge corpus,
+        // so the two arms are the same function and that test covers both.
+        #[cfg(target_feature = "sse4.1")]
+        {
+            value.floor()
+        }
+        #[cfg(not(target_feature = "sse4.1"))]
+        {
+            let abs = value.abs();
+            // `nearest_even_magnitude(abs)` is non-negative (its input is), so the
+            // 2-op OR is exactly `copysign` here — see `Self::or_sign`.
+            let nearest = Self::or_sign(Self::nearest_even_magnitude(abs), value);
+            let adjusted = if nearest > value {
+                nearest - 1.0
+            } else {
+                nearest
+            };
+            if abs < TWO_POW_52 { adjusted } else { value }
+        }
     }
 
     /// Branchless `ceil`; see [`Self::floor_fast`] for the mechanism and the
@@ -26821,22 +26843,44 @@ impl Column {
     /// so restoring the input's sign is total, not a special case.
     #[inline]
     fn ceil_fast(value: f64) -> f64 {
-        let abs = value.abs();
-        // Same as `floor_fast`: a non-negative magnitude, so the OR is exact.
-        let nearest = Self::or_sign(Self::nearest_even_magnitude(abs), value);
-        let adjusted = if nearest < value {
-            nearest + 1.0
-        } else {
-            nearest
-        };
-        if abs < TWO_POW_52 {
-            // `adjusted` cannot be negative-while-`value`-is-positive: for
-            // `value > 0` every term above is >= 0. So the OR is exact here too,
-            // and it is still needed — it is what turns the `+0.0` that
-            // `nearest + 1.0` produces for `value` in (-1.0, -0.5] into `-0.0`.
-            Self::or_sign(adjusted, value)
-        } else {
-            value
+        // br-frankenpandas-3qpj4: under +sse4.1 the f64::ceil intrinsic
+        // lowers to ONE `roundpd`, and the hand-rolled magnitude trick below
+        // becomes the SLOW path — a dozen ops against one instruction. Counted
+        // on the flagged binaries: `Column::ceil` appears in the rounding-
+        // instruction list of NONE of them, while `Column::round` (std
+        // `round_ties_even`) collects `roundsd` in every one.
+        //
+        // ⚠️ GATED, NOT SWAPPED. Without the flag `f64::ceil` lowers to a libm
+        // CALL, which is the whole reason the trick exists and why the ledger
+        // banks it at 2.1-2.4x on an unflagged build — today's default. An
+        // unconditional swap would regress every such build.
+        //
+        // Bit-identity is not assumed: `floor_ceil_trunc_fast_are_bit_identical_o57rj`
+        // already compares these kernels against `f64::ceil` over an edge corpus,
+        // so the two arms are the same function and that test covers both.
+        #[cfg(target_feature = "sse4.1")]
+        {
+            value.ceil()
+        }
+        #[cfg(not(target_feature = "sse4.1"))]
+        {
+            let abs = value.abs();
+            // Same as `floor_fast`: a non-negative magnitude, so the OR is exact.
+            let nearest = Self::or_sign(Self::nearest_even_magnitude(abs), value);
+            let adjusted = if nearest < value {
+                nearest + 1.0
+            } else {
+                nearest
+            };
+            if abs < TWO_POW_52 {
+                // `adjusted` cannot be negative-while-`value`-is-positive: for
+                // `value > 0` every term above is >= 0. So the OR is exact here too,
+                // and it is still needed — it is what turns the `+0.0` that
+                // `nearest + 1.0` produces for `value` in (-1.0, -0.5] into `-0.0`.
+                Self::or_sign(adjusted, value)
+            } else {
+                value
+            }
         }
     }
 
@@ -26847,19 +26891,41 @@ impl Column {
     /// `trunc(-0.5)` is `-0.0` as IEEE requires rather than `0.0`.
     #[inline]
     fn trunc_fast(value: f64) -> f64 {
-        let abs = value.abs();
-        let nearest = Self::nearest_even_magnitude(abs);
-        let toward_zero = if nearest > abs {
-            nearest - 1.0
-        } else {
-            nearest
-        };
-        if abs < TWO_POW_52 {
-            // `toward_zero` is computed entirely in the magnitude domain and is
-            // therefore non-negative, so the OR is exact — see `Self::or_sign`.
-            Self::or_sign(toward_zero, value)
-        } else {
-            value
+        // br-frankenpandas-3qpj4: under +sse4.1 the f64::trunc intrinsic
+        // lowers to ONE `roundpd`, and the hand-rolled magnitude trick below
+        // becomes the SLOW path — a dozen ops against one instruction. Counted
+        // on the flagged binaries: `Column::trunc` appears in the rounding-
+        // instruction list of NONE of them, while `Column::round` (std
+        // `round_ties_even`) collects `roundsd` in every one.
+        //
+        // ⚠️ GATED, NOT SWAPPED. Without the flag `f64::trunc` lowers to a libm
+        // CALL, which is the whole reason the trick exists and why the ledger
+        // banks it at 2.1-2.4x on an unflagged build — today's default. An
+        // unconditional swap would regress every such build.
+        //
+        // Bit-identity is not assumed: `floor_ceil_trunc_fast_are_bit_identical_o57rj`
+        // already compares these kernels against `f64::trunc` over an edge corpus,
+        // so the two arms are the same function and that test covers both.
+        #[cfg(target_feature = "sse4.1")]
+        {
+            value.trunc()
+        }
+        #[cfg(not(target_feature = "sse4.1"))]
+        {
+            let abs = value.abs();
+            let nearest = Self::nearest_even_magnitude(abs);
+            let toward_zero = if nearest > abs {
+                nearest - 1.0
+            } else {
+                nearest
+            };
+            if abs < TWO_POW_52 {
+                // `toward_zero` is computed entirely in the magnitude domain and is
+                // therefore non-negative, so the OR is exact — see `Self::or_sign`.
+                Self::or_sign(toward_zero, value)
+            } else {
+                value
+            }
         }
     }
 
