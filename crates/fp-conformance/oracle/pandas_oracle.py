@@ -1957,6 +1957,80 @@ def timedelta_total_seconds_from_payload(pd, payload: dict[str, Any], op_name: s
     return {"expected_series": series_to_expected(out)}
 
 
+def timedelta_component_from_payload(
+    pd, payload: dict[str, Any], op_name: str, component: str
+) -> dict[str, Any]:
+    """Shared body for series_dt_days/seconds/microseconds/nanoseconds.
+
+    br-frankenpandas-timedelta-nat-days-returns-zero-406ni. Same shape as
+    `timedelta_total_seconds_from_payload` and it carries BOTH of that function's
+    gates for the same reasons (br-frankenpandas-7btvv / f9xlz):
+
+      1. A NUMERIC series is refused up front by reaching for the component on
+         `.dt` directly, which is the expression pandas refuses. Going through
+         `to_timedelta` instead would silently read the numbers as NANOSECONDS
+         and manufacture an answer pandas never gives.
+      2. `errors="raise"`, not `"coerce"`, so a non-timedelta string column
+         propagates instead of degrading to NaT and producing a column of nan
+         that would make FrankenPandas' correct rejection look like a divergence.
+
+    MEASURED, live pandas 2.2.3, `pd.to_timedelta([1, None, -1, 90061.5], unit='s')`:
+
+        .dt.days         -> [0.0, nan, -1.0, 1.0]        dtype float64
+        .dt.seconds      -> [1.0, nan, 86399.0, 3661.0]
+        .dt.microseconds -> [0.0, nan, 0.0, 500000.0]
+        .dt.nanoseconds  -> [0.0, nan, 0.0, 0.0]
+
+    float64 rather than int64 is forced: NaT must be representable and numpy
+    int64 cannot hold a missing value, so pandas promotes the component column.
+
+    ⚠️ The four components are PROPERTIES, not methods like `total_seconds()`.
+    `getattr(x.dt, component)` is therefore the access, and writing
+    `getattr(x.dt, component)()` would raise on a Series.
+    """
+    left = payload.get("left")
+    if left is None:
+        raise OracleError(f"{op_name} requires left payload")
+    series = fixture_series_from_payload(pd, left, op_name)
+
+    if (
+        len(series) > 0
+        and pd.api.types.is_numeric_dtype(series)
+        and not pd.api.types.is_timedelta64_dtype(series)
+    ):
+        try:
+            getattr(series.dt, component)
+        except Exception as exc:  # noqa: BLE001 - re-raised with pandas as __cause__
+            raise OracleError(f"{op_name}: {exc}") from exc
+        raise OracleError(
+            f"{op_name}: .dt.{component} unexpectedly succeeded on a "
+            f"non-timedelta numeric series of dtype {series.dtype}"
+        )
+
+    try:
+        td_series = pd.to_timedelta(series, errors="raise")
+        out = getattr(td_series.dt, component)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_days(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return timedelta_component_from_payload(pd, payload, "series_dt_days", "days")
+
+
+def op_series_dt_seconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return timedelta_component_from_payload(pd, payload, "series_dt_seconds", "seconds")
+
+
+def op_series_dt_microseconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return timedelta_component_from_payload(pd, payload, "series_dt_microseconds", "microseconds")
+
+
+def op_series_dt_nanoseconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return timedelta_component_from_payload(pd, payload, "series_dt_nanoseconds", "nanoseconds")
+
+
 def op_series_dt_total_seconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return timedelta_total_seconds_from_payload(pd, payload, "series_dt_total_seconds")
 
@@ -8396,6 +8470,14 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_dt_round(pd, payload)
     if op == "series_dt_total_seconds":
         return op_series_dt_total_seconds(pd, payload)
+    if op == "series_dt_days":
+        return op_series_dt_days(pd, payload)
+    if op == "series_dt_seconds":
+        return op_series_dt_seconds(pd, payload)
+    if op == "series_dt_microseconds":
+        return op_series_dt_microseconds(pd, payload)
+    if op == "series_dt_nanoseconds":
+        return op_series_dt_nanoseconds(pd, payload)
     if op == "series_dt_to_timestamp":
         return op_series_dt_to_timestamp(pd, payload)
     if op in {"dataframe_from_series", "data_frame_from_series"}:
