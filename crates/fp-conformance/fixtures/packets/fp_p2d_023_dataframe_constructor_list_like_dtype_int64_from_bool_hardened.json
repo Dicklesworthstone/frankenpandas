@@ -8,7 +8,7 @@
     "oracle_script_sha256": "4b3fc0baee4e9d2e23ebef540381bdebb156f40cdab6611d283cfb7976f218fc",
     "generated_at": "2026-08-16T12:37:14Z"
   },
-  "constructor_dtype": "Int64",
+  "constructor_dtype": "int64",
   "matrix_rows": [
     [
       { "kind": "bool", "value": true },

@@ -1261,6 +1261,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         DType::Categorical => Err(TypeError::InvalidCast { from, to: target }),
         DType::Timedelta64 => match &value {
             Scalar::Int64(v) => Ok(Scalar::Timedelta64(*v)),
+            Scalar::Float64(v) => Ok(Scalar::Timedelta64(float_to_temporal_nanos(*v))),
             Scalar::Utf8(s) => Timedelta::parse(s)
                 .map(Scalar::Timedelta64)
                 .map_err(|_| TypeError::InvalidCast { from, to: target }),
@@ -1268,6 +1269,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         },
         DType::Datetime64 => match &value {
             Scalar::Int64(v) => Ok(Scalar::Datetime64(*v)),
+            Scalar::Float64(v) => Ok(Scalar::Datetime64(float_to_temporal_nanos(*v))),
             Scalar::Utf8(s) => Timestamp::parse(s)
                 .map(|timestamp| Scalar::Datetime64(timestamp.nanos))
                 .map_err(|_| TypeError::InvalidCast { from, to: target }),
@@ -1289,6 +1291,52 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Sparse => Err(TypeError::InvalidCast { from, to: target }),
+    }
+}
+
+/// A float reinterpreted as integer NANOSECONDS, the way pandas casts to
+/// `datetime64[ns]` / `timedelta64[ns]`.
+///
+/// ⚠️ THIS IS NOT THE `int64` RULE, and the difference is the whole reason this
+/// helper exists rather than a reuse. The explicit constructor REFUSES a lossy
+/// float -> int64 (`TypeError::LossyFloatToInt`, mirroring pandas' "Trying to
+/// coerce float values to integers"), but the temporal dtypes silently truncate.
+/// MEASURED side by side, live pandas 2.2.3, on the single value `1.5`:
+///
+///     pd.DataFrame([[1.5]], dtype="int64")           -> ValueError
+///     pd.DataFrame([[1.5]], dtype="datetime64[ns]")  -> 1ns
+///     pd.DataFrame([[1.5]], dtype="timedelta64[ns]") -> 1ns
+///
+/// TRUNCATION IS TOWARD ZERO, NOT FLOOR. Measured on both signs, where the two
+/// disagree: 0.9 -> 0 and -0.9 -> 0; 1.5 -> 1 and -1.5 -> -1; -2.5 -> -2 (a
+/// floor would give -1, -2 and -3). Rust's `as i64` is exactly this truncation.
+///
+/// ANYTHING NOT REPRESENTABLE AS `i64` BECOMES NaT, which is why this cannot be
+/// a bare `as` — Rust's saturating cast would hand back `i64::MAX` where pandas
+/// hands back NaT, and would map NaN to 0, i.e. the epoch. Measured, all NaT:
+/// NaN, +inf, -inf, 1e30, -1e30, 9.3e18, and exactly 2^63 and -2^63; while
+/// 2^63 - 1024 IS representable and converts (2262-04-11 23:47:16.854774784).
+/// The bounds are therefore strict on both ends — `i64::MIN as f64` is exactly
+/// -2^63, which pandas already reads as NaT because it IS the NaT sentinel.
+///
+/// ⚠️ ONE KNOWN DIVERGENCE, RECORDED RATHER THAN GUESSED. For `timedelta64[ns]`
+/// pandas' two paths disagree on the non-finite input: `astype` yields NaT but
+/// the constructor raises OverflowError. `datetime64[ns]` has no such split —
+/// both give NaT. This cast is shared by both paths, so it takes the behaviour
+/// they agree on for datetimes and `astype`'s for timedeltas; the constructor's
+/// stricter refusal belongs in `DataFrame::with_constructor_dtype`, which is
+/// already where the constructor-only `int64`-rejects-NA check lives, and for
+/// the same reason.
+fn float_to_temporal_nanos(value: f64) -> i64 {
+    // Strict on both ends: `i64::MIN as f64` and `i64::MAX as f64` are -2^63 and
+    // 2^63, and pandas reads both of those as NaT.
+    if value.is_finite() && value > (i64::MIN as f64) && value < (i64::MAX as f64) {
+        // Truncates toward zero, and the guard above means it cannot saturate.
+        value as i64
+    } else {
+        // `Timestamp::NAT` and `Timedelta::NAT` are the same value (`i64::MIN`),
+        // so this one sentinel is correct for both callers.
+        Timestamp::NAT
     }
 }
 
@@ -6763,6 +6811,93 @@ mod tests {
                 "trunc-toward-zero v={v}"
             );
         }
+    }
+
+    /// Float -> `datetime64[ns]` / `timedelta64[ns]` reinterprets the float as
+    /// integer NANOSECONDS. Every value here is transcribed from live pandas
+    /// 2.2.3, measured on both the constructor and `astype` paths.
+    ///
+    /// ⚠️ THE CONTRAST WITH `int64` IS THE POINT: the explicit constructor
+    /// REFUSES a lossy float -> int64, and silently truncates the same float
+    /// into a temporal dtype. Assuming one rule covers both is how this gets
+    /// re-broken, so both are asserted here on the same input.
+    #[test]
+    fn cast_scalar_float_to_temporal_truncates_to_nanoseconds() {
+        use super::{Timedelta, Timestamp, cast_scalar};
+
+        // TRUNCATION TOWARD ZERO, on both signs, where a floor would disagree.
+        // pandas: 0.9 -> 0, -0.9 -> 0, 1.5 -> 1, -1.5 -> -1, -2.5 -> -2.
+        for (input, want) in [
+            (1.5_f64, 1_i64),
+            (-1.5, -1),
+            (0.9, 0),
+            (-0.9, 0),
+            (2.5, 2),
+            (-2.5, -2),
+            (1.999_999, 1),
+            (-1.999_999, -1),
+            (2.0, 2),
+            (1e18, 1_000_000_000_000_000_000),
+        ] {
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(input), DType::Datetime64).unwrap(),
+                Scalar::Datetime64(want),
+                "datetime64 cast of {input}"
+            );
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(input), DType::Timedelta64).unwrap(),
+                Scalar::Timedelta64(want),
+                "timedelta64 cast of {input}"
+            );
+        }
+
+        // ANYTHING NOT REPRESENTABLE AS i64 IS NaT — not a saturated i64::MAX,
+        // and not the epoch. A bare `as i64` would produce both of those wrong
+        // answers (saturation for the large values, 0 for NaN).
+        for input in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e30,
+            -1e30,
+            9.3e18,
+            -9.3e18,
+            9_223_372_036_854_775_808.0,  // exactly 2^63
+            -9_223_372_036_854_775_808.0, // exactly -2^63, which IS the NaT sentinel
+        ] {
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(input), DType::Datetime64).unwrap(),
+                Scalar::Datetime64(Timestamp::NAT),
+                "datetime64 cast of {input} must be NaT"
+            );
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(input), DType::Timedelta64).unwrap(),
+                Scalar::Timedelta64(Timedelta::NAT),
+                "timedelta64 cast of {input} must be NaT"
+            );
+        }
+
+        // ...but the largest float BELOW 2^63 is representable and converts.
+        // pandas renders it 2262-04-11 23:47:16.854774784.
+        let just_inside = 9_223_372_036_854_774_784.0_f64; // 2^63 - 1024
+        assert_eq!(
+            cast_scalar(&Scalar::Float64(just_inside), DType::Datetime64).unwrap(),
+            Scalar::Datetime64(9_223_372_036_854_774_784),
+            "the largest representable float must NOT be treated as NaT"
+        );
+
+        // THE CONTRAST. Same input, three dtypes, two different rules — the
+        // temporal ones truncate where int64 refuses outright.
+        assert_eq!(
+            cast_scalar(&Scalar::Float64(1.5), DType::Datetime64).unwrap(),
+            Scalar::Datetime64(1)
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Float64(1.5), DType::Int64).unwrap(),
+            Scalar::Int64(1),
+            "the SHARED cast truncates here too; it is the explicit constructor \
+             that refuses, via Column::new's LossyFloatToInt pre-check"
+        );
     }
 
     #[test]
