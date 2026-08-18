@@ -1179,6 +1179,39 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     {
         return Ok(Scalar::Bool(true));
     }
+    // TEMPORAL -> NUMPY bool IS NONZERO-TRUTHY ON THE RAW NANOSECONDS, and it
+    // sits here for exactly the reason the NaN check above does: FP's
+    // missing-value model would otherwise swallow NaT below, and pandas does not
+    // treat it as missing here.
+    //
+    // MEASURED, live pandas 2.2.3, `.astype('bool')` beside `.astype('int64')`
+    // so the rule is visible as one rule rather than four cases:
+    //
+    //   value                                 nanos                  bool
+    //   Timestamp(0)                              0                 False
+    //   Timestamp('2024-03-15 10:30:45.123..')  1.71e18               True
+    //   Timestamp('1969-12-31 23:59:59.999..')       -1               True
+    //   NaT (either dtype)          -9223372036854775808              True
+    //   Timedelta(0)                              0                 False
+    //   Timedelta('1 days')          86400000000000                   True
+    //   Timedelta('-1 ns')                       -1                   True
+    //
+    // So `nanos != 0` is the whole rule, and NaT needs no case of its own: it IS
+    // i64::MIN, which is nonzero. Only the epoch and a zero duration are False.
+    //
+    // ⚠️ THE NULLABLE `boolean` REFUSES ALL OF THESE, including the ones whose
+    // nanos are 0 or 1 — `.astype('boolean')` raises "Need to pass bool-like
+    // values" for EVERY row above, so it is the dtype it rejects, not the value.
+    // That is why this is guarded on `DType::Bool` alone and why the strict
+    // `BoolNullable` arm below is left without a temporal case.
+    if target == DType::Bool {
+        match &value {
+            Scalar::Datetime64(nanos) | Scalar::Timedelta64(nanos) => {
+                return Ok(Scalar::Bool(*nanos != 0));
+            }
+            _ => {}
+        }
+    }
     // TEMPORAL -> NUMPY int64 IS RAW NANOSECONDS, and this sits ABOVE the
     // missing-value branch on purpose.
     //
@@ -7009,6 +7042,68 @@ mod tests {
             assert_eq!(
                 cast_scalar(&Scalar::Bool(flag), DType::Timedelta64).unwrap(),
                 Scalar::Timedelta64(want)
+            );
+        }
+    }
+
+    /// Temporal -> numpy `bool` is nonzero-truthy on the RAW NANOSECONDS, which
+    /// makes NaT `true`. Transcribed from live pandas 2.2.3 `.astype('bool')`,
+    /// measured beside `.astype('int64')` so the one rule is visible as one rule.
+    #[test]
+    fn cast_scalar_temporal_to_bool_is_nonzero_on_the_nanos() {
+        use super::{Timedelta, Timestamp, cast_scalar};
+
+        // Only the epoch and a zero duration are false.
+        for (nanos, want) in [
+            (0_i64, false),
+            (1_710_498_645_123_456_789, true),
+            (-1, true),
+            (86_400_000_000_000, true),
+            (1, true),
+        ] {
+            assert_eq!(
+                cast_scalar(&Scalar::Datetime64(nanos), DType::Bool).unwrap(),
+                Scalar::Bool(want),
+                "datetime64 {nanos} -> bool"
+            );
+            assert_eq!(
+                cast_scalar(&Scalar::Timedelta64(nanos), DType::Bool).unwrap(),
+                Scalar::Bool(want),
+                "timedelta64 {nanos} -> bool"
+            );
+        }
+
+        // ⚠️ NaT IS TRUE, not missing. It needs no case of its own — NaT IS
+        // i64::MIN, which is nonzero — but it only reaches the rule because the
+        // cast sits ABOVE is_missing(); below it, both of these become Null.
+        assert_eq!(
+            cast_scalar(&Scalar::Datetime64(Timestamp::NAT), DType::Bool).unwrap(),
+            Scalar::Bool(true),
+            "NaT -> bool is true in pandas, not a missing value"
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Timedelta64(Timedelta::NAT), DType::Bool).unwrap(),
+            Scalar::Bool(true)
+        );
+
+        // ⚠️ THE NULLABLE `boolean` REFUSES THE WHOLE DTYPE, not just the odd
+        // value: pandas raises "Need to pass bool-like values" for every row
+        // above, INCLUDING the ones whose nanos are 0 or 1. That exclusion is
+        // what the `DType::Bool` guard buys, so it is asserted rather than
+        // assumed.
+        //
+        // NaT is deliberately NOT in this loop, and the reason is a KNOWN
+        // DIVERGENCE rather than an oversight: `is_missing()` catches NaT before
+        // any BoolNullable arm can refuse it, so FP answers `Null` where pandas
+        // raises. Asserting `is_err()` for it here would fail. Left visible.
+        for nanos in [0_i64, 1, -1, 1_710_498_645_123_456_789] {
+            assert!(
+                cast_scalar(&Scalar::Datetime64(nanos), DType::BoolNullable).is_err(),
+                "datetime64 {nanos} -> nullable boolean must stay refused"
+            );
+            assert!(
+                cast_scalar(&Scalar::Timedelta64(nanos), DType::BoolNullable).is_err(),
+                "timedelta64 {nanos} -> nullable boolean must stay refused"
             );
         }
     }
