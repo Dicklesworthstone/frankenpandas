@@ -5830,19 +5830,37 @@ impl PeriodFreq {
         }
     }
 
-    /// Per br-frankenpandas-qigpe: resolution string for PeriodIndex.resolution.
+    /// Resolution word for `PeriodIndex.resolution`, or `None` where pandas has
+    /// no answer.
+    ///
+    /// ⚠️ THIS IS NOT THE ALIAS TABLE. pandas' `.resolution` names the period's
+    /// *component*, in the same vocabulary `DatetimeIndex::resolution` already
+    /// uses here -- it is not the frequency string, which is what
+    /// [`PeriodFreq::alias`] is for. MEASURED, live pandas 2.2.3, one-element
+    /// `PeriodIndex` per freq:
+    ///     Y   -> 'year'        Q   -> 'quarter'     M  -> 'month'
+    ///     D   -> 'day'         h   -> 'hour'        min-> 'minute'
+    ///     s   -> 'second'
+    ///     W   -> raises AttributeError
+    ///     B   -> raises AttributeError
+    /// Every arm below previously returned the alias instead ("A-DEC", "M", "H",
+    /// "T", "S", ...), so all nine disagreed with the incumbent; W and B answered
+    /// where pandas refuses. The refusal is modelled as `None` rather than a
+    /// wrong word, because the caller already returns `Option` for the empty
+    /// index and pandas' own failure there is an absence, not a value.
     #[must_use]
-    pub const fn resolution(self) -> &'static str {
+    pub const fn resolution(self) -> Option<&'static str> {
         match self {
-            Self::Annual => "A-DEC",
-            Self::Quarterly => "Q-DEC",
-            Self::Monthly => "M",
-            Self::Weekly => "W-SUN",
-            Self::Daily => "D",
-            Self::Business => "B",
-            Self::Hourly => "H",
-            Self::Minutely => "T",
-            Self::Secondly => "S",
+            Self::Annual => Some("year"),
+            Self::Quarterly => Some("quarter"),
+            Self::Monthly => Some("month"),
+            Self::Daily => Some("day"),
+            Self::Hourly => Some("hour"),
+            Self::Minutely => Some("minute"),
+            Self::Secondly => Some("second"),
+            // pandas' Week and BusinessDay offsets carry no `_resolution_obj`,
+            // so `.resolution` raises AttributeError rather than answering.
+            Self::Weekly | Self::Business => None,
         }
     }
 }
@@ -12213,6 +12231,46 @@ mod tests {
         assert_eq!(PeriodFreq::parse("H"), Some(PeriodFreq::Hourly));
         assert_eq!(PeriodFreq::parse("T"), Some(PeriodFreq::Minutely));
         assert_eq!(PeriodFreq::parse("S"), Some(PeriodFreq::Secondly));
+    }
+
+    /// The resolution table is the COMPONENT WORD, never the frequency alias.
+    /// Transcribed from live pandas 2.2.3: `pd.PeriodIndex([ts], freq=f).resolution`
+    /// for each f, with W and B raising AttributeError.
+    #[test]
+    fn period_freq_resolution_is_the_component_word_not_the_alias() {
+        assert_eq!(PeriodFreq::Annual.resolution(), Some("year"));
+        assert_eq!(PeriodFreq::Quarterly.resolution(), Some("quarter"));
+        assert_eq!(PeriodFreq::Monthly.resolution(), Some("month"));
+        assert_eq!(PeriodFreq::Daily.resolution(), Some("day"));
+        assert_eq!(PeriodFreq::Hourly.resolution(), Some("hour"));
+        assert_eq!(PeriodFreq::Minutely.resolution(), Some("minute"));
+        assert_eq!(PeriodFreq::Secondly.resolution(), Some("second"));
+
+        // pandas raises AttributeError for these two rather than answering.
+        assert_eq!(PeriodFreq::Weekly.resolution(), None);
+        assert_eq!(PeriodFreq::Business.resolution(), None);
+
+        // The bug this replaces was the alias table copied into the resolution
+        // slot, so pin the two apart: no frequency may report the same string
+        // for both. (Every pandas alias is short and lowercase-ish; every
+        // resolution word is a full English noun -- they never coincide.)
+        for freq in [
+            PeriodFreq::Annual,
+            PeriodFreq::Quarterly,
+            PeriodFreq::Monthly,
+            PeriodFreq::Weekly,
+            PeriodFreq::Daily,
+            PeriodFreq::Business,
+            PeriodFreq::Hourly,
+            PeriodFreq::Minutely,
+            PeriodFreq::Secondly,
+        ] {
+            assert_ne!(
+                Some(freq.alias()),
+                freq.resolution(),
+                "{freq:?} reports its alias as its resolution again"
+            );
+        }
     }
 
     #[test]

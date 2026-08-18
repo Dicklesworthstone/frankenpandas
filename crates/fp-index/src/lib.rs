@@ -10415,9 +10415,12 @@ impl PeriodIndex {
     }
 
     /// Frequency resolution string, matching `pd.PeriodIndex.resolution`.
+    ///
+    /// `None` for an empty index, and also for the two frequencies whose pandas
+    /// offsets have no resolution to report -- see [`PeriodFreq::resolution`].
     #[must_use]
     pub fn resolution(&self) -> Option<&'static str> {
-        self.values.first().map(|p| p.freq.resolution())
+        self.values.first().and_then(|p| p.freq.resolution())
     }
 
     /// Format each period as a string with strftime, matching `pd.PeriodIndex.strftime`.
