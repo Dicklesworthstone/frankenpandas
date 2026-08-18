@@ -37882,3 +37882,78 @@ measuring run, so a fix lands before the rows are taken rather than invalidating
 The better technique, which they worked out and I will use next time a lane already exists,
 is to measure against `git show HEAD:benches/vs_pandas_harness.py` written to scratch — the
 harness hashes its own content, so the row is reproducible the moment it is taken.
+
+### 2026-08-18 SlateHeron (br-frankenpandas-live-oracle-passes-by-skip-l7r1p) — l7r1p's FIX has been in CI since May; the reason parity is still unverified is that CI ITSELF has not produced a single green run in 1,200 attempts, and for the last ~35 hours produces no jobs at all
+
+I went looking for where to implement `l7r1p` step 2 — "set `FP_REQUIRE_LIVE_ORACLE` in the
+CI conformance job so a missing oracle is a hard failure there". It is already set. So is
+the fallback. Both have been in `.github/workflows/ci.yml` since **`ec36ff1d6`,
+2026-05-02** — three months BEFORE the bead was filed on 2026-08-06. The bead observed a
+local skip and generalised it to CI without checking CI.
+
+```
+conformance:
+  needs: [test]
+  env:
+    FP_REQUIRE_LIVE_ORACLE: "1"
+    FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
+```
+
+**So the bead's CONCLUSION is correct and its DIAGNOSIS is wrong, and the difference
+matters because it changes the fix entirely.** Parity really is unverified. Not because a
+variable is unset — because the job that would verify it never executes. Two separate
+mechanisms, stacked:
+
+**1. THE CONFORMANCE JOB IS `needs: [test]`, AND `test` FAILS.** On the last CI run that
+executed anything (`31923213809`, 2026-08-16T03:00Z), **12 jobs failed** — `test` on both
+ubuntu and macos, all six `lint` matrix legs, `licenses`, `security`, `fuzz-regression` —
+and `conformance` and `gates` are recorded as **`skipped`**. The correctly-configured live
+oracle has been gated behind a red upstream job, so it reports nothing rather than
+reporting a pass. A skipped job is not a green one, but it occupies the same space in a
+run summary.
+
+**2. SINCE THEN, CI PRODUCES NO JOBS AT ALL.** Every run after 2026-08-16T03:00Z is
+`cancelled`, and cancelled *before a single job starts* — `jobs.total_count` is **0** on
+every recent run I sampled (`32112703339`, `32112570327`, `32111893250`, all zero). That
+is roughly **400 consecutive runs over ~35 hours** in which no CI work of any kind ran.
+
+**AND THE NUMBER THAT SHOULD END THE ARGUMENT: over the last 1,200 CI runs, back to
+2026-07-13, there is not ONE `success`.**
+
+| pages sampled (100 runs each) | window | cancelled | failure | success |
+|---|---|---|---|---|
+| 1–4 | 2026-08-16 → 2026-08-18 | 398 | 0 | **0** |
+| 5–8 | 2026-08-04 → 2026-08-16 | 350 | 50 | **0** |
+| 9–12 | 2026-07-13 → 2026-08-04 | 277 | 123 | **0** |
+
+**WHY THIS IS THE SAME FAMILY AS THE REST OF TODAY'S FINDINGS.** The other pane and I have
+been naming a shape all day: *the check's subject and its object come apart, and nothing
+inside the artifact records which one it touched.* This is that shape at repository scale.
+`AGENTS.md` states parity is verified by differential testing against the pandas oracle for
+the full API surface. The workflow file says so too, correctly and in detail. Every layer
+of configuration is right. **The verification has simply not run — and no artifact anywhere
+in the repo records that fact.** A reader inspecting `ci.yml` would conclude parity is
+enforced, and would be reading a true description of a job that does not execute.
+
+**WHAT I AM NOT CLAIMING.** I do not know WHY runs are cancelled before their jobs start. A
+zero-job cancellation is consistent with an account-level runner/minutes/billing limit, but
+I read the Actions API, not the billing page, and I am not going to assert a cause I have
+not seen. It could equally be an org policy or a disabled-Actions state. **That is the
+first thing to check, and it is outside what I can verify from here.**
+
+**WHAT THIS DOES TO `l7r1p`.** Step 1 (obtain the oracle) — done, system pandas, works
+today, verified by hand. Step 2 (fail closed in CI) — done since May. Step 3 (run it and
+triage) — **blocked, and not on anything in the bead's scope.** The residual work is: find
+out why CI produces no jobs; fix or decouple the red `test` job that `conformance` needs;
+and only then triage. Setting a variable was never going to close this bead.
+
+```
+NO VERDICT, NO RATIO, NO ROW BANKED — this measures the CI system, not FrankenPandas
+against an incumbent, so no A/A null control applies.
+METHOD    GitHub Actions API, 12 pages x 100 runs of ci.yml, conclusions tallied per
+          page; job-level detail read for the last executing run (31923213809) and
+          jobs.total_count checked on three recent cancellations.
+LOADAVG   not applicable and deliberately so: no cargo, no bench, no CPU taken while
+          the other pane re-locks floordiv @10M on the new harness sha.
+DISK      /data 101G.
+```
