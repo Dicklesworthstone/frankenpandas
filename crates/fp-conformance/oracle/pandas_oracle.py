@@ -4687,15 +4687,39 @@ def op_dataframe_pivot(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pivot_dropna(payload: dict[str, Any]) -> bool:
-    """`pivot_table(dropna=...)`, defaulting to the historical override.
+    """`pivot_table(dropna=...)`, defaulting to PANDAS' default.
 
-    br-frankenpandas-eay9h. Returns False when the key is absent so that every
-    fixture banked before this knob existed is byte-unchanged; a fixture that
-    explicitly asks for True gets pandas' documented default.
+    br-frankenpandas-eay9h. This defaulted to False — the historical override —
+    on the stated grounds that flipping it "changes the expectations of the seven
+    fixtures that do not ask". THAT WAS NEVER MEASURED, AND IT IS FALSE.
+
+    Every pivot_table case that compares against this oracle was enumerated and
+    asked both ways: 8 banked fixtures under fixtures/packets, the 3
+    conformance_reshape cases, and the 4 live_oracle cases (mean/sum/count/min —
+    my first count said 2 because I read the grep through `head`, the same
+    false-absence this repo has bitten me with before). ZERO of the 15 change
+    under dropna=True, because none of the other fourteen has a NaN group key at
+    all — the only input that does is
+    reshape_pivot_table_missing_keys_dropna_default_tn6qb9, which already asks for
+    True explicitly. So pandas' default costs nothing and no fixture was re-banked
+    to get here.
+
+    An oracle that silently rewrites the argument under test cannot certify
+    parity, so absence now means pandas' behaviour; a fixture that deliberately
+    wants all-NaN cells kept visible must say `pivot_dropna: false` and mean it.
+
+    `sort` is NOT flipped with it: measured the same way, sort=True changes
+    fp_p2d_127_dataframe_pivot_table_multi_values_strict, so that one is a
+    re-banking decision rather than a free correction. See `_pivot_sort`.
+
+    A/B'd against a prebuilt conformance binary, oracle reverted and re-flipped:
+    7 failures become 6, and the one that flips to PASSING is
+    conformance_reshape_pivot_table_missing_keys_dropna_default_tn6qb9 — the test
+    whose name always wanted this default. Nothing else moves.
     """
     raw = payload.get("pivot_dropna")
     if raw is None:
-        return False
+        return True
     if not isinstance(raw, bool):
         raise OracleError("dataframe_pivot_table pivot_dropna must be a boolean")
     return raw
@@ -4707,6 +4731,14 @@ def _pivot_sort(payload: dict[str, Any]) -> bool:
     br-frankenpandas-eay9h, sibling of `_pivot_dropna`. Returns False when absent
     so every banked fixture is byte-unchanged; a fixture that explicitly asks for
     True gets pandas' documented default.
+
+    ⚠ THIS ONE IS STILL NOT PANDAS' DEFAULT, deliberately, and unlike `dropna` the
+    reason is measured rather than assumed: asking all 13 oracle-comparing
+    pivot_table cases both ways, sort=True changes exactly ONE —
+    fp_p2d_127_dataframe_pivot_table_multi_values_strict, whose column order moves.
+    That is a one-fixture re-banking decision for the corpus, not a free
+    correction, so it is left to be taken explicitly. The blast radius the bead
+    feared ("reorders rows for all eight at once") is 1 of 15, not 8 of 8.
     """
     raw = payload.get("pivot_sort")
     if raw is None:
