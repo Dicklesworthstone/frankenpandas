@@ -40011,3 +40011,56 @@ refuted), reached here BEFORE the fixture exists rather than after.
 explicit note that pandas differs and why, or choose epoch-adjacent inputs (small ns values
 where `f64` is still exact) so the two engines agree and the fixture tests the operation
 rather than the float mantissa. Do NOT let the oracle arbitrate this one.
+
+---
+
+## METHOD ADDENDUM — the false-absence taxonomy needs a SIBLING CLASS, and it recurred twice while I was using it (CrimsonPine, 2026-08-18)
+
+**Date:** 2026-08-18 · **Agent:** CrimsonPine · **Status:** correction to the
+"nine distinct ways" entry above. Build freeze (/data 34G at 99%): no cargo, no
+artifact writes. Locks defended BY INSPECTION — both `4kig1` tests still defined,
+`BINARY_BANDWIDTH_PARALLEL_MIN_LEN` unchanged at `1 << 20`. Subject intact, NOT a
+green run.
+
+**THE TAXONOMY WAS INCOMPLETE IN A WAY THAT COST A RETRACTED CLAIM.** All nine
+entries share the form "the probe reported NOTHING". There is a second family with the
+same consequence and a different shape: **the probe reported SOMETHING TRUE and I drew
+a false conclusion from it.** That is not false absence, it is false attribution, and
+it is more dangerous because the number is real.
+
+**CLASS 10 — A RATE IS NOT A TOTAL.** I measured `/data/tmp/amrel-enginehead-target`
+writing **7148.9 MB in 15 minutes** and published, and pushed, that it was draining
+the volume at "~28 GB/hour" and that stopping it was "the whole fix". The write
+measurement was correct. The inference was not: two `du` readings nine minutes apart
+both said **8.3 G**, so the directory was CHURNING — a build that recompiles rewrites
+the same artifacts, and `find -mmin` counts every rewrite. Gigabytes per minute at
+constant size. Acting on my claim would have stopped a build and left the shortfall
+unexplained.
+*Remedy: to attribute free-space loss to a writer, measure its SIZE TWICE. Bytes
+written and bytes consumed are different quantities and churn separates them
+completely.*
+
+**AND THE TAXONOMY DID NOT PROTECT ME FROM ITS OWN CONTENTS — TWICE, IN THE TWO TURNS
+AFTER I WROTE IT:**
+
+* **Class 6 (name collision) recurred verbatim.** Diagnosing the same disk event I ran
+  `pgrep -f cargo`, got "7 cargo/rustc processes" including two with
+  `cwd=/data/projects/frankenpandas`, and was about to report a PEER BUILDING DURING
+  THE FREEZE. The match was a **disk-scanning script** whose arguments merely contain
+  `cands=['/data/tmp/cargo-target', ...]`. Strict `pgrep -x rustc` and `pgrep -x cargo`
+  both returned 0. I had committed the entry naming this exact class one turn earlier.
+* **Class 2/3 (a search that cannot match) recurred on THIS ENTRY.** Grooming my own
+  ledger I grepped for `"nine structurally different instances"` to find my own heading
+  and got **0** — the entry says "nine distinct ways". I had misremembered my own
+  wording. Only the positive control ("is the entry present at all?" -> 1) separated
+  "wording differs" from "entry missing".
+
+**THE TRANSFERABLE POINT IS NARROWER THAN "BE CAREFUL", AND IT IS THE REASON THIS
+ADDENDUM EXISTS.** Writing the taxonomy down did not stop me reproducing two of its
+entries within two turns. What stopped both was the mechanical habit, not the
+knowledge: **run the positive control every time, including when you are certain, and
+especially when searching for something you wrote yourself.** A catalogue of traps is
+not a defence against them; a reflex is.
+
+**COUNT CORRECTION:** the entry above should read **ten** classes, nine of absence and
+one of attribution.
