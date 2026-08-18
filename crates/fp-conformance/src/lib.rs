@@ -875,6 +875,11 @@ pub enum FixtureOperation {
     SeriesDtTimetz,
     #[serde(rename = "series_dt_floor", alias = "series_dt_floor_default")]
     SeriesDtFloor,
+    #[serde(
+        rename = "series_dt_to_period",
+        alias = "series_dt_to_period_default"
+    )]
+    SeriesDtToPeriod,
     #[serde(rename = "series_dt_ceil", alias = "series_dt_ceil_default")]
     SeriesDtCeil,
     #[serde(rename = "series_dt_round", alias = "series_dt_round_default")]
@@ -1520,6 +1525,7 @@ impl FixtureOperation {
             Self::SeriesDtTzLocalize => "series_dt_tz_localize",
             Self::SeriesDtTimetz => "series_dt_timetz",
             Self::SeriesDtFloor => "series_dt_floor",
+            Self::SeriesDtToPeriod => "series_dt_to_period",
             Self::SeriesDtCeil => "series_dt_ceil",
             Self::SeriesDtRound => "series_dt_round",
             Self::SeriesDtMonthName => "series_dt_month_name",
@@ -2887,6 +2893,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDtTzConvert
         | FixtureOperation::SeriesDtTzLocalize
         | FixtureOperation::SeriesDtTimetz
+        | FixtureOperation::SeriesDtToPeriod
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
@@ -11537,6 +11544,7 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesDtTzConvert
         | FixtureOperation::SeriesDtTzLocalize
         | FixtureOperation::SeriesDtTimetz
+        | FixtureOperation::SeriesDtToPeriod
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
@@ -13211,6 +13219,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtTzConvert
         | FixtureOperation::SeriesDtTzLocalize
         | FixtureOperation::SeriesDtTimetz
+        | FixtureOperation::SeriesDtToPeriod
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
@@ -13944,6 +13953,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtTzConvert
         | FixtureOperation::SeriesDtTzLocalize
         | FixtureOperation::SeriesDtTimetz
+        | FixtureOperation::SeriesDtToPeriod
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
@@ -17454,6 +17464,13 @@ fn execute_series_module_utility_fixture_operation(
                 .as_deref()
                 .ok_or_else(|| "series_dt_floor requires dt_freq".to_string())?;
             series.dt().floor(freq).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtToPeriod => {
+            let freq = fixture
+                .dt_freq
+                .as_deref()
+                .ok_or_else(|| "series_dt_to_period requires dt_freq".to_string())?;
+            series.dt().to_period(freq).map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtCeil => {
             let freq = fixture
@@ -21279,6 +21296,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesDtTzConvert
         | FixtureOperation::SeriesDtTzLocalize
         | FixtureOperation::SeriesDtTimetz
+        | FixtureOperation::SeriesDtToPeriod
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound

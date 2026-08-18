@@ -2031,6 +2031,39 @@ def op_series_dt_nanoseconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return timedelta_component_from_payload(pd, payload, "series_dt_nanoseconds", "nanoseconds")
 
 
+def op_series_dt_to_period(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    """`pd.Series.dt.to_period(freq)` - datetime VALUES to period labels.
+
+    NOT `Series.to_period`, which converts the INDEX. pandas keeps the two separate
+    and FrankenPandas previously had only the index form.
+
+    MEASURED, 2.2.3, on ['2024-03-10 01:30:45', '2024-12-31 23:59:59', NaT]:
+        'Y' -> 2024,       2024,       NaT
+        'Q' -> 2024Q1,     2024Q4,     NaT
+        'M' -> 2024-03,    2024-12,    NaT
+        'D' -> 2024-03-10, 2024-12-31, NaT
+
+    Emitted as STRINGS with NaT as MISSING, matching FrankenPandas' documented
+    convention of canonical period labels until a dedicated Period value variant
+    lands. `astype(str)` alone renders NaT as the literal three-character "NaT", so
+    the `.where(notna())` is what keeps a missing value missing instead of turning it
+    into a string that equals nothing.
+    """
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_to_period requires left payload")
+    freq = payload.get("dt_freq")
+    if not isinstance(freq, str) or not freq:
+        raise OracleError("series_dt_to_period requires dt_freq")
+    series = fixture_series_from_payload(pd, left, "series_dt_to_period")
+    try:
+        periods = pd.to_datetime(series, errors="raise").dt.to_period(freq)
+        out = periods.astype(str).where(periods.notna())
+    except Exception as exc:
+        raise OracleError(f"series_dt_to_period failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_series_dt_to_pytimedelta(pd, payload: dict[str, Any]) -> dict[str, Any]:
     """`pd.Series.dt.to_pytimedelta()` — resolution reduced to microseconds.
 
@@ -8516,6 +8549,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_dt_total_seconds(pd, payload)
     if op == "series_dt_to_pytimedelta":
         return op_series_dt_to_pytimedelta(pd, payload)
+    if op == "series_dt_to_period":
+        return op_series_dt_to_period(pd, payload)
     if op == "series_dt_days":
         return op_series_dt_days(pd, payload)
     if op == "series_dt_seconds":
