@@ -5793,13 +5793,35 @@ pub enum PeriodFreq {
     Minutely,
     /// `s` / `S` — secondly periods.
     Secondly,
+    /// `ms` — millisecond periods. NOT `MS`, which pandas reads as month start.
+    Milliseconds,
+    /// `us` / `US` — microsecond periods.
+    Microseconds,
+    /// `ns` / `NS` — nanosecond periods.
+    Nanoseconds,
 }
 
 impl PeriodFreq {
     /// Parse a pandas-style frequency alias. Recognizes the common subset
-    /// (Y-DEC/A/Y, Q-DEC/Q, M, W-SUN/W, D, B, h/H, min/T, s/S).
-    /// Case-insensitive.
+    /// (Y-DEC/A/Y, Q-DEC/Q, M, W-SUN/W, D, B, h/H, min/T, s/S) plus the
+    /// sub-second units ms, us/US, ns/NS.
+    ///
+    /// Case-insensitive with ONE exception: bare `MS` is month start in pandas,
+    /// not milliseconds, and is refused here the way pandas refuses it for
+    /// `to_period`. See the check at the top of the body.
     pub fn parse(alias: &str) -> Option<Self> {
+        // ⚠️ CASE MATTERS FOR EXACTLY ONE ALIAS, and this parser uppercases
+        // everything. MEASURED, live pandas 2.2.3, Timestamp.to_period(f):
+        //     'ms' -> millisecond      'Ms' -> millisecond
+        //     'MS' -> ValueError       (it is month start, a date_range-only freq)
+        //     'us' -> microsecond      'US' -> microsecond
+        //     'ns' -> nanosecond       'NS' -> nanosecond
+        // So only the fully-capitalised `MS` is excluded; every other casing of
+        // "ms" is milliseconds, while us/ns are case-insensitive and belong in
+        // the table below. Checked here, before the uppercase collapses it.
+        if alias.eq_ignore_ascii_case("ms") && alias != "MS" {
+            return Some(Self::Milliseconds);
+        }
         match alias.to_ascii_uppercase().as_str() {
             "A" | "Y" | "A-DEC" | "Y-DEC" | "ANNUAL" | "YEARLY" => Some(Self::Annual),
             "Q" | "Q-DEC" | "QUARTERLY" => Some(Self::Quarterly),
@@ -5810,6 +5832,11 @@ impl PeriodFreq {
             "H" | "HOURLY" => Some(Self::Hourly),
             "T" | "MIN" | "MINUTELY" => Some(Self::Minutely),
             "S" | "SECONDLY" => Some(Self::Secondly),
+            "US" | "MICROSECOND" | "MICROSECONDS" => Some(Self::Microseconds),
+            "NS" | "NANOSECOND" | "NANOSECONDS" => Some(Self::Nanoseconds),
+            // The spelled-out form only; bare "MS" is deliberately absent, and
+            // every other casing of it was taken above.
+            "MILLISECOND" | "MILLISECONDS" => Some(Self::Milliseconds),
             _ => None,
         }
     }
@@ -5827,6 +5854,9 @@ impl PeriodFreq {
             Self::Hourly => "h",
             Self::Minutely => "min",
             Self::Secondly => "s",
+            Self::Milliseconds => "ms",
+            Self::Microseconds => "us",
+            Self::Nanoseconds => "ns",
         }
     }
 
@@ -5858,6 +5888,9 @@ impl PeriodFreq {
             Self::Hourly => Some("hour"),
             Self::Minutely => Some("minute"),
             Self::Secondly => Some("second"),
+            Self::Milliseconds => Some("millisecond"),
+            Self::Microseconds => Some("microsecond"),
+            Self::Nanoseconds => Some("nanosecond"),
             // pandas' Week and BusinessDay offsets carry no `_resolution_obj`,
             // so `.resolution` raises AttributeError rather than answering.
             Self::Weekly | Self::Business => None,
@@ -6063,6 +6096,35 @@ impl Period {
                     secs / 3600,
                     (secs % 3600) / 60,
                     secs % 60
+                )
+            }
+            // The three sub-second frequencies differ only in the divisor and
+            // the FIXED fraction width -- pandas pads to the full width and
+            // never trims trailing zeros. MEASURED on 2024-03-15 10:30:45.123456789:
+            //     ms -> "2024-03-15 10:30:45.123"
+            //     us -> "2024-03-15 10:30:45.123456"
+            //     ns -> "2024-03-15 10:30:45.123456789"
+            PeriodFreq::Milliseconds | PeriodFreq::Microseconds | PeriodFreq::Nanoseconds => {
+                let (per_sec, width) = match self.freq {
+                    PeriodFreq::Milliseconds => (1_000_i64, 3_usize),
+                    PeriodFreq::Microseconds => (1_000_000_i64, 6_usize),
+                    _ => (1_000_000_000_i64, 9_usize),
+                };
+                // 86_400 * 1e9 = 8.64e13 -- the widest of these is well inside i64.
+                let per_day = 86_400 * per_sec;
+                let day = ord.div_euclid(per_day);
+                let rest = ord.rem_euclid(per_day);
+                let secs = rest / per_sec;
+                let frac = rest % per_sec;
+                let (y, m, d) = civil_from_days(day);
+                write!(
+                    rendered,
+                    "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}.{:0width$}",
+                    secs / 3600,
+                    (secs % 3600) / 60,
+                    secs % 60,
+                    frac,
+                    width = width
                 )
             }
         }
@@ -12202,9 +12264,73 @@ mod tests {
             PeriodFreq::Hourly,
             PeriodFreq::Minutely,
             PeriodFreq::Secondly,
+            PeriodFreq::Milliseconds,
+            PeriodFreq::Microseconds,
+            PeriodFreq::Nanoseconds,
         ] {
             assert_eq!(PeriodFreq::parse(freq.alias()), Some(freq));
         }
+    }
+
+    /// The three sub-second frequencies pandas' `to_period` accepts and this
+    /// crate used to reject. Transcribed from live pandas 2.2.3 on
+    /// `Timestamp('2024-03-15 10:30:45.123456789')`.
+    #[test]
+    fn period_freq_subsecond_units_match_pandas() {
+        // Aliases and resolution words.
+        assert_eq!(PeriodFreq::Milliseconds.alias(), "ms");
+        assert_eq!(PeriodFreq::Microseconds.alias(), "us");
+        assert_eq!(PeriodFreq::Nanoseconds.alias(), "ns");
+        assert_eq!(PeriodFreq::Milliseconds.resolution(), Some("millisecond"));
+        assert_eq!(PeriodFreq::Microseconds.resolution(), Some("microsecond"));
+        assert_eq!(PeriodFreq::Nanoseconds.resolution(), Some("nanosecond"));
+
+        // ⚠️ THE ONE CASE-SENSITIVE ALIAS. pandas reads bare "MS" as month start
+        // and refuses it here, while every other casing of "ms" is milliseconds.
+        assert_eq!(PeriodFreq::parse("ms"), Some(PeriodFreq::Milliseconds));
+        assert_eq!(PeriodFreq::parse("Ms"), Some(PeriodFreq::Milliseconds));
+        assert_eq!(PeriodFreq::parse("mS"), Some(PeriodFreq::Milliseconds));
+        assert_eq!(PeriodFreq::parse("MS"), None);
+        // us/ns are case-insensitive in pandas, so both casings resolve.
+        assert_eq!(PeriodFreq::parse("us"), Some(PeriodFreq::Microseconds));
+        assert_eq!(PeriodFreq::parse("US"), Some(PeriodFreq::Microseconds));
+        assert_eq!(PeriodFreq::parse("ns"), Some(PeriodFreq::Nanoseconds));
+        assert_eq!(PeriodFreq::parse("NS"), Some(PeriodFreq::Nanoseconds));
+
+        // Ordinals are unit counts since the epoch; labels pad the fraction to
+        // the full width of the frequency and never trim trailing zeros.
+        assert_eq!(
+            Period::new(1_710_498_645_123, PeriodFreq::Milliseconds).calendar_string(),
+            "2024-03-15 10:30:45.123"
+        );
+        assert_eq!(
+            Period::new(1_710_498_645_123_456, PeriodFreq::Microseconds).calendar_string(),
+            "2024-03-15 10:30:45.123456"
+        );
+        assert_eq!(
+            Period::new(1_710_498_645_123_456_789, PeriodFreq::Nanoseconds).calendar_string(),
+            "2024-03-15 10:30:45.123456789"
+        );
+
+        // A whole-second instant still shows its zero fraction, and the
+        // pre-epoch ordinals are the FLOOR, not a truncation toward zero:
+        // Timestamp('1969-12-31 23:59:59.999') at 'ms' has ordinal -1.
+        assert_eq!(
+            Period::new(0, PeriodFreq::Milliseconds).calendar_string(),
+            "1970-01-01 00:00:00.000"
+        );
+        assert_eq!(
+            Period::new(-1, PeriodFreq::Milliseconds).calendar_string(),
+            "1969-12-31 23:59:59.999"
+        );
+        assert_eq!(
+            Period::new(-1_000, PeriodFreq::Microseconds).calendar_string(),
+            "1969-12-31 23:59:59.999000"
+        );
+        assert_eq!(
+            Period::new(-999_999, PeriodFreq::Nanoseconds).calendar_string(),
+            "1969-12-31 23:59:59.999000001"
+        );
     }
 
     #[test]

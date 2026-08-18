@@ -5986,6 +5986,14 @@ fn datetime_period_ordinal(nanos: i64, freq: PeriodFreq) -> Result<i64, IndexErr
         PeriodFreq::Hourly => Ok(nanos.div_euclid(Timedelta::NANOS_PER_HOUR)),
         PeriodFreq::Minutely => Ok(nanos.div_euclid(Timedelta::NANOS_PER_MIN)),
         PeriodFreq::Secondly => Ok(nanos.div_euclid(Timedelta::NANOS_PER_SEC)),
+        // MEASURED, live pandas 2.2.3: the ordinal is simply the unit count since
+        // the epoch, FLOORED -- Timestamp('1969-12-31 23:59:59.999').to_period('ms')
+        // has ordinal -1, and '...999000001' at 'ns' has -999999. div_euclid is
+        // that floor; plain `/` would truncate toward zero and be wrong pre-epoch.
+        PeriodFreq::Milliseconds => Ok(nanos.div_euclid(Timedelta::NANOS_PER_MILLI)),
+        PeriodFreq::Microseconds => Ok(nanos.div_euclid(Timedelta::NANOS_PER_MICRO)),
+        // Storage is already nanoseconds, so this is the identity.
+        PeriodFreq::Nanoseconds => Ok(nanos),
         PeriodFreq::Weekly => date_to_weekly_period_ordinal(date),
         PeriodFreq::Business => date_to_business_period_ordinal(date),
         _ => Err(datetime_to_period_error("unsupported period frequency")),
@@ -6338,6 +6346,18 @@ fn period_start_nanos(period: Period) -> Result<i64, IndexError> {
             .ordinal
             .checked_mul(Timedelta::NANOS_PER_SEC)
             .ok_or_else(|| period_timestamp_error("secondly ordinal overflow")),
+        PeriodFreq::Milliseconds => period
+            .ordinal
+            .checked_mul(Timedelta::NANOS_PER_MILLI)
+            .ok_or_else(|| period_timestamp_error("millisecond ordinal overflow")),
+        PeriodFreq::Microseconds => period
+            .ordinal
+            .checked_mul(Timedelta::NANOS_PER_MICRO)
+            .ok_or_else(|| period_timestamp_error("microsecond ordinal overflow")),
+        // Identity, and therefore the one arm that cannot overflow -- which also
+        // makes period_end_nanos (next_start - 1ns) collapse to the start, the
+        // correct end for a period one nanosecond wide.
+        PeriodFreq::Nanoseconds => Ok(period.ordinal),
         _ => Err(period_timestamp_error("unsupported period frequency")),
     }
 }
@@ -6518,18 +6538,36 @@ fn period_from_fields_at(
     };
     let hour = if matches!(
         freq,
-        PeriodFreq::Hourly | PeriodFreq::Minutely | PeriodFreq::Secondly
+        PeriodFreq::Hourly
+            | PeriodFreq::Minutely
+            | PeriodFreq::Secondly
+            | PeriodFreq::Milliseconds
+            | PeriodFreq::Microseconds
+            | PeriodFreq::Nanoseconds
     ) {
         period_field_value(fields.hour, position, 0)
     } else {
         0
     };
-    let minute = if matches!(freq, PeriodFreq::Minutely | PeriodFreq::Secondly) {
+    let minute = if matches!(
+        freq,
+        PeriodFreq::Minutely
+            | PeriodFreq::Secondly
+            | PeriodFreq::Milliseconds
+            | PeriodFreq::Microseconds
+            | PeriodFreq::Nanoseconds
+    ) {
         period_field_value(fields.minute, position, 0)
     } else {
         0
     };
-    let second = if freq == PeriodFreq::Secondly {
+    let second = if matches!(
+        freq,
+        PeriodFreq::Secondly
+            | PeriodFreq::Milliseconds
+            | PeriodFreq::Microseconds
+            | PeriodFreq::Nanoseconds
+    ) {
         period_field_value(fields.second, position, 0)
     } else {
         0

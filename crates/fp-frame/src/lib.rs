@@ -51541,6 +51541,9 @@ fn format_period_label(dt: NaiveDateTime, freq: PeriodFreq) -> Result<String, Fr
         PeriodFreq::Hourly => dt.format("%Y-%m-%d %H:00").to_string(),
         PeriodFreq::Minutely => dt.format("%Y-%m-%d %H:%M").to_string(),
         PeriodFreq::Secondly => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        PeriodFreq::Milliseconds => dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+        PeriodFreq::Microseconds => dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+        PeriodFreq::Nanoseconds => dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
         _ => {
             return Err(FrameError::CompatibilityRejected(
                 "to_period frequency is not supported yet".to_owned(),
@@ -51712,6 +51715,42 @@ fn period_label_to_timestamp(
                     999_999_999,
                 )?
             }
+        }
+        // The three sub-second frequencies read back the same label shape the
+        // formatter above writes; only the fraction width and the period's own
+        // width in nanoseconds differ.
+        PeriodFreq::Milliseconds | PeriodFreq::Microseconds | PeriodFreq::Nanoseconds => {
+            // Width of one period, in nanoseconds.
+            let step = match freq {
+                PeriodFreq::Milliseconds => 1_000_000_u32,
+                PeriodFreq::Microseconds => 1_000_u32,
+                _ => 1_u32,
+            };
+            // `%.f` on the PARSING side: it consumes the leading dot and a
+            // fraction of any width, which is what the fixed `%.3f`/`%.6f`/`%.9f`
+            // formatting directives above emit. One format string covers all
+            // three because the fraction is snapped to the grid below anyway.
+            let base = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f")
+                .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            // Snap to the frequency's own grid first, so a label carrying more
+            // precision than its frequency -- or a leap second, where chrono
+            // reports nanosecond() >= 1e9 -- can never land outside the second
+            // it belongs to. Start is the floor; End is the last nanosecond
+            // still inside the period.
+            let frac = base.nanosecond().min(999_999_999);
+            let floored = frac - (frac % step);
+            let target = if how == PeriodTimestampHow::Start {
+                floored
+            } else {
+                floored + step - 1
+            };
+            period_datetime_at(
+                base.date(),
+                base.hour(),
+                base.minute(),
+                base.second(),
+                target,
+            )?
         }
         PeriodFreq::Weekly => {
             // Weekly period labels are formatted "START/END" (the Monday-anchored
