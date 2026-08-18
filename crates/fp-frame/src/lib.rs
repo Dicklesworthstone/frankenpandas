@@ -34626,18 +34626,37 @@ impl SeriesGroupBy<'_> {
             let mut gid_of = vec![usize::MAX; range];
             let mut order: Vec<IndexLabel> = Vec::new();
             let mut order_keys: Vec<ScalarKey<'_>> = Vec::new();
-            let mut group_indices: Vec<Vec<usize>> = Vec::new();
-            for (i, &v) in data.iter().enumerate() {
+            // br-frankenpandas-vw0uu. TWO PASSES, and the extra scan pays for
+            // itself. Growing one `Vec<usize>` per group from empty copies each
+            // row index about one extra time on average (doubling growth) and
+            // costs ~ngroups*log2(rows/ngroups) reallocations; at 1M rows over
+            // 100 groups that is ~8MB of index vectors rebuilt through ~1400
+            // reallocs. Counting first lets every group allocate EXACTLY once.
+            // The counting pass is a sequential read of `data` with no
+            // allocation, which is far cheaper than the copying it removes.
+            //
+            // Semantics are untouched on purpose: first-seen group order, the
+            // ascending row indices within each group, and the keys are all
+            // produced exactly as before — this changes WHEN memory is
+            // reserved, not what lands in it.
+            let mut counts: Vec<usize> = Vec::new();
+            for &v in data {
                 let off = (v as i128 - min as i128) as usize;
-                let mut gid = gid_of[off];
+                let gid = gid_of[off];
                 if gid == usize::MAX {
-                    gid = order.len();
-                    gid_of[off] = gid;
+                    gid_of[off] = order.len();
                     order.push(IndexLabel::Int64(v));
                     order_keys.push(ScalarKey::Int64(v));
-                    group_indices.push(Vec::new());
+                    counts.push(1);
+                } else {
+                    counts[gid] += 1;
                 }
-                group_indices[gid].push(i);
+            }
+            let mut group_indices: Vec<Vec<usize>> =
+                counts.iter().map(|&c| Vec::with_capacity(c)).collect();
+            for (i, &v) in data.iter().enumerate() {
+                let off = (v as i128 - min as i128) as usize;
+                group_indices[gid_of[off]].push(i);
             }
             let mut groups: FxHashMap<ScalarKey<'_>, Vec<usize>> =
                 FxHashMap::with_capacity_and_hasher(order_keys.len(), Default::default());
