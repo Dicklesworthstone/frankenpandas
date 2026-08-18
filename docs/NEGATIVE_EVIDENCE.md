@@ -37474,3 +37474,28 @@ METHOD    1259-packet corpus; 40-packet stratified sample (every 32nd) for the h
           dtype comparisons were run against live pandas directly, not against the
           oracle — the oracle is the thing under test here.
 ```
+
+**ADDENDUM, same probe — the OTHER 9, and the single packet enabling the oracle WOULD
+catch.** The 9 `error_origin=null` packets deserved a look because "an error-named packet
+where pandas returns a value" sounds like a divergence. Eight of them are not: they are
+`_error_`-NAMED after their INPUT shape (`concat_column_mismatch`, `csv_round_trip_ragged_row`,
+`series_constructor_utf8_numeric`, `from_dict_dtype_bool_invalid`, …) and assert a
+`expected_frame`/`expected_series`/`expected_bool` VALUE, with no
+`expected_error_contains` at all. Live pandas returns exactly the pinned value for each.
+Misleading names, sound fixtures.
+
+**The ninth is real.** `fp_p2d_025_dataframe_iloc_duplicate_column_selector_error_strict`
+pins `expected_error_contains: "duplicate column selector"`, and live pandas 2.2.3 instead
+returns a frame with `column_order: ["a", "a"]` — it duplicates the column and does not
+raise. Unlike the 15 adapter refusals, this one **is** attestable: the oracle produced a
+value answer, so a differ running against live pandas would see value-vs-error and flag
+it. It is the one packet in the 67 that enabling the oracle would actually catch, and it
+lands on a known limitation — `ih4t0` records that FrankenPandas' column store cannot
+represent duplicate column labels, which is presumably why the strict expectation was
+written that way.
+
+So the split over 67 error-shaped packets is: 43 attestable and agreeing, 15 outside the
+oracle's reach entirely, 8 misnamed but sound, and **1 catchable contradiction**. That is a
+concrete, bounded answer to the bead's step 3 for this slice of the corpus — and it argues
+the live oracle's value here is not in what it will find (one packet) but in what it stops
+future fixtures from pinning.
