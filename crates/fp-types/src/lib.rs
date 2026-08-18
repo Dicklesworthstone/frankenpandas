@@ -2622,6 +2622,37 @@ pub struct Timestamp {
     pub tz: Option<String>,
 }
 
+/// How wide `astype(str)` renders a `datetime64[ns]` value.
+///
+/// ⚠️ THIS IS A PROPERTY OF THE COLUMN, NOT OF THE VALUE, which is the whole
+/// reason it is a separate type rather than a branch inside a per-scalar
+/// formatter. MEASURED, live pandas 2.2.3 — the SAME midnight timestamp renders
+/// three different ways depending only on what it shares a column with:
+///
+///     Series([midnight, midnight]).astype(str)   -> '2024-03-15'
+///     Series([midnight, one_nanosecond]).astype(str)
+///                                                -> '2024-03-15 00:00:00.000000000'
+///     str(Timestamp(midnight))                   -> '2024-03-15 00:00:00'
+///
+/// pandas picks the coarsest rung that is lossless for EVERY element and
+/// imposes it on all of them. The `Ord` derive is the fold: scan the column
+/// with `max` over [`Timestamp::string_resolution`], then format every value at
+/// the winner. Variants are declared coarsest-first so that `max` means
+/// "finest needed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DatetimeStringResolution {
+    /// `2024-03-15` — every value in the column is midnight.
+    Date,
+    /// `2024-03-15 10:30:45` — every value is a whole second.
+    Second,
+    /// `2024-03-15 10:30:45.123`
+    Milli,
+    /// `2024-03-15 10:30:45.123456`
+    Micro,
+    /// `2024-03-15 10:30:45.123456789`
+    Nano,
+}
+
 impl Timestamp {
     /// NaT sentinel, parallel to `Timedelta::NAT`.
     pub const NAT: i64 = i64::MIN;
@@ -3624,6 +3655,93 @@ impl Timestamp {
     #[must_use]
     pub fn to_iso8601(&self) -> String {
         self.isoformat()
+    }
+
+    /// The coarsest [`DatetimeStringResolution`] that renders `nanos` losslessly.
+    ///
+    /// Fold this over a column with `max` to get the column's width — see
+    /// [`DatetimeStringResolution`] for why the width is a property of the
+    /// COLUMN and not of the value. `NaT` reports [`DatetimeStringResolution`]
+    /// `::Date`, the identity for that fold, because pandas excludes it from the
+    /// scan entirely: a column of one midnight plus one NaT still renders
+    /// `['2024-03-15', 'NaT']`.
+    #[must_use]
+    pub const fn string_resolution(nanos: i64) -> DatetimeStringResolution {
+        if nanos == Self::NAT {
+            return DatetimeStringResolution::Date;
+        }
+        if nanos.rem_euclid(Timedelta::NANOS_PER_DAY) == 0 {
+            DatetimeStringResolution::Date
+        } else if nanos.rem_euclid(Timedelta::NANOS_PER_SEC) == 0 {
+            DatetimeStringResolution::Second
+        } else if nanos.rem_euclid(Timedelta::NANOS_PER_MILLI) == 0 {
+            DatetimeStringResolution::Milli
+        } else if nanos.rem_euclid(Timedelta::NANOS_PER_MICRO) == 0 {
+            DatetimeStringResolution::Micro
+        } else {
+            DatetimeStringResolution::Nano
+        }
+    }
+
+    /// Render `nanos` the way `astype(str)` does, at a resolution chosen for the
+    /// whole column by [`Self::string_resolution`].
+    ///
+    /// ⚠️ NOT [`Self::isoformat`]. That one is `pd.Timestamp.isoformat()` — a `T`
+    /// separator, and a width chosen per VALUE. This is the array formatter:
+    /// a SPACE separator, and a width imposed on every element alike. MEASURED,
+    /// live pandas 2.2.3, one column per rung:
+    ///
+    ///     all midnight       -> '2024-03-15'
+    ///     all whole seconds  -> '2024-03-15 10:30:45'
+    ///     all whole millis   -> '2024-03-15 10:30:45.123'
+    ///     all whole micros   -> '2024-03-15 10:30:45.123456'
+    ///     anything finer     -> '2024-03-15 10:30:45.123456789'
+    ///     NaT                -> 'NaT'          (a STRING, not a missing value)
+    ///
+    /// There is NO minute rung: a column of whole minutes still renders its
+    /// seconds (`'2024-01-01 00:05:00'`).
+    #[must_use]
+    pub fn format_at_resolution(nanos: i64, resolution: DatetimeStringResolution) -> String {
+        use std::fmt::Write as _;
+
+        if nanos == Self::NAT {
+            return "NaT".to_string();
+        }
+        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos,
+        // the same correction isoformat makes (br-frankenpandas-wkjtw): a
+        // pre-epoch value must render 1969-12-31 23:59:59.999999999, not a
+        // negative fraction.
+        let days_since_epoch = nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let nanos_of_day = nanos.rem_euclid(Timedelta::NANOS_PER_DAY);
+        let secs_of_day = nanos_of_day / Timedelta::NANOS_PER_SEC;
+        let sub_nanos = nanos_of_day.rem_euclid(Timedelta::NANOS_PER_SEC);
+        // The crate's existing Hinnant civil-from-days, NOT a second copy: two
+        // implementations of a calendar algorithm are two chances to drift.
+        let (year, month, day) = civil_from_days(days_since_epoch);
+
+        // pandas' datetime64[ns] range is 1677..=2262, so the year is always
+        // four digits and `{:04}` never truncates.
+        let mut result = String::with_capacity(30);
+        // `fmt::Write for String` is infallible.
+        let _ = write!(result, "{year:04}-{month:02}-{day:02}");
+        if matches!(resolution, DatetimeStringResolution::Date) {
+            return result;
+        }
+        let _ = write!(
+            result,
+            " {:02}:{:02}:{:02}",
+            secs_of_day / 3600,
+            (secs_of_day % 3600) / 60,
+            secs_of_day % 60
+        );
+        let (fraction, width) = match resolution {
+            DatetimeStringResolution::Date | DatetimeStringResolution::Second => return result,
+            DatetimeStringResolution::Milli => (sub_nanos / Timedelta::NANOS_PER_MILLI, 3_usize),
+            DatetimeStringResolution::Micro => (sub_nanos / Timedelta::NANOS_PER_MICRO, 6_usize),
+            DatetimeStringResolution::Nano => (sub_nanos, 9_usize),
+        };
+        let _ = write!(result, ".{fraction:0width$}", width = width);
+        result
     }
 
     /// Parse a datetime string into a Timestamp.
@@ -7044,6 +7162,110 @@ mod tests {
                 Scalar::Timedelta64(want)
             );
         }
+    }
+
+    /// The two halves of the column-width datetime formatter, checked apart:
+    /// which rung a value NEEDS, and how a value RENDERS at a given rung.
+    /// Transcribed from live pandas 2.2.3 `.astype(str)`, one column per rung.
+    #[test]
+    fn timestamp_string_resolution_and_formatting_match_pandas() {
+        use super::{DatetimeStringResolution as Res, Timestamp};
+
+        const MIDNIGHT: i64 = 1_710_460_800_000_000_000; // 2024-03-15 00:00:00
+
+        // Which rung each value needs, on its own.
+        assert_eq!(Timestamp::string_resolution(MIDNIGHT), Res::Date);
+        assert_eq!(
+            Timestamp::string_resolution(MIDNIGHT + 37_845_000_000_000),
+            Res::Second
+        );
+        assert_eq!(
+            Timestamp::string_resolution(MIDNIGHT + 37_845_123_000_000),
+            Res::Milli
+        );
+        assert_eq!(
+            Timestamp::string_resolution(MIDNIGHT + 37_845_123_456_000),
+            Res::Micro
+        );
+        assert_eq!(
+            Timestamp::string_resolution(MIDNIGHT + 37_845_123_456_789),
+            Res::Nano
+        );
+        // A whole MINUTE is not its own rung — it still needs Second.
+        assert_eq!(
+            Timestamp::string_resolution(MIDNIGHT + 300_000_000_000),
+            Res::Second
+        );
+        // NaT reports the coarsest rung, the identity of the `max` fold, which
+        // is what keeps it from dragging a column to nanoseconds.
+        assert_eq!(Timestamp::string_resolution(Timestamp::NAT), Res::Date);
+
+        // Coarsest-first ordering is what makes `max` mean "finest needed".
+        assert!(Res::Date < Res::Second);
+        assert!(Res::Second < Res::Milli);
+        assert!(Res::Milli < Res::Micro);
+        assert!(Res::Micro < Res::Nano);
+
+        // ...and how ONE value renders at each rung it might be forced into.
+        let value = MIDNIGHT + 37_845_123_456_789;
+        assert_eq!(
+            Timestamp::format_at_resolution(value, Res::Date),
+            "2024-03-15"
+        );
+        assert_eq!(
+            Timestamp::format_at_resolution(value, Res::Second),
+            "2024-03-15 10:30:45"
+        );
+        assert_eq!(
+            Timestamp::format_at_resolution(value, Res::Milli),
+            "2024-03-15 10:30:45.123"
+        );
+        assert_eq!(
+            Timestamp::format_at_resolution(value, Res::Micro),
+            "2024-03-15 10:30:45.123456"
+        );
+        assert_eq!(
+            Timestamp::format_at_resolution(value, Res::Nano),
+            "2024-03-15 10:30:45.123456789"
+        );
+
+        // A midnight forced to the nanosecond rung keeps its zero fraction --
+        // pandas pads, it does not trim.
+        assert_eq!(
+            Timestamp::format_at_resolution(MIDNIGHT, Res::Nano),
+            "2024-03-15 00:00:00.000000000"
+        );
+
+        // ⚠️ NOT isoformat: a SPACE separator, not a `T`.
+        assert_eq!(
+            Timestamp::format_at_resolution(MIDNIGHT, Res::Second),
+            "2024-03-15 00:00:00"
+        );
+
+        // NaT is the STRING "NaT" at every rung.
+        for resolution in [Res::Date, Res::Second, Res::Milli, Res::Micro, Res::Nano] {
+            assert_eq!(
+                Timestamp::format_at_resolution(Timestamp::NAT, resolution),
+                "NaT"
+            );
+        }
+
+        // Pre-epoch: rem_euclid must keep the fraction on the right side of
+        // midnight, or -1ns renders as 1970-01-01 with a negative fraction.
+        assert_eq!(
+            Timestamp::format_at_resolution(-1, Res::Nano),
+            "1969-12-31 23:59:59.999999999"
+        );
+
+        // Both ends of pandas' datetime64[ns] range.
+        assert_eq!(
+            Timestamp::format_at_resolution(-9_223_372_036_854_775_806, Res::Nano),
+            "1677-09-21 00:12:43.145224194"
+        );
+        assert_eq!(
+            Timestamp::format_at_resolution(9_223_372_036_854_775_807, Res::Nano),
+            "2262-04-11 23:47:16.854775807"
+        );
     }
 
     /// Temporal -> numpy `bool` is nonzero-truthy on the RAW NANOSECONDS, which

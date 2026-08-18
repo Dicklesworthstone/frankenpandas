@@ -57,8 +57,9 @@
 use std::sync::{Arc, OnceLock};
 
 use fp_types::{
-    DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType, Timedelta,
-    Timestamp, TypeError, cast_scalar, cast_scalar_owned, common_dtype, infer_dtype, nanall,
+    DType, DatetimeStringResolution, Interval, IntervalClosed, NullKind, Period, PeriodFreq,
+    Scalar, SparseDType, Timedelta, Timestamp, TypeError, cast_scalar, cast_scalar_owned,
+    common_dtype, infer_dtype, nanall,
     nanany, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nankurt, nanmax,
     nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd,
     nansum, nanvar,
@@ -24216,6 +24217,55 @@ impl Column {
             offsets.push(0);
             for &v in data {
                 bytes.extend_from_slice(fp_types::float_to_string_for_astype(v).as_bytes());
+                offsets.push(bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(bytes, offsets));
+        }
+        // Datetime64 -> Utf8: THE WIDTH IS A PROPERTY OF THE COLUMN, so this
+        // cannot go through the per-scalar `cast_scalar` tail below — that arm
+        // has no column to look at and rendered the placeholder
+        // "Timestamp[1710498645123456789]" for every cell.
+        //
+        // pandas picks the COARSEST rung that is lossless for EVERY element and
+        // imposes it on all of them. MEASURED, live pandas 2.2.3, one column per
+        // rung, and note that the same midnight value renders three different
+        // ways depending only on its neighbours:
+        //
+        //   [midnight, midnight]        -> '2024-03-15'
+        //   [10:30:45, 00:00:00]        -> '2024-03-15 10:30:45'
+        //   [.123, .456]                -> '2024-03-15 10:30:45.123'
+        //   [.123456]                   -> '2024-03-15 10:30:45.123456'
+        //   [midnight, +1ns]            -> '2024-03-15 00:00:00.000000000'
+        //   [midnight, NaT]             -> ['2024-03-15', 'NaT']
+        //
+        // NaT is EXCLUDED from the scan (it does not force a finer rung) and
+        // renders as the STRING "NaT", not as a missing value — casting to
+        // string never keeps missingness, which is the same rule the Utf8 arm of
+        // `cast_scalar` already follows.
+        if target == DType::Utf8 && self.dtype == DType::Datetime64 {
+            // Bound once so the resolution scan and the format pass read the
+            // same slice.
+            let values = self.values();
+            let resolution = values.iter().fold(DatetimeStringResolution::Date, |acc, v| {
+                match v {
+                    // `string_resolution` reports Date for NaT, the identity of
+                    // this fold, so the exclusion needs no arm of its own.
+                    Scalar::Datetime64(nanos) => acc.max(Timestamp::string_resolution(*nanos)),
+                    _ => acc,
+                }
+            });
+            let mut bytes: Vec<u8> = Vec::with_capacity(values.len() * 20);
+            let mut offsets: Vec<usize> = Vec::with_capacity(values.len() + 1);
+            offsets.push(0);
+            for value in values {
+                match value {
+                    Scalar::Datetime64(nanos) => bytes.extend_from_slice(
+                        Timestamp::format_at_resolution(*nanos, resolution).as_bytes(),
+                    ),
+                    // A validity-mask missing in a datetime column is the same
+                    // NaT the sentinel spells.
+                    _ => bytes.extend_from_slice(b"NaT"),
+                }
                 offsets.push(bytes.len());
             }
             return Ok(Self::from_utf8_contiguous(bytes, offsets));
@@ -51122,6 +51172,121 @@ mod tests {
                     Scalar::Utf8("nan".to_owned()),
                 ]
             );
+        }
+
+        /// ⚠️ THE WIDTH OF A DATETIME astype(str) IS A PROPERTY OF THE COLUMN.
+        ///
+        /// This is the assertion the per-scalar cast could not make: THE SAME
+        /// VALUE renders three different ways depending only on what it shares a
+        /// column with. Every string below is transcribed from live pandas
+        /// 2.2.3 `pd.Series([...], dtype='datetime64[ns]').astype(str)`.
+        #[test]
+        fn astype_datetime64_to_utf8_picks_one_width_for_the_whole_column() {
+            // 2024-03-15 00:00:00 and 2024-01-01 00:00:00.
+            const MIDNIGHT: i64 = 1_710_460_800_000_000_000;
+            const NEW_YEAR: i64 = 1_704_067_200_000_000_000;
+            let strings = |col: &Column| -> Vec<String> {
+                col.values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Utf8(text) => text.clone(),
+                        other => panic!("expected Utf8, got {other:?}"),
+                    })
+                    .collect()
+            };
+            let column = |nanos: Vec<i64>| {
+                Column::new(
+                    DType::Datetime64,
+                    nanos.into_iter().map(Scalar::Datetime64).collect(),
+                )
+                .expect("datetime col")
+                .astype(DType::Utf8)
+                .expect("astype utf8")
+            };
+
+            // Rung 1: every value is midnight -> the DATE alone, no time at all.
+            assert_eq!(
+                strings(&column(vec![MIDNIGHT, NEW_YEAR])),
+                vec!["2024-03-15".to_owned(), "2024-01-01".to_owned()]
+            );
+
+            // ...and the SAME midnight value, one nanosecond of company later,
+            // renders in full. This pair is the whole point of the feature.
+            assert_eq!(
+                strings(&column(vec![MIDNIGHT, NEW_YEAR + 1])),
+                vec![
+                    "2024-03-15 00:00:00.000000000".to_owned(),
+                    "2024-01-01 00:00:00.000000001".to_owned(),
+                ]
+            );
+
+            // Rung 2: whole seconds. NOTE there is NO minute rung — a column of
+            // whole minutes still prints its seconds.
+            assert_eq!(
+                strings(&column(vec![MIDNIGHT + 37_845_000_000_000, NEW_YEAR])),
+                vec![
+                    "2024-03-15 10:30:45".to_owned(),
+                    "2024-01-01 00:00:00".to_owned(),
+                ]
+            );
+            assert_eq!(
+                strings(&column(vec![NEW_YEAR + 300_000_000_000])),
+                vec!["2024-01-01 00:05:00".to_owned()]
+            );
+
+            // Rungs 3, 4 and 5: milli, micro, nano — each padded to its own
+            // full width, never trimmed.
+            assert_eq!(
+                strings(&column(vec![MIDNIGHT + 37_845_123_000_000])),
+                vec!["2024-03-15 10:30:45.123".to_owned()]
+            );
+            assert_eq!(
+                strings(&column(vec![MIDNIGHT + 37_845_123_456_000])),
+                vec!["2024-03-15 10:30:45.123456".to_owned()]
+            );
+            assert_eq!(
+                strings(&column(vec![MIDNIGHT + 37_845_123_456_789])),
+                vec!["2024-03-15 10:30:45.123456789".to_owned()]
+            );
+
+            // NaT is EXCLUDED from the scan — it does not drag the column to the
+            // nanosecond rung — and renders as the STRING "NaT", not as a
+            // missing value. Casting to string never keeps missingness.
+            let with_nat = Column::new(
+                DType::Datetime64,
+                vec![Scalar::Datetime64(MIDNIGHT), Scalar::Null(NullKind::NaT)],
+            )
+            .expect("datetime col")
+            .astype(DType::Utf8)
+            .expect("astype utf8");
+            assert_eq!(
+                strings(&with_nat),
+                vec!["2024-03-15".to_owned(), "NaT".to_owned()]
+            );
+            assert_eq!(
+                strings(&column(vec![Timestamp::NAT, MIDNIGHT])),
+                vec!["NaT".to_owned(), "2024-03-15".to_owned()]
+            );
+
+            // Pre-epoch, where a truncating division would put the fraction on
+            // the wrong side of midnight.
+            assert_eq!(
+                strings(&column(vec![-1])),
+                vec!["1969-12-31 23:59:59.999999999".to_owned()]
+            );
+
+            // Both ends of pandas' datetime64[ns] range.
+            assert_eq!(
+                strings(&column(vec![-9_223_372_036_854_775_806])),
+                vec!["1677-09-21 00:12:43.145224194".to_owned()]
+            );
+            assert_eq!(
+                strings(&column(vec![9_223_372_036_854_775_807])),
+                vec!["2262-04-11 23:47:16.854775807".to_owned()]
+            );
+
+            // An empty column has no rung to pick and must not panic.
+            assert!(strings(&column(vec![])).is_empty());
         }
 
         /// The Float64 -> Utf8 astype above the `PAR_MIN_ROWS` gate builds its
