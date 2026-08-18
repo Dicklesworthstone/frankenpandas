@@ -196042,3 +196042,82 @@ mod blocked_moments_8s4mb {
         );
     }
 }
+
+/// GUARD for the tz-aware datetime divergence (br-frankenpandas-00ze3).
+///
+/// `DType::Datetime64` is a BARE variant — there is nowhere to put a zone, and the
+/// value reaching a column is `Scalar::Datetime64(nanos)`, a bare i64. So a
+/// tz-aware input cannot round-trip its zone through a column at all. Today
+/// `to_datetime` without `utc` keeps such input as **Utf8**, which diverges from
+/// pandas (`datetime64[ns, tz]`) LOUDLY: every `.dt` accessor visibly breaks.
+///
+/// `00ze3` warns that the tempting fix is to parse the zone away into a naive
+/// Datetime64 — which makes the dtype look right, passes any test that checks the
+/// dtype alone, and silently renders wall-clock in the wrong zone. **A loud
+/// divergence traded for a quiet one is a regression, not a fix**, and nothing in
+/// the tree stopped it.
+///
+/// These tests do NOT claim Utf8 is correct. They claim it is the CURRENT,
+/// deliberately-visible answer, so that changing it requires taking `00ze3`'s
+/// decision rather than arriving as a side effect.
+#[cfg(test)]
+mod tz_aware_datetime_guard_00ze3 {
+    use fp_types::{DType, Scalar};
+
+    use super::{Series, ToDatetimeOptions, to_datetime_with_options};
+
+    fn tz_aware_strings() -> Series {
+        Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00+05:30".to_owned()),
+                Scalar::Utf8("2024-01-16 11:45:00+05:30".to_owned()),
+            ],
+        )
+        .expect("tz-aware series")
+    }
+
+    /// THE GUARD. If this starts failing with `Datetime64`, the zone was discarded
+    /// somewhere — check that the wall-clock is still right before believing it is
+    /// an improvement.
+    #[test]
+    fn tz_aware_without_utc_must_stay_loudly_divergent_not_silently_naive_00ze3() {
+        let out = to_datetime_with_options(&tz_aware_strings(), ToDatetimeOptions::default())
+            .expect("to_datetime");
+        assert_eq!(
+            out.dtype(),
+            DType::Utf8,
+            "tz-aware input without utc must remain Utf8. pandas returns \
+             datetime64[ns, tz] and we cannot represent that (br-frankenpandas-00ze3: \
+             DType::Datetime64 carries no zone). If this now reports Datetime64, the \
+             ZONE WAS DISCARDED — a silent wrong-wall-clock divergence replacing a \
+             visible one. That is 00ze3's explicitly forbidden fix; take the decision \
+             rather than deleting this assertion."
+        );
+    }
+
+    /// The other half, and what keeps the guard from being read as "we cannot parse
+    /// zones at all": with `utc: true` the zone is APPLIED and then legitimately
+    /// gone, because the result is genuinely in UTC. That path is allowed to be
+    /// Datetime64 and must stay so — otherwise a future change could satisfy the
+    /// guard above by refusing tz-aware input everywhere.
+    #[test]
+    fn tz_aware_with_utc_must_still_convert_to_datetime64_00ze3() {
+        let out = to_datetime_with_options(
+            &tz_aware_strings(),
+            ToDatetimeOptions {
+                utc: true,
+                ..ToDatetimeOptions::default()
+            },
+        )
+        .expect("to_datetime utc");
+        assert_eq!(
+            out.dtype(),
+            DType::Datetime64,
+            "with utc=true the zone is applied and the result is genuinely UTC, so \
+             Datetime64 is correct here. If this regresses to Utf8, the guard above \
+             would still pass while tz support got strictly worse."
+        );
+    }
+}
