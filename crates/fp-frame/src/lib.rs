@@ -88367,35 +88367,75 @@ impl DataFrameGroupBy<'_> {
             // instead of bailing to the per-func loop that re-groups (re-factorizes
             // the Utf8 key) once per func. f64::min/max match gb.min()/gb.max()
             // (order-independent exact) over an all-valid f64 column.
-            let mut mn = vec![f64::INFINITY; ngroups];
-            let mut mx = vec![f64::NEG_INFINITY; ngroups];
-            // first/last fused into the same pass (positional, not a fold): first
-            // value set on a group's FIRST row (cnt still 0), last value overwritten
-            // every row. For an all-valid f64 column (the gate) there are no nulls to
-            // skip, so this == gb.first()/gb.last() (first/last non-null per group).
-            let mut first_val = vec![0.0_f64; ngroups];
-            let mut last_val = vec![0.0_f64; ngroups];
-            // prod folded in the SAME row order as a bucket `b.iter().product()`
-            // (init 1.0, *= v per row) → bit-identical.
-            let mut prod = vec![1.0_f64; ngroups];
-            for (row, &v) in vals.iter().enumerate() {
-                let g = gid_per_row[row];
-                if cnt[g] == 0 {
-                    first_val[g] = v;
-                }
-                last_val[g] = v;
-                sum[g] += v;
-                cnt[g] += 1;
-                mn[g] = mn[g].min(v);
-                mx[g] = mx[g].max(v);
-                prod[g] *= v;
-            }
-
+            // WHICH ACCUMULATORS DOES THIS CALL ACTUALLY NEED? The `needs` closure
+            // used to be defined below the loop, so the loop maintained all seven
+            // unconditionally and the answer arrived too late to matter. On a
+            // sum-only aggregation (df_groupby_2strkey_sum, the profiled workload)
+            // five of them are dead: five scattered read-modify-writes per row into
+            // five ngroups-sized arrays, plus the allocations.
+            //
+            // These flags are loop-INVARIANT, so the guards below are branch-predictable
+            // and are exactly the shape LLVM can unswitch. Nothing about any
+            // accumulator's arithmetic changes, so every emitted value is bit-identical.
             let needs = |name: &str| {
                 specs
                     .iter()
                     .any(|(col, func)| col == col_name && func == name)
             };
+            let want_first = needs("first");
+            let want_last = needs("last");
+            let want_minmax = needs("min") || needs("max");
+            let want_prod = needs("prod");
+            let mut mn = if want_minmax {
+                vec![f64::INFINITY; ngroups]
+            } else {
+                Vec::new()
+            };
+            let mut mx = if want_minmax {
+                vec![f64::NEG_INFINITY; ngroups]
+            } else {
+                Vec::new()
+            };
+            // first/last fused into the same pass (positional, not a fold): first
+            // value set on a group's FIRST row (cnt still 0), last value overwritten
+            // every row. For an all-valid f64 column (the gate) there are no nulls to
+            // skip, so this == gb.first()/gb.last() (first/last non-null per group).
+            let mut first_val = if want_first {
+                vec![0.0_f64; ngroups]
+            } else {
+                Vec::new()
+            };
+            let mut last_val = if want_last {
+                vec![0.0_f64; ngroups]
+            } else {
+                Vec::new()
+            };
+            // prod folded in the SAME row order as a bucket `b.iter().product()`
+            // (init 1.0, *= v per row) → bit-identical.
+            let mut prod = if want_prod {
+                vec![1.0_f64; ngroups]
+            } else {
+                Vec::new()
+            };
+            for (row, &v) in vals.iter().enumerate() {
+                let g = gid_per_row[row];
+                if want_first && cnt[g] == 0 {
+                    first_val[g] = v;
+                }
+                if want_last {
+                    last_val[g] = v;
+                }
+                sum[g] += v;
+                cnt[g] += 1;
+                if want_minmax {
+                    mn[g] = mn[g].min(v);
+                    mx[g] = mx[g].max(v);
+                }
+                if want_prod {
+                    prod[g] *= v;
+                }
+            }
+
             if needs("sum") {
                 let out: Vec<Scalar> = emit.iter().map(|&g| Scalar::Float64(sum[g])).collect();
                 by_pair.insert(
