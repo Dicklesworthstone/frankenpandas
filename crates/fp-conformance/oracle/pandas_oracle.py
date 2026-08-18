@@ -3840,16 +3840,42 @@ def pandas_dtype_from_constructor_spec(dtype_spec: str) -> str:
     fp_p2d_023_..._dtype_bool_invalid_int_error_strict look like FrankenPandas
     being over-strict when FP and pandas actually agree.
 
-    ⚠️ KNOWN REMAINING CONFLATION, deliberately not changed here: the leading
-    `.lower()` also merges `Int64` (nullable) with `int64` (numpy), which pandas
-    distinguishes BY CASE. It cannot simply be made case-sensitive, because the
-    corpus contains `"  INT64  "` specifically to pin trimming + case-insensitive
-    normalization, and `INT64` is not a pandas dtype at all. The two intents are
-    in genuine conflict; recorded on br-frankenpandas-9ooer rather than resolved
-    by guess. No current fixture observes the difference (both spell their
-    expected values as `kind: int64`).
+    ⚠️ THE `Int64`/`int64` CONFLATION IS NOW RESOLVED, BY ORDERING
+    (br-frankenpandas-jozfk). This docstring previously recorded it as a
+    "genuine conflict" — case-sensitivity could not simply be switched on,
+    because the corpus contains `"  INT64  "` to pin trimming plus
+    case-insensitive normalization. Both intents hold at once if the match is
+    TIERED rather than flat: exact case-sensitive pandas spellings first, the
+    case-insensitive alias table second. `INT64` is not a pandas dtype — as the
+    old note itself observed — so it cannot collide with the exact tier, and
+    nothing that passed before stops passing.
+
+    The distinction is observable rather than cosmetic. Live pandas 2.2.3:
+
+        pd.DataFrame([[True,None],[False,True]], dtype='Int64') -> Int64Dtype
+        pd.DataFrame([[True,None],[False,True]], dtype='int64') -> TypeError
+
+    A MISSING ENTRY is what separates them, which is why the old note was right
+    that "no current fixture observes the difference": every constructor fixture
+    in the corpus is all-valid. The nullable constructor path has therefore never
+    been exercised, and no fixture could detect it being wrong.
+
+    ⚠️ The Rust side (`parse_constructor_dtype_spec`, fp-conformance lib.rs) had
+    the identical lowercasing with NO note, so a reader fixing one side would have
+    missed the other. Both are changed together for that reason.
+
+    The old note pointed at br-frankenpandas-9ooer, which was CLOSED as REFUTED on
+    2026-08-08 for an unrelated reason, so the item had no open owner for ten days
+    while looking filed.
     """
-    normalized = dtype_spec.strip().lower()
+    stripped = dtype_spec.strip()
+    # TIER 1 — exact, case-sensitive: pandas' nullable extension spellings.
+    if stripped == "Int64":
+        return "Int64"
+    if stripped == "Float64":
+        return "Float64"
+    # TIER 2 — case-insensitive aliases, unchanged.
+    normalized = stripped.lower()
     if normalized == "bool":
         return "bool"
     if normalized == "boolean":

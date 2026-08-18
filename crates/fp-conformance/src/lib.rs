@@ -14956,7 +14956,35 @@ fn collect_constructor_series_payloads(
 }
 
 fn parse_constructor_dtype_spec(dtype_spec: &str) -> Result<DType, String> {
-    let normalized = dtype_spec.trim().to_ascii_lowercase();
+    let trimmed = dtype_spec.trim();
+
+    // TIER 1 — EXACT, CASE-SENSITIVE. pandas' nullable extension dtypes differ
+    // from the numpy ones BY CASE ALONE, and the difference is observable rather
+    // than cosmetic (br-frankenpandas-jozfk). Live pandas 2.2.3:
+    //
+    //   pd.DataFrame([[True, None], [False, True]], dtype="Int64") -> Int64Dtype
+    //   pd.DataFrame([[True, None], [False, True]], dtype="int64") -> TypeError
+    //
+    // `fp-types` encodes the same split on purpose — `Int64` vs `Int64Nullable`,
+    // `Float64` vs `Float64Nullable`, with `#[serde(rename = "Int64")]` chosen so
+    // the wire spelling IS pandas' spelling (br-frankenpandas-qkqfb). Lowercasing
+    // first destroyed exactly that bit.
+    //
+    // WHY A TIER RATHER THAN JUST MAKING THE WHOLE MATCH CASE-SENSITIVE: the
+    // corpus deliberately pins case-insensitive alias handling — `BOOLEAN`,
+    // `STRING`, `Float`, and `"  INT64  "` with surrounding whitespace. Those are
+    // ALIASES, not pandas dtypes (`INT64` is not a pandas dtype at all), so they
+    // cannot collide with this tier, and ordering satisfies both intents at once.
+    // The oracle's own docstring called the two intents "in genuine conflict";
+    // they are only in conflict if the match is flat.
+    match trimmed {
+        "Int64" => return Ok(DType::Int64Nullable),
+        "Float64" => return Ok(DType::Float64Nullable),
+        _ => {}
+    }
+
+    // TIER 2 — case-insensitive aliases, unchanged.
+    let normalized = trimmed.to_ascii_lowercase();
     match normalized.as_str() {
         // numpy bool (nonzero-truthy) vs pandas nullable Boolean (strict 0/1).
         // (br-frankenpandas-tjomg)
