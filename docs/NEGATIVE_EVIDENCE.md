@@ -37066,3 +37066,51 @@ ever been parsed at all. **A gate reporting success on rows it never read is wor
 gate that fails.** I audited my own five `SlateHeron` entries: zero nested headings, but
 only because I happen to use bold lead-ins for subsections rather than headings. I did
 not know it mattered.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-relock-orphaned-standing-rows-85clb) — SOME ORPHANS MAY BE UNRECOVERABLE BY CONSTRUCTION: a 504x ratio with a CI of [492, 521] is REFUSED because a 2-MICROSECOND arm's self-comparison wobbled by ~50 nanoseconds
+
+**NOTHING BANKED THIS TURN.** The orchestrator barred certification (CPU idle 2% with pandas and
+redis both building) partway through this batch. The row below was measured BEFORE that collapse —
+its own recorded window is loadavg 6.67-7.38 with arms clock-matched at 4292.2/4292.3 MHz — but I am
+not banking anything while a no-certify instruction stands, and the remaining three rows of the
+batch are still in flight and will be judged on their OWN recorded windows, not on this one's.
+
+**Counted mechanism:** `df_transpose_materialize @100k`, preserved ELF `a802073cf042`, harness
+`60ed3c58fdd5`, pandas incumbent same invocation:
+
+    ratio 504.572x   CI [492.05536934, 521.33795272]   best-vs-best 537.63x (AGREES)
+    claim_log_effect 6.22370991  against  required_log_effect 0.30358643   -> clears by 20x
+    FP     p50 2.00us   min 1.83us   cv 19.94%
+    pandas p50 999.01us min 983.06us cv 10.07%
+
+    effect_ci_excludes_unity          True
+    effect_exceeds_two_x_null_margin  True
+    null_medians_within_2pct_unity    FALSE   <- FP null 1.02489; pandas null 0.98569 passes
+
+**THE FAILING CLAUSE IS MEASURING THE CLOCK, NOT THE ENGINE.** FrankenPandas' arm is **two
+microseconds**. A 2.49% deviation on a 2us arm is about **50 nanoseconds** — below the granularity
+at which a scheduling hiccup, a cache miss on the timer read, or a frequency transition is
+distinguishable from engine behaviour. The A/A control is doing exactly what it was designed to do
+and the answer it returns is not about FrankenPandas.
+
+**THIS IS THE SAME CLASS AS THE `df_dot @1M` FALSE CERTIFICATION, AT THE OPPOSITE EXTREME.** There,
+a 2.55x-wide incumbent let a p50 comparison certify a row that best-vs-best refuted. Here, an arm too
+FAST for the null to stabilise blocks a row that every other signal — CI width, margin clearance by
+20x, best-vs-best agreeing at 537.63x — says is real. **The median-CI gate has a working range, and
+both of its edges have now been found by measurement rather than argument.**
+
+**CONSEQUENCE FOR THE RE-LOCK BEAD, AND IT LOWERS THE EXPECTED RETURN.** That bead assumes 42
+orphaned workloads can be recovered by re-measuring them in clean windows. **Some fraction cannot
+be, for this reason**: the four highest-value orphans by ratio are `df_transpose_materialize @100k`
+(389x banked), `df_transpose @10k` (243x), `floor @100` (151x) and
+`df_transpose_materialize @10k` (82x) — all of them enormous ratios, which is precisely the shape
+that arises when FP's arm collapses to single-digit microseconds. **A large banked ratio is a
+PREDICTOR of an unrecoverable orphan, not of an easy one.** Whoever works that bead should expect
+the cheap wins to be in the MIDDLE of the ranked list, not the top.
+
+⚠️ **WHAT I AM NOT PROPOSING.** Not a wider null band, not an exemption for small arms, not a
+special case for large ratios. Every one of those is gate self-weakening, and the gate is not
+malfunctioning — it is correctly reporting that it cannot resolve a 2us arm. The honest options are
+to measure such workloads at a size where FP's arm is large enough to time (the corpus already
+carries `@1M` variants for some), or to accept that a handful of orphans stay orphaned and record
+WHY, so nobody re-runs them monthly expecting a different answer.
