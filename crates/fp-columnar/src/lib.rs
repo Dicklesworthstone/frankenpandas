@@ -6810,6 +6810,35 @@ fn blocked_min_max_f64(data: &[f64]) -> (f64, f64) {
     (min, max)
 }
 
+/// Blocked 8-lane `wrapping_mul` product over an i64 slice.
+///
+/// ⚠️ EXACT, not approximate. `wrapping_mul` is associative AND commutative mod
+/// 2^64, so regrouping the multiplications cannot change the result at any
+/// length — the same reasoning `all_valid_i64_chunk_product`'s own doc already
+/// gives for grouping by chunk. Overflow is not a caveat here, it is the defined
+/// arithmetic.
+fn blocked_product_i64(data: &[i64]) -> i64 {
+    let mut acc = [1_i64; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            acc[l] = acc[l].wrapping_mul(c[l]);
+        }
+    }
+    let mut p = acc[0]
+        .wrapping_mul(acc[1])
+        .wrapping_mul(acc[2].wrapping_mul(acc[3]))
+        .wrapping_mul(
+            acc[4]
+                .wrapping_mul(acc[5])
+                .wrapping_mul(acc[6].wrapping_mul(acc[7])),
+        );
+    for &v in chunks.remainder() {
+        p = p.wrapping_mul(v);
+    }
+    p
+}
+
 /// Blocked 8-lane min/max over an i64 slice, returning `None` for an empty slice.
 ///
 /// ⚠️ UNLIKE EVERY OTHER BLOCKED HELPER HERE, THIS ONE IS EXACTLY BIT-IDENTICAL AT
@@ -18881,11 +18910,11 @@ impl Column {
             return None;
         }
         let chunks = self.values.int64_chunks_ref()?;
+        // Blocked per chunk; exact for the same reason the doc above gives for
+        // chunk grouping — wrapping_mul is associative mod 2^64.
         let mut p = 1_i64;
         for chunk in chunks {
-            for &v in chunk.as_slice() {
-                p = p.wrapping_mul(v);
-            }
+            p = p.wrapping_mul(blocked_product_i64(chunk.as_slice()));
         }
         Some(p)
     }
