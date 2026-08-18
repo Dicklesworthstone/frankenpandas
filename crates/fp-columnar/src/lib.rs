@@ -6689,6 +6689,23 @@ fn present_central_moments_f64(
     data: &[f64],
     validity: Option<&ValidityMask>,
 ) -> (usize, f64, f64, f64) {
+    // FAST PATH (br-frankenpandas-8s4mb): with no validity mask every element is
+    // a candidate, so the present-filter collapses to the NaN test and both
+    // passes can run 8-lane blocked.
+    //
+    // A NaN anywhere PROPAGATES through the blocked sum, so a non-NaN total is
+    // proof that no element was NaN — no separate scan is needed. Mixing +inf
+    // and -inf also yields NaN, which costs only the fallback, never
+    // correctness: the fallback IS the scalar loop below.
+    if validity.is_none() && !data.is_empty() {
+        let sum = blocked_sum_f64(data);
+        if !sum.is_nan() {
+            let n = data.len();
+            let mean = sum / n as f64;
+            let (m2, m3, m4) = blocked_central_moments_f64(data, mean);
+            return (n, m2, m3, m4);
+        }
+    }
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &x) in data.iter().enumerate() {
@@ -6719,6 +6736,14 @@ fn present_central_moments_i64(
     data: &[i64],
     validity: Option<&ValidityMask>,
 ) -> (usize, f64, f64, f64) {
+    // FAST PATH (br-frankenpandas-8s4mb). Int64 has no NaN, so with no validity
+    // mask the present-filter is vacuous and both passes block unconditionally.
+    if validity.is_none() && !data.is_empty() {
+        let n = data.len();
+        let mean = blocked_sum_i64_as_f64(data) / n as f64;
+        let (m2, m3, m4) = blocked_central_moments_i64(data, mean);
+        return (n, m2, m3, m4);
+    }
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &v) in data.iter().enumerate() {
@@ -6741,6 +6766,118 @@ fn present_central_moments_i64(
         }
     }
     (n, m2, m3, m4)
+}
+
+/// Vectorizable f64 sum: 8 independent accumulator lanes broken out of the
+/// sequential-dependency chain a plain `iter().sum()` left-fold forms. LLVM
+/// cannot auto-vectorize that fold because f64 addition is non-associative, so
+/// the fold is what pins skew/kurtosis to scalar throughput
+/// (br-frankenpandas-8s4mb).
+///
+/// This is the same algorithm `fp-frame`'s `blocked_sum_f64` already ships for
+/// `Series.sum`/`mean` (9ab0f8cc1), and the same shape numpy uses for its own
+/// `sum` (pairwise), so it tracks the incumbent's VALUE more closely than the
+/// left-fold did as well as running faster.
+///
+/// NUMERICS, stated rather than assumed: for `data.len() < 8` the
+/// `chunks_exact(8)` iterator yields nothing and the whole slice flows through
+/// the remainder left-fold, so the result is BIT-IDENTICAL to `iter().sum()` on
+/// short inputs — which is every reduction conformance fixture. It diverges (by
+/// a last-ULP amount, in the more accurate direction) only on long arrays, where
+/// no exact value is pinned.
+fn blocked_sum_f64(data: &[f64]) -> f64 {
+    let mut acc = [0.0_f64; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            acc[l] += c[l];
+        }
+    }
+    let mut total =
+        ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+    for &x in chunks.remainder() {
+        total += x;
+    }
+    total
+}
+
+/// Int64 sibling of [`blocked_sum_f64`]: widens each lane with `as f64` exactly
+/// where the scalar fold does, so the per-element conversion is unchanged and
+/// only the accumulation is re-associated.
+fn blocked_sum_i64_as_f64(data: &[i64]) -> f64 {
+    let mut acc = [0.0_f64; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            acc[l] += c[l] as f64;
+        }
+    }
+    let mut total =
+        ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+    for &v in chunks.remainder() {
+        total += v as f64;
+    }
+    total
+}
+
+/// Second pass of the central-moment computation, 8-lane blocked: accumulates
+/// m2/m3/m4 about `mean` in 24 independent lanes so the three dependency chains
+/// break the same way [`blocked_sum_f64`] breaks the sum's.
+///
+/// The lane bodies use `d2 * d` and `d2 * d2` rather than `powi(3)`/`powi(4)`;
+/// both associate as `(d*d)*d` and `(d*d)*(d*d)`, which is what `powi` lowers
+/// to, so the per-element arithmetic is unchanged and only the ACCUMULATION is
+/// re-associated. The remainder loop keeps `powi` verbatim, so a slice shorter
+/// than 8 is bit-identical to the scalar version.
+fn blocked_central_moments_f64(data: &[f64], mean: f64) -> (f64, f64, f64) {
+    let mut a2 = [0.0_f64; 8];
+    let mut a3 = [0.0_f64; 8];
+    let mut a4 = [0.0_f64; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            let d = c[l] - mean;
+            let d2 = d * d;
+            a2[l] += d2;
+            a3[l] += d2 * d;
+            a4[l] += d2 * d2;
+        }
+    }
+    let combine = |a: [f64; 8]| ((a[0] + a[1]) + (a[2] + a[3])) + ((a[4] + a[5]) + (a[6] + a[7]));
+    let (mut m2, mut m3, mut m4) = (combine(a2), combine(a3), combine(a4));
+    for &x in chunks.remainder() {
+        let d = x - mean;
+        m2 += d.powi(2);
+        m3 += d.powi(3);
+        m4 += d.powi(4);
+    }
+    (m2, m3, m4)
+}
+
+/// Int64 sibling of [`blocked_central_moments_f64`].
+fn blocked_central_moments_i64(data: &[i64], mean: f64) -> (f64, f64, f64) {
+    let mut a2 = [0.0_f64; 8];
+    let mut a3 = [0.0_f64; 8];
+    let mut a4 = [0.0_f64; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            let d = c[l] as f64 - mean;
+            let d2 = d * d;
+            a2[l] += d2;
+            a3[l] += d2 * d;
+            a4[l] += d2 * d2;
+        }
+    }
+    let combine = |a: [f64; 8]| ((a[0] + a[1]) + (a[2] + a[3])) + ((a[4] + a[5]) + (a[6] + a[7]));
+    let (mut m2, mut m3, mut m4) = (combine(a2), combine(a3), combine(a4));
+    for &v in chunks.remainder() {
+        let d = v as f64 - mean;
+        m2 += d.powi(2);
+        m3 += d.powi(3);
+        m4 += d.powi(4);
+    }
+    (m2, m3, m4)
 }
 
 /// Int64 sibling of [`present_moments_f64`]: present iff validity-set; folds
