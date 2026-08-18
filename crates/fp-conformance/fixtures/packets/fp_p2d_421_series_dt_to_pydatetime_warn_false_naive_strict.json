@@ -5,37 +5,85 @@
   "operation": "series_dt_to_pydatetime",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "7981912ddd4ecdbf0407df1dbfec5283061d395687cd5f9ce66668c2e2d64cc1",
+    "generated_at": "2026-08-18T23:01:04Z"
   },
   "dt_warn": false,
   "left": {
     "name": "datetimes",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-01-15 10:30:00.123456789" },
-      { "kind": "utf8", "value": "2024-01-16" },
-      { "kind": "utf8", "value": "2024-01-15 10:30:00.500000000" },
-      { "kind": "utf8", "value": "not a date" }
+      {
+        "kind": "utf8",
+        "value": "2024-01-15 10:30:00.123456789"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-16"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-15 10:30:00.500000000"
+      },
+      {
+        "kind": "utf8",
+        "value": "not a date"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-01-15 10:30:00.123456" },
-      { "kind": "utf8", "value": "2024-01-16 00:00:00" },
-      { "kind": "utf8", "value": "2024-01-15 10:30:00.500000" },
-      { "kind": "null", "value": "na_n" }
+      {
+        "kind": "utf8",
+        "value": "2024-01-15 10:30:00.123456"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-15 10:30:00.500000"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      }
     ]
   }
 }

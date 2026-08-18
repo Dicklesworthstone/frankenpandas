@@ -5,33 +5,69 @@
   "operation": "series_dt_to_pydatetime",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "7981912ddd4ecdbf0407df1dbfec5283061d395687cd5f9ce66668c2e2d64cc1",
+    "generated_at": "2026-08-18T23:01:05Z"
   },
   "dt_warn": false,
   "left": {
     "name": "datetimes",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-01-15T10:30:00.987654321+05:30" },
-      { "kind": "utf8", "value": "2024-01-16 00:00:00.123000000+05:30" },
-      { "kind": "utf8", "value": "still not a date" }
+      {
+        "kind": "utf8",
+        "value": "2024-01-15T10:30:00.987654321+05:30"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-16 00:00:00.123000000+05:30"
+      },
+      {
+        "kind": "utf8",
+        "value": "still not a date"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-01-15 10:30:00.987654+05:30" },
-      { "kind": "utf8", "value": "2024-01-16 00:00:00.123000+05:30" },
-      { "kind": "null", "value": "na_n" }
+      {
+        "kind": "utf8",
+        "value": "2024-01-15 10:30:00.987654+05:30"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      }
     ]
   }
 }
