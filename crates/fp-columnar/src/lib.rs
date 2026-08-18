@@ -6615,7 +6615,91 @@ fn argextreme_nullable_i64(
 /// lo/hi via `<`/`>` and — like `nanptp`'s `is_missing` skip — must NOT mark `seen`,
 /// else an all-NaN column would return `Float64(NaN)` instead of `Null(NaN)`).
 /// All-missing ⇒ `Null(NaN)`; otherwise `Float64(hi − lo)`.
+/// Blocked 8-lane min/max over an f64 slice, for `ptp`. Same dependency-breaking
+/// idea as [`blocked_sum_f64`]: eight independent lo/hi lanes instead of one
+/// serial pair, so the compare-and-select auto-vectorizes.
+///
+/// ⚠️ THE NaN HANDLING IS THE `min`/`max` CHOICE, NOT AN EXTRA BRANCH. IEEE
+/// `minNum` returns the OTHER operand when one side is NaN, and the lanes start
+/// at ±infinity (never NaN), so a NaN input simply never displaces a lane. That
+/// reproduces the scalar loop exactly, whose `if x < lo` is likewise false for
+/// NaN — and it does so without a per-element branch, which is what lets it
+/// vectorize.
+///
+/// Returns the untouched sentinels `(+inf, -inf)` iff EVERY element was NaN,
+/// which is how the caller distinguishes "no present value" from a real answer.
+/// A genuine infinity in the data cannot fake that: `[inf]` leaves `hi = inf`,
+/// `[-inf]` leaves `lo = -inf`, and only the all-NaN case leaves BOTH sentinels.
+///
+/// The -0.0/+0.0 case differs from the scalar loop in WHICH zero is kept
+/// (`f64::min` follows minNum; `if x < lo` keeps the first), and that difference
+/// is not observable here: `ptp` returns `hi - lo`, and `h - (-0.0) == h - 0.0`
+/// for every `h`, including when both are zeros.
+fn blocked_min_max_f64(data: &[f64]) -> (f64, f64) {
+    let mut lo = [f64::INFINITY; 8];
+    let mut hi = [f64::NEG_INFINITY; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            lo[l] = c[l].min(lo[l]);
+            hi[l] = c[l].max(hi[l]);
+        }
+    }
+    let mut min = (lo[0].min(lo[1]).min(lo[2].min(lo[3])))
+        .min(lo[4].min(lo[5]).min(lo[6].min(lo[7])));
+    let mut max = (hi[0].max(hi[1]).max(hi[2].max(hi[3])))
+        .max(hi[4].max(hi[5]).max(hi[6].max(hi[7])));
+    for &x in chunks.remainder() {
+        min = x.min(min);
+        max = x.max(max);
+    }
+    (min, max)
+}
+
+/// Int64 sibling of [`blocked_min_max_f64`]. Folds `v as f64` exactly where the
+/// scalar loop does, so the per-element conversion is unchanged; Int64 has no NaN
+/// so the sentinel case cannot arise from the data.
+fn blocked_min_max_i64_as_f64(data: &[i64]) -> (f64, f64) {
+    let mut lo = [f64::INFINITY; 8];
+    let mut hi = [f64::NEG_INFINITY; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            let x = c[l] as f64;
+            lo[l] = x.min(lo[l]);
+            hi[l] = x.max(hi[l]);
+        }
+    }
+    let mut min = (lo[0].min(lo[1]).min(lo[2].min(lo[3])))
+        .min(lo[4].min(lo[5]).min(lo[6].min(lo[7])));
+    let mut max = (hi[0].max(hi[1]).max(hi[2].max(hi[3])))
+        .max(hi[4].max(hi[5]).max(hi[6].max(hi[7])));
+    for &v in chunks.remainder() {
+        let x = v as f64;
+        min = x.min(min);
+        max = x.max(max);
+    }
+    (min, max)
+}
+
 fn ptp_nullable_f64(data: &[f64], validity: Option<&ValidityMask>) -> Scalar {
+    // FAST PATH. When every element is present the per-element validity lookup is
+    // dead weight and the filter collapses to the NaN test, which
+    // `blocked_min_max_f64` folds into the min/max choice itself.
+    //
+    // ⚠️ GATE IS `is_none_or(all)`, NOT `is_none`. Two of this function's four call
+    // sites pass `Some(validity)` even for columns with nothing unset; gating on
+    // `is_none()` would silently exclude them — the inertness that made the 8s4mb
+    // lever unreachable until it was caught.
+    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
+        let (lo, hi) = blocked_min_max_f64(data);
+        return if lo == f64::INFINITY && hi == f64::NEG_INFINITY {
+            // Both sentinels untouched ⇒ every element was NaN.
+            Scalar::Null(NullKind::NaN)
+        } else {
+            Scalar::Float64(hi - lo)
+        };
+    }
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut seen = false;
     for (i, &x) in data.iter().enumerate() {
@@ -6639,6 +6723,13 @@ fn ptp_nullable_f64(data: &[f64], validity: Option<&ValidityMask>) -> Scalar {
 /// Int64 sibling of [`ptp_nullable_f64`]: present iff validity-set; lo/hi fold
 /// `v as f64` (matching nanptp's `to_f64`), output Float64.
 fn ptp_nullable_i64(data: &[i64], validity: Option<&ValidityMask>) -> Scalar {
+    // FAST PATH; see the f64 sibling for the gate rationale. Int64 has no NaN, so
+    // once every element is present the filter is vacuous and `seen` is simply
+    // `!data.is_empty()`.
+    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
+        let (lo, hi) = blocked_min_max_i64_as_f64(data);
+        return Scalar::Float64(hi - lo);
+    }
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut seen = false;
     for (i, &v) in data.iter().enumerate() {
@@ -42924,6 +43015,44 @@ mod tests {
         /// which is the regime every reduction conformance fixture lives in. The
         /// hand-computed values below are exact in f64 (all dyadic rationals), so
         /// `assert_eq!` on them is a real equality check rather than a tolerance.
+        /// The `ptp` blocked min/max must agree with the scalar fold it fronts,
+        /// including the all-NaN sentinel and the mask shapes the PRODUCT passes.
+        #[test]
+        fn blocked_ptp_matches_scalar_fold() {
+            let f = |d: &[f64], v: Option<&ValidityMask>| crate::ptp_nullable_f64(d, v);
+            assert_eq!(f(&[3.0, -1.0, 7.5], None), Scalar::Float64(8.5));
+            assert_eq!(f(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], None), Scalar::Float64(7.0));
+
+            // A NaN must be skipped, not propagated: min/max already ignore it.
+            assert_eq!(f(&[1.0, f64::NAN, -4.0], None), Scalar::Float64(5.0));
+            // EVERY element NaN leaves both sentinels untouched -> missing.
+            assert!(f(&[f64::NAN; 9], None).is_missing());
+            // A genuine infinity must NOT be mistaken for the sentinel.
+            assert_eq!(f(&[f64::INFINITY, 0.0], None), Scalar::Float64(f64::INFINITY));
+
+            // ⚠️ NON-VACUITY: two of the four call sites pass Some(validity). An
+            // all-set mask must reach the SAME blocked path, and a holed one must
+            // fall back and exclude the hole.
+            let full = ValidityMask::all_valid(8);
+            assert_eq!(
+                f(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], Some(&full)),
+                Scalar::Float64(7.0)
+            );
+            let mut holed = ValidityMask::all_valid(3);
+            holed.set(1, false);
+            assert_eq!(f(&[1.0, 999.0, 4.0], Some(&holed)), Scalar::Float64(3.0));
+
+            // Int64 sibling: same two regimes.
+            assert_eq!(
+                crate::ptp_nullable_i64(&[5, 1, 9, 2, 8, 3, 7, 4], None),
+                Scalar::Float64(8.0)
+            );
+            assert_eq!(
+                crate::ptp_nullable_i64(&[5, 1, 9, 2, 8, 3, 7, 4], Some(&full)),
+                Scalar::Float64(8.0)
+            );
+        }
+
         #[test]
         fn blocked_central_moments_match_scalar_8s4mb() {
             // len 4 (< 8): entirely remainder. mean 2.5; deviations -1.5,-0.5,0.5,1.5.
