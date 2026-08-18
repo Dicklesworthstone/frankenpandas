@@ -3192,6 +3192,41 @@ fn run(
                     .expect("grouped rolling mean");
             })
         }
+        ("rolling", "groupby_expanding_mean") => {
+            // br-frankenpandas-vw0uu. SeriesGroupBy grouped EXPANDING had no lane,
+            // so `SeriesGroupByExpanding::apply_grouped_expanding` has never been
+            // measured — while its rolling sibling has had one since u5cg4. That
+            // gap is why the index-clone and pre-size fixes could be verified on
+            // rolling and only ASSUMED on expanding, despite both landing in the
+            // same two code paths.
+            //
+            // Deliberately identical to `groupby_rolling_mean_w10` except for the
+            // aggregation: same `i % 100` key derived from the ROW INDEX, same 100
+            // groups (clearing the 64-group parallel threshold), same value column.
+            // Anything else and the two lanes stop being comparable, which is the
+            // whole reason to mirror rather than invent one.
+            //
+            // ⚠️ EXPANDING IS NOT ROLLING WITH A BIG WINDOW. Each group's window
+            // grows from 1 to the group's length, so the per-element work differs
+            // from `rolling(10)` and the two lanes' ABSOLUTE times must not be
+            // compared to each other — only each against its own before/after.
+            let keys: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
+            let key_series = Series::new(
+                "key",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_i64_values(keys),
+            )
+            .expect("grouped expanding key series");
+            let values = df.get_column("col_0");
+            time_us(|| {
+                let _ = values
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .expanding(Some(1))
+                    .mean()
+                    .expect("grouped expanding mean");
+            })
+        }
         ("rolling", "df_groupby_rolling_mean_w10") => {
             // br-frankenpandas-vw0uu. The DataFrameGroupBy grouped-rolling surface
             // had NO lane, so its "~14-32ms residual" has never been compared to
