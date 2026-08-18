@@ -2020,6 +2020,44 @@ fn run(
             }
             black_box((&transposed, touched));
         }),
+        ("dataframe_ops", "df_transpose_full_materialize_positional") => time_us(|| {
+            // br-frankenpandas-3ya6b. SIBLING OF `df_transpose_full_materialize`,
+            // identical in every respect except HOW a column is addressed. It exists
+            // so the API tax and the representational gap can be separated, because
+            // the older lane necessarily conflates them.
+            //
+            // The sibling reaches each column by label — `column_name_at(i)` hands
+            // back an OWNED String and `column(name)` parses it back into the
+            // position it was formatted from, then re-formats it to validate. Two
+            // allocations and a parse per column to arrive where the caller already
+            // was. This lane calls `column_at(i)` instead, which goes straight to the
+            // lazy plan's cached column.
+            //
+            // ⚠️ WHAT A DIFFERENCE BETWEEN THESE TWO LANES DOES *NOT* MEAN. It does
+            // NOT close the l4vzc gap and must not be reported as doing so. pandas
+            // answers `df.T.to_numpy()` from its 2D BlockManager and measured FLAT at
+            // 45.2 / 44.6 / 44.6us from 10k to 1M rows (ledger 778a7eeb2), while BOTH
+            // of these lanes still build one Column per output column. The prediction
+            // recorded on 3ya6b before this lane existed is a large ABSOLUTE saving
+            // with NO sign change against the incumbent; if a measurement ever shows a
+            // sign flip, l4vzc's structural account is wrong and THAT is the finding.
+            //
+            // ⚠️ BOTH LANES MUST KEEP READING EVERY COLUMN AND SUMMING EVERY LENGTH.
+            // The `touched` accumulator and the `black_box` are load-bearing: without
+            // them an optimiser is free to drop the loop, and a lane that measures
+            // nothing would report an enormous and entirely false improvement over its
+            // sibling. That failure would look exactly like the win this lane exists
+            // to detect.
+            let transposed = df.transpose().expect("transpose");
+            let mut touched = 0usize;
+            for position in 0..transposed.num_columns() {
+                let col = transposed
+                    .column_at(position)
+                    .expect("positional column present");
+                touched += col.values().len();
+            }
+            black_box((&transposed, touched));
+        }),
         ("dataframe_ops", "df_skew") => time_us(|| {
             // pandas: df.skew()
             let _ = df.skew().expect("skew");
