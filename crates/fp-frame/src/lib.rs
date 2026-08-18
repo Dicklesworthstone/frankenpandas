@@ -3707,6 +3707,14 @@ enum AsFreqUnit {
     BusinessMonthEnd,
     /// `BMS` — the first WEEKDAY of each month.
     BusinessMonthStart,
+    /// `BQE` — the last weekday of the anchored quarter (1..=12, default 12).
+    BusinessQuarterEnd(u8),
+    /// `BQS` — the first weekday of the anchored quarter (1..=12, default 1).
+    BusinessQuarterStart(u8),
+    /// `BYE` — the last weekday of the anchored year (1..=12, default 12).
+    BusinessYearEnd(u8),
+    /// `BYS` — the first weekday of the anchored year (1..=12, default 1).
+    BusinessYearStart(u8),
     /// Weekly, anchored on a WEEKDAY expressed as days-from-Sunday (0 = Sunday).
     ///
     /// br-frankenpandas-week-anchor-days. pandas has seven weekly frequencies —
@@ -3723,6 +3731,39 @@ impl AsFreqUnit {
         matches!(
             self,
             Self::Days | Self::Hours | Self::Minutes | Self::Seconds
+        )
+    }
+
+    /// Whether the anchor is the START of its period rather than the end.
+    ///
+    /// br-frankenpandas-week-anchor-days. The anchored units vary along TWO
+    /// independent axes — which months they keep, and which day of the month they
+    /// land on — and the day depends only on (start?, business?). Deriving those
+    /// two booleans once keeps the grid from needing an arm per combination, which
+    /// matters here because both matches on this enum have catch-alls: a missing
+    /// arm is a silently wrong grid rather than a compile error.
+    const fn is_period_start(self) -> bool {
+        matches!(
+            self,
+            Self::MonthStart
+                | Self::QuarterStart(_)
+                | Self::YearStart(_)
+                | Self::BusinessMonthStart
+                | Self::BusinessQuarterStart(_)
+                | Self::BusinessYearStart(_)
+        )
+    }
+
+    /// Whether the anchor rolls off a weekend onto a business day.
+    const fn is_business_anchor(self) -> bool {
+        matches!(
+            self,
+            Self::BusinessMonthEnd
+                | Self::BusinessMonthStart
+                | Self::BusinessQuarterEnd(_)
+                | Self::BusinessQuarterStart(_)
+                | Self::BusinessYearEnd(_)
+                | Self::BusinessYearStart(_)
         )
     }
 }
@@ -3806,8 +3847,20 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
         // last — so the defaults differ (QS is January, QE is December) even though
         // both reduce to the same modulo-3 test.
         "MS" => AsFreqUnit::MonthStart,
+        // MEASURED, live pandas 2.2.3, 2024..2025:
+        //     BQE     -> 03-29 Fri, 06-28 Fri, 09-30 Mon, 12-31 Tue
+        //     BQS     -> 01-01 Mon, 04-01 Mon, 07-01 Mon, 10-01 Tue
+        //     BYE     -> 12-31 Tue, 12-31 Wed
+        //     BQE-NOV -> 02-29 Thu, 05-31 Fri, 08-30 Fri, 11-29 Fri
+        // i.e. exactly the anchored month test of QE/QS/YE/YS with the weekend roll
+        // of BME/BMS, and the same default asymmetry: ends anchor on December,
+        // starts on January.
         "BME" | "BM" => AsFreqUnit::BusinessMonthEnd,
         "BMS" => AsFreqUnit::BusinessMonthStart,
+        "BQE" | "BQ" => AsFreqUnit::BusinessQuarterEnd(12),
+        "BQS" => AsFreqUnit::BusinessQuarterStart(1),
+        "BYE" | "BY" | "BA" => AsFreqUnit::BusinessYearEnd(12),
+        "BYS" | "BAS" => AsFreqUnit::BusinessYearStart(1),
         "QS" => AsFreqUnit::QuarterStart(1),
         "YS" | "AS" => AsFreqUnit::YearStart(1),
         "Q" | "QE" | "QUARTER" | "QUARTERS" => AsFreqUnit::QuarterEnd(12),
@@ -3836,11 +3889,19 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
                     "Y" | "A" | "YE" => return Ok((count, AsFreqUnit::YearEnd(month))),
                     "QS" => return Ok((count, AsFreqUnit::QuarterStart(month))),
                     "YS" | "AS" => return Ok((count, AsFreqUnit::YearStart(month))),
+                    "BQ" | "BQE" => {
+                        return Ok((count, AsFreqUnit::BusinessQuarterEnd(month)));
+                    }
+                    "BQS" => return Ok((count, AsFreqUnit::BusinessQuarterStart(month))),
+                    "BY" | "BA" | "BYE" => {
+                        return Ok((count, AsFreqUnit::BusinessYearEnd(month)));
+                    }
+                    "BYS" | "BAS" => return Ok((count, AsFreqUnit::BusinessYearStart(month))),
                     _ => {}
                 }
             }
             return Err(FrameError::CompatibilityRejected(format!(
-                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC), MS, QS (and QS-JAN..QS-DEC), YS (and YS-JAN..YS-DEC), BME/BM, BMS"
+                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC), MS, QS (and QS-JAN..QS-DEC), YS (and YS-JAN..YS-DEC), BME/BM, BMS, BQE/BQ, BQS, BYE/BY/BA, BYS/BAS (each with JAN..DEC anchors)"
             )));
         }
     };
@@ -3979,27 +4040,36 @@ fn anchored_asfreq_anchors(
         | AsFreqUnit::QuarterStart(_)
         | AsFreqUnit::YearStart(_)
         | AsFreqUnit::BusinessMonthEnd
-        | AsFreqUnit::BusinessMonthStart => {
+        | AsFreqUnit::BusinessMonthStart
+        | AsFreqUnit::BusinessQuarterEnd(_)
+        | AsFreqUnit::BusinessQuarterStart(_)
+        | AsFreqUnit::BusinessYearEnd(_)
+        | AsFreqUnit::BusinessYearStart(_) => {
             let (mut year, mut month) = (start.year(), start.month());
             // Walk month-ends from the start month up to (and including) the end
             // month, keeping only the ones the unit anchors on and in range.
             loop {
                 // Period STARTS anchor on day 1, ends on the last day; the month
                 // walk and the range logic are identical either way.
-                let me = match unit {
-                    AsFreqUnit::MonthStart
-                    | AsFreqUnit::QuarterStart(_)
-                    | AsFreqUnit::YearStart(_) => asfreq_month_start(year, month)?,
-                    // Business anchors take the calendar boundary and then step off
-                    // a weekend, outward from the month.
-                    AsFreqUnit::BusinessMonthStart | AsFreqUnit::BusinessMonthEnd => {
-                        let forward = matches!(unit, AsFreqUnit::BusinessMonthStart);
-                        let boundary = if forward {
-                            NaiveDate::from_ymd_opt(year, month, 1)
-                        } else {
-                            period_last_day_of_month(year, month)
-                                .and_then(|last| NaiveDate::from_ymd_opt(year, month, last))
-                        };
+                // The day of the month depends ONLY on (start?, business?), so it
+                // is computed from the two predicates rather than matched per unit.
+                let want_start = unit.is_period_start();
+                let me = if unit.is_business_anchor() {
+                    let boundary = if want_start {
+                        NaiveDate::from_ymd_opt(year, month, 1)
+                    } else {
+                        period_last_day_of_month(year, month)
+                            .and_then(|last| NaiveDate::from_ymd_opt(year, month, last))
+                    };
+                    let rolled = boundary.and_then(|date| roll_off_weekend(date, want_start));
+                    asfreq_midnight(rolled.ok_or_else(|| {
+                        FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+                    })?)?
+                } else if want_start {
+                    asfreq_month_start(year, month)?
+                } else {
+                    asfreq_month_end(year, month)?
+                };
                         let rolled = boundary.and_then(|date| roll_off_weekend(date, forward));
                         asfreq_midnight(rolled.ok_or_else(|| {
                             FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
@@ -4023,6 +4093,12 @@ fn anchored_asfreq_anchors(
                     | AsFreqUnit::BusinessMonthStart => true,
                     AsFreqUnit::QuarterStart(anchor) => month % 3 == u32::from(anchor) % 3,
                     AsFreqUnit::YearStart(anchor) => month == u32::from(anchor),
+                    AsFreqUnit::BusinessQuarterEnd(anchor)
+                    | AsFreqUnit::BusinessQuarterStart(anchor) => {
+                        month % 3 == u32::from(anchor) % 3
+                    }
+                    AsFreqUnit::BusinessYearEnd(anchor)
+                    | AsFreqUnit::BusinessYearStart(anchor) => month == u32::from(anchor),
                     _ => unreachable!(),
                 };
                 if keep {
@@ -150842,6 +150918,96 @@ mod tests {
         let result = s.dt().day_name().unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("Monday".to_string()));
         assert_eq!(result.values()[1], Scalar::Utf8("Saturday".to_string()));
+    }
+
+    /// `.dt.components` against pandas' measured 7-column output, and
+    /// `.dt.to_pytimedelta`'s half-to-even rounding.
+    ///
+    /// MEASURED, pandas 2.2.3, `pd.to_timedelta([90061.5s, -1s, NaT, 0s])`:
+    /// ```text
+    ///   days [1,-1,nan,0]  hours [1,23,nan,0]  minutes [1,59,nan,0]
+    ///   seconds [1,59,nan,0]  milliseconds [500,0,nan,0]
+    ///   microseconds [0,0,nan,0]  nanoseconds [0,0,nan,0]
+    /// ```
+    /// The -1s row is the load-bearing one: the split is EUCLIDEAN, so it is
+    /// -1 day + 23:59:59, not a negative hour field.
+    #[test]
+    fn dt_timedelta_components_and_to_pytimedelta_match_pandas() {
+        use fp_types::Timedelta;
+        let td = |ns: i64| Scalar::Timedelta64(ns);
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                td(90_061_500_000_000),
+                td(-Timedelta::NANOS_PER_SEC),
+                Scalar::Null(NullKind::NaN),
+                td(0),
+            ],
+        )
+        .unwrap();
+
+        let c = s.dt().components().expect("components");
+        // A NaT is present, so pandas promotes every column to float64.
+        let expect: [(&str, [f64; 3]); 7] = [
+            ("days", [1.0, -1.0, 0.0]),
+            ("hours", [1.0, 23.0, 0.0]),
+            ("minutes", [1.0, 59.0, 0.0]),
+            ("seconds", [1.0, 59.0, 0.0]),
+            ("milliseconds", [500.0, 0.0, 0.0]),
+            ("microseconds", [0.0, 0.0, 0.0]),
+            ("nanoseconds", [0.0, 0.0, 0.0]),
+        ];
+        for (name, vals) in expect {
+            let col = &c.columns[name];
+            assert_eq!(col.values()[0], Scalar::Float64(vals[0]), "{name} row0");
+            assert_eq!(col.values()[1], Scalar::Float64(vals[1]), "{name} row1 (euclidean)");
+            assert!(col.values()[2].is_missing(), "{name} NaT row");
+            assert_eq!(col.values()[3], Scalar::Float64(vals[2]), "{name} row3");
+        }
+
+        // With NOTHING missing pandas gives int64 instead — the promotion is
+        // demand-driven, not a fixed dtype choice.
+        let clean = Series::from_values(
+            "td",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![td(90_061_500_000_000), td(-Timedelta::NANOS_PER_SEC)],
+        )
+        .unwrap();
+        let cc = clean.dt().components().expect("components");
+        assert_eq!(cc.columns["days"].values()[0], Scalar::Int64(1));
+        assert_eq!(cc.columns["days"].values()[1], Scalar::Int64(-1));
+        assert_eq!(cc.columns["hours"].values()[1], Scalar::Int64(23));
+
+        // ⚠️ to_pytimedelta ROUNDS to microseconds, ties to EVEN. Truncation would
+        // pass only the 1 / -1 rows below and fail every other one.
+        let rounding = Series::from_values(
+            "td",
+            (0..7_i64).map(Into::into).collect::<Vec<_>>(),
+            vec![td(1), td(-1), td(999), td(-999), td(500), td(1500), td(2500)],
+        )
+        .unwrap();
+        let r = rounding.dt().to_pytimedelta().expect("to_pytimedelta");
+        let got: Vec<i64> = r
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Timedelta64(n) => *n,
+                other => panic!("expected Timedelta64, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(got, vec![0, 0, 1_000, -1_000, 0, 2_000, 2_000]);
+
+        // NaT survives as missing.
+        let with_nat = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        assert!(
+            with_nat.dt().to_pytimedelta().expect("to_pytimedelta").values()[0].is_missing()
+        );
     }
 
     /// br-frankenpandas-timedelta-nat-days-returns-zero-406ni: the four
