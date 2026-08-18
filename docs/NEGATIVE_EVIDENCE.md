@@ -36701,3 +36701,48 @@ these ops (pandas delegates to numpy ufuncs, but I have not traced `Series.floor
 dispatched symbol), nor that adopting `+avx2` would be free of correctness or portability cost — a
 blanket flag makes the binary unrunnable on pre-AVX2 hardware, which is a deployment decision and
 not a perf one. **Both are reasons this is a finding for a human to weigh, not a change to make.**
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-3qpj4) — floor's sse2 penalty is COMPOUNDED, not single: no `roundpd` AND no `blendvpd`, so 23 of its packed ops are select emulation. One lever survives that needs no ISA change
+
+**NO NEW MEASUREMENT AND NO LEVER CLAIMED.** Source reading plus an instruction census on the
+shipping ELF `a802073cf042`, in a clean window (loadavg 15.31 draining from 19.94, idle 89%, no
+builds, disk 131G). This is a characterisation of WHERE floor's shipping-build cost sits, written so
+the next agent does not repeat the search I just did.
+
+**Counted mechanism:** packed-op census inside `Column::floor`, default (sse2) build:
+
+    10 andpd    7 orpd    6 andnpd     <- 23 ops: SELECT EMULATION
+     3 addpd    2 cmpltpd  1 xorpd  1 xorps
+    61 packed ops total in the symbol
+
+**THE PENALTY IS TWO INSTRUCTIONS DEEP, WHICH I HAD NOT APPRECIATED.** `floor_fast` is
+`abs -> or_sign(nearest_even_magnitude) -> if nearest > value {nearest - 1.0} -> if abs < 2^52`.
+Each of those two branches becomes `cmppd` plus a THREE-op `and / andn / or` select, **because SSE2
+has no `blendvpd` — that is SSE4.1, the same extension that carries `roundpd`.** So the shipping
+build pays twice for the missing ISA level: once for emulating the rounding, and again for emulating
+every select inside the emulation.
+
+**THE KERNEL ITSELF IS NOT THE PROBLEM AND I WENT LOOKING.** `floor_fast` is the canonical
+magic-constant sequence and has already been tuned with measurements: `or_sign` replaces `copysign`
+to save one operation on the precondition that the magnitude is non-negative, measured under
+br-frankenpandas-o57rj at floor 744.5 -> 689.5us, ceil 825.5 -> 720.9us, trunc 739.3 -> 695.7us,
+with the fn-pointer-probe trap explicitly called out in its doc comment. **There is no cheap
+rewrite here. A 10:1 instruction ratio against a single `roundpd` is not closable by shuffling sse2
+operations**, and I am recording that as a searched-and-not-found rather than leaving the next
+agent to rediscover it.
+
+**ONE LEVER DOES SURVIVE, AND IT NEEDS NO ISA CHANGE — UNMEASURED, OFFERED AS A CANDIDATE.** The
+second branch, `if abs < TWO_POW_52 { adjusted } else { value }`, is a RANGE GUARD evaluated PER
+ELEMENT. It is false only for magnitudes at or above 2^52, which no realistic float column contains.
+FrankenPandas already has the witness machinery to answer "does this column satisfy P" once per
+column rather than per element — `typed_float_domain_fused_unary_with_finiteness` threads exactly
+that kind of precondition. **A "all magnitudes below 2^52" witness would hoist one `cmppd` plus one
+3-op select out of the inner loop entirely: 4 of roughly 13 ops per vector, on floor, ceil AND
+trunc.**
+
+⚠️ **I HAVE NOT MEASURED IT AND IT DOES NOT CLOSE THE GAP.** ~30% off the kernel takes floor @1M
+from 0.493x to roughly 0.64x — still a decisive LOSS to pandas, because the ISA gap dominates. It is
+worth doing on its own terms (three ops, shipping build, no policy decision) and it is NOT a
+substitute for the build-policy question. Anyone taking it should predict the ratio BEFORE building
+and check the witness is actually cheaper than the branch it replaces — a per-column scan that costs
+a pass over the data would give back everything it saves.
