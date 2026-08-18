@@ -476,8 +476,31 @@ def test_setup_pandas_strict_legacy_rejects_system_import(oracle, tmp_path):
 
 
 def test_setup_pandas_strict_legacy_allows_system_fallback(oracle, tmp_path):
+    """br-frankenpandas-ey5sl: this test could NEVER pass, and the reason is subtle.
+
+    It used `legacy_root=tmp_path / "pandas"`. `setup_pandas` inserts the legacy
+    root's PARENT on sys.path when that parent is a directory — and under pytest
+    `tmp_path` always exists. So `legacy_path_inserted` was always True, which
+    routes into the pjxm1 branch that refuses to swap pandas in-process, and the
+    fallback this test asserts was unreachable from its own fixture.
+
+    The contract is about the parent's ABSENCE, so the fixture has to express
+    that: `tmp_path / "absent" / "pandas"` has a parent that does not exist, which
+    is the real-checkout situation (no legacy_pandas_code/pandas) the fallback
+    exists to serve.
+
+    ⚠️ I hit this same path-sensitivity by hand earlier with `--legacy-root /x`,
+    whose parent `/` exists — it produced a refusal I nearly recorded as "the
+    oracle cannot evaluate these fixtures". The trap is that ANY plausible-looking
+    absent path whose parent happens to exist silently selects the other branch.
+    """
+    absent_root = tmp_path / "absent" / "pandas"
+    assert not absent_root.parent.exists(), (
+        "the whole point of this fixture is a legacy root whose PARENT is absent; "
+        "if the parent exists, setup_pandas inserts it and takes the refusal branch"
+    )
     args = SimpleNamespace(
-        legacy_root=str(tmp_path / "pandas"),
+        legacy_root=str(absent_root),
         strict_legacy=True,
         allow_system_pandas_fallback=True,
     )
@@ -487,6 +510,42 @@ def test_setup_pandas_strict_legacy_allows_system_fallback(oracle, tmp_path):
     finally:
         sys.path[:] = original_path
     assert hasattr(pd, "Series")
+
+
+def test_setup_pandas_refuses_the_in_process_swap_when_the_parent_exists_ey5sl(
+    oracle, tmp_path
+):
+    """The other half, and the half that makes the fix above mean something.
+
+    `allow_system_pandas_fallback=True` does NOT rescue a run whose legacy parent
+    is on sys.path: swapping pandas in-process breaks its datetime C-API
+    (br-frankenpandas-pjxm1), so the oracle refuses loudly instead of returning a
+    corrupted module. Without this test, the fix above could be "achieved" by
+    deleting the refusal, and the same flag would then silently return a module
+    whose `_pandas_datetime_CAPI` is gone.
+
+    This is also the exact configuration the old fixture accidentally selected, so
+    pinning it here keeps the accident documented rather than merely removed.
+    """
+    present_parent_root = tmp_path / "pandas"
+    assert present_parent_root.parent.exists(), "tmp_path exists by construction"
+    args = SimpleNamespace(
+        legacy_root=str(present_parent_root),
+        strict_legacy=True,
+        allow_system_pandas_fallback=True,
+    )
+    original_path = list(sys.path)
+    try:
+        with pytest.raises(oracle.OracleError) as excinfo:
+            oracle.setup_pandas(args)
+    finally:
+        sys.path[:] = original_path
+    assert "cannot swap legacy pandas for system pandas in-process" in str(
+        excinfo.value
+    ), (
+        "the refusal must stay explicit and name its cause; a generic import error "
+        "here would send readers hunting for a missing pandas that is installed"
+    )
 
 
 def _datetime_series_payload(values):
