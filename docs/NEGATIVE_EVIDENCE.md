@@ -36458,3 +36458,46 @@ an identity trace. No measurement was taken and nothing was certified.
 LOADAVG   4.67 / 5.01 / 8.84 ;  CPU IDLE 91.92%, iowait 0.00%, by mpstat
 DISK      /data 56G, flat, under the standing build hold; no cargo invoked
 ```
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-4kig1) — REFUTED with the CORRECT instrument this time: BOTH sqrt and log pass the harness drift-null at 1M, and log CERTIFIES at 2.125x. My prediction was wrong twice on the same question
+
+**Counted mechanism:** operation threads and peak process threads, `@1M`, preserved ELF
+`bench_elf_sha256=a802073cf042d28d9807347acee416505a0af97e7e2c0e344877405ea1ef80c5 (82346192 bytes) /data/projects/.scratch/crimsonpine/fp-bench-MAIN-8b263954b`:
+log 8 threads / peak 10 (ON the parallel witness arm), sqrt 1 / peak 2 (OFF it), against
+`ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN = 200_000`.
+
+**MEASURED, harness `60ed3c58fdd5`, both arms same invocation, pandas as incumbent, `--json-stdout`
+with NO `--output` so nothing was written to disk** (build hold, /data at 45G falling to 40G from
+EXTERNAL activity during the run; loadavg 10.70, 15-min 7.85; CPU MHz 2169.6):
+
+| op @1M | verdict | ratio | **FP A/A null (harness DRIFT stat)** | pandas null | all clauses |
+|---|---|---|---|---|---|
+| sqrt | SLOWER | 0.933x | **1.00219 PASS** | 1.00101 | **true** |
+| log | **FASTER** | **2.125x** | **0.99681 PASS** | 0.99272 | **true** |
+
+**THIS BEAD'S PREMISE IS REFUTED.** 4kig1 states sqrt and log are "the only two whose FP A/A null
+still FAILS" and that "neither can certify anything while their own null fails", recording
+`sqrt @1M` null 0.913921 FAIL and `log @1M` null 1.041860 FAIL on ELF 62c9a184. On the current ELF
+**both pass, both rows are fully decidable, and log certifies at 2.125x** — a certified win on the
+very op the bead says cannot certify.
+
+⚠️ **AND MY OWN PREDICTION WAS WRONG TWICE, WHICH IS THE PART I WANT ON THE RECORD.** I
+pre-registered that log would STILL fail because it runs 8 workers. First I tested it with fp-bench's
+in-process null — the wrong statistic — and log passed; I corrected the instrument rather than the
+prediction, and explicitly kept the prediction "unchanged and now sharper". Now with the RIGHT
+statistic, the harness `outer_aa_null` drift measure the bead actually cites, **log passes again.**
+The parallel arm does not fail this null, per-call or across placements. **I defended a hypothesis
+through one instrument correction; the second measurement is what killed it, not better reasoning.**
+
+**WHAT THIS MEANS FOR THE ATTRIBUTION.** The shared `thread::scope` arm cannot explain either op's
+null today: sqrt is not on it, and log is on it and passes. Whatever produced 0.913921 and 1.041860
+on ELF 62c9a184 has been fixed or has moved, and `44700c04b` (the sqrt/log domain fuse) is the
+candidate for at least the sqrt half. **The bead should close or be rewritten around what remains
+true**, which is that sqrt @1M is a real 0.933x LOSS to pandas — decidable, clean nulls, and a
+legitimate target — while log @1M is a 2.125x win.
+
+**NOT BANKED, AND THE REASON IS A LIMITATION OF HOW I RAN IT.** `--json-stdout` without `--output`
+writes no artifact, which is what made this runnable under a build hold with the disk falling. The
+consequence is that `assemble_standing_locks.py` has no file to read, so **log @1M 2.125x cannot be
+banked as a standing lock from this run.** That is the correct trade for a floor-breach window and
+it should be re-run to an artifact when disk allows.
