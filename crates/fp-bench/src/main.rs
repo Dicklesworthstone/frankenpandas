@@ -1663,6 +1663,44 @@ fn run(
                 let _ = series.value_counts().expect("value_counts");
             })
         }
+        ("dataframe_ops", "cumsum_batched") => time_us_repeated_total(1000, || {
+            // br-frankenpandas-d4cs8. SIBLING of `cumsum`, identical work, timed as a
+            // BATCH of 1000 calls instead of one.
+            //
+            // MEASURED (ledger e8d10f48e): at size 100 `cumsum`'s FP arm is 3.3us and
+            // its own A/A null sits 11% off unity — five times the gate's limit —
+            // while the effect it refuses to certify is 9.5x and not in doubt.
+            // Corpus-wide, arms under 100us fail their null ~60% of the time. Fixed-cost
+            // regressions live at small n by construction, so the gate is blindest
+            // exactly where that class of defect appears.
+            //
+            // This lane tests ONE half of the proposed remedy: does amortising the fixed
+            // per-measurement cost over 1000 calls lengthen the arm enough for the A/A
+            // control to hold unity? That question is answerable FP-SIDE ALONE, because
+            // `null_control` is computed inside fp-bench — so it costs no harness edit
+            // and orphans no standing lock.
+            //
+            // ⚠️ IT DOES NOT MAKE A vs-PANDAS ROW. The incumbent arm is still timed
+            // single-shot by the harness, so any ratio against `cumsum_batched` compares
+            // a batched arm to an unbatched one and IS MEANINGLESS WHILE LOOKING VALID.
+            // A real vs-pandas row needs `time_operation_repeated` on the pandas side
+            // with a MATCHED repeat count, which moves the harness sha and orphans all
+            // standing locks — deliberately out of scope here.
+            //
+            // ⚠️ USES `time_us_repeated_total`, WHICH REPORTS THE BATCH TOTAL, NOT a
+            // per-call figure — so its p50 is ~1000x `cumsum`'s and the two are NOT
+            // directly comparable without dividing. The per-call helper
+            // (`time_us_repeated`) is gated behind `lazy-transpose-prototype`, which is
+            // NOT a default feature, so it is unreachable in a shipping build. That gating
+            // is itself part of why 4 of 218 lanes use repeated timing at all.
+            //
+            // ⚠️ BATCHING IS NOT A PURE TIMER CHANGE: 1000 consecutive cumsum calls on
+            // one frame run warmer than one call. If the per-call time moves materially
+            // versus `cumsum`, that is the semantic difference showing up, and it is a
+            // reason NOT to adopt batching rather than a measurement artifact to
+            // explain away.
+            let _ = df.cumsum().expect("cumsum");
+        }),
         ("dataframe_ops", "cumsum") => time_us(|| {
             let _ = df.cumsum().expect("cumsum");
         }),
