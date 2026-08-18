@@ -4433,6 +4433,60 @@ pub fn nansum(values: &[Scalar]) -> Scalar {
     Scalar::Float64(sum)
 }
 
+/// Sum of a STRING group: pandas concatenates, skipping missing entries.
+///
+/// br-frankenpandas-a7faz. `nansum` cannot serve this: it coerces through
+/// `to_f64`, which fails for every `Utf8`, so a string column sums to
+/// `Float64(0.0)` — a wrong value rather than a refusal. This is a separate
+/// reducer rather than a branch inside `nansum` on purpose: the SUM SURFACES
+/// DISAGREE in pandas and a shared change would silently move the others.
+///
+/// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18):
+/// ```text
+///   Series(['a','b','c']).sum()              -> 'abc'
+///   Series(['a',None,'c']).sum()             -> TypeError: can only concatenate str
+///   DataFrame({'v':['a',None]}).sum()        -> TypeError (same)
+///   df.groupby(k)['v'].sum()  with a None    -> 'a'      SKIPS, does not raise
+///   s.resample('ME').sum()    with a None    -> 'ps'     SKIPS, does not raise
+/// ```
+/// So the REDUCTION surfaces raise on a missing entry while the GROUPED surfaces
+/// skip it. This function implements the grouped rule and must not be wired into
+/// `Series::sum`/`DataFrame::sum` without implementing their raise.
+///
+/// ⚠️ AND AN EMPTY OR ALL-MISSING GROUP IS INTEGER `0`, NOT `""`. Measured:
+/// ```text
+///   Series(['p','q'], index=[Jan-01, Mar-01]).resample('ME').sum()
+///     -> ['p', 0, 'q']        <- the empty February bucket is int 0
+///   Series([None,None,'r','u'], ...).resample('ME').sum()
+///     -> [0, 'ru']            <- an all-missing bucket is int 0 too
+///   types: ['int', 'str']     <- the output column is genuinely MIXED
+/// ```
+/// That is pandas' `sum()` identity element leaking through unchanged, and it is
+/// why this returns `Scalar::Int64(0)` rather than an empty string: matching the
+/// incumbent here means reproducing a mixed-dtype column.
+///
+/// Concatenation is POSITIONAL, not sorted — `Series(['z','a','m']).sum()` is
+/// `'zam'`. Callers that bucket by time therefore hand the values over in index
+/// order, which is what produced `'psq'` for a Jan bucket holding Jan-01 'p',
+/// Jan-05 's', Jan-15 'q'.
+#[must_use]
+pub fn nansum_utf8(values: &[Scalar]) -> Scalar {
+    let mut out: Option<String> = None;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        if let Scalar::Utf8(part) = v {
+            out.get_or_insert_with(String::new).push_str(part);
+        }
+    }
+    match out {
+        Some(joined) => Scalar::Utf8(joined),
+        // Not `Utf8(String::new())`: pandas yields the integer identity here.
+        None => Scalar::Int64(0),
+    }
+}
+
 pub fn nanmean(values: &[Scalar]) -> Scalar {
     if let Some((sum, count)) = collect_timedelta_ns(values) {
         if count == 0 {

@@ -31561,6 +31561,17 @@ impl Resample<'_> {
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
         }
+        // STRING SUM IS CONCATENATION (br-frankenpandas-a7faz). `nansum` coerces via
+        // `to_f64`, which fails for every Utf8, so a string column silently summed to
+        // Float64(0.0) — a wrong value, not a refusal. MEASURED, live pandas 2.2.3:
+        //   s.resample('ME').sum() on ['p','q','r','s','t','u'] -> ['psq', 'rtu']
+        //   with a None in a bucket                             -> skips it, no raise
+        //   an EMPTY or ALL-MISSING bucket                      -> integer 0, not ''
+        // `nansum_utf8` implements exactly that, including the int-0 identity, which
+        // makes the output column genuinely mixed str/int the way pandas' is.
+        if self.series.column().dtype() == DType::Utf8 {
+            return self.aggregate_scalar(fp_types::nansum_utf8);
+        }
         self.aggregate_scalar(fp_types::nansum)
     }
 
@@ -94644,6 +94655,15 @@ enum ResampleValueDomain {
     /// Timedelta64 and Period are likewise unmeasured here and stay out — this
     /// widening covers exactly the rows of the table that were measured.
     OrderableAndCountable,
+    /// Int64/Float64 plus Utf8 ONLY — for `sum`, where pandas concatenates strings
+    /// but refuses the other non-numeric dtypes.
+    ///
+    /// MEASURED, live pandas 2.2.3: `sum` on a utf8 column gives ['pq','r','s','tu'];
+    /// on a bool column it PROMOTES TO INT ([1,1,1]); on datetime64 and category it
+    /// raises TypeError. Bool is therefore excluded here even though it is admitted
+    /// for count/min/max/first/last — the int promotion is a separate behaviour that
+    /// `nansum_utf8` does not implement and `nansum` would get wrong.
+    NumericAndUtf8,
 }
 
 pub struct GroupByResample<'a> {
@@ -94674,6 +94694,9 @@ impl GroupByResample<'_> {
                 let dt = self.groupby.df.columns[c.as_str()].dtype();
                 match domain {
                     ResampleValueDomain::Numeric => dt == DType::Int64 || dt == DType::Float64,
+                    ResampleValueDomain::NumericAndUtf8 => {
+                        dt == DType::Int64 || dt == DType::Float64 || dt == DType::Utf8
+                    }
                     ResampleValueDomain::OrderableAndCountable => {
                         dt == DType::Int64
                             || dt == DType::Float64
@@ -94845,11 +94868,12 @@ impl GroupByResample<'_> {
 
     /// Grouped resample sum.
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
-        // pandas CONCATENATES strings here; nansum does not, so a widened
-        // filter would emit a WRONG value instead of a missing column (a7faz).
+        // pandas concatenates strings for sum, and `Resample::sum` now does too via
+        // `nansum_utf8`, so Utf8 is admitted here (a7faz). Bool/Datetime64 are NOT:
+        // pandas promotes bool to int and raises on datetime.
         self.apply_grouped_resample(
             |s, freq| s.resample(freq).sum(),
-            ResampleValueDomain::Numeric,
+            ResampleValueDomain::NumericAndUtf8,
         )
     }
 
@@ -159364,6 +159388,139 @@ mod tests {
                 Scalar::Datetime64(1709337600000000000),
                 Scalar::Datetime64(1712620800000000000),
             ]
+        );
+    }
+
+    /// grouped resample `sum` on a utf8 column CONCATENATES, per pandas.
+    ///
+    /// br-frankenpandas-a7faz item 1. `sum` was pinned to Numeric precisely because
+    /// `nansum` coerces through `to_f64` and would have returned Float64(0.0) for a
+    /// string column — a wrong value, worse than dropping it. `Resample::sum` now
+    /// routes Utf8 to `fp_types::nansum_utf8`, so the column can be admitted.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18):
+    /// ```text
+    ///   grp=[a,a,a,b,b,b] tag=[p,q,r,s,t,u]
+    ///   idx Jan-01/Jan-15/Feb-01 (a) and Jan-05/Feb-05/Feb-20 (b)
+    ///     df.groupby('grp').resample('ME').sum() -> tag ['pq', 'r', 's', 'tu']
+    ///   with tag=[p,None,r,s,None,u]            -> tag ['p',  'r', 's', 'u']
+    /// ```
+    /// Missing entries are SKIPPED on this surface — note that `Series(['a',None]).sum()`
+    /// RAISES TypeError in pandas, so the grouped rule and the reduction rule differ
+    /// and `nansum_utf8` deliberately implements only the grouped one.
+    #[test]
+    fn groupby_resample_sum_concatenates_utf8_a7faz() {
+        let utf8 = |v: &str| Scalar::Utf8(v.to_string());
+        let build = |tags: Vec<Scalar>| {
+            DataFrame::from_dict_with_index(
+                vec![
+                    (
+                        "grp",
+                        vec![
+                            utf8("a"),
+                            utf8("a"),
+                            utf8("a"),
+                            utf8("b"),
+                            utf8("b"),
+                            utf8("b"),
+                        ],
+                    ),
+                    ("tag", tags),
+                ],
+                vec![
+                    "2024-01-01".into(),
+                    "2024-01-15".into(),
+                    "2024-02-01".into(),
+                    "2024-01-05".into(),
+                    "2024-02-05".into(),
+                    "2024-02-20".into(),
+                ],
+            )
+            .unwrap()
+        };
+
+        let all_valid = build(vec![
+            utf8("p"),
+            utf8("q"),
+            utf8("r"),
+            utf8("s"),
+            utf8("t"),
+            utf8("u"),
+        ]);
+        let summed = all_valid.groupby(&["grp"]).unwrap().resample("M").sum().unwrap();
+        assert_eq!(
+            summed.column_names(),
+            vec!["grp", "tag"],
+            "the utf8 column must survive sum now that it concatenates"
+        );
+        assert_eq!(
+            summed.column("tag").unwrap().values(),
+            &[utf8("pq"), utf8("r"), utf8("s"), utf8("tu")]
+        );
+
+        // Missing entries are skipped, NOT propagated and NOT raised on.
+        let with_missing = build(vec![
+            utf8("p"),
+            Scalar::Null(NullKind::NaN),
+            utf8("r"),
+            utf8("s"),
+            Scalar::Null(NullKind::NaN),
+            utf8("u"),
+        ]);
+        let summed = with_missing
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .sum()
+            .unwrap();
+        assert_eq!(
+            summed.column("tag").unwrap().values(),
+            &[utf8("p"), utf8("r"), utf8("s"), utf8("u")]
+        );
+    }
+
+    /// An ALL-MISSING string bucket sums to integer `0`, not `""`.
+    ///
+    /// ⚠️ This looks like a bug and is pandas' actual behaviour — `sum()`'s integer
+    /// identity leaking through unchanged, which makes the output column genuinely
+    /// MIXED int/str. MEASURED, live pandas 2.2.3:
+    /// ```text
+    ///   Series([None,None,'r','u'], index=[Jan-01,Jan-15,Feb-01,Feb-20])
+    ///     .resample('ME').sum()  -> [0, 'ru']    types ['int', 'str']
+    ///   Series(['p','q'], index=[Jan-01, Mar-01]).resample('ME').sum()
+    ///                            -> ['p', 0, 'q']  <- the EMPTY Feb bucket is 0 too
+    /// ```
+    /// Matching the incumbent here means reproducing the mixed column, which
+    /// `Column::from_values` supports by falling back to an object column.
+    #[test]
+    fn groupby_resample_sum_all_missing_utf8_bucket_is_integer_zero_a7faz() {
+        let utf8 = |v: &str| Scalar::Utf8(v.to_string());
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("grp", vec![utf8("a"), utf8("a"), utf8("a"), utf8("a")]),
+                (
+                    "tag",
+                    vec![
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Null(NullKind::NaN),
+                        utf8("r"),
+                        utf8("u"),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+                "2024-02-20".into(),
+            ],
+        )
+        .unwrap();
+        let summed = df.groupby(&["grp"]).unwrap().resample("M").sum().unwrap();
+        assert_eq!(
+            summed.column("tag").unwrap().values(),
+            &[Scalar::Int64(0), utf8("ru")],
+            "an all-missing bucket is pandas' integer identity, not an empty string"
         );
     }
 
