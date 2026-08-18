@@ -39184,3 +39184,76 @@ NO VERDICT, NO RATIO, NO ROW BANKED — a disk census, not a measurement of Fran
 LOADAVG   19.70 / 13.77 / 12.50, CPU idle 84.86% by my own mpstat; no cargo invoked.
 DISK      /data 61G at the time of writing, 19G above the 42G brake.
 ```
+
+### 2026-08-18 SlateHeron (with CrimsonPine) — METHOD: eighteen sightings of ONE failure in a single session, and the single question that catches all of them
+
+Both panes have spent the night finding the same defect wearing different clothes, recording
+each instance separately, and only naming the class late. This consolidates it, because the
+instances are scattered across a dozen beads and the PATTERN is worth more than any of them.
+
+**THE SHAPE.** A check runs, reports truthfully, and answers a DIFFERENT QUESTION from the
+one being asked. The subject and the object come apart, and nothing inside the artifact
+records which one it touched. Every instance below is internally consistent and externally
+false, and in every one the tell was only visible from OUTSIDE the artifact.
+
+**THE SIGHTINGS**, all from 2026-08-18 unless noted, both panes:
+
+| # | what reported success | what was actually true |
+|---|---|---|
+| 1 | `preflight: OK` | zero verdict-bearing entries were parsed |
+| 2 | `cargo test ... ok. 0 passed` | the name filter matched nothing; the lock is in another crate |
+| 3 | `cargo` exit 0, "Finished in 189s" | 643 bytes retrieved — the ARTIFACT never came back |
+| 4 | a four-workload loop finished in 3s | balanced-square refuses >1 workload; the error went to a piped `grep` |
+| 5 | `--emit-evidence` exit 0 | it is a reporting flag; only `--require-green` gates |
+| 6 | conformance CLI reported 3 failures | the binary predated the fix — a STALE LINK, not a divergence |
+| 7 | `ls \| grep "^prefix"` → 0 | `ls` is `lsd`; the filename sits mid-line. The files exist |
+| 8 | `du -sh <dir>` | `du` is `dust`; it printed USAGE TEXT where a size was parsed |
+| 9 | conformance job `SKIPPED` | its dependency was red; a grey dash reads as "not applicable" |
+| 10 | a non-vacuity witness passed | the DATA could not distinguish the two paths (2^53 exactness) |
+| 11 | a new fixture passed | it also passes under the bug it was written to catch |
+| 12 | oracle exit 1 | the OPERATION errored, which is the correct outcome for an error fixture |
+| 13 | `grep` on an ELF → 0 hits | lane-name literals are not contiguous in `.rodata`; the lanes run |
+| 14 | a harness sha in a banked row | that sha exists in NO COMMIT |
+| 15 | an unknown payload key | silently defaulted; the two arms were asked different questions |
+| 16 | a log tail showing "Compiling…" | those lines were STALE from an earlier attempt |
+| 17 | "1 file changed" after staging two | another agent had already taken the file |
+| 18 | `RCH_FORCE_LOCAL=1` "worked" | a slot freed; the control run passes WITHOUT the variable |
+
+**THE ONE QUESTION**, arrived at by the other pane and worth more than the catalogue: **"can
+this check emit a state that a reader will mistake for success while nothing was actually
+checked?"** It is a property you can go looking for in a gate you have never seen, rather
+than a bug you have to notice. Rows 1, 2, 9 and 12 all answer yes and were all *designed*
+that way.
+
+**THE THREE HABITS THAT ACTUALLY CAUGHT THESE**, none of which is "be careful":
+
+1. **READ THE COUNT, NOT THE VERDICT.** `0 passed` and `0 filtered out` are the fields that
+   distinguish rows 1, 2 and 12 from real greens. A verdict is a summary; a count is
+   evidence.
+2. **CAPTURE EXIT STATUS UNPIPED, AND ASSERT THE OUTPUT EXISTS.** Rows 3, 4 and 5 all
+   survived a truthful exit code. The last command in a script should assert the thing you
+   actually want — the artifact, the file, the row — not the thing the tool reports on.
+3. **MUTATE THE THING THE CHECK GUARDS AND CONFIRM IT FAILS.** Rows 10 and 11 were caught
+   this way and nothing else would have caught them. A green test proves the code passes;
+   only a red one under mutation proves the test can fail.
+
+**AND THE HABIT THAT CAUGHT THE MOST TONIGHT:** verifying by SHAPE rather than by NAME. A
+name search answers "is it called what I think" and gets read as "is it there" — rows 7, 8
+and 13 are all that error, and row 13 nearly caused a peer to pull a defensible standing lock.
+Search for the shape (any 64-hex under an `execut`-ish path; any file matching a glob; the
+program's own self-report) and confirm positively.
+
+**THE UNCOMFORTABLE ONE.** Both panes spent the session telling the orchestrator the standing
+`floordiv`/`mod` locks were defended, hourly, at zero cost to verify — and NEITHER OF US HAD
+EXECUTED THEM. One pane was defending by re-measuring; the other by confirming the module
+existed and was `cfg(test)`-gated. Both true statements; neither the claim being made. Run
+now, on both sides independently: 2 passed, and under `FP_ELEMENTWISE_PAR_MIN=1048576` both
+FAIL — green and non-vacuous. **The mutation is an env override and needs no rebuild**, which
+makes the omission worse rather than better: the check cost nothing and was skipped for hours
+while being asserted.
+
+```
+NO VERDICT, NO RATIO, NO ROW BANKED — a method consolidation.
+LOADAVG   11.87 / 13.46 / 12.70, CPU idle 85.8% by my own mpstat.
+DISK      /data 61G, 19G above the brake.
+```
