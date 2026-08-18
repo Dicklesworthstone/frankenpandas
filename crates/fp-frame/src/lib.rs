@@ -47470,7 +47470,62 @@ impl DatetimeAccessor<'_> {
     }
 
     /// Helper: apply a fallible datetime transform to each value.
+    /// Fallible per-element `.dt` extraction with NO single-format lock: every
+    /// element is parsed on its own terms.
+    ///
+    /// ⚠️ THIS IS THE PERIOD-DOMAIN PRIMITIVE. Do not "fix" it by adding the
+    /// datetime shape lock — that was done once, as a blanket change to this
+    /// shared helper, and it silently broke `to_timestamp` (details on the locked
+    /// sibling below). A period series legitimately mixes precisions: `2024` is a
+    /// year period, `2024-06` a month period, `2024-06-15` a day period, and each
+    /// converts on its own freq. Locking them to the first element's shape turns
+    /// every later element into NaT.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), why no pandas rule
+    /// demands the lock here — pandas will not even accept this input:
+    /// ```text
+    ///   pd.Series(['2024','2024-06']).dt.to_timestamp()
+    ///     -> AttributeError: Can only use .dt accessor with datetimelike values
+    ///   pd.Series(pd.to_datetime([...])).dt.to_timestamp()
+    ///     -> AttributeError: 'DatetimeProperties' object has no attribute 'to_timestamp'
+    ///   pd.PeriodIndex(['2024','2024-06','2024-06-15'])
+    ///     -> ValueError: freq not specified and cannot be inferred
+    /// ```
+    /// Only a period-dtype series is valid input, and a single `PeriodIndex`
+    /// cannot hold mixed precision at all — so pandas' single-format *datetime*
+    /// inference has no counterpart on this path. Per-element `pd.Period` is what
+    /// the behaviour corresponds to, and it reads a distinct freq per element:
+    /// `2024`->Y-DEC, `2024-06`->M, `2024-06-15`->D, `2024-06-15T12:30:00`->s.
     fn try_extract_component<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> Result<Scalar, FrameError>,
+    {
+        self.try_extract_component_inner(func, name, false)
+    }
+
+    /// Fallible per-element `.dt` extraction under pandas 2.x SINGLE-FORMAT
+    /// inference: the format is guessed from the first non-null element and every
+    /// element that does not match becomes NaT.
+    ///
+    /// ⚠️ DATETIME-DOMAIN ONLY — see `try_extract_component` for why the period
+    /// conversions must not take this path.
+    fn try_extract_component_one_format<F>(
+        &self,
+        func: F,
+        name: &str,
+    ) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> Result<Scalar, FrameError>,
+    {
+        self.try_extract_component_inner(func, name, true)
+    }
+
+    fn try_extract_component_inner<F>(
+        &self,
+        func: F,
+        name: &str,
+        one_format: bool,
+    ) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Result<Scalar, FrameError>,
     {
@@ -47499,7 +47554,20 @@ impl DatetimeAccessor<'_> {
         // pandas' behaviour when guess_datetime_format cannot read the first
         // non-null element, and `infer_datetime_shape_lock` documents the
         // measurement for that case.
-        let shape_lock = infer_datetime_shape_lock(vals);
+        //
+        // ⚠️ GATED ON `one_format` (CrimsonPine 2026-08-18). The lock landed here as
+        // an UNCONDITIONAL change to this shared helper, which reached all three
+        // callers — including `to_timestamp_with_how`, a PERIOD conversion whose
+        // whole contract is that precision varies per element. On its own banked
+        // input ['2024', '2024-06', '2024-06-15', '2024-06-15T12:30:00'] the lock
+        // pins element 0's shape and NaTs the other three, which would have taken
+        // FP-P2D-246's basic/how_end/invalid_periods cases from green to red — and
+        // wrongly, since no pandas behaviour asks for it.
+        let shape_lock = if one_format {
+            infer_datetime_shape_lock(vals)
+        } else {
+            None
+        };
         let out: Vec<Scalar> = vals
             .iter()
             .map(|v| match v {
@@ -50278,7 +50346,8 @@ impl DatetimeAccessor<'_> {
     /// Convert datetime-like strings to Python-datetime-compatible strings,
     /// optionally suppressing pandas' nanosecond-loss warning.
     pub fn to_pydatetime_with_warn(&self, warn: bool) -> Result<Series, FrameError> {
-        self.try_extract_component(
+        // DATETIME domain: pandas infers one format and NaTs the rest (mhygz).
+        self.try_extract_component_one_format(
             |s| Self::normalize_to_pydatetime(s, warn),
             self.series.name(),
         )
@@ -50517,7 +50586,9 @@ impl DatetimeAccessor<'_> {
     /// removes timezone information.
     pub fn tz_convert(&self, tz: Option<&str>) -> Result<Series, FrameError> {
         let target_tz = tz.map(parse_tz_spec).transpose()?;
-        self.try_extract_component(
+        // DATETIME domain: pandas infers one format and NaTs the rest (mhygz);
+        // the NaT then propagates through the tz conversion.
+        self.try_extract_component_one_format(
             |s| {
                 if !has_tz_suffix(s) {
                     return Err(FrameError::CompatibilityRejected(
@@ -157523,6 +157594,83 @@ mod tests {
         );
     }
 
+    /// The one-format lock is DATETIME-ONLY: `to_timestamp` must stay per-element.
+    ///
+    /// ⚠️ REGRESSION WITNESS for br-frankenpandas-mhygz. The lock was first added as
+    /// an unconditional change to the shared `try_extract_component` helper, which
+    /// reached all three of its callers. Two of them (`to_pydatetime`, `tz_convert`)
+    /// genuinely parse datetimes and want it. The third, `to_timestamp_with_how`,
+    /// converts PERIOD-like strings, where varying precision is the entire contract —
+    /// `2024` is a year, `2024-06` a month, `2024-06-15` a day. Locking to element 0's
+    /// shape NaTs every later element.
+    ///
+    /// The input below is FP-P2D-246 `series_dt_to_timestamp_basic_strict` verbatim,
+    /// so this test fails in the same motion as that fixture rather than after it.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), establishing that no
+    /// pandas rule wants the lock here — pandas rejects the input outright:
+    /// ```text
+    ///   pd.Series(['2024','2024-06']).dt.to_timestamp()
+    ///     -> AttributeError: Can only use .dt accessor with datetimelike values
+    ///   pd.PeriodIndex(['2024','2024-06','2024-06-15'])
+    ///     -> ValueError: freq not specified and cannot be inferred
+    ///   per-element pd.Period: '2024'->Y-DEC  '2024-06'->M  '2024-06-15'->D
+    /// ```
+    /// A single PeriodIndex cannot hold mixed precision at all, so pandas'
+    /// single-format DATETIME inference has no counterpart on this path.
+    #[test]
+    fn to_timestamp_stays_per_element_while_to_pydatetime_locks_mhygz() {
+        let periods = Series::from_values(
+            "periods",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("2024".to_string()),
+                Scalar::Utf8("2024-06".to_string()),
+                Scalar::Utf8("2024-06-15".to_string()),
+                Scalar::Utf8("2024-06-15T12:30:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let got = periods.dt().to_timestamp().unwrap();
+        // Every element converts on its OWN freq. If the lock ever leaks back onto
+        // this path, indices 1..3 become Null(NaN) and these four assertions are the
+        // first thing to fail.
+        assert_eq!(
+            got.column().values()[0],
+            Scalar::Utf8("2024-01-01 00:00:00".to_string())
+        );
+        assert_eq!(
+            got.column().values()[1],
+            Scalar::Utf8("2024-06-01 00:00:00".to_string())
+        );
+        assert_eq!(
+            got.column().values()[2],
+            Scalar::Utf8("2024-06-15 00:00:00".to_string())
+        );
+        assert_eq!(
+            got.column().values()[3],
+            Scalar::Utf8("2024-06-15T12:30:00".to_string())
+        );
+
+        // THE CONTRAST, same shape of input through the LOCKED sibling: a date-only
+        // element after a time-carrying one is NaT, exactly as pandas coerces it.
+        let datetimes = Series::from_values(
+            "datetimes",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00.123456789".to_string()),
+                Scalar::Utf8("2024-01-16".to_string()),
+            ],
+        )
+        .unwrap();
+        let locked = datetimes.dt().to_pydatetime_with_warn(false).unwrap();
+        assert_eq!(
+            locked.column().values()[0],
+            Scalar::Utf8("2024-01-15 10:30:00.123456".to_string())
+        );
+        assert_eq!(locked.column().values()[1], Scalar::Null(NullKind::NaN));
+    }
+
     #[test]
     fn test_dt_to_timestamp_rejects_malformed_periods() {
         let s = Series::from_values(
@@ -157578,18 +157726,30 @@ mod tests {
         )
         .unwrap();
         let result = s.dt().to_pydatetime_with_warn(false).unwrap();
+        // ⚠️ ELEMENTS 1 AND 2 ARE NaT, AND USED TO BE VALUES HERE
+        // (br-frankenpandas-mhygz). This test pinned pandas' PRE-2.0 per-element
+        // leniency. pandas 2.x guesses ONE format from the first non-null element
+        // and coerces everything that does not match it.
+        //
+        // MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), this exact list:
+        // ```text
+        //   guess_datetime_format('2024-01-15 10:30:00.123456789')
+        //     -> '%Y-%m-%d %H:%M:%S.%f'
+        //   pd.to_datetime(vals, errors='coerce') ->
+        //     [Timestamp('2024-01-15 10:30:00.123456789'),   matches
+        //      NaT,        'T' separator AND a +05:30 offset — different format
+        //      NaT,        date-only, no time part at all
+        //      Timestamp('2024-01-15 10:30:00.500000'),      matches
+        //      NaT]        unparseable
+        //   .dt.to_pydatetime() then truncates the survivors to microseconds.
+        // ```
+        // Elements 0 and 3 still exercise what this test is named for.
         assert_eq!(
             result.column().values()[0],
             Scalar::Utf8("2024-01-15 10:30:00.123456".to_string())
         );
-        assert_eq!(
-            result.column().values()[1],
-            Scalar::Utf8("2024-01-15 10:30:00.987654+05:30".to_string())
-        );
-        assert_eq!(
-            result.column().values()[2],
-            Scalar::Utf8("2024-01-16 00:00:00".to_string())
-        );
+        assert_eq!(result.column().values()[1], Scalar::Null(NullKind::NaN));
+        assert_eq!(result.column().values()[2], Scalar::Null(NullKind::NaN));
         assert_eq!(
             result.column().values()[3],
             Scalar::Utf8("2024-01-15 10:30:00.500000".to_string())
