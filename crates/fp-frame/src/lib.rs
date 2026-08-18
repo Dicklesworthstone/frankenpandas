@@ -22347,6 +22347,19 @@ impl Series {
     ///
     /// Matches `series.to_list()`.
     pub fn to_list(&self) -> Vec<Scalar> {
+        // ⚠️ A CATEGORICAL COLUMN HOLDS CODES. MEASURED, live pandas 2.2.3:
+        //
+        //   c = pd.Categorical(['x', 'y', 'x'])
+        //   list(c.codes)          -> [0, 1, 0]
+        //   pd.Series(c).tolist()  -> ['x', 'y', 'x']
+        //   pd.Series(pd.Categorical(['a', None, 'b'])).tolist()
+        //                          -> ['a', nan, 'b']
+        //
+        // Same trap as `astype` (5821dc846), and `tolist` delegates here so both
+        // spellings are covered by this one guard.
+        if let Some(categorical) = self.cat() {
+            return categorical.resolved_values();
+        }
         self.column.values().to_vec()
     }
 
@@ -42605,8 +42618,22 @@ impl CategoricalAccessor<'_> {
     /// It was `Null(NullKind::Null)`, which is a supplied-`None` marker and
     /// belongs to Rule 2. (br-frankenpandas-nywa8)
     pub fn to_values(&self) -> Result<Series, FrameError> {
-        let values: Vec<Scalar> = self
-            .series
+        let values = self.resolved_values();
+
+        // Per br-frankenpandas-pkdl5: pandas Categorical materialize preserves
+        // source axis name.
+        let index = self.series.index.clone();
+        let column = Column::from_values(values)?;
+        Series::new(self.series.name.clone(), index, column)
+    }
+
+    /// The category value each code names, in row order.
+    ///
+    /// The one place codes become values. Infallible, so callers that cannot
+    /// return a `Result` (`Series::to_list`) reuse it instead of growing a
+    /// second copy of the missing-code rule.
+    fn resolved_values(&self) -> Vec<Scalar> {
+        self.series
             .column
             .values()
             .iter()
@@ -42620,13 +42647,7 @@ impl CategoricalAccessor<'_> {
                     Scalar::Null(NullKind::NaN)
                 }
             })
-            .collect();
-
-        // Per br-frankenpandas-pkdl5: pandas Categorical materialize preserves
-        // source axis name.
-        let index = self.series.index.clone();
-        let column = Column::from_values(values)?;
-        Series::new(self.series.name.clone(), index, column)
+            .collect()
     }
 
     /// Map category values through a given function.
@@ -48628,6 +48649,12 @@ impl DatetimeAccessor<'_> {
                     .next()
                     .and_then(|t| t.split('-').next())
                     .and_then(|t| t.split('Z').next())
+                    // Lowercase 'z' is split off as well, so the time still parses
+                    // (br-frankenpandas-t2n6i). It used to stay attached, `parse_time`
+                    // failed on it and the element became Null — a MISSING value where
+                    // pandas has a time. A time literal holds only digits, ':' and '.',
+                    // so splitting on 'z' cannot cut a real time short.
+                    .and_then(|t| t.split('z').next())
                     .unwrap_or(time_with_tz);
                 if Self::parse_time(time_part).is_some() {
                     let timezone = &time_with_tz[time_part.len()..];
@@ -48663,7 +48690,19 @@ impl DatetimeAccessor<'_> {
                     //   to_datetime('2024-01-15T10:30:00z') -> NAIVE Timestamp
                     // so `eq_ignore_ascii_case` here would wrongly promote the
                     // lowercase form to +00:00. Same trap as the ms/MS freq alias.
-                    let timezone = if timezone == "Z" { "+00:00" } else { timezone };
+                    // MEASURED, live pandas 2.2.3, four spellings across both
+                    // separators — the CASE carries the whole meaning:
+                    //   T10:30:00Z     -> tz=UTC,  timetz 10:30:00+00:00
+                    //   T10:30:00z     -> tz=None, timetz 10:30:00
+                    //   ' 10:30:00z'   -> tz=None, timetz 10:30:00
+                    //   T10:30:00.500z -> tz=None, timetz 10:30:00.500000
+                    // Uppercase is UTC; lowercase is consumed and yields a NAIVE
+                    // timestamp, so it renders with NO offset rather than +00:00.
+                    let timezone = match timezone {
+                        "Z" => "+00:00",
+                        "z" => "",
+                        other => other,
+                    };
                     return Scalar::Utf8(format!(
                         "{}{}",
                         Self::trim_zero_time_fraction(time_part),
@@ -157102,16 +157141,14 @@ mod tests {
             one("2024-01-15T10:30:00Z"),
             Scalar::Utf8("10:30:00+00:00".into())
         );
-        // ⚠️ LOWERCASE 'z' IS DELIBERATELY NOT ASSERTED HERE, and the reason is a
-        // second divergence rather than an oversight. MEASURED, live pandas 2.2.3:
-        //   to_datetime('2024-01-15T10:30:00z') -> NAIVE Timestamp, timetz '10:30:00'
-        // i.e. pandas ignores the lowercase suffix and still yields a TIME.
-        // FrankenPandas' `timetz` splits `time_part` on an uppercase 'Z' only, so
-        // "10:30:00z" reaches `parse_time` with the letter attached, fails, and the
-        // element becomes Null — a missing value where pandas has a time. Asserting
-        // FP's Null would bank a divergence as the contract (the laundering pattern
-        // nvnvr documents), and asserting pandas' '10:30:00' would fail until the
-        // parser accepts the suffix. Filed rather than pinned either way.
+        // ⚠️ LOWERCASE 'z' IS A DIFFERENT ANSWER, NOT THE SAME ONE CASE-FOLDED.
+        // pandas consumes it and yields a NAIVE timestamp, so the time renders with
+        // NO offset. The previous revision of this test could not assert this row:
+        // FrankenPandas left the letter attached to the time, `parse_time` failed and
+        // the element came back Null — a missing value where pandas has a time.
+        assert_eq!(one("2024-01-15T10:30:00z"), Scalar::Utf8("10:30:00".into()));
+        // space separator reaches the same suffix logic
+        assert_eq!(one("2024-01-15 10:30:00z"), Scalar::Utf8("10:30:00".into()));
     }
 
     #[test]
@@ -161541,6 +161578,55 @@ mod tests {
         assert_eq!(cast.values()[0], Scalar::Utf8("a".to_owned()));
         assert_eq!(cast.values()[2], Scalar::Utf8("b".to_owned()));
         assert!(cast.values()[1].is_missing());
+    }
+
+    /// `to_list`/`tolist` returned the CODES for a categorical. Values from
+    /// live pandas 2.2.3: `pd.Series(pd.Categorical(['x','y','x'])).tolist()`
+    /// is `['x','y','x']` while `list(c.codes)` is `[0, 1, 0]`.
+    #[test]
+    fn to_list_on_a_categorical_returns_categories_not_codes() {
+        let labels = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("x".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        // The codes are what the column actually holds.
+        assert_eq!(labels.column().values()[0], Scalar::Int64(0));
+        assert_eq!(labels.column().values()[1], Scalar::Int64(1));
+        // ...and the list is the labels, through both spellings.
+        let want = vec![
+            Scalar::Utf8("x".to_owned()),
+            Scalar::Utf8("y".to_owned()),
+            Scalar::Utf8("x".to_owned()),
+        ];
+        assert_eq!(labels.to_list(), want);
+        assert_eq!(labels.tolist(), want);
+
+        // A missing code decodes to NaN, not to -1. pandas: ['a', nan, 'b'].
+        let gapped = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("b".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        let got = gapped.to_list();
+        assert_eq!(got[0], Scalar::Utf8("a".to_owned()));
+        assert!(got[1].is_missing());
+        assert_eq!(got[2], Scalar::Utf8("b".to_owned()));
+
+        // A non-categorical Series is untouched by the guard.
+        let plain = Series::from_values("p", vec![IndexLabel::Int64(0)], vec![Scalar::Int64(7)])
+            .unwrap();
+        assert_eq!(plain.to_list(), vec![Scalar::Int64(7)]);
     }
 
     #[test]
