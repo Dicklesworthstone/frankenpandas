@@ -78313,6 +78313,156 @@ impl DataFrame {
     }
 
     /// Internal: extract a named column as a Series.
+    /// Filter rows with a boolean expression. Matches the supported subset of
+    /// `pd.DataFrame.query(expr)`.
+    ///
+    /// MEASURED, pandas 2.2.3, on `{a: [1,5,3,NaN], b: ['x','y','x','z']}`:
+    /// ```text
+    ///   "a > 2"                 -> rows 1, 2      (NaN excluded, as a comparison mask)
+    ///   "a >= 3 and b == \"x\"" -> row 2
+    ///   "b != \"x\""            -> rows 1, 3
+    ///   "a < 5 or b == \"z\""   -> rows 0, 2, 3
+    /// ```
+    ///
+    /// ⚠️ THE SUPPORTED SUBSET IS DELIBERATELY NARROW AND EVERYTHING ELSE IS
+    /// REFUSED, not approximated. Accepted: `column OP literal` where OP is one of
+    /// `== != >= <= > <`, joined by ALL `and` or ALL `or`.
+    ///
+    /// MIXING `and` WITH `or` IN ONE EXPRESSION IS REJECTED. Python binds `and`
+    /// tighter than `or`, so `a < 5 or b == "z" and c == 1` means
+    /// `or(a<5, and(b,c))`. A left-to-right fold would compute `and(or(a,b),c)` —
+    /// a DIFFERENT set of rows, returned with no error. Refusing is the only
+    /// honest option until a real precedence-aware parser exists; a wrong row set
+    /// is indistinguishable from a right one at the call site.
+    ///
+    /// Parentheses, function calls, arithmetic, `in`/`not`, column-to-column
+    /// comparison and `@variables` are all refused for the same reason.
+    ///
+    /// Comparison and missing-value behaviour is inherited from
+    /// [`Series::compare_scalar`] and [`Self::filter_rows`] rather than
+    /// reimplemented, so `query` cannot drift from `df[df["a"] > 2]`.
+    pub fn query(&self, expr: &str) -> Result<Self, FrameError> {
+        let mask = self.query_mask(expr)?;
+        self.filter_rows(&mask)
+    }
+
+    /// Build the boolean mask for [`Self::query`]. Separated so the parse can be
+    /// tested without also exercising row selection.
+    fn query_mask(&self, expr: &str) -> Result<Series, FrameError> {
+        let trimmed = expr.trim();
+        if trimmed.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "query: empty expression".to_owned(),
+            ));
+        }
+        for unsupported in ['(', ')', '@', '~', '+', '*', '/', '%'] {
+            if trimmed.contains(unsupported) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "query: unsupported syntax '{unsupported}' — this subset accepts \
+                     `column OP literal` joined by all-`and` or all-`or`"
+                )));
+            }
+        }
+
+        let has_and = trimmed.contains(" and ");
+        let has_or = trimmed.contains(" or ");
+        if has_and && has_or {
+            return Err(FrameError::CompatibilityRejected(
+                "query: mixing `and` with `or` is not supported — Python binds `and` \
+                 tighter, and evaluating left-to-right would silently select a \
+                 different set of rows"
+                    .to_owned(),
+            ));
+        }
+
+        let (parts, combine_with_and): (Vec<&str>, bool) = if has_and {
+            (trimmed.split(" and ").collect(), true)
+        } else if has_or {
+            (trimmed.split(" or ").collect(), false)
+        } else {
+            (vec![trimmed], true)
+        };
+
+        let mut mask: Option<Series> = None;
+        for part in parts {
+            let clause = self.query_clause_mask(part)?;
+            mask = Some(match mask {
+                None => clause,
+                Some(acc) => {
+                    if combine_with_and {
+                        acc.and(&clause)?
+                    } else {
+                        acc.or(&clause)?
+                    }
+                }
+            });
+        }
+        mask.ok_or_else(|| {
+            FrameError::CompatibilityRejected("query: no clauses parsed".to_owned())
+        })
+    }
+
+    /// One `column OP literal` clause.
+    fn query_clause_mask(&self, clause: &str) -> Result<Series, FrameError> {
+        // Two-character operators MUST be tested first: `>` would otherwise match
+        // inside `>=` and leave a stray `=` in the literal.
+        const OPS: [(&str, ComparisonOp); 6] = [
+            ("==", ComparisonOp::Eq),
+            ("!=", ComparisonOp::Ne),
+            (">=", ComparisonOp::Ge),
+            ("<=", ComparisonOp::Le),
+            (">", ComparisonOp::Gt),
+            ("<", ComparisonOp::Lt),
+        ];
+        let clause = clause.trim();
+        for (token, op) in OPS {
+            let Some(pos) = clause.find(token) else {
+                continue;
+            };
+            let column = clause[..pos].trim();
+            let literal = clause[pos + token.len()..].trim();
+            if column.is_empty() || literal.is_empty() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "query: malformed clause '{clause}'"
+                )));
+            }
+            let series = self.column_as_series(column)?;
+            let scalar = Self::query_literal(literal)?;
+            return series.compare_scalar(&scalar, op);
+        }
+        Err(FrameError::CompatibilityRejected(format!(
+            "query: no comparison operator in '{clause}' — expected one of == != >= <= > <"
+        )))
+    }
+
+    /// Literal on the right of a query comparison.
+    ///
+    /// A quoted literal is ALWAYS a string, even when it looks numeric: `a == "1"`
+    /// must not silently become `a == 1`, because those select different rows on a
+    /// mixed column.
+    fn query_literal(text: &str) -> Result<Scalar, FrameError> {
+        let bytes = text.as_bytes();
+        if bytes.len() >= 2
+            && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+                || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+        {
+            return Ok(Scalar::Utf8(text[1..text.len() - 1].to_owned()));
+        }
+        if text == "True" || text == "False" {
+            return Ok(Scalar::Bool(text == "True"));
+        }
+        if let Ok(v) = text.parse::<i64>() {
+            return Ok(Scalar::Int64(v));
+        }
+        if let Ok(v) = text.parse::<f64>() {
+            return Ok(Scalar::Float64(v));
+        }
+        Err(FrameError::CompatibilityRejected(format!(
+            "query: unsupported literal '{text}' — expected a quoted string, an \
+             integer, a float, or True/False"
+        )))
+    }
+
     fn column_as_series(&self, name: &str) -> Result<Series, FrameError> {
         let col = self.column(name).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column not found: {name}"))
