@@ -29917,6 +29917,17 @@ impl Ewm<'_> {
                 "sum" => self.sum()?,
                 "std" => self.std()?,
                 "var" => self.var()?,
+                // br-frankenpandas-groupby-idxmax-idxmin, fifth surface. Ewm::corr
+                // and Ewm::cov already exist and were refused by name; the struct
+                // holds `series: &'a Series`, so the string form pairs the window
+                // with itself exactly as rolling/expanding do.
+                // MEASURED, live pandas 2.2.3, ewm(alpha=0.5) over [3,1,2,5,4]:
+                //     e.agg('corr').equals(e.corr(s))   True
+                //     e.agg('cov').equals(e.cov(s))     True
+                // compared with .equals(), which is NaN-aware — a list comparison
+                // reads False on any window result because NaN != NaN.
+                "corr" => self.corr(self.series)?,
+                "cov" => self.cov(self.series)?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "ewm.agg: unsupported function '{func}' (supported: mean, sum, std, var)"
@@ -31869,6 +31880,21 @@ impl Resample<'_> {
             "skew" => self.skew(),
             "kurt" => self.kurt(),
             "kurtosis" => self.kurtosis(),
+            // br-frankenpandas-groupby-idxmax-idxmin, sixth surface. asfreq,
+            // nearest and quantile all EXIST here and were refused by name.
+            // MEASURED, live pandas 2.2.3, resample('2D') over a 5-day series,
+            // each `r.agg(name).equals(r.<name>(default))`: quantile(0.5) True,
+            // asfreq() True, nearest() True.
+            //
+            // ⚠️ ARM SHAPE: this dispatch's arms ARE the Result (`"sum" => self.sum(),`)
+            // while DataFrameResample's bind a local and apply `?`. Different receiver,
+            // different `?`, different indent — one shared patch would be wrong in both.
+            //
+            // `ohlc` is left out HERE only: Resample::ohlc returns a DataFrame while
+            // these arms yield a Series. It IS routed on the DataFrame side below.
+            "asfreq" => self.asfreq(),
+            "nearest" => self.nearest(),
+            "quantile" => self.quantile(0.5),
             other => Err(FrameError::CompatibilityRejected(format!(
                 "resample agg: unsupported function '{other}'"
             ))),
@@ -33382,6 +33408,13 @@ impl DataFrameResample<'_> {
                     "nunique" => resample.nunique()?,
                     "first" => resample.first()?,
                     "last" => resample.last()?,
+                    // br-frankenpandas-groupby-idxmax-idxmin, sixth surface,
+                    // DataFrame side. Same names, and `ohlc` fits here too because
+                    // every arm in this dispatch yields a DataFrame.
+                    "asfreq" => resample.asfreq()?,
+                    "nearest" => resample.nearest()?,
+                    "quantile" => resample.quantile(0.5)?,
+                    "ohlc" => resample.ohlc()?,
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "resample agg: unsupported function '{func}'"
