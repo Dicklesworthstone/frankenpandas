@@ -46587,10 +46587,43 @@ impl DatetimeAccessor<'_> {
     {
         self.validate_datetime_dtype()?;
         let vals = self.series.column().values();
+        // br-frankenpandas-mhygz: take the SAME one-format lock the infallible
+        // sibling `extract_component_raw` has taken since br-frankenpandas-hzayc.
+        // This function was missed by that pass, and it is the one `to_pydatetime`
+        // uses — so `.dt.to_pydatetime()` answered for rows pandas turns into NaT.
+        //
+        // MEASURED, live pandas 2.2.3, on fp_p2d_421's own input
+        //   ['2024-01-15 10:30:00.123456789', '2024-01-16',
+        //    '2024-01-15 10:30:00.500000000', 'not a date']
+        //   pd.to_datetime(..., errors='coerce') -> [ts, NaT, ts, NaT]
+        // Element 1 is DATE-ONLY where the format guessed from element 0 carries a
+        // time part, so pandas refuses it. FrankenPandas parsed each element on its
+        // own terms and returned Utf8("2024-01-16 00:00:00") — MORE LENIENT, and
+        // silently so.
+        //
+        // The shape signature already distinguishes these: 'Y-N-N N:N:N.N' for
+        // element 0 against 'Y-N-N' for element 1. The tz-aware sibling fixture
+        // differs by SEPARATOR ('T' versus ' '), which the signature also keeps
+        // because a non-alphanumeric ASCII byte is emitted verbatim.
+        //
+        // `None` from the inference is deliberately permissive, not a gap: it is
+        // pandas' behaviour when guess_datetime_format cannot read the first
+        // non-null element, and `infer_datetime_shape_lock` documents the
+        // measurement for that case.
+        let shape_lock = infer_datetime_shape_lock(vals);
         let out: Vec<Scalar> = vals
             .iter()
             .map(|v| match v {
-                Scalar::Utf8(s) => func(s),
+                Scalar::Utf8(s) => {
+                    if shape_lock
+                        .as_deref()
+                        .is_some_and(|lock| !datetime_shape_matches(s, lock))
+                    {
+                        Ok(Scalar::Null(NullKind::NaN))
+                    } else {
+                        func(s)
+                    }
+                }
                 _ if v.is_missing() => Ok(Scalar::Null(NullKind::NaN)),
                 _ => Ok(Scalar::Null(NullKind::NaN)),
             })
@@ -48819,6 +48852,106 @@ impl DatetimeAccessor<'_> {
         let index = self.series.index().clone();
         let column = Column::from_values(out)?;
         Series::new(self.series.name(), index, column)
+    }
+
+    /// Shared body for the four `pd.Series.dt.<component>` accessors on a
+    /// Timedelta column. `component` is one of the `fp_types::Timedelta`
+    /// component helpers.
+    ///
+    /// ⚠️ NaT IS TESTED HERE, BEFORE `component` is ever called.
+    /// `Timedelta::days(NAT)` returns `0` behind a comment asserting pandas does
+    /// the same; pandas returns `nan`
+    /// (br-frankenpandas-timedelta-nat-days-returns-zero-406ni). Routing NaT to
+    /// `Null` first is what keeps that false premise off this path, and it is
+    /// why the helper's own NaT branch stays unreachable from the product.
+    fn timedelta_component<F>(&self, component: F) -> Result<Series, FrameError>
+    where
+        F: Fn(i64) -> i64,
+    {
+        // Typed all-valid-or-not Timedelta64 fast path: read the raw &[i64]
+        // nanos directly, skipping Scalar materialization. Unlike
+        // `total_seconds` this does NOT bail on NaT, because the component
+        // accessors have a defined answer for it (missing) rather than needing
+        // the Scalar path's fallback.
+        if let Some(nanos) = self.series.column().as_timedelta64_slice() {
+            let out: Vec<Scalar> = nanos
+                .iter()
+                .map(|&n| {
+                    if n == fp_types::Timedelta::NAT {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(component(n) as f64)
+                    }
+                })
+                .collect();
+            let index = self.series.index().clone();
+            let column = Column::from_values(out)?;
+            return Series::new(self.series.name(), index, column);
+        }
+
+        let vals = self.series.column().values();
+        let mut out = Vec::with_capacity(vals.len());
+        for v in vals {
+            match v {
+                Scalar::Timedelta64(nanos) if *nanos != fp_types::Timedelta::NAT => {
+                    out.push(Scalar::Float64(component(*nanos) as f64));
+                }
+                Scalar::Utf8(text) => match fp_types::Timedelta::parse(text) {
+                    Ok(nanos) if nanos != fp_types::Timedelta::NAT => {
+                        out.push(Scalar::Float64(component(nanos) as f64));
+                    }
+                    _ => out.push(Scalar::Null(NullKind::NaN)),
+                },
+                _ => out.push(Scalar::Null(NullKind::NaN)),
+            }
+        }
+
+        let index = self.series.index().clone();
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
+    }
+
+    /// Whole days of each Timedelta. Matches `pd.Series.dt.days`.
+    ///
+    /// MEASURED, pandas 2.2.3, `pd.to_timedelta([1, None, -1, 90061.5], unit='s')`:
+    ///
+    /// ```text
+    ///   .dt.days         -> [0.0, nan, -1.0, 1.0]        dtype float64
+    ///   .dt.seconds      -> [1.0, nan, 86399.0, 3661.0]
+    ///   .dt.microseconds -> [0.0, nan, 0.0, 500000.0]
+    ///   .dt.nanoseconds  -> [0.0, nan, 0.0, 0.0]
+    /// ```
+    ///
+    /// **FLOAT64, NOT Int64, AND THAT IS NOT A CHOICE.** NaT must be
+    /// representable in the output, and numpy `int64` cannot hold a missing
+    /// value, so pandas promotes the whole component column — the same
+    /// dtype-level rule measured across seven producers for the
+    /// br-frankenpandas-09ygw / b8n0q cluster.
+    ///
+    /// The negative case is the one an implementation gets wrong: `-1s` is
+    /// `days == -1` and `seconds == 86399`, not `0`/`-1`, because the split is
+    /// EUCLIDEAN. `fp_types::Timedelta` already uses `div_euclid`/`rem_euclid`,
+    /// so this delegates rather than re-deriving it.
+    pub fn days(&self) -> Result<Series, FrameError> {
+        self.timedelta_component(fp_types::Timedelta::days)
+    }
+
+    /// Seconds within the day (0..=86399). Matches `pd.Series.dt.seconds`.
+    /// See [`Self::days`] for the measured table and the float64 rationale.
+    pub fn seconds(&self) -> Result<Series, FrameError> {
+        self.timedelta_component(fp_types::Timedelta::seconds)
+    }
+
+    /// Microseconds within the second (0..=999_999). Matches
+    /// `pd.Series.dt.microseconds`. See [`Self::days`].
+    pub fn microseconds(&self) -> Result<Series, FrameError> {
+        self.timedelta_component(fp_types::Timedelta::microseconds)
+    }
+
+    /// Nanoseconds within the microsecond (0..=999). Matches
+    /// `pd.Series.dt.nanoseconds`. See [`Self::days`].
+    pub fn nanoseconds(&self) -> Result<Series, FrameError> {
+        self.timedelta_component(fp_types::Timedelta::nanoseconds)
     }
 
     fn last_day_of_month(year: i32, month: u32) -> Option<u32> {

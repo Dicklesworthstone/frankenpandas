@@ -1919,7 +1919,14 @@ impl Timedelta {
     #[must_use]
     pub fn days(nanos: i64) -> i64 {
         if nanos == Self::NAT {
-            return 0; // pandas returns 0 for NaT.days (no error)
+            // ⚠️ pandas returns **nan** here, not 0 — measured, pd.NaT.days is
+            // nan (br-frankenpandas-timedelta-nat-days-returns-zero-406ni; the
+            // previous comment asserted the opposite). This `i64` signature
+            // cannot express that, so EVERY caller must test NAT before calling
+            // and emit a missing value. `DatetimeAccessor::timedelta_component`
+            // does exactly that, which is why this branch is unreachable from
+            // the product and reached only by the unit tests below.
+            return 0;
         }
         // FLOOR division like pandas: pd.Timedelta(-1,'s').days == -1, not 0.
         nanos.div_euclid(Self::NANOS_PER_DAY)
