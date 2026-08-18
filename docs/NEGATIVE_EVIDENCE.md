@@ -37567,3 +37567,42 @@ operation errored, the correct outcome for an error-expectation packet. Their ru
 
 Every one is the status channel answering a different question than the one asked. **Classify by the
 field that encodes the semantics, not by the one that encodes "did the process end badly".**
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-l4vzc) — AUDITING A ROW I BANKED MYSELF: `df_transpose_materialize` reads ONE column of ten, so its name invites a reading the measurement does not support, and l4vzc's 1500x claim covers an operation NO LANE MEASURES
+
+**NO NEW MEASUREMENT.** Source reading of two lanes and one bead, taken while the other pane held the
+CPU for its own run. This audits `df_transpose_materialize @10k` **which I banked earlier today at
+92.649x** — nobody asked me to re-examine it; the prompt was noticing that l4vzc claims a 1500x LOSS
+on transpose while my banked row claims a 92x WIN.
+
+**BOTH ARE TRUE, BECAUSE THEY MEASURE DIFFERENT OPERATIONS.** The lanes mirror each other honestly —
+pandas does `t = df.T; col = t.columns[0]; len(t[col].to_numpy())`, fp-bench does the same via
+`column_name_at(0)` then `column(...).values()`, and the Rust comment says plainly that this
+"materializes ONE output column". At `dataframe_ops` sizes the frame is **rows x 10**, so at 100k the
+TRANSPOSED frame is 10 rows x 100,000 columns. **Both engines materialize one column of length 10.**
+
+That is why FP's arm is 2.00us at 100k: it is not transposing 100k values, it is answering
+"transpose, then give me ten numbers". FP's lazy transpose skips building 100,000 column labels;
+pandas builds the transposed BlockManager and its 100k-element column index. **The win is real for
+that operation and I am not withdrawing the row.**
+
+⚠️ **BUT THE NAME OVERSELLS IT, AND I BANKED IT WITHOUT NOTICING.** A reader seeing
+`df_transpose_materialize 92.649x` in the standing baseline will reasonably conclude FrankenPandas
+materializes transposes 92x faster than pandas. **l4vzc says the opposite for the operation that
+name suggests:** measured 2026-06-21, `transpose` at 1M was fp 80ms against pandas 52us, **~1500x
+SLOWER**, precisely because pandas `.T` returns an O(1) VIEW of its 2D BlockManager while FP must
+build n separate columns. My row does not contradict that; it never crosses the same boundary.
+
+**AND NO LANE COVERS THE OPERATION l4vzc IS ABOUT.** The harness has exactly two transpose lanes —
+`df_transpose` and `df_transpose_materialize` — and both touch a single column. **There is no lane
+that materializes the WHOLE transposed frame**, which is the case where FP's columnar layout is
+structurally disadvantaged and where the 1500x was measured. That is the same "no lane, so the
+residual has never been compared to the incumbent" shape the other pane found for grouped rolling,
+and it means **l4vzc's central claim has not been re-tested since 2026-06-21 on any current
+instrument.**
+
+**WHAT I AM NOT DOING.** Not unbanking the row: it is a correct measurement of a real operation, all
+clauses true, best-vs-best agreeing. Not closing or reframing l4vzc: its premise is untested rather
+than refuted, and testing it needs a lane that does not exist. **What I am doing is recording that a
+banked 92x row and an open 1500x-loss bead describe the same op name and do not contradict each
+other**, so nobody reconciles them by assuming one is stale — which is exactly what I nearly did.
