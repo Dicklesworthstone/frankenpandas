@@ -2350,6 +2350,15 @@ pub struct PacketFixture {
     /// byte-unchanged. br-frankenpandas-eay9h.
     #[serde(default)]
     pub pivot_dropna: Option<bool>,
+    /// `pivot_table(sort=...)`. Sibling of `pivot_dropna` and the last of the two
+    /// pandas defaults this oracle overrode with no way to ask for them. `None`
+    /// keeps the historical `sort=False`. MEASURED before adding it: of the eight
+    /// banked pivot_table fixtures, exactly ONE changes under pandas' default —
+    /// `fp_p2d_127_dataframe_pivot_table_multi_values_strict` — six are
+    /// byte-identical and one errors for an unrelated reason.
+    /// br-frankenpandas-eay9h.
+    #[serde(default)]
+    pub pivot_sort: Option<bool>,
     #[serde(default)]
     pub pivot_margins_name: Option<String>,
     #[serde(default)]
@@ -3894,6 +3903,8 @@ struct OracleRequest {
     pivot_margins: Option<bool>,
     #[serde(default)]
     pivot_dropna: Option<bool>,
+    #[serde(default)]
+    pivot_sort: Option<bool>,
     #[serde(default)]
     pivot_margins_name: Option<String>,
     #[serde(default)]
@@ -13574,6 +13585,7 @@ fn capture_live_oracle_expected(
         pivot_aggfunc: fixture.pivot_aggfunc.clone(),
         pivot_margins: fixture.pivot_margins,
         pivot_dropna: fixture.pivot_dropna,
+        pivot_sort: fixture.pivot_sort,
         pivot_margins_name: fixture.pivot_margins_name.clone(),
         dummy_columns: fixture.dummy_columns.clone(),
         crosstab_normalize: fixture.crosstab_normalize.clone(),

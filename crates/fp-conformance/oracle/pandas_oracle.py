@@ -4622,6 +4622,21 @@ def _pivot_dropna(payload: dict[str, Any]) -> bool:
     return raw
 
 
+def _pivot_sort(payload: dict[str, Any]) -> bool:
+    """`pivot_table(sort=...)`, defaulting to the historical override.
+
+    br-frankenpandas-eay9h, sibling of `_pivot_dropna`. Returns False when absent
+    so every banked fixture is byte-unchanged; a fixture that explicitly asks for
+    True gets pandas' documented default.
+    """
+    raw = payload.get("pivot_sort")
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise OracleError("dataframe_pivot_table pivot_sort must be a boolean")
+    return raw
+
+
 def op_dataframe_pivot_table(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -4640,7 +4655,7 @@ def op_dataframe_pivot_table(pd, payload: dict[str, Any]) -> dict[str, Any]:
         "index": index,
         "columns": columns,
         "aggfunc": aggfunc,
-        "sort": False,
+        "sort": _pivot_sort(payload),
         # DROPNA IS NOW A KNOB, DEFAULTING TO THE HISTORICAL OVERRIDE.
         # br-frankenpandas-eay9h. This was hardcoded False against pandas'
         # default of True, with no way to ask for the default — so
@@ -4651,8 +4666,16 @@ def op_dataframe_pivot_table(pd, payload: dict[str, Any]) -> dict[str, Any]:
         #   dropna=False -> index ['r1','r2',nan]   <- what this forced
         # The default stays False so all eight fixtures banked under the
         # override are byte-unchanged; only a fixture that ASKS for True moves.
-        # `sort` is still forced False and is NOT addressed here: flipping it
-        # would reorder rows for every one of those fixtures at once.
+        # `sort` IS NOW A KNOB TOO, and the estimate that used to sit here was
+        # wrong. It read: "flipping it would reorder rows for every one of those
+        # fixtures at once". MEASURED instead, by running all eight banked
+        # pivot_table fixtures through the oracle twice — as the corpus does, and
+        # with sort=True — exactly ONE moves
+        # (fp_p2d_127_dataframe_pivot_table_multi_values_strict), SIX are
+        # byte-identical, and one errors for an unrelated reason (an aggfunc pandas
+        # does not support). So the cost of adopting pandas' default here is one
+        # fixture, not eight, and eay9h's option (a) is far cheaper than the bead
+        # assumes. I wrote that estimate without measuring it; this replaces it.
         "dropna": _pivot_dropna(payload),
         "margins": bool(payload.get("pivot_margins", False)),
     }
