@@ -37606,3 +37606,28 @@ clauses true, best-vs-best agreeing. Not closing or reframing l4vzc: its premise
 than refuted, and testing it needs a lane that does not exist. **What I am doing is recording that a
 banked 92x row and an open 1500x-loss bead describe the same op name and do not contradict each
 other**, so nobody reconciles them by assuming one is stale — which is exactly what I nearly did.
+
+**⚠️ AN OPERATING ASSUMPTION I ACTED ON WAS WRONG: BENCH ARTIFACTS ARE NOT THE DISK COST, BUILDS
+ARE.** Measured while waiting out another pane's run:
+
+    artifacts/bench     17M   over 609 rows (25 added today)  -> ~28KB per row
+    .bench-history     2.0M
+    shared target/      37G
+    my .scratch         16G   (6.8G reclaimable cargo cache + 8.5G escalated worktree)
+
+**A certified vs-pandas row costs about 28 kilobytes.** During the disk emergency earlier — /data at
+40G and falling ~5G per tick — I ran a harness pass with `--json-stdout` and NO `--output`
+specifically to avoid writing artifacts, and recorded that as the correct trade at a breached floor.
+**It was not a trade at all: the artifact would have cost 28KB against a volume losing 5,000,000KB
+per tick.** The cost of that caution was real — the row could not be banked, because
+`assemble_standing_locks.py` reads files and there was no file, so `log @1M 2.125x` had to be
+re-measured later purely to exist on disk.
+
+**THE RULE I HAD WAS "NO LARGE-ARTIFACT BENCHES", AND I APPLIED IT TO BENCHES THAT ARE NOT LARGE.**
+The instruction was sound; my mapping of it onto harness rows was not. Under disk pressure the thing
+to refuse is a BUILD — a cargo target directory is 3-6G and the shared one is 37G, five to six
+orders of magnitude above a row. Measurements are free at this scale and should not be withheld.
+
+**WHAT WOULD ACTUALLY JUSTIFY WITHHOLDING A MEASUREMENT:** CPU contention corrupting the numbers, or
+an unstable instrument making them unbankable — both of which have bitten this session and both of
+which are about VALIDITY, not disk. Disk pressure argues against building, not against measuring.
