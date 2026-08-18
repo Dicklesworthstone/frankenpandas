@@ -162020,14 +162020,12 @@ mod tests {
             Scalar::Float64(1.0)
         );
 
-        // ⚠️ ONE RESIDUAL DIVERGENCE, and it is NOT introduced here: for STRING
-        // categories the resolved column is already Utf8, so `astype(Utf8)` is a
-        // same-dtype no-op and the missing stays missing, where pandas renders
-        // the string 'nan'. That is the pre-existing behaviour of astype(Utf8)
-        // on any already-Utf8 column with nulls — pandas stringifies there too
-        // (`pd.Series(['a', None]).astype(str)` -> ['a', 'None']) — so fixing it
-        // changes every Utf8 astype, not just this path. Pinned as-is so the
-        // difference is recorded rather than discovered again.
+        // The residual divergence this test used to pin is CLOSED: `astype(Utf8)`
+        // on an already-Utf8 column no longer short-circuits when the column
+        // carries a missing value, so the categorical's NaN marker is stringified
+        // as pandas spells it. MEASURED:
+        //   pd.Series(pd.Categorical(['a', None, 'b'])).astype(str)
+        //     -> ['a', 'nan', 'b']
         let with_missing = Series::from_categorical(
             "c",
             vec![
@@ -162041,7 +162039,11 @@ mod tests {
         let cast = with_missing.astype(DType::Utf8).unwrap();
         assert_eq!(cast.values()[0], Scalar::Utf8("a".to_owned()));
         assert_eq!(cast.values()[2], Scalar::Utf8("b".to_owned()));
-        assert!(cast.values()[1].is_missing());
+        assert_eq!(
+            cast.values()[1],
+            Scalar::Utf8("nan".to_owned()),
+            "a categorical's missing is the NaN marker, which stringifies as 'nan'"
+        );
     }
 
     /// `to_list`/`tolist` returned the CODES for a categorical. Values from

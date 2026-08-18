@@ -23997,7 +23997,24 @@ impl Column {
     /// target dtype's canonical missing representation.
     pub fn astype(&self, target: DType) -> Result<Self, ColumnError> {
         if self.dtype == target {
-            return Ok(self.clone());
+            // ⚠️ EXCEPT Utf8 CARRYING A MISSING VALUE. Casting to string does not
+            // KEEP missingness — pandas STRINGIFIES it, and spells it differently
+            // per marker. MEASURED, live pandas 2.2.3:
+            //
+            //   pd.Series(['a', None]).astype(str)                  -> ['a', 'None']
+            //   pd.Series(['a', np.nan]).astype(str)                -> ['a', 'nan']
+            //   pd.Series(pd.Categorical(['a', None])).astype(str)  -> ['a', 'nan']
+            //
+            // The identity shortcut skipped all of that for a column that was
+            // ALREADY Utf8, so `astype(str)` on a string column left its nulls
+            // untouched. `scalar_to_string_for_astype` already renders each
+            // NullKind correctly (Null->"None", NaN->"nan", NaT->"NaT"), and
+            // `normalize_missing_for_dtype` preserves NaN and NaT verbatim, so
+            // falling through to the cast produces pandas' spelling without any
+            // new mapping. Every other same-dtype cast still short-circuits.
+            if target != DType::Utf8 || !self.has_nulls() {
+                return Ok(self.clone());
+            }
         }
         // Typed fast paths for the two ubiquitous all-valid numeric casts:
         //   Int64 -> Float64 is exactly `x as f64` (the cast_scalar branch), and
@@ -51209,6 +51226,48 @@ mod tests {
                     Scalar::Utf8("1.0".to_owned()),
                     Scalar::Utf8("nan".to_owned()),
                 ]
+            );
+        }
+
+        /// `astype(str)` on an already-Utf8 column must STRINGIFY its missing
+        /// values, not keep them. The identity shortcut used to skip that.
+        /// MEASURED, live pandas 2.2.3 — the spelling follows the MARKER:
+        /// `pd.Series(['a', None]).astype(str)` is `['a', 'None']` and
+        /// `pd.Series(['a', np.nan]).astype(str)` is `['a', 'nan']`.
+        #[test]
+        fn astype_utf8_to_utf8_stringifies_missing_per_null_kind() {
+            let none_marked = Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("a".into()), Scalar::Null(NullKind::Null)],
+            )
+            .expect("utf8 col");
+            assert_eq!(
+                none_marked.astype(DType::Utf8).expect("astype").values(),
+                &[
+                    Scalar::Utf8("a".to_owned()),
+                    Scalar::Utf8("None".to_owned()),
+                ]
+            );
+
+            let nan_marked = Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("a".into()), Scalar::Null(NullKind::NaN)],
+            )
+            .expect("utf8 col");
+            assert_eq!(
+                nan_marked.astype(DType::Utf8).expect("astype").values(),
+                &[Scalar::Utf8("a".to_owned()), Scalar::Utf8("nan".to_owned())]
+            );
+
+            // An all-valid Utf8 column still takes the identity shortcut.
+            let clean = Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            )
+            .expect("utf8 col");
+            assert_eq!(
+                clean.astype(DType::Utf8).expect("astype").values(),
+                &[Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]
             );
         }
 
