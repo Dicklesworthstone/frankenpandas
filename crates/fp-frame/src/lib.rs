@@ -18920,6 +18920,20 @@ impl Series {
     }
 
     pub fn isin(&self, test_values: &[Scalar]) -> Result<Self, FrameError> {
+        // ⚠️ A CATEGORICAL COLUMN HOLDS CODES, and this is the worst place for
+        // that to go unnoticed: the Int64 fast path below would happily match a
+        // user's integers against the CODES and return a confidently wrong
+        // answer. MEASURED, live pandas 2.2.3, on Categorical([10, 20, 10])
+        // whose codes are [0, 1, 0]:
+        //
+        //   s.isin([10]) -> [True, False, True]    the VALUES
+        //   s.isin([0])  -> [False, False, False]  code 0 exists, value 0 does not
+        //
+        // Unguarded, FrankenPandas returned [True, False, True] for the second
+        // one. Same trap as astype (5821dc846) and to_list (545eba15d).
+        if let Some(categorical) = self.cat() {
+            return categorical.to_values()?.isin(test_values);
+        }
         // Direct-address membership fast path: an all-valid Int64 column tested
         // against all-Int64 needles in a bounded span probes a dense bitset
         // (1 load/elem) instead of the SipHash HashSet. Bit-identical because
@@ -161627,6 +161641,51 @@ mod tests {
         let plain = Series::from_values("p", vec![IndexLabel::Int64(0)], vec![Scalar::Int64(7)])
             .unwrap();
         assert_eq!(plain.to_list(), vec![Scalar::Int64(7)]);
+    }
+
+    /// `isin` on a categorical must test the CATEGORY VALUES. Unguarded, the
+    /// Int64 fast path matched the user's integers against the codes — a
+    /// confidently wrong answer rather than a miss. From live pandas 2.2.3 on
+    /// `Categorical([10, 20, 10])`, whose codes are `[0, 1, 0]`.
+    #[test]
+    fn isin_on_a_categorical_tests_values_not_codes() {
+        let numbers = Series::from_categorical(
+            "c",
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(numbers.column().values()[0], Scalar::Int64(0), "codes");
+
+        let by_value = numbers.isin(&[Scalar::Int64(10)]).unwrap();
+        assert_eq!(
+            by_value.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+
+        // ⚠️ THE ROW THAT FAILS WITHOUT THE GUARD: code 0 exists, value 0 does not.
+        let by_code = numbers.isin(&[Scalar::Int64(0)]).unwrap();
+        assert_eq!(
+            by_code.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false)
+            ],
+            "matching a CODE must not report membership"
+        );
+
+        // String categories, where the unguarded answer was merely all-false.
+        let labels = Series::from_categorical(
+            "c",
+            vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            labels.isin(&[Scalar::Utf8("x".into())]).unwrap().values(),
+            &[Scalar::Bool(true), Scalar::Bool(false)]
+        );
     }
 
     #[test]
