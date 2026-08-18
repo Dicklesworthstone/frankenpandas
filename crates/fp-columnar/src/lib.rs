@@ -25517,7 +25517,17 @@ impl Column {
             // SERIAL BY MEASUREMENT, not by default: `usize::MAX` means the
             // parallel arm is never taken. See the note on `par_min_override`
             // above for the numbers — parallelism is inside the noise for this
-            // op and costs it the A/A null it needs to certify.
+            // op (1.038x at 10M on the float path).
+            //
+            // CORRECTED 2026-08-18: this used to add "and costs it the A/A null
+            // it needs to certify". That is no longer true and should not be
+            // cited — `sqrt @1M` certifies SERIAL today, and `log @1M` certifies
+            // while running 8 workers ON the parallel arm, both with all three
+            // clauses true (br-frankenpandas-4kig1, closed premise-refuted). The
+            // 1.038x is the whole reason to stay serial; the null is not a reason
+            // at all. Found by the other frankenpandas pane; corrected here
+            // rather than left to rot because a stale justification is how a
+            // measured decision turns into folklore.
             self.typed_float_domain_fused_unary_with_finiteness(
                 |x| x >= 0.0,
                 f64::sqrt,
