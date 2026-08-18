@@ -37631,3 +37631,44 @@ orders of magnitude above a row. Measurements are free at this scale and should 
 **WHAT WOULD ACTUALLY JUSTIFY WITHHOLDING A MEASUREMENT:** CPU contention corrupting the numbers, or
 an unstable instrument making them unbankable — both of which have bitten this session and both of
 which are about VALIDITY, not disk. Disk pressure argues against building, not against measuring.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-h67zz) — `mod @10M` WILL NOT CERTIFY: 2 of 2 attempts in clean windows on a committed instrument, FP null ~3% low both times, and my explanation for it is REFUTED by my own check
+
+**THE STANDING ORDER CANNOT BE SATISFIED FOR HALF THE PAIR, AND I AM STOPPING RATHER THAN RE-RUNNING.**
+`floordiv @10M` is defended at 9.033x on `a67f720ac1f8`. `mod @10M` is not, after two attempts:
+
+| attempt | verdict | ratio | best-vs-best | FP null | pandas null | window |
+|---|---|---|---|---|---|---|
+| 1 | NULL_UNDECIDABLE | 7.79x | 8.631x agrees | **0.97512** | 1.00179 | load 8.01-21.97 |
+| 2 | NULL_UNDECIDABLE | 8.255x | 9.239x agrees | **0.96767** | 0.99923 | load 7.32-9.84 |
+
+Attempt 2 had everything a row should want: committed instrument (`a67f720ac1f8`, the same sha
+`floordiv` is banked on), preserved ELF `a802073c` whose floordiv/mod path has zero changed lines
+since its commit, arms clock-matched at 4298.1/4299.0 MHz, FP cv 5.45% and **pandas cv 0.69%**, and a
+quiet window that stayed quiet (load 7.32-9.84, no builds, no contending measurement — I chained the
+run to start only after the other pane's PID exited). **Two of the three clauses pass and the effect
+clears its margin comfortably. Only the FP A/A null fails, and it fails LOW both times.**
+
+⚠️ **I HAD AN EXPLANATION AND MY OWN CHECK KILLED IT.** Two failures at 0.97512 and 0.96767 — never
+above unity — looked systematic, so I hypothesised within-run drift on the FP arm (first-touch page
+faults or thermal ramp at a 10M working set). Measured, first-half against last-half of FP's samples:
+
+    mod attempt 1   drift -0.27%      null 0.97512  FAILED
+    mod attempt 2   drift -0.19%      null 0.96767  FAILED
+    floordiv        drift -1.56%      null 0.98922  PASSED
+
+**The row with the LARGEST gross drift is the one that PASSED.** So the null is not measuring what my
+half-split measures — it is `first two versus final two PLACEMENTS per arm` inside an ABBAABBA
+square, a position effect my crude split cannot reproduce. **The hypothesis is refuted and I am
+recording the refutation instead of the story**, because a plausible-but-wrong mechanism in this
+ledger is worth less than an honest "reproducible and unexplained".
+
+**WHAT IS ESTABLISHED:** `mod @10M` is FASTER than pandas by every statistic available — 7.79x and
+8.255x by median, 8.631x and 9.239x best-vs-best, direction agreeing on both — and it is
+**NOT LOCKABLE**, because the gate's null clause refuses it reproducibly. This is the third distinct
+edge of the median-CI gate found by measurement today, after the false certification at `df_dot @1M`
+(wide incumbent) and the refusal at `df_transpose_materialize @100k` (2us arm).
+
+**WHAT I AM NOT DOING.** Not re-running until a null cooperates — I committed to that before the
+second attempt and two failures in clean windows is the answer, not an invitation. Not widening the
+band. Not banking the row by hand. **The pair is half-defended and saying so is the accurate report.**
