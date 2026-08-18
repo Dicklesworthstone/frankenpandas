@@ -38336,3 +38336,75 @@ captures the exit status directly, never through a pipe, and checks the output f
 before parsing it. This is another sighting of *the absence of work rendered as the success
 of work*, and the first where I caught it by noticing the elapsed time was implausible rather
 than by any check I had written.
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-tk0ig, br-frankenpandas-85clb) — NO ROW IN THIS CORPUS CARRIES BUILD-FLAG PROVENANCE. fp-bench emits it, the harness drops it, and one orphaned standing lock is unattributable as a result
+
+**THIS ENTRY CLAIMS NO RATIO AND CERTIFIES NOTHING.** It is a finding about the instrument and about
+a guard I wrote myself. No lever is proposed or rejected here, so it carries no A/A control by
+design rather than by omission.
+
+**THE GAP.** `fp-bench` prints `compiled_target_features` on every invocation — I added it in
+`34bcf8973` precisely because `runtime_detected_isa_features` records what the CPU supports, not
+what the compiler targeted, so a `+avx2` build and a shipping build emitted byte-identical lists.
+The harness never persists it. Verified by RECURSIVE key search over whole artifact JSONs, done
+recursively on purpose because I produced two false-absences today by checking the wrong level:
+
+    compiled_target_features        0 hits   artifacts/bench/8s4mb_df_sem_1M_r1.json  (fresh tonight)
+    compiled_target_features        0 hits   artifacts/bench/3qpj4_floor_intrinsic.json
+    elf_sha256 / bench_elf_sha256   0 hits   both
+
+**Corpus-wide: 316 rows carry verdict `FASTER`, and ZERO of them record which ISA the measured
+binary was compiled for.**
+
+**THE ONE DURABLE DISCRIMINATOR THAT DOES EXIST** is `parameters.frankenpandas_binary_requested` —
+an explicit path when `--frankenpandas-binary` was passed, `null` otherwise. `null` means "resolved
+from `CARGO_TARGET_DIR` at the time", which is unattributable after the fact.
+
+**A CONCRETE LEAK, NOT A HYPOTHETICAL.** Standing-lock orphan `floor @1M 1.544x FASTER`
+(`3qpj4_floor_intrinsic.json`, harness `669547f601ff`, host `thinkstation1`) records no ELF identity
+and no compiled features. Its value sits in the flagged-build cluster. Same harness, same host,
+same day:
+
+| artifact | ratio |
+|---|---|
+| `cu22b_floor_default`, `_b` | 0.343x |
+| `cu22b_floor_sse41` family | 0.415-0.526x |
+| `isa3_floor_v3_adaptive`, `v3_floor_1m_warm` | 0.909-1.019x |
+| `3qpj4_floor1M_avx2` | 1.384x |
+| **`3qpj4_floor_intrinsic` (the orphan)** | **1.544x** |
+
+Every default-build `floor @1M` row on that host reads 0.30-0.51x, across 65 rows and six harness
+shas.
+
+⚠️ **STATED PRECISELY, BECAUSE THE DISTINCTION IS THE WHOLE POINT: I am NOT claiming that row is
+false or that its number is wrong for whatever it measured.** I am claiming it is UNATTRIBUTABLE —
+nothing in its artifact says which binary produced it — and that an unattributable row must not be
+re-locked as a defence of the SHIPPING build. My own earlier summary, "36 of 51 orphans are >=2x
+wins", was too comfortable and should be read with this caveat.
+
+**AND THE GUARD I WROTE FOR EXACTLY THIS CANNOT FIRE.** `scripts/assemble_standing_locks.py`
+denylists non-shipping binaries by ELF sha prefix (`KNOWN_NON_SHIPPING_ELF_SHA_PREFIXES`,
+one entry, `162f821c9c09`). **No artifact in the corpus records an ELF sha at all, so that check can
+never match anything.** It is not incorrect; it is INAPPLICABLE, which is worse than being wrong,
+because in a code read it looks like coverage. I built it, I described it as closing the hole, and
+it does not.
+
+**FIX, ORDERED, AND DELIBERATELY NOT DONE TONIGHT.** (1) harness persists the child's
+`compiled_target_features` per arm; (2) harness persists fp-bench's line-one
+`bench_elf_sha256=<64hex> (<bytes>) <path>`, which it already reads; (3) the assembler refuses rows
+lacking build provenance with a distinct message, with `--self-test` cases both directions.
+
+⚠️ **SEQUENCING IS THE REASON THIS IS A BEAD AND NOT A COMMIT.** (1) and (2) change the harness
+sha, which ORPHANS ALL 51 STANDING LOCKS plus every row landing tonight. Batching it with the next
+harness change that is already paying that cost is strictly cheaper than paying it twice. Landing a
+provenance improvement as a drive-by would destroy more defences than it protects.
+
+**METHOD NOTE — HOW THE ELF QUESTION SHOULD BE ASKED.** `grep`/`strings` on an fp-bench ELF is not
+a capability test and FALSE-NEGATIVES: `df_transpose_full_materialize`, `df_sem`, `series_kurtosis`
+and the long-standing `df_transpose_materialize` all return zero occurrences from a binary that
+runs them, while `df_transpose` returns a hit. SlateHeron reproduced this independently. Inconsistent
+results are more dangerous than uniform failure, because a miss next to a hit reads as
+discrimination. **A hit means something; a miss means nothing.** Ask the binary instead — a 10k
+probe costs ~2s and its line-one self-hash is the ELF marker the ledger wants anyway.
+
