@@ -39315,3 +39315,78 @@ not have gone in the table.
 **WHAT THESE ROWS DO NOT SHOW.** They say nothing about the other 117 unmeasured workloads. Two
 probes are not a survey, and picking one "likely loss" candidate that turned out to be an 8x win is
 weak evidence that the rest are fine — it is one draw from a distribution nobody has sampled.
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-uza04) — WIN x2 from gap-hunt round 2 across three more categories, plus `csv_read` undecidable because OUR arm is too fast. Six probes, five categories, ZERO gaps found
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=7414864069469f80471fa2afc5eb4addc76889f176932049c54b7ca79f7c7b80 (83278512 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-BEFORE-exppar`
+— the pinned artifact matching HEAD, reused rather than rebuilt. Harness `50d3c3ffad4d`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f (2922 files), run
+in the SAME process as the subject under
+invocation_id=vs-pandas-20260818T121614.546604Z-pid3678 for `df_groupby_2strkey_sum` and
+invocation_id=vs-pandas-20260818T122657.109548Z-pid148001 for `affine_index_take_arithmetic` ,
+giving measured_ratio=1.519x and measured_ratio=1.442x respectively.
+
+**A/A null control (same invocation):** `df_groupby_2strkey_sum` FrankenPandas null median ratio
+0.99950 and pandas 1.00748; `affine_index_take_arithmetic` FrankenPandas 0.99255 and pandas 0.99383.
+All four inside the 0.02 maximum absolute deviation.
+
+**Median-CI decision:** `df_groupby_2strkey_sum` effect median 1.5190x, claimed log effect
+0.41835338 against a required threshold of 0.06764924 at margin multiplier 2.0 .
+`affine_index_take_arithmetic` effect median 1.4420x, claimed log effect 0.36576859 against a
+required threshold of 0.12321419 at margin multiplier 2.0 . Best-vs-best agrees with both: 1.4564x
+and 1.3560x.
+
+**CV role:** provenance-only, no vote. `df_groupby_2strkey_sum` FP p50 4.44ms cv 1.1% against pandas
+6.73ms cv 11.2%; `affine_index_take_arithmetic` FP p50 36.70ms cv 14.0% against pandas 52.32ms
+cv 21.6%.
+
+**THE THIRD PROBE DID NOT CERTIFY, AND ITS REASON IS THE INTERESTING PART.** `csv_read @100k`
+measured 120.9080x with best-vs-best 137.5357x — FP 0.82ms against pandas 96.48ms — and came back
+**NULL_UNDECIDABLE** because FrankenPandas' own A/A null read 1.02138, just outside the 2% limit.
+pandas' null was clean at 1.00262.
+
+⚠️ **THIS IS THE MIRROR OF THE TRANSPOSE FINDING AND IT GENERALISES THE MECHANISM.** Earlier tonight
+(`778a7eeb2`) three `df_transpose_full_materialize` rows were undecidable because the INCUMBENT's
+45us arm could not hold a null while ours was clean. Here it is OURS that cannot: at 0.82ms the
+FrankenPandas arm is short enough that its A/A control samples timer and scheduler noise. **"Too
+fast to certify" is not a pandas pathology — it is a property of ANY arm short enough**, and it
+bites whichever side happens to be winning by two orders of magnitude. Filed against `g0apw` as a
+fourth worked example, and the first where the fast arm is ours.
+
+**A ROW I RE-MEASURED RATHER THAN CAVEATED, AND WHAT IT TAUGHT.** The first
+`affine_index_take_arithmetic` run certified at 1.3890x but was measured across a spike to
+**loadavg 61.75**, with nulls at 1.6% against a 2% limit and cv 13.5%/23.1%. A modest effect, a
+noisy window and nulls near the edge is the exact combination that produced my 26.7% error earlier
+tonight, so I re-ran it in a clean window (max loadavg 18.55) rather than publish with a warning:
+
+| | ratio | null deviation | max loadavg |
+|---|---|---|---|
+| spike run | 1.3890x | 1.6% | 61.75 |
+| **clean run (banked)** | **1.4420x** | **0.7%** | 18.55 |
+
+The nulls tightened by more than half, confirming the window WAS degrading the control — but the
+effect moved only **3.8%** and held direction.
+
+⚠️ **SO WINDOW CONTAMINATION IS NOT UNIFORMLY CATASTROPHIC, AND I HAD OVER-GENERALISED FROM ONE
+CASE.** My 3-5x error earlier tonight was `df_dot`, where a 64-thread OpenBLAS incumbent saturates
+the box and the measurement competes with itself. This is a 1-thread indexing op that barely
+contends, and a loadavg-61.75 window cost it 3.8%. **The sensitivity scales with how much the
+measurement itself contends, not with the loadavg number alone** — which means "was the window
+quiet?" is the wrong question in isolation; "does this workload saturate?" has to be asked with it.
+
+**THE TALLY, STATED SO "NO GAPS" CANNOT BE AN ARTIFACT OF SELECTIVE REPORTING.** Across both rounds:
+**six probes, five categories (dataframe_ops, groupby, indexing, io, and the earlier pair), ZERO
+gaps found.** Every workload measured is FrankenPandas-faster, by margins from 1.44x to 120x. Probes
+run and probes that found something are both recorded; a hunt reported only when it succeeds is not
+a hunt.
+
+**WHAT THIS DOES NOT ESTABLISH.** Six of 117 unmeasured workloads is a thin sample, and I chose
+candidates by guessing where FP would be weak (object strings, string keys, IO parsing) — a
+selection that FAILED to find weakness, which is informative but not coverage. The remaining 111 are
+unmeasured, not known-good.
