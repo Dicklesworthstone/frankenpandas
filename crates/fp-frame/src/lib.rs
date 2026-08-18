@@ -94620,9 +94620,30 @@ enum ResampleValueDomain {
     /// Int64/Float64 only — the historical filter. Used where pandas either refuses
     /// a string column or answers with a value FrankenPandas cannot yet produce.
     Numeric,
-    /// Int64/Float64 plus Utf8, for the aggregations pandas answers on strings with
-    /// semantics `fp_types::nanmin`/`nanmax`/`nancount` already implement.
-    NumericAndUtf8,
+    /// Int64/Float64 plus every non-numeric dtype whose ordering/counting semantics
+    /// pandas and `fp_types` already agree on: Utf8, Bool and Datetime64.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), a bool column `flag` and
+    /// a datetime column `when` through `groupby('grp').resample('ME')`:
+    /// ```text
+    ///   agg     flag                          when
+    ///   count   [2, 1, 1, 2]                  [2, 1, 1, 2]
+    ///   min     [False, True, False, True]    ['2024-03-01','2024-04-01','2024-03-02','2024-04-03']
+    ///   max     [True,  True, False, True]    ['2024-03-05','2024-04-01','2024-03-02','2024-04-09']
+    ///   first   [True,  True, False, True]    ['2024-03-01','2024-04-01','2024-03-02','2024-04-03']
+    ///   last    [False, True, False, True]    ['2024-03-05','2024-04-01','2024-03-02','2024-04-09']
+    /// ```
+    /// `fp_types::nanmin`/`nanmax` already order Bool and Datetime64 (fp-types ~4539
+    /// and ~4557) and `nancount` is dtype-agnostic, so nothing underneath needed to
+    /// change — as with Utf8, only this filter stood in the way.
+    ///
+    /// ⚠️ CATEGORICAL IS STILL EXCLUDED, and not by oversight: pandas answers count,
+    /// first and last on a category column but RAISES TypeError for min and max. One
+    /// domain cannot express "in for three of the five", so admitting it needs a
+    /// third variant plus a decision about what FP should do where pandas raises.
+    /// Timedelta64 and Period are likewise unmeasured here and stay out — this
+    /// widening covers exactly the rows of the table that were measured.
+    OrderableAndCountable,
 }
 
 pub struct GroupByResample<'a> {
@@ -94653,8 +94674,12 @@ impl GroupByResample<'_> {
                 let dt = self.groupby.df.columns[c.as_str()].dtype();
                 match domain {
                     ResampleValueDomain::Numeric => dt == DType::Int64 || dt == DType::Float64,
-                    ResampleValueDomain::NumericAndUtf8 => {
-                        dt == DType::Int64 || dt == DType::Float64 || dt == DType::Utf8
+                    ResampleValueDomain::OrderableAndCountable => {
+                        dt == DType::Int64
+                            || dt == DType::Float64
+                            || dt == DType::Utf8
+                            || dt == DType::Bool
+                            || dt == DType::Datetime64
                     }
                 }
             })
@@ -94843,25 +94868,27 @@ impl GroupByResample<'_> {
         // pandas counts non-missing for every dtype (a7faz).
         self.apply_grouped_resample(
             |s, freq| s.resample(freq).count(),
-            ResampleValueDomain::NumericAndUtf8,
+            ResampleValueDomain::OrderableAndCountable,
         )
     }
 
     /// Grouped resample min.
     pub fn min(&self) -> Result<DataFrame, FrameError> {
-        // pandas orders strings lexicographically, as nanmin does (a7faz).
+        // pandas orders strings lexicographically and bool/datetime naturally,
+        // exactly as nanmin does (a7faz).
         self.apply_grouped_resample(
             |s, freq| s.resample(freq).min(),
-            ResampleValueDomain::NumericAndUtf8,
+            ResampleValueDomain::OrderableAndCountable,
         )
     }
 
     /// Grouped resample max.
     pub fn max(&self) -> Result<DataFrame, FrameError> {
-        // pandas orders strings lexicographically, as nanmax does (a7faz).
+        // pandas orders strings lexicographically and bool/datetime naturally,
+        // exactly as nanmax does (a7faz).
         self.apply_grouped_resample(
             |s, freq| s.resample(freq).max(),
-            ResampleValueDomain::NumericAndUtf8,
+            ResampleValueDomain::OrderableAndCountable,
         )
     }
 
@@ -94870,7 +94897,7 @@ impl GroupByResample<'_> {
         // positional, dtype-independent in pandas (a7faz).
         self.apply_grouped_resample(
             |s, freq| s.resample(freq).first(),
-            ResampleValueDomain::NumericAndUtf8,
+            ResampleValueDomain::OrderableAndCountable,
         )
     }
 
@@ -94879,7 +94906,7 @@ impl GroupByResample<'_> {
         // positional, dtype-independent in pandas (a7faz).
         self.apply_grouped_resample(
             |s, freq| s.resample(freq).last(),
-            ResampleValueDomain::NumericAndUtf8,
+            ResampleValueDomain::OrderableAndCountable,
         )
     }
 }
@@ -159211,6 +159238,103 @@ mod tests {
             // The bucket rows still exist — that is the no-value-column branch.
             assert_eq!(out.len(), 5, "{agg}: bucket rows are still emitted");
         }
+    }
+
+    /// groupby().resample() on BOOL and DATETIME value columns.
+    ///
+    /// Extends br-frankenpandas-a7faz past the utf8 case. Same defect, two more
+    /// dtypes: `value_cols` dropped them, pandas aggregates them.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), this exact frame —
+    /// grp=[a,a,a,b,b,b], flag=[T,F,T,F,T,T], index Jan-01/Jan-15/Feb-01 for 'a'
+    /// and Jan-05/Feb-05/Feb-20 for 'b':
+    /// ```text
+    ///   buckets [2024-01-31, 2024-02-29, 2024-01-31, 2024-02-29]  grp [a, a, b, b]
+    ///   count  flag [2, 1, 1, 2]
+    ///   min    flag [F, T, F, T]
+    ///   max    flag [T, T, F, T]
+    /// ```
+    /// ⚠️ THIS TEST COVERS THE BOOL HALF ONLY. The Datetime64 rows are measured and
+    /// recorded on `ResampleValueDomain` and the filter admits that dtype, but no
+    /// assertion here exercises it — building a Datetime64 column from `Scalar`s
+    /// needs the i64-nanos form, and an untested widening is exactly what the enum
+    /// doc warns against. A datetime case is owed.
+    /// Note `min`/`max` on bool are the logical and/or of the bucket, which is what
+    /// `fp_types::nanmin`/`nanmax` compute for `Scalar::Bool` — no new kernel.
+    #[test]
+    fn groupby_resample_aggregates_bool_and_datetime_columns_a7faz() {
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "flag",
+                    vec![
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                        Scalar::Bool(true),
+                        Scalar::Bool(true),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+                "2024-01-05".into(),
+                "2024-02-05".into(),
+                "2024-02-20".into(),
+            ],
+        )
+        .unwrap();
+        let gb = df_with_idx.groupby(&["grp"]).unwrap();
+
+        let counted = gb.resample("M").count().unwrap();
+        assert_eq!(
+            counted.column_names(),
+            vec!["grp", "flag"],
+            "a bool column must survive count, not be dropped"
+        );
+        assert_eq!(
+            counted.column("flag").unwrap().values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ]
+        );
+
+        // min/max on bool = logical and/or over the bucket.
+        assert_eq!(
+            gb.resample("M").min().unwrap().column("flag").unwrap().values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ]
+        );
+        assert_eq!(
+            gb.resample("M").max().unwrap().column("flag").unwrap().values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ]
+        );
     }
 
     #[test]
