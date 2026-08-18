@@ -37760,3 +37760,125 @@ under-coverage the orphaned-lock bead
 not 20 items and it is not 3. It is 3 known plus 20 unverified, and the cheapest next action is not
 optimisation — **it is re-measuring the 20 on the current instrument to find out which still exist**,
 because four of the four I checked had already closed themselves.
+
+### 2026-08-18 SlateHeron (br-frankenpandas-vw0uu) — the two remaining DataFrameGroupBy window siblings had NO LANES either; grouped EXPANDING certifies at 8.652x and grouped EWM at 7.070x, so the bead's last two engines are AHEAD of the incumbent too
+
+`vw0uu` names `GroupByEwm` as still sitting on the old per-cell `Scalar` path. It is not —
+SapphireCedar's `dde7be739` verified in source that rolling, expanding and ewm were all
+already fixed, and only `resample` still needed the typed gather. So the live question was
+never "is this on the slow path"; it was **"is it already ahead of pandas, like grouped
+rolling turned out to be at 7.251x"** — a bead-CLOSING question, and unanswerable while
+neither surface had a lane. Both lanes landed in `12973ead9`; this banks what they found.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=4c56745cacf711ebcabcecac9ad57612acd7d56c821f5c588b69ba990b8dfe63 (83063192 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260818T064556.176515Z-pid2587821 , giving
+measured_ratio=8.652x for this row.
+
+| `df_groupby_expanding_mean @1M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **27888.41us** | 3.08% | 0.983996 — PASSES |
+| pandas | 239321.96us | 5.18% | 0.998653 — PASSES |
+
+| `df_groupby_ewm_mean @1M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **32003.61us** | 2.64% | 0.996909 — PASSES |
+| pandas | 225542.71us | 10.84% | 0.995590 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.983996 and pandas
+median ratio 0.998653, both inside the 2% limit.
+
+**Median-CI decision:** effect median 8.652x, 95% CI [8.22422495, 8.84926582], excluding
+unity; claimed log effect 2.15779938 against a required threshold of 0.10185083, cleared
+by 21x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 3.08%, pandas 5.18%.
+
+**ALL SIX ROWS, three repeats per lane, every one CERTIFIED FASTER on ELF `4c56745c`:**
+
+| lane | repeat | ratio | FP p50 | pandas p50 | FP null | pandas null | best-vs-best | clauses |
+|---|---|---|---|---|---|---|---|---|
+| `expanding` | r0 | **8.652x** | 27888.4us | 239322.0us | 0.9840 | 0.9987 | 8.6721 | 3/3 |
+| `expanding` | r1 | **8.704x** | 28024.6us | 242550.2us | 1.0042 | 1.0122 | 9.0108 | 3/3 |
+| `expanding` | r2 | **8.614x** | 28693.5us | 245598.8us | 1.0174 | 1.0039 | 8.7233 | 3/3 |
+| `ewm` | r0 | **7.070x** | 32003.6us | 225542.7us | 0.9969 | 0.9956 | 7.1404 | 3/3 |
+| `ewm` | r1 | **6.683x** | 32000.4us | 214030.0us | 0.9906 | 0.9999 | 6.9114 | 3/3 |
+| `ewm` | r2 | **6.912x** | 31762.4us | 220373.0us | 1.0012 | 1.0107 | 6.8621 | 3/3 |
+
+**MIN/MIN CHECKED ON EVERY ROW, not inherited from the median.** pandas'
+`peak_process_threads` is 67 on all six, the same shape that made me caveat my `u5cg4`
+row. Best-vs-best agrees in direction with the median on every one and sits within 4% of
+it on five of six (`expanding` r1 is the outlier at 9.011 vs 8.704, in the CONSERVATIVE
+direction — min/min says the win is larger, not smaller). By the sharpened criterion in
+`ef3e286ab` — compare the incumbent's SPREAD to the EFFECT, not its thread count — the
+worst case here is `ewm` r0 at pandas cv 10.84% against a 7.070x effect, still roughly one
+part in sixty.
+
+**THE THREE-COLUMN FIXTURE IS LOAD-BEARING FOR THESE TWO EXACTLY AS FOR ROLLING.**
+`thread_count_actually_used` came back **3** on all six runs — the column count. A
+one-column fixture would have routed serial and measured a path nobody runs, while looking
+identical in every recorded field.
+
+**WHAT I VERIFIED BEFORE MEASURING RATHER THAN AFTER**, because a fix applied after the
+rows are taken kills them:
+* Both lanes emit at 100k on the built ELF (2.7ms expanding, 3.2ms ewm) — checked first.
+* Both pandas routes return a two-level index, and `droplevel(0).sort_index()` recovers
+  the original index **exactly** (element-wise, 12/12 rows, `index.equals` True) rather
+  than dropping or duplicating rows.
+* FrankenPandas defaults `adjust=true` (fp-frame:28718, `new_wt = 1.0 if adjust`) and
+  pandas' `ewm` default is `adjust=True`, so the two arms compute the same quantity and
+  not merely the same-named one. `expanding(Some(1))` matches `min_periods=1`.
+
+**AND ONE GATE THAT COST NOTHING AND SHOULD BE STANDARD:** the pandas half of a new lane
+can be exercised with NO Rust build at all — import the harness module and call the bench
+function directly. Both new functions returned 50 samples with nulls 1.0018 and 1.0030
+before I had compiled anything. Every harness lane gets this for free.
+
+**A NON-FINDING WORTH RECORDING SO NOBODY ELSE CHASES IT:** the per-engine `checksum` is
+byte-identical across all three grouped-window lanes. That looked like a fall-through in my
+match arm. It is not — `main.rs:990` documents it as a `size_of_val` liveness token, not a
+result witness, so identical values across ops returning the same type are expected. The
+differing timings and the observed thread count are what show distinct work.
+
+**WHAT THIS DOES TO THE BEAD.** All three DataFrameGroupBy window engines are now measured
+against the incumbent for the first time, and all three are ahead: rolling 7.251x,
+expanding 8.652x, ewm 7.070x. `vw0uu`'s framing — "residual ~32ms, fuse the dense grouped
+rolling" — describes real headroom against ourselves but **no gap against pandas on any of
+the three**. Combined with `u5cg4` measuring `build_groups` at 20.65% of instructions and
+saying explicitly not to re-attack it, half the bead's stated lever is refuted and the
+other half ("per-group agg inline over the raw slice, no per-group Series") is a
+widen-a-win, not a close-a-gap. `resample` remains genuinely unmeasured and needs its own
+lane with a temporal fixture.
+
+```
+LOADAVG   per row, min-max of the harness's own 1-min samples:
+          expanding r0 6.45-20.78 · r1 7.41-21.82 · r2 7.32-9.82
+          ewm       r0 6.87-28.80 · r1 6.37-17.89 · r2 7.27-10.45
+CPU MHz   busy-core per arm, all six rows: FP 4296.9-4299.9 · pandas 4295.5-4298.7
+          arms_saw_same_clock true on every row; arm_clock_ratio 1.0002 on r0
+THREADS   FP 3 (= column count) · pandas 2 used, 67 peak — on all six rows
+DISK      /data 124G at build, 101G at the last row
+HARNESS   1aad8419371742cf — measured against the WORKING TREE, then committed
+          BYTE-FOR-BYTE UNCHANGED in 12973ead9 so the sha is reproducible in git.
+          Verified after committing: `git show HEAD:benches/vs_pandas_harness.py`
+          hashes to 1aad8419371742cf.
+GATES     clippy -p fp-bench --all-targets -D warnings rc=0 captured UNPIPED, 0
+          error/warning lines; cargo fmt --check clean.
+```
+
+**ON THE HARNESS SHA, because the other pane lost a row to this exact thing today:** these
+six rows were taken against an UNCOMMITTED working tree. That is only safe because the tree
+was committed unchanged immediately afterwards — had verification turned up anything
+needing a lane edit, all six would have died. The other pane's `mod @10M` did die that way
+an hour ago and nothing in its output said so; only their new uncommitted-harness guard
+caught it. **The ordering that makes this safe is: verify the lanes emit BEFORE the
+measuring run, so a fix lands before the rows are taken rather than invalidating them.**
+The better technique, which they worked out and I will use next time a lane already exists,
+is to measure against `git show HEAD:benches/vs_pandas_harness.py` written to scratch — the
+harness hashes its own content, so the row is reproducible the moment it is taken.
