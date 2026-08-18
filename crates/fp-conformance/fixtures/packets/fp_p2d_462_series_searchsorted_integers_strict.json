@@ -1,0 +1,67 @@
+{
+  "packet_id": "FP-P2D-462",
+  "case_id": "series_searchsorted_integers_strict",
+  "mode": "strict",
+  "operation": "series_searchsorted",
+  "searchsorted_value": {
+    "kind": "int64",
+    "value": 25
+  },
+  "searchsorted_side": "left",
+  "left": {
+    "name": "int_series",
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      }
+    ],
+    "values": [
+      {
+        "kind": "int64",
+        "value": 10
+      },
+      {
+        "kind": "int64",
+        "value": 20
+      },
+      {
+        "kind": "int64",
+        "value": 30
+      },
+      {
+        "kind": "int64",
+        "value": 40
+      },
+      {
+        "kind": "int64",
+        "value": 50
+      }
+    ]
+  },
+  "expected_scalar": {
+    "kind": "int64",
+    "value": 2
+  },
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
+    "generated_at": "2026-08-18T15:56:43Z"
+  }
+}
