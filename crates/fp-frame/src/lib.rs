@@ -84252,6 +84252,20 @@ impl DataFrameGroupBy<'_> {
                     "std" => fp_types::nanstd(&group_vals, 1),
                     "var" => fp_types::nanvar(&group_vals, 1),
                     "median" => fp_types::nanmedian(&group_vals),
+                    // br-frankenpandas-groupby-idxmax-idxmin, second slice.
+                    // `.agg("quantile")` CANNOT carry a q, so the string form is
+                    // always pandas' default q=0.5 with linear interpolation —
+                    // which is the median. MEASURED, live pandas 2.2.3:
+                    //     g.agg('quantile').equals(g.agg('median'))  ->  True
+                    // on an odd group (1, 2, 10 gives 2.0), on a group with a null
+                    // (NaN, 4.0 gives 4.0, so nulls are skipped the same way), and
+                    // on an EVEN group (1, 2, 3, 4 gives 2.5, so the interpolation
+                    // agrees too — the case that would expose a nearest-rank
+                    // implementation pretending to be linear).
+                    //
+                    // Routed to nanmedian rather than reimplemented: a second code
+                    // path for the same measured answer is how the two drift apart.
+                    "quantile" => fp_types::nanmedian(&group_vals),
                     // pandas groupby.first()/last() skip nulls (skipna default):
                     // first/last NON-missing per group, matching the SeriesGroupBy
                     // skip-missing behavior (br-frankenpandas-iq9gz / nt65g11).
