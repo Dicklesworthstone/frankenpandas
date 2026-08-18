@@ -141,6 +141,26 @@ def best_vs_best_contradicts(result: dict[str, Any]) -> bool:
 NON_SHIPPING_TARGET_FEATURES = frozenset({"avx", "avx2", "avx512f", "fma"})
 
 
+# ELF sha256 prefixes KNOWN to be non-shipping builds, for rows measured BEFORE
+# fp-bench emitted `compiled_target_features` (34bcf8973). Those artifacts carry no
+# build-flag provenance at all, so the field-based check below cannot see them and
+# the operator would be the only guard. MEASURED 2026-08-18: with this list empty,
+# `--apply` banked `df_dot @10k 1.125x` from a `-C target-feature=+avx2` binary as a
+# standing lock, asserting a defence the shipped build does not provide — the same
+# row's default-flags arm measures 0.979x/0.991x. Add a sha here ONLY with the
+# measurement that shows the build is non-shipping.
+KNOWN_NON_SHIPPING_ELF_SHA_PREFIXES = (
+    "162f821c9c09",  # fp-bench-AVX2-fc793a3b7, built with -C target-feature=+avx2
+)
+
+
+def elf_is_known_non_shipping(result: dict[str, Any]) -> bool:
+    """Pre-provenance rows whose binary is known non-shipping by its ELF sha."""
+    executable = (result.get("frankenpandas") or {}).get("executable") or {}
+    sha = str(executable.get("sha256") or "")
+    return any(sha.startswith(prefix) for prefix in KNOWN_NON_SHIPPING_ELF_SHA_PREFIXES)
+
+
 def is_non_shipping_build(result: dict[str, Any]) -> bool:
     """Was this row measured on a binary compiled with non-default target features?
 
@@ -159,6 +179,8 @@ def is_non_shipping_build(result: dict[str, Any]) -> bool:
     retroactive purge. The cost of that choice is stated plainly: for pre-change
     artifacts the operator is still the only check.
     """
+    if elf_is_known_non_shipping(result):
+        return True
     features = (result.get("thread_provenance") or {}).get("compiled_target_features")
     if not isinstance(features, list):
         return False
@@ -219,11 +241,15 @@ def _self_test() -> int:
         failures.append("is_non_shipping_build REFUSED a default build")
     if is_non_shipping_build(row(2.0, [1.0], [2.0])):
         failures.append("is_non_shipping_build refused a row predating the field")
+    pre = row(2.0, [1.0], [2.0])
+    pre["frankenpandas"]["executable"] = {"sha256": "162f821c9c09deadbeef"}
+    if not is_non_shipping_build(pre):
+        failures.append("is_non_shipping_build MISSED a known non-shipping ELF sha")
 
     for failure in failures:
         print(f"  FAIL: {failure}")
     print(
-        f"self-test: {6 - len(failures)}/6 checks passed"
+        f"self-test: {7 - len(failures)}/7 checks passed"
         + ("" if failures else " — both guards behave as documented")
     )
     return 1 if failures else 0
@@ -266,12 +292,16 @@ def collect(*, report_refusals: bool = True) -> dict[str, dict[str, Any]]:
                 continue
             if is_non_shipping_build(result):
                 if report_refusals:
-                        print(
-                        f"    !! REFUSED {result.get('workload')} @{result.get('size')}: "
-                        f"compiled_target_features="
-                        f"{(result.get('thread_provenance') or {}).get('compiled_target_features')}"
-                        f" — not the shipping build, so a lock from it would assert a "
-                        f"defence the shipped binary does not provide"
+                    reason = (
+                        "ELF sha is on the known-non-shipping list"
+                        if elf_is_known_non_shipping(result)
+                        else "compiled_target_features="
+                    )
+                    print(
+                        f"    !! REFUSED {result.get('workload')} "
+                        f"@{result.get('size')}: {reason} — not the shipping "
+                        f"build, so a lock from it would assert a defence the "
+                        f"shipped binary does not provide"
                     )
                 continue
             if best_vs_best_contradicts(result):

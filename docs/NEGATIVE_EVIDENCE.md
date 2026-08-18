@@ -36501,3 +36501,31 @@ writes no artifact, which is what made this runnable under a build hold with the
 consequence is that `assemble_standing_locks.py` has no file to read, so **log @1M 2.125x cannot be
 banked as a standing lock from this run.** That is the correct trade for a floor-breach window and
 it should be re-run to an artifact when disk allows.
+
+**⚠️ FOLLOW-UP ON THE ABOVE: BANKING THIS ROW EXPOSED MY OWN GUARD FAILING EXACTLY AS DOCUMENTED.**
+With the build hold lifted I re-ran both ops to ARTIFACTS so `log @1M` could become a lock, and
+`--apply` banked SEVEN workloads — including `df_dot @10k 1.125x`, which I had explicitly refused to
+bank because it came from a `-C target-feature=+avx2` binary. The non-shipping guard did not fire:
+it keys on `compiled_target_features`, that ELF predates the field, and the guard treats an ABSENT
+field as "not proven non-shipping" so the whole pre-change corpus is not quarantined. **The
+limitation was written into its docstring the day I added it, and it still caught me the first time
+`--apply` ran against a corpus containing such a row.** Documenting a hole is not the same as
+closing it.
+
+Fixed with a precise, evidence-keyed refusal rather than a broad one: a
+`KNOWN_NON_SHIPPING_ELF_SHA_PREFIXES` list holding `162f821c9c09` (fp-bench-AVX2-fc793a3b7), with a
+comment requiring a measurement before any sha is added. Re-applying evicts the row; the live
+baseline is 6 workloads and `df_dot` is absent. Self-test extended to 7/7.
+
+**REPRODUCTION OF THE STDOUT-ONLY PAIR, now artifact-backed** (harness `60ed3c58fdd5`, ELF
+`a802073cf042`, default build, loadavg 7.43-7.96, idle 89.9%, arms clock-matched at 4292.2/4292.3
+MHz, disk 131G):
+
+| op @1M | verdict | ratio (stdout run) | best-vs-best | nulls FP/pandas | clauses |
+|---|---|---|---|---|---|
+| log | FASTER | **2.096x** (2.125x) | 2.377x AGREES | 0.99801 / 0.99633 | all true |
+| sqrt | SLOWER | **0.93x** (0.933x) | 0.931x AGREES | 0.99625 / 0.99834 | all true |
+
+Both reproduce the stdout-only figures to within 1.4%, and best-vs-best agrees in direction on both
+— so the win is not the incumbent-spread artefact this ledger caught at `df_dot @1M`. **`log @1M` is
+now banked**; `sqrt @1M` is a real, decidable 0.93x LOSS and stands as 4kig1's remaining target.
