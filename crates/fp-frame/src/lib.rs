@@ -150581,6 +150581,27 @@ mod tests {
         assert_eq!(nanos.values()[0], Scalar::Float64(0.0));
         assert!(nanos.values()[1].is_missing());
         assert_eq!(nanos.values()[3], Scalar::Float64(0.0));
+
+        // ⚠️ DTYPE FOLLOWS PANDAS' PROMOTION RULE, not a fixed choice. The series
+        // above contains a NaT, so pandas gives float64 — asserted throughout. With
+        // NO missing value pandas gives int64 instead:
+        //     pd.to_timedelta([1, -1], unit='s').dt.days -> int64 [0, -1]
+        // An earlier version of this accessor emitted Float64 unconditionally.
+        let clean = Series::from_values(
+            "td",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Timedelta64(Timedelta::NANOS_PER_SEC),
+                Scalar::Timedelta64(-Timedelta::NANOS_PER_SEC),
+            ],
+        )
+        .unwrap();
+        let clean_days = clean.dt().days().expect("days");
+        assert_eq!(clean_days.values()[0], Scalar::Int64(0));
+        assert_eq!(clean_days.values()[1], Scalar::Int64(-1));
+        let clean_secs = clean.dt().seconds().expect("seconds");
+        assert_eq!(clean_secs.values()[0], Scalar::Int64(1));
+        assert_eq!(clean_secs.values()[1], Scalar::Int64(86399));
     }
 
     #[test]
