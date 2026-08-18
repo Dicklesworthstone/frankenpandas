@@ -2345,6 +2345,11 @@ pub struct PacketFixture {
     pub pivot_aggfunc: Option<String>,
     #[serde(default)]
     pub pivot_margins: Option<bool>,
+    /// `pivot_table(dropna=...)`. `None` keeps the oracle's historical
+    /// `dropna=False`, so every fixture banked before this knob existed is
+    /// byte-unchanged. br-frankenpandas-eay9h.
+    #[serde(default)]
+    pub pivot_dropna: Option<bool>,
     #[serde(default)]
     pub pivot_margins_name: Option<String>,
     #[serde(default)]
@@ -3887,6 +3892,8 @@ struct OracleRequest {
     pivot_aggfunc: Option<String>,
     #[serde(default)]
     pivot_margins: Option<bool>,
+    #[serde(default)]
+    pivot_dropna: Option<bool>,
     #[serde(default)]
     pivot_margins_name: Option<String>,
     #[serde(default)]
@@ -13566,6 +13573,7 @@ fn capture_live_oracle_expected(
         pivot_columns: fixture.pivot_columns.clone(),
         pivot_aggfunc: fixture.pivot_aggfunc.clone(),
         pivot_margins: fixture.pivot_margins,
+        pivot_dropna: fixture.pivot_dropna,
         pivot_margins_name: fixture.pivot_margins_name.clone(),
         dummy_columns: fixture.dummy_columns.clone(),
         crosstab_normalize: fixture.crosstab_normalize.clone(),

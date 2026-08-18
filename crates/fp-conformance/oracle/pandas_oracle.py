@@ -4581,6 +4581,21 @@ def op_dataframe_pivot(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def _pivot_dropna(payload: dict[str, Any]) -> bool:
+    """`pivot_table(dropna=...)`, defaulting to the historical override.
+
+    br-frankenpandas-eay9h. Returns False when the key is absent so that every
+    fixture banked before this knob existed is byte-unchanged; a fixture that
+    explicitly asks for True gets pandas' documented default.
+    """
+    raw = payload.get("pivot_dropna")
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise OracleError("dataframe_pivot_table pivot_dropna must be a boolean")
+    return raw
+
+
 def op_dataframe_pivot_table(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -4600,7 +4615,19 @@ def op_dataframe_pivot_table(pd, payload: dict[str, Any]) -> dict[str, Any]:
         "columns": columns,
         "aggfunc": aggfunc,
         "sort": False,
-        "dropna": False,
+        # DROPNA IS NOW A KNOB, DEFAULTING TO THE HISTORICAL OVERRIDE.
+        # br-frankenpandas-eay9h. This was hardcoded False against pandas'
+        # default of True, with no way to ask for the default — so
+        # reshape_pivot_table_missing_keys_dropna_default_tn6qb9 tested the
+        # opposite of its name, and FrankenPandas was marked divergent for
+        # matching pandas. Measured live on 2.2.3 with that fixture's inputs:
+        #   dropna=True  -> index ['r1','r2']       <- pandas default, and FP
+        #   dropna=False -> index ['r1','r2',nan]   <- what this forced
+        # The default stays False so all eight fixtures banked under the
+        # override are byte-unchanged; only a fixture that ASKS for True moves.
+        # `sort` is still forced False and is NOT addressed here: flipping it
+        # would reorder rows for every one of those fixtures at once.
+        "dropna": _pivot_dropna(payload),
         "margins": bool(payload.get("pivot_margins", False)),
     }
     if payload.get("fill_value") is not None:

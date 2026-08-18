@@ -361,6 +361,14 @@ fn conformance_reshape_pivot_table_missing_keys_dropna_default_tn6qb9() {
             ("pivot_columns", serde_json::json!("col")),
             ("pivot_values", serde_json::json!(["val"])),
             ("pivot_aggfunc", serde_json::json!("sum")),
+            // ASK FOR PANDAS' DEFAULT, which is what this case's name claims to
+            // test. br-frankenpandas-eay9h: the oracle hardcoded dropna=False
+            // with no knob, so this fixture tested the OPPOSITE of its name and
+            // marked FrankenPandas divergent for matching pandas. Measured live
+            // on 2.2.3 with these exact inputs:
+            //   dropna=True  -> index ['r1','r2']       <- pandas default, = FP
+            //   dropna=False -> index ['r1','r2',nan]
+            ("pivot_dropna", serde_json::json!(true)),
         ],
     );
     check_reshape_fixture(fixture);
