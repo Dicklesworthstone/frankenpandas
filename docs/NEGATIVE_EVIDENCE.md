@@ -39117,3 +39117,70 @@ direct evidence for the CSR lever rather than against it: `build_groups` and the
 the serial terms Amdahl is charging here. A future parallel arm for expanding should be attempted
 only AFTER that remainder shrinks, and re-measured with the A/A null as a first-class outcome rather
 than a footnote.
+
+### 2026-08-18 SlateHeron — WHERE THE DISK WENT: 117G of the volume is the SHARED cargo-target the standing orders forbid us to use, and 35G of that is regenerable incremental cache
+
+`/data` fell from 88G to 61G across this session, roughly 1G per orchestrator tick, and the
+brake is at 42G. Every pane has been throttling builds against that number without anyone
+localising it. Measured tonight, and none of it is what the throttling implies.
+
+```
+BUILD TREES
+  117.14 GB  /data/tmp/cargo-target        <- the SHARED dir our orders forbid using
+   54.96 GB  /data/projects/frankenpandas/target
+    6.74 GB  target-sse41
+    4.38 GB  target-crimsonpine
+    2.42 GB  target-v3
+    1.98 GB  target-avx2nofma
+  ---------
+  187.62 GB  total
+
+ARTIFACTS AND SCRATCH
+    0.05 GB  artifacts/phase2c
+    0.01 GB  artifacts/bench          (includes every row measured tonight)
+    0.01 GB  this pane's scratchpad
+    0.00 GB  artifacts/conformance
+```
+
+**THE MEASUREMENT ROWS AND FIXTURES ARE NOISE.** Everything eighteen measured rows, sixteen
+new fixtures, three new conformance operations and a night of probes produced comes to
+**0.07 GB combined**. Nobody should be trading evidence for space; there is no space in the
+evidence.
+
+**THE SHARED DIR IS THE STORY, AND ITS SHAPE IS INFORMATIVE.** All 117G sits under a single
+`debug/` profile — 70G in `deps/` and **35G in `incremental/`**. Incremental is a compiler
+cache: regenerable by construction, never an input to any result, and the first thing any
+build system would evict. Its newest file was written at 07:34 today, so it is live and
+still growing, not an abandoned tree.
+
+**AND IT IS THE ONE DIRECTORY WE ARE INSTRUCTED NOT TO USE.** `CARGO_TARGET_DIR` is exported
+session-wide to that path, so anything that does NOT override it lands there. Both pandas
+panes override it on every build (my orders require it), which means this 117G is
+accumulating from elsewhere on the host — `frankenlibc`, `franken_numpy`, `frankenredis`,
+`frankensqlite` all built tonight. **The volume pressure that has been shaping this
+project's build policy all night is largely not this project's.**
+
+**I HAVE DELETED NOTHING AND AM NOT PROPOSING TO.** Reclaim is explicitly the user's call
+under the standing orders, and a shared incremental cache with a live writer is exactly the
+thing an agent should not touch on its own initiative — evicting it while another project is
+mid-build would turn a space problem into a broken build. This entry exists so the decision
+has numbers rather than a trend line.
+
+**WHAT I WOULD WANT KNOWN BEFORE ANYONE ACTS:** the 35G incremental cache is the cheapest
+candidate and costs only recompilation time; the 70G `deps/` is not cache in the same sense
+and evicting it forces full rebuilds across every project sharing the dir. Those are
+different decisions with different costs and should not be taken as one.
+
+**TWO TOOL TRAPS FOUND WHILE MEASURING, both of which produce a WRONG NUMBER rather than an
+error.** `du` on this host is aliased to `dust` — `du -sh <dir>` prints dust's usage text
+instead of a size, and a script parsing that output gets garbage. `ls` is aliased to `lsd` in
+long format, so `ls | grep "^prefix"` returns ZERO for files that exist. Both were hit
+tonight; both were caught only by cross-checking against a second source. Every figure above
+was measured with `os.walk` + `getsize` so it does not depend on which binary answers to a
+name.
+
+```
+NO VERDICT, NO RATIO, NO ROW BANKED — a disk census, not a measurement of FrankenPandas.
+LOADAVG   19.70 / 13.77 / 12.50, CPU idle 84.86% by my own mpstat; no cargo invoked.
+DISK      /data 61G at the time of writing, 19G above the 42G brake.
+```
