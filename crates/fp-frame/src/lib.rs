@@ -65466,25 +65466,123 @@ impl DataFrame {
                     "sem" => Scalar::Float64(Self::row_sem(&row_vals)),
                     "skew" => Scalar::Float64(Self::row_skew(&row_vals)),
                     "kurt" | "kurtosis" => Scalar::Float64(Self::row_kurtosis(&row_vals)),
-                    // ⚠️ THE SEVEN NAMES THE axis=0 ARM GAINED ARE NOT HERE, and
-                    // that is deliberate rather than an omission. They were
-                    // copied into this arm without a receiver — `s` is the
-                    // per-column Series the axis=0 loop builds and does not
-                    // exist row-wise — and they cannot simply be re-expressed
-                    // over `row_vals`, because that vector has already DROPPED
-                    // the missing entries.
+                    // br-frankenpandas-groupby-idxmax-idxmin, axis=1 half.
+                    // pandas accepts these row-wise too; only the axis=0 arm had
+                    // them, and an earlier attempt to copy the arms across
+                    // failed to compile because it reached for `s`, the
+                    // per-column Series the axis=0 loop builds and this loop has
+                    // no equivalent of.
                     //
-                    // MEASURED, live pandas 2.2.3, on {a: [1.0, 2.0], b: [3.0, NaN]}:
-                    //     df.apply('size',   axis=1) -> [2, 2]     counts BOTH
-                    //                                              columns, NaN
-                    //                                              included
-                    //     df.apply('nunique',axis=1) -> [2, 1]     NaN excluded
-                    //     df.apply('idxmax', axis=1) -> ['b', 'a'] a COLUMN LABEL
-                    //     df.apply('idxmin', axis=1) -> ['a', 'a']
-                    // so `size` needs the unfiltered width and the two idx names
-                    // need the column labels that `row_vals` threw away.
-                    // Implementing them means walking the row WITH its labels,
-                    // which is a different loop, not another arm.
+                    // ⚠️ MISSING VALUES ARE EXCLUDED FROM EVERY ONE OF THESE
+                    // EXCEPT `size`, which counts the COLUMNS. `row_vals` has
+                    // already dropped them, so it is the right input for four of
+                    // the five and the wrong input for the other two.
+                    // MEASURED, live pandas 2.2.3, one case per rule:
+                    //
+                    //   {a:[1.0,2.0], b:[3.0,NaN]}
+                    //     any     [True, True]      all      [True, True]
+                    //     size    [2, 2]            quantile [2.0, 2.0]
+                    //     idxmax  ['b', 'a']        idxmin   ['a', 'a']
+                    //   {a:[0.0], b:[0.0]}    any [False]  all [False]
+                    //   {a:[0.0], b:[1.0]}    any [True]   all [False]
+                    //   {a:[NaN], b:[NaN]}    any [False]  all [True]   <- VACUOUS
+                    //                         quantile [nan]  idxmax [nan]
+                    //   {a:[5.0], b:[5.0]}    idxmax ['a']  idxmin ['a'] <- FIRST wins
+                    //   {a:[NaN], b:[2.0]}    idxmin ['b']  <- a missing cell is
+                    //                                          not a candidate
+                    //
+                    // An all-missing row is the case that separates them: `any`
+                    // is false and `all` is TRUE there, which is exactly Rust's
+                    // empty-iterator behaviour, so both fall out of `row_vals`
+                    // without a special case.
+                    "any" => Scalar::Bool(row_vals.iter().any(|value| *value != 0.0)),
+                    "all" => Scalar::Bool(row_vals.iter().all(|value| *value != 0.0)),
+                    // The COLUMN COUNT, missing cells included — the one name
+                    // here that must not look at `row_vals`.
+                    "size" => Scalar::Int64(self.column_order.len() as i64),
+                    // The string form carries no q, so it is pandas' default 0.5.
+                    //
+                    // ⚠️ NOT `sample_median`, even though q=0.5 makes them agree
+                    // to within an ulp on every input. They are DIFFERENT
+                    // ALGORITHMS: the median averages the two middle values
+                    // `(a+b)/2`, while the quantile interpolates
+                    // `lo + (hi - lo) * weight`. MEASURED, live pandas 2.2.3, on
+                    // the row {a: -1.356, b: 6.844}:
+                    //
+                    // ```text
+                    // df.apply('median',   axis=1) -> 2.744
+                    // df.apply('quantile', axis=1) -> 2.7439999999999998
+                    // ```
+                    //
+                    // so routing quantile through the median would be a silently
+                    // wrong LAST BIT. `group_nanquantile_f64` is the crate's own
+                    // interpolating quantile, bit-identical to
+                    // `fp_types::nanquantile`'s numeric arm — which is what the
+                    // axis=0 arm reaches through `s.quantile(0.5)`. Using it here
+                    // makes the two axes agree with each other by construction.
+                    //
+                    // (FP's interpolation still differs from pandas' in the last
+                    // ulp — pandas reproduces neither `(a+b)/2` nor
+                    // `lo + (hi-lo)*w` exactly. That is a pre-existing,
+                    // crate-wide property of nanquantile and not something to
+                    // fork per call site; noted here so the next reader does not
+                    // "fix" it by switching formulas on one arm.)
+                    "quantile" => {
+                        if row_vals.is_empty() {
+                            // group_nanquantile_f64 selects an order statistic
+                            // and would panic on an empty slice; pandas returns
+                            // NaN for an all-missing row.
+                            Scalar::Float64(f64::NAN)
+                        } else {
+                            let mut sorted = row_vals.clone();
+                            Scalar::Float64(group_nanquantile_f64(&mut sorted, 0.5))
+                        }
+                    }
+                    "idxmax" | "idxmin" => {
+                        let want_max = func == "idxmax";
+                        // Walk the row WITH its labels. Strict `>` / `<` keeps
+                        // the FIRST column on a tie, matching pandas.
+                        let mut best: Option<(&String, f64)> = None;
+                        for name in &self.column_order {
+                            let Some(col) = self.columns.get(name) else {
+                                continue;
+                            };
+                            let value = &col.values()[row_idx];
+                            if value.is_missing() {
+                                continue;
+                            }
+                            let Ok(value) = value.to_f64() else {
+                                continue;
+                            };
+                            let better = match best {
+                                None => true,
+                                Some((_, current)) => {
+                                    if want_max {
+                                        value > current
+                                    } else {
+                                        value < current
+                                    }
+                                }
+                            };
+                            if better {
+                                best = Some((name, value));
+                            }
+                        }
+                        match best {
+                            Some((name, _)) => Scalar::Utf8(name.clone()),
+                            // An all-missing row has no argmax to name; pandas
+                            // returns NaN rather than raising.
+                            None => Scalar::Null(NullKind::NaN),
+                        }
+                    }
+                    // `nunique` never reaches here: apply_named short-circuits it
+                    // to `nunique_axis(axis)` before either dispatch, which
+                    // already handles both axes.
+                    //
+                    // `cumsum` and `rank` are the two names pandas accepts that
+                    // this match still cannot express — they return one row per
+                    // input row, not a scalar per row, exactly as on the axis=0
+                    // arm and the groupby surfaces.
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported apply function: '{other}'"
@@ -147199,6 +147297,97 @@ mod tests {
         assert!(skew_v.abs() < 1e-10);
         let kurt_v = expect_float64(&kurt.column().values()[0]);
         assert!((kurt_v + 1.2).abs() < 1e-10);
+    }
+
+    /// The six names `df.apply(name, axis=1)` accepts that this surface refused.
+    ///
+    /// ⚠️ MISSING VALUES ARE EXCLUDED FROM ALL OF THEM EXCEPT `size`, which
+    /// counts the COLUMNS — that split is the whole reason these could not be
+    /// written over the loop's existing `row_vals` alone. Every expected value
+    /// transcribed from live pandas 2.2.3.
+    #[test]
+    fn df_apply_axis1_any_all_size_quantile_and_the_idx_names() {
+        let frame = |rows: Vec<(&str, Vec<Scalar>)>| {
+            let names: Vec<&str> = rows.iter().map(|(n, _)| *n).collect();
+            DataFrame::from_dict(
+                &names,
+                rows.iter()
+                    .map(|(n, v)| ((*n), v.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let one = |df: &DataFrame, func: &str| df.apply(func, 1).unwrap().column().values()[0].clone();
+
+        // {a: 1.0, b: 3.0} — nothing missing.
+        let plain = frame(vec![
+            ("a", vec![Scalar::Float64(1.0)]),
+            ("b", vec![Scalar::Float64(3.0)]),
+        ]);
+        assert_eq!(one(&plain, "any"), Scalar::Bool(true));
+        assert_eq!(one(&plain, "all"), Scalar::Bool(true));
+        assert_eq!(one(&plain, "size"), Scalar::Int64(2));
+        assert_eq!(one(&plain, "idxmax"), Scalar::Utf8("b".to_owned()));
+        assert_eq!(one(&plain, "idxmin"), Scalar::Utf8("a".to_owned()));
+        assert_eq!(one(&plain, "quantile"), Scalar::Float64(2.0));
+
+        // A zero is FALSEY but present: any stays true, all goes false.
+        let with_zero = frame(vec![
+            ("a", vec![Scalar::Float64(0.0)]),
+            ("b", vec![Scalar::Float64(1.0)]),
+        ]);
+        assert_eq!(one(&with_zero, "any"), Scalar::Bool(true));
+        assert_eq!(one(&with_zero, "all"), Scalar::Bool(false));
+        let all_zero = frame(vec![
+            ("a", vec![Scalar::Float64(0.0)]),
+            ("b", vec![Scalar::Float64(0.0)]),
+        ]);
+        assert_eq!(one(&all_zero, "any"), Scalar::Bool(false));
+        assert_eq!(one(&all_zero, "all"), Scalar::Bool(false));
+
+        // ⚠️ AN ALL-MISSING ROW IS THE CASE THAT SEPARATES THEM: `any` is false
+        // and `all` is TRUE (vacuously), `size` still counts both columns, and
+        // the two idx names return NaN rather than raising.
+        let all_missing = frame(vec![
+            ("a", vec![Scalar::Null(NullKind::NaN)]),
+            ("b", vec![Scalar::Null(NullKind::NaN)]),
+        ]);
+        assert_eq!(one(&all_missing, "any"), Scalar::Bool(false));
+        assert_eq!(one(&all_missing, "all"), Scalar::Bool(true));
+        assert_eq!(one(&all_missing, "size"), Scalar::Int64(2));
+        assert!(one(&all_missing, "idxmax").is_missing());
+        assert!(one(&all_missing, "idxmin").is_missing());
+        // Scalar::is_missing already treats a Float64 NaN as missing, which is
+        // what the quantile arm returns for an empty row.
+        assert!(one(&all_missing, "quantile").is_missing());
+
+        // A missing cell is not a candidate for idxmin, and `size` counts it
+        // anyway — the two rules meeting on one row.
+        let one_missing = frame(vec![
+            ("a", vec![Scalar::Null(NullKind::NaN)]),
+            ("b", vec![Scalar::Float64(2.0)]),
+        ]);
+        assert_eq!(one(&one_missing, "idxmin"), Scalar::Utf8("b".to_owned()));
+        assert_eq!(one(&one_missing, "idxmax"), Scalar::Utf8("b".to_owned()));
+        assert_eq!(one(&one_missing, "size"), Scalar::Int64(2));
+
+        // Ties keep the FIRST column, in column order.
+        let tied = frame(vec![
+            ("a", vec![Scalar::Float64(5.0)]),
+            ("b", vec![Scalar::Float64(5.0)]),
+        ]);
+        assert_eq!(one(&tied, "idxmax"), Scalar::Utf8("a".to_owned()));
+        assert_eq!(one(&tied, "idxmin"), Scalar::Utf8("a".to_owned()));
+
+        // Negatives: the max is the one CLOSEST to zero, which a naive
+        // magnitude comparison would get backwards.
+        let negatives = frame(vec![
+            ("a", vec![Scalar::Float64(-1.0)]),
+            ("b", vec![Scalar::Float64(-3.0)]),
+        ]);
+        assert_eq!(one(&negatives, "idxmax"), Scalar::Utf8("a".to_owned()));
+        assert_eq!(one(&negatives, "idxmin"), Scalar::Utf8("b".to_owned()));
+        assert_eq!(one(&negatives, "quantile"), Scalar::Float64(-2.0));
     }
 
     #[test]
