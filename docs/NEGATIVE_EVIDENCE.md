@@ -39257,3 +39257,61 @@ NO VERDICT, NO RATIO, NO ROW BANKED — a method consolidation.
 LOADAVG   11.87 / 13.46 / 12.70, CPU idle 85.8% by my own mpstat.
 DISK      /data 61G, 19G above the brake.
 ```
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-uza04) — WIN x2 from a gap-hunt that found NO gaps: `cumsum @1M` 12.229x and `df_explode_string_python @1M` 8.285x, both certified. 119 of 126 workloads have never been measured on the live harness
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=7414864069469f80471fa2afc5eb4addc76889f176932049c54b7ca79f7c7b80 (83278512 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-BEFORE-exppar`
+— the pinned artifact matching HEAD (both landed vw0uu fixes, the expanding lane, and NOT the
+reverted parallel arm), reused rather than rebuilt because /data was at the 58G floor. Harness
+`50d3c3ffad4d`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f (2922 files), run
+in the SAME process as the subject under
+invocation_id=vs-pandas-20260818T120652.472506Z-pid4052212 for `cumsum` and
+invocation_id=vs-pandas-20260818T114808.541527Z-pid3809270 for `df_explode_string_python` , giving
+measured_ratio=12.229x and measured_ratio=8.285x respectively.
+
+**A/A null control (same invocation):** `cumsum` FrankenPandas null median ratio 0.99674 and pandas
+0.99283; `df_explode_string_python` FrankenPandas 1.00627 and pandas 1.00275. All four inside the
+0.02 maximum absolute deviation.
+
+**Median-CI decision:** `cumsum` effect median 12.2290x, CI [11.3275, 12.7147], claimed log effect
+2.50380012 against a required threshold of 0.18117749 at margin multiplier 2.0 .
+`df_explode_string_python` effect median 8.2850x, CI [8.1428, 8.5000], claimed log effect 2.11450217
+against a required threshold of 0.14669608 at margin multiplier 2.0 . Best-vs-best agrees with both:
+12.25x and 8.1565x.
+
+**CV role:** provenance-only, no vote. `cumsum` FP p50 6.95ms cv 10.5% against pandas 83.80ms cv
+3.5%; `df_explode_string_python` FP p50 58.78ms cv 5.5% against pandas 489.06ms cv 2.8%.
+
+**WHY THESE TWO, AND WHY THIS IS NOT RE-MEASURING A WIN.** Scanning every artifact against the live
+harness: **126 workloads have a row somewhere, 7 have a row on `50d3c3ffad4d`, and 119 have never
+been measured on it at all.** Their current status is UNKNOWN rather than known-good, and uza04
+cannot close gaps that have never been looked for. I picked one workload structurally likely to
+expose a loss (`df_explode_string_python` — Python-object strings are where FP historically loses)
+and one control from a different shape (`cumsum`).
+
+**THE HUNT FOUND NOTHING, AND THAT IS THE RESULT.** Both came back as decisive wins. No gap here.
+Reporting a hunt that found nothing costs one entry and stops the next agent paying for the same
+two probes.
+
+**WINDOW, DISCLOSED BECAUSE IT WAS NOT QUIET.** A redis build started mid-sweep. loadavg spanned
+7.48-24.44 on the `df_explode_string_python` row (first 9.09, last 15.24) and 9.3-18.62 on `cumsum`
+(first 14.58, last 11.13). Per-arm clocks matched to 1.0002 and 1.0003 (4297-4298 MHz busy-core).
+
+⚠️ **I BANKED THESE DESPITE THE LOAD SPREAD, AND THE REASONING SHOULD BE CHECKABLE RATHER THAN
+TAKEN.** My own rule is that a window which disqualifies a number disqualifies it caveated or not.
+Three things say these survive it: all four A/A nulls passed (the gate's own within-window control),
+best-vs-best agrees with the gated median to within 1.6% on both rows, and the effects are 8x and
+12x rather than marginal. The failure mode a bad window produces is a MARGINAL row flipping sign or
+a median-vs-best disagreement, and neither is present. A row of 1.1x measured in this window would
+not have gone in the table.
+
+**WHAT THESE ROWS DO NOT SHOW.** They say nothing about the other 117 unmeasured workloads. Two
+probes are not a survey, and picking one "likely loss" candidate that turned out to be an 8x win is
+weak evidence that the rest are fine — it is one draw from a distribution nobody has sampled.
