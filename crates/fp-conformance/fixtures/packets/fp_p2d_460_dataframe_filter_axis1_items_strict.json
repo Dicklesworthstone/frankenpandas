@@ -1,0 +1,105 @@
+{
+  "packet_id": "FP-P2D-460",
+  "case_id": "dataframe_filter_axis1_items_strict",
+  "mode": "strict",
+  "operation": "dataframe_filter",
+  "filter_axis": 1,
+  "filter_items": [
+    "gamma",
+    "missing",
+    "alpha",
+    "gamma"
+  ],
+  "frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "column_order": [
+      "alpha",
+      "beta",
+      "gamma"
+    ],
+    "columns": {
+      "alpha": [
+        {
+          "kind": "int64",
+          "value": 10
+        },
+        {
+          "kind": "int64",
+          "value": 20
+        }
+      ],
+      "beta": [
+        {
+          "kind": "int64",
+          "value": 30
+        },
+        {
+          "kind": "int64",
+          "value": 40
+        }
+      ],
+      "gamma": [
+        {
+          "kind": "int64",
+          "value": 50
+        },
+        {
+          "kind": "int64",
+          "value": 60
+        }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "columns": {
+      "gamma": [
+        {
+          "kind": "int64",
+          "value": 50
+        },
+        {
+          "kind": "int64",
+          "value": 60
+        }
+      ],
+      "alpha": [
+        {
+          "kind": "int64",
+          "value": 10
+        },
+        {
+          "kind": "int64",
+          "value": 20
+        }
+      ]
+    },
+    "column_order": [
+      "gamma",
+      "alpha"
+    ]
+  },
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
+    "generated_at": "2026-08-18T15:44:23Z"
+  }
+}
