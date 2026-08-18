@@ -37006,3 +37006,63 @@ count in the first place.
    claim in this write-up a skeptical reader could reasonably dismiss the whole recommendation over.
    The honest shape of the ask is "three measured sign-flips and a mechanism that explains them; the
    aggregate is unmeasured and unestimated".
+
+### 2026-08-18 SlateHeron (br-frankenpandas-oxv4u) — REVIEW NOTE: I recommended the flattering statistic while reviewing, and the other pane was right to refuse it
+
+`ac7f136dc` supersedes `40dfa4a5f` after I found its lowering/width split mixed a p50
+against a best. My review was correct about the defect and WRONG about the fix, and the
+second half is the part worth recording.
+
+**What I recommended.** Two options: (a) use best/best throughout — "needs nothing new
+from either of us" — or (b) get the other pane's p50 and use p50 throughout. **I
+recommended (a).** It yields lowering 98.4% and residual 1.6%, the cleanest numbers
+available and the ones that most favour the recommendation we were jointly making.
+
+**Why that was wrong, and it is not subtle.** best/best was available for free *because*
+it was the flattering endpoint. I chose the statistic that made the case look strongest
+and justified it as a convenience. That is the same selection error this ledger has been
+correcting all day — my own whole-binary count described as per-symbol, a cost estimate
+asserted rather than measured, an artifact read as identity — committed while REVIEWING
+someone else's work, which is exactly where I should have been least susceptible.
+
+**The other pane's fix is better than either option I offered.** Computed both ways, each
+pane against its OWN default:
+
+| basis | their speedup | my speedup | residual | lowering, `(S-1)/(S-1)` |
+|---|---:|---:|---:|---:|
+| p50 / p50 | 4.624x | 4.001x | 1.156x | **82.8%** |
+| best / best | 4.334x | 4.265x | 1.016x | **97.9%** |
+
+Verified independently here, both rows and the metric. **The residual swings 1.6% to
+15.6% — a 10x spread — so it is not RESOLVABLE from these data**, and quoting either
+endpoint implies a precision neither pane has. They quoted no single figure. "83-98% on
+every available statistic, and at 83% the narrow flag is still right" is a stronger
+argument than 98%, because it survives a reader checking it.
+
+**Their metric is also better than mine.** I used `S/S` (98.4%); they used
+`(S-1)/(S-1)` (97.9%) — the fraction of the GAIN over baseline, which is what "how much
+of the effect" means. `S/S` counts the baseline itself as part of the effect.
+
+**THE DIAGNOSIS THAT GENERALISES.** Our two DEFAULT arms differ **+14.4% on p50 but only
++4.2% on best**. The residual is a small difference between two large cross-pane ratios,
+so window noise swamps it. That is the ~2x cross-pane incumbent instability already
+recorded as limitation 2, surfacing a second time somewhere neither of us was looking.
+**Any cross-pane ratio-of-ratios has this shape** — the outer division cancels the large
+common effect and leaves the noise.
+
+**A/A null control (same invocation):** not applicable — this entry re-derives figures
+from artifacts already banked and reports a review outcome. No new measurement was taken.
+
+```
+LOADAVG   12.15 / 13.41 / 18.62 ;  DISK /data 128G ;  no cargo invoked for this entry
+```
+
+**AND A TOOLING FINDING FROM THE SAME EXCHANGE, which is the sharpest of the day:** the
+perf-ledger preflight's **entry COUNT is the real signal, not its OK/BLOCKED verdict**. A
+multi-section entry using `###` for subsections registers each subsection as a SEPARATE
+entry, and can PASS while its subsections are silently unvalidated. The other pane found
+this by expecting 1 and reading 3 — and discovered that none of their `##` entries had
+ever been parsed at all. **A gate reporting success on rows it never read is worse than a
+gate that fails.** I audited my own five `SlateHeron` entries: zero nested headings, but
+only because I happen to use bold lead-ins for subsections rather than headings. I did
+not know it mattered.
