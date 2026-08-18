@@ -40504,6 +40504,43 @@ impl SeriesGroupBy<'_> {
 
         for &func in funcs {
             let agg_result = match func {
+                // br-frankenpandas-groupby-idxmax-idxmin, Series side. THE SAME
+                // ROUTING GAP AS DataFrameGroupBy, and the sibling asymmetry is the
+                // point: DataFrameGroupBy now accepts 31 of pandas' 32 .agg(str)
+                // names while SeriesGroupBy accepted 21 of 32. Every one of the
+                // thirteen added below ALREADY EXISTED as a SeriesGroupBy method
+                // and was still refused by name.
+                //
+                // Defaults are pandas', verified rather than assumed — live pandas
+                // 2.2.3, each `g.agg(name).equals(g.<name>(default))`:
+                //     quantile(0.5)  head(5)  tail(5)  nlargest(5)  nsmallest(5)
+                //     rank()         diff(1)  pct_change(1)  cumsum()  unique()
+                // all True. rank()'s own defaults are method='average',
+                // ascending=True, na_option='keep'.
+                //
+                // ⚠️ SINGLE-FUNC ONLY IS WHAT THIS CLAIMS. pandas allows MIXING a
+                // reduction and a transform in one list — g.agg(['sum','cumsum'])
+                // returns a union-indexed frame with NaN where each func has no row
+                // — and I have NOT verified that this function's DataFrame assembly
+                // reproduces that. The single-name form, which is what `.agg("x")`
+                // means, is what the equalities above cover.
+                "cumsum" => self.cumsum()?,
+                "cumprod" => self.cumprod()?,
+                "cummax" => self.cummax()?,
+                "cummin" => self.cummin()?,
+                "diff" => self.diff(1)?,
+                "pct_change" => self.pct_change(1)?,
+                "rank" => self.rank("average", true, "keep")?,
+                "quantile" => self.quantile(0.5)?,
+                "head" => self.head(5)?,
+                "tail" => self.tail(5)?,
+                "nlargest" => self.nlargest(5)?,
+                "nsmallest" => self.nsmallest(5)?,
+                "unique" => self.unique()?,
+                // `ohlc` is the one name left out on this side: SeriesGroupBy::ohlc
+                // returns a DataFrame (four columns) while every arm here yields a
+                // Series. Same shape mismatch that keeps `size` out of
+                // DataFrameGroupBy's dispatch, in the opposite direction.
                 "sum" => self.sum()?,
                 "mean" => self.mean()?,
                 "count" => self.count()?,
