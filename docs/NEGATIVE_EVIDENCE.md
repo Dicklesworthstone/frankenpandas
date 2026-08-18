@@ -35986,3 +35986,60 @@ floor/ceil/trunc). Both as predicted narrows this bead to log alone, with the fi
 already applied to sqrt. **If sqrt @1M fails its null while provably running on one thread, the
 shared-scope attribution is wrong for reasons that outlive this bead and the diagnosis reopens
 entirely.** Not taken this turn: large-artifact benches are barred at 56G.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-t2n6i) — the datetime-contract split is FOUR handlers, not "a family", and the comment justifying it names an op that was migrated away years-of-commits ago. Correcting my own entry
+
+Yesterday I banked that the oracle carries two datetime contracts and that "a family of
+conformance-green ops is green against pandas' opposite", quoting the source comment's
+own list: *dt.floor/ceil/round, to_timestamp, csv parse_dates*. I took that list at face
+value. Censusing it changes both the size and the shape of the problem.
+
+**Counted mechanism — every datetime-producing handler, its encoder, and what pandas
+2.2.3 actually returns:**
+
+| op | oracle encoder | pandas dtype | verdict |
+|---|---|---|---|
+| `dt.floor` | `series_to_expected` → utf8 | `datetime64[ns]` | **MIS-CONTRACTED** |
+| `dt.ceil` | `series_to_expected` → utf8 | `datetime64[ns]` | **MIS-CONTRACTED** |
+| `dt.round` | `series_to_expected` → utf8 | `datetime64[ns]` | **MIS-CONTRACTED** |
+| `dt.to_timestamp` | explicit `str(...)` at line 1852 | `datetime64[ns]` | **MIS-CONTRACTED** |
+| `to_datetime` | local `datetime_scalar_to_json` | `datetime64[ns]` | correct (typed) |
+| csv `parse_dates` | `dataframe_to_json(datetime_as_typed=True)` | `datetime64[ns]` | correct (typed) |
+| `dt.date` | `series_to_expected` → utf8 | **`object`** (`datetime.date`) | correct as-is |
+| `dt.to_pydatetime` | local `pydatetime_scalar_to_json` | **`object`** | correct as-is |
+| `dt.normalize`, `dt.tz_localize`, `dt.tz_convert`, `dt.tz`, `dt.timetz` | — | — | **NO HANDLER** |
+
+**THE MIS-CONTRACTED SET IS FOUR HANDLERS.** Not a family, not 97 call sites. The typed
+contract is reached from exactly 3 places — two local encoders plus the single
+`datetime_as_typed=True` caller, which is `op_csv_read_frame` — against 97
+`series_to_expected` and 97 other `dataframe_to_json` callers, but almost none of those
+produce datetimes, so the default only bites in the four rows above.
+
+**AND THE COMMENT THAT JUSTIFIES THE DEFAULT IS STALE.** It names three ops as "the
+established (conformance-green) contract … utf8": `dt.floor/ceil/round`, `to_timestamp`,
+and `csv parse_dates`. The first two are on utf8 as claimed. **`csv parse_dates` is
+not** — it is the one caller that opts into the typed encoder, migrated under
+`br-frankenpandas-0ezw7`, and the comment was never updated. So the comment cites as
+precedent an op that had already moved to the other contract.
+
+**`dt.date` AND `dt.to_pydatetime` ARE NOT DEFECTS, which I would have miscounted.**
+Both return **object** dtype in pandas (`datetime.date` / `datetime.datetime` objects),
+not `datetime64`, so encoding them as strings is defensible. Had I trusted the "family"
+framing I would have filed two non-bugs — the same error as `v3q4j`, one step earlier in
+the pipeline.
+
+**A/A null control (same invocation):** not applicable — this entry reports encoder
+call-sites and pandas dtypes, not timings. No ratio is claimed and nothing was certified.
+
+```
+LOADAVG   4.96 / 6.46 / 13.49 ;  CPU IDLE 91.71%, iowait 0.02%, by mpstat
+DISK      /data 56G under the standing build hold; no cargo invoked this turn
+```
+
+**WHAT THIS DOES TO THE DECISION.** `t2n6i`'s scope said "decide the datetime VALUE
+contract once, for all datetime-producing ops". That is still right, but the cost is now
+known: **four handlers to migrate, plus five surfaces that need a handler before they can
+be decided at all.** That is a bounded change, not a corpus-wide one — the same
+correction the `sort` probe made for `eay9h`, where "all eight fixtures" turned out to be
+one. Both times the unmeasured estimate was the pessimistic one, and both times it was
+mine.
