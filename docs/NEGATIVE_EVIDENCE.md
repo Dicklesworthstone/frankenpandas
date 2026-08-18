@@ -35609,3 +35609,69 @@ and let `comparability_identity` include it. Its deletion condition is that it s
 if the project fixes one build configuration forever. I am not landing it this turn — the host disk
 has fallen 193G -> 124G (94% used) in ninety minutes and I am not spending a build on tooling while
 that trend is running.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-mti15) — REJECTED as a claim: a FULLY CERTIFIED 1.299x "FASTER" row at df_dot @1M that best-vs-best refutes at 0.552x. The gate passed all three clauses on a comparison whose incumbent samples span 10.88-27.70ms
+
+**A/A null control (same invocation):** null median ratio frankenpandas=0.98592 and null median ratio
+pandas=0.98024 maximum_absolute_deviation=0.02 — **both inside the band, which is exactly the
+problem.** The nulls certified a row that is not true.
+
+**Counted mechanism:** wall-clock sample spread, same invocation, `df_dot @1M`, default build:
+pandas p50 27.70ms against pandas min 10.88ms — a **2.55x spread within one arm**, cv 22.82%; FP
+p50 21.08ms against min 19.71ms, a 1.07x spread, cv 6.82%.
+
+**THE ROW THAT MUST NOT BE BANKED.** Default-flags ELF, harness `60ed3c58fdd5`, same invocation as
+its incumbent:
+
+    verdict FASTER, p50 ratio 1.299x, ALL THREE CLAUSES TRUE, nulls 0.98592 / 0.98024
+
+By the letter of the gate that is a certified win over pandas at 1M. **It is not one.** Taking each
+arm's best sample — the statistic this bead argues for, because it is the one the host cannot
+inflate — the same run reads **0.552x, a 1.8x LOSS.** The p50 comparison flatters FrankenPandas
+because pandas' own distribution is dispersed 2.55x within a single invocation while FP's is
+dispersed 1.07x. Comparing medians of a tight distribution against a wide one measures the width,
+not the engine.
+
+**This is br-frankenpandas-633fb's thesis arriving as a concrete artifact rather than an argument:**
+at dim>=316 the incumbent runs a 64-thread OpenBLAS GEMM whose timing is bimodal, and the
+median-CI gate has no defence against that. **The A/A nulls do not catch it** — they were 0.98592
+and 0.98024, comfortably inside 2% — because an A/A control measures whether an arm is stable
+against ITSELF across placements, not whether its distribution is comparable in SHAPE to the other
+arm's.
+
+⚠️ **AND THE ASSEMBLER WOULD BANK IT.** `assemble_standing_locks.py` reports it would write **7
+workloads instead of 5**, picking up both this false 1.299x and the `+avx2` 10k row from a
+non-shipping build. **I did not run `--apply`.** That is the second time today the lock tool would
+have enshrined something it cannot evaluate, and the two failures share a root: the assembler banks
+on `verdict == FASTER` and has no access to the facts that invalidate a row — build flags in one
+case, distribution shape in the other.
+
+**WHAT IS ACTUALLY TRUE AT dim=1000.** `+avx2` improves FrankenPandas' own best from **19.71ms to
+15.40ms, a 1.280x self-speedup**, consistent with the 1.604x serial-kernel figure diluted by the
+call's non-kernel work. Best-vs-best against the incumbent:
+
+| pandas best used | default | `+avx2` | improvement |
+|---|---|---|---|
+| 10.88ms (this run's default arm) | 0.552x | 0.707x | **1.280x** |
+| 13.81ms (this run's avx2 arm) | 0.701x | 0.897x | **1.280x** |
+
+**The improvement factor is 1.280x either way, because it is only FP's own minimum moving.** The
+ABSOLUTE best-vs-best is not stable and I am not quoting a single figure for it: pandas' own best
+differed by **27% between two runs minutes apart** (10.88ms vs 13.81ms), which is the same incumbent
+instability that makes the p50 row meaningless.
+
+**mti15's BASELINE REPRODUCES — unlike the neighbouring beads'.** This bead cites best-vs-best of
+0.620x and 0.509x; I measure 0.552x on the default build. That is squarely in range, so unlike
+03fp5's and oxv4u's stale 0.53x whole-call figure, **this bead's number is still good and its
+framing was right.** `+avx2` narrows the 2x gap to roughly 1.1-1.4x depending on which incumbent
+best you credit, and does not close it.
+
+**WINDOW, AND WHY "QUIET" IS THE WRONG WORD AT THIS SIZE.** loadavg went 12.65 -> 65.89 during the
+avx2 run and stayed 59.82-78.8 through the default run; MHz 2632.5 -> 3877.2. **That load is the
+measurement itself** — `ps` showed the harness at 3445% CPU across 66 threads (pandas + OpenBLAS)
+and fp-bench at 1512% across 63. Both arms saturate a 64-core host by construction, so a quiet-window
+precondition is unsatisfiable for 1M linalg rows and the balanced square's same-host interleave is
+the only real control. Arms were clock-matched within 2.3% (4130.8 vs 4037.3 MHz on the avx2 run,
+3967.8 vs 3978.9 on the default). **The two builds ran under different loads, so their absolute
+numbers are not comparable to each other** — which is why the improvement factor above is derived
+from FP's own minimum and reported as robust to the incumbent, rather than as a cross-run ratio.
