@@ -151088,6 +151088,81 @@ mod tests {
         assert_eq!(result.values()[1], Scalar::Utf8("Saturday".to_string()));
     }
 
+    /// `.dt.to_period(freq)` on VALUES, against pandas' measured labels.
+    ///
+    /// MEASURED, pandas 2.2.3, on ['2024-03-10 01:30:45', '2024-12-31 23:59:59', NaT] —
+    /// and independently reproduced by the oracle handler in fp-conformance:
+    /// ```text
+    ///   'Y' -> 2024,       2024,       NaT
+    ///   'Q' -> 2024Q1,     2024Q4,     NaT
+    ///   'M' -> 2024-03,    2024-12,    NaT
+    ///   'D' -> 2024-03-10, 2024-12-31, NaT
+    /// ```
+    ///
+    /// The 2024-12-31 row is the one that separates a real calendar conversion from a
+    /// string truncation: under 'Q' it must be 2024Q4, which no prefix of the input
+    /// contains.
+    #[test]
+    fn dt_to_period_on_values_matches_pandas() {
+        let s = Series::from_values(
+            "d",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-03-10 01:30:45".into()),
+                Scalar::Utf8("2024-12-31 23:59:59".into()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+
+        for (freq, first, second) in [
+            ("Y", "2024", "2024"),
+            ("Q", "2024Q1", "2024Q4"),
+            ("M", "2024-03", "2024-12"),
+            ("D", "2024-03-10", "2024-12-31"),
+        ] {
+            let out = s.dt().to_period(freq).expect("to_period");
+            assert_eq!(
+                out.values()[0],
+                Scalar::Utf8(first.to_string()),
+                "freq {freq} row0"
+            );
+            assert_eq!(
+                out.values()[1],
+                Scalar::Utf8(second.to_string()),
+                "freq {freq} row1"
+            );
+            assert!(out.values()[2].is_missing(), "freq {freq} NaT row");
+        }
+
+        // ⚠️ NOT the same operation as `Series::to_period`, which converts the
+        // INDEX and leaves the values alone. Both exist; this pins the difference.
+        //
+        // The index form needs DATETIME-LIKE INDEX LABELS — it rejects the Int64
+        // index used above, so this uses its own series. (My first draft called it
+        // on `s` and would have panicked on the Err.)
+        let idx_series = Series::from_values(
+            "d",
+            vec![
+                IndexLabel::Utf8("2024-03-10".into()),
+                IndexLabel::Utf8("2024-12-31".into()),
+            ],
+            vec![Scalar::Int64(7), Scalar::Int64(8)],
+        )
+        .unwrap();
+        let idx_form = idx_series.to_period("M").expect("Series::to_period");
+        assert_eq!(
+            idx_form.values()[0],
+            Scalar::Int64(7),
+            "Series::to_period must leave VALUES untouched"
+        );
+        assert_eq!(
+            idx_form.index().labels()[0],
+            IndexLabel::Utf8("2024-03".into()),
+            "Series::to_period must convert the INDEX"
+        );
+    }
+
     /// `.dt.components` against pandas' measured 7-column output, and
     /// `.dt.to_pytimedelta`'s half-to-even rounding.
     ///
