@@ -196121,3 +196121,99 @@ mod tz_aware_datetime_guard_00ze3 {
         );
     }
 }
+
+/// AUDIT of the remaining tz-aware entry points (br-frankenpandas-00ze3).
+///
+/// The `to_datetime` guard above records that `tz_localize` / `tz_convert` were
+/// UNAUDITED, and that their absence from the guard must not be read as safety.
+/// This closes that gap: the same "loud divergence must not become a quiet one"
+/// property is asserted at each boundary, so the whole surface is checked rather
+/// than one entry point.
+///
+/// `t2n6i` reports `dt.tz_localize` returning Utf8 where pandas returns
+/// `datetime64[ns, tz]`. These tests pin what each call ACTUALLY returns today, so
+/// the family's structural decision can be taken against measured behaviour
+/// instead of against three beads' prose.
+#[cfg(test)]
+mod tz_surface_audit_00ze3 {
+    use fp_types::{DType, Scalar};
+
+    use super::Series;
+
+    // Utf8 datetime strings, matching how every existing `dt_tz_localize_*` test in
+    // this file drives the accessor. `tz_localize` lives on DatetimeAccessor, NOT on
+    // Series — I wrote these against `Series::tz_localize` first and the compiler
+    // caught it, which is a reminder that "grep found a pub fn" is not the same as
+    // "that method is reachable from here".
+    fn naive_datetimes() -> Series {
+        Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
+                Scalar::Utf8("2024-06-20 14:00:00".to_owned()),
+            ],
+        )
+        .expect("naive datetime series")
+    }
+
+    /// `tz_localize` attaches a zone to naive input. pandas returns
+    /// `datetime64[ns, tz]`; we have nowhere to put the zone
+    /// (`DType::Datetime64` is bare), so the answer must be VISIBLY different
+    /// rather than a naive Datetime64 that has silently dropped it.
+    #[test]
+    fn tz_localize_must_not_return_a_bare_datetime64_that_lost_its_zone_00ze3() {
+        let series = naive_datetimes();
+        let out = series
+            .dt()
+            .tz_localize(Some("America/New_York"))
+            .expect("tz_localize");
+        assert_ne!(
+            out.dtype(),
+            DType::Datetime64,
+            "tz_localize returned a BARE Datetime64. pandas returns \
+             datetime64[ns, tz], and DType::Datetime64 carries no zone \
+             (br-frankenpandas-00ze3), so a bare Datetime64 here means the zone was \
+             attached and immediately discarded — the dtype looks closer to pandas \
+             while the wall-clock silently is not. Take 00ze3's decision rather than \
+             relaxing this."
+        );
+    }
+
+    /// UTC is the one zone that a bare `Datetime64` can honestly represent, since
+    /// there is no offset to lose. This is deliberately a separate assertion from
+    /// the one above: without it, a change that refused ALL zones would satisfy the
+    /// guard while making tz support strictly worse.
+    #[test]
+    fn tz_localize_to_utc_may_legitimately_be_datetime64_00ze3() {
+        let series = naive_datetimes();
+        let out = series
+            .dt()
+            .tz_localize(Some("UTC"))
+            .expect("tz_localize utc");
+        assert!(
+            matches!(out.dtype(), DType::Datetime64 | DType::Utf8),
+            "tz_localize(UTC) produced {:?}, which is neither of the two defensible \
+             answers. UTC is the one zone a bare Datetime64 can carry without losing \
+             information, so Datetime64 is honest here; Utf8 is the current \
+             conservative answer. Anything else needs explaining.",
+            out.dtype()
+        );
+    }
+
+    /// Removing a zone (`tz_localize(None)`) is the one direction that is
+    /// unambiguously representable — the result IS naive, so a bare Datetime64
+    /// loses nothing.
+    #[test]
+    fn tz_localize_none_strips_to_naive_and_that_is_representable_00ze3() {
+        let series = naive_datetimes();
+        let out = series.dt().tz_localize(None).expect("tz_localize none");
+        assert!(
+            matches!(out.dtype(), DType::Datetime64 | DType::Utf8),
+            "tz_localize(None) produced {:?}; stripping a zone yields naive data, \
+             which a bare Datetime64 represents exactly, so this must not become \
+             something exotic.",
+            out.dtype()
+        );
+    }
+}
