@@ -6340,11 +6340,24 @@ impl Period {
     /// `1970`/`1970Q1`/`1970-01`/`1970-01-01`/`1970-01-01 00:00` all have
     /// ordinal 0. Returns `"NaT"` for the missing sentinel (`i64::MIN`).
     ///
-    /// Annual/Quarterly/Monthly/Daily and the sub-daily clocks
-    /// (Hourly/Minutely/Secondly) are exact. Weekly and Business use a
-    /// best-effort `YYYY-MM-DD` rendering (their pandas axes — a Sunday-ended
-    /// week range and a business-day count — are not yet wired; neither is
-    /// reachable through the current parse/cast paths).
+    /// EVERY frequency is exact, Weekly and Business included.
+    ///
+    /// ⚠️ THOSE TWO ARE NOT INDEXED IN DAYS, which is what made them wrong until
+    /// 08363d42f: a weekly ordinal counts WEEKS from the Monday 1969-12-22 and
+    /// renders as the RANGE it spans (`2024-03-11/2024-03-17`), and a business
+    /// ordinal counts BUSINESS DAYS at five per week. Both used to be handed to
+    /// `civil_from_days`, which reads its argument as days since the epoch, so
+    /// ordinal 2829 rendered `1977-09-30` instead of the week of 2024-03-15.
+    ///
+    /// The note that used to sit here called them "best-effort" and said neither
+    /// was "reachable through the current parse/cast paths". The first half was
+    /// a real limitation; the second was too narrow a survey. [`Self::parse`]
+    /// indeed cannot produce them and neither can `cast_scalar` — but
+    /// `DatetimeIndex::to_period("W")` builds them directly, and fp-index then
+    /// renders those values through `Display` in `PeriodIndex::format`,
+    /// `to_index`, `to_flat_index`, the `.str` accessor and the `get_loc` error
+    /// message. The frequencies were unreachable only from the two paths the
+    /// note happened to check.
     #[must_use]
     pub fn calendar_string(&self) -> String {
         let mut rendered = String::new();

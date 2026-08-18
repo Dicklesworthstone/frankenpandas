@@ -30425,6 +30425,88 @@ mod tests {
         Ok(())
     }
 
+    /// The RENDERED labels for the same three timestamps the ordinal test above
+    /// checks — the half that was missing, and the half that was wrong.
+    ///
+    /// ⚠️ CORRECT ORDINALS DO NOT IMPLY CORRECT LABELS. That test verified
+    /// `to_period("W")` produces ordinals 1, 1, 2827 and `to_period("B")`
+    /// produces -1, 0, 14130, all of which agree with pandas — and every one of
+    /// them then rendered decades wrong, because those two ordinals are a WEEK
+    /// COUNT and a BUSINESS-DAY COUNT rather than day indices (fixed in
+    /// 08363d42f). Checking only the ordinal is what let it through.
+    ///
+    /// This is also the path that makes the frequencies reachable at all:
+    /// `PeriodIndex::format` matches `pd.PeriodIndex.format()`, and `to_index`,
+    /// `to_flat_index` and the `.str` accessor all render through the same
+    /// `Display`. Every string below is transcribed from live pandas 2.2.3.
+    #[test]
+    fn period_index_labels_match_pandas_not_just_the_ordinals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn ns(value: &str) -> Result<i64, super::DateRangeError> {
+            super::parse_datetime_to_nanos(value)
+        }
+
+        let dt = super::DatetimeIndex::new(vec![
+            ns("1969-12-31 23:59:59")?,
+            ns("1970-01-01 00:00:00")?,
+            ns("2024-02-29 12:34:56")?,
+        ]);
+
+        // WEEKLY IS A RANGE. The first two timestamps straddle the epoch and
+        // land in the SAME week, which is why they render identically.
+        assert_eq!(
+            dt.to_period("W")?.format(),
+            vec![
+                "1969-12-29/1970-01-04".to_owned(),
+                "1969-12-29/1970-01-04".to_owned(),
+                "2024-02-26/2024-03-03".to_owned(),
+            ]
+        );
+
+        // BUSINESS is a single date, but off a five-per-week axis.
+        assert_eq!(
+            dt.to_period("B")?.format(),
+            vec![
+                "1969-12-31".to_owned(),
+                "1970-01-01".to_owned(),
+                "2024-02-29".to_owned(),
+            ]
+        );
+
+        // The frequencies whose ordinal IS a count of its own unit were always
+        // right; pinned here so the two groups are compared side by side.
+        assert_eq!(
+            dt.to_period("D")?.format(),
+            vec![
+                "1969-12-31".to_owned(),
+                "1970-01-01".to_owned(),
+                "2024-02-29".to_owned(),
+            ]
+        );
+        assert_eq!(
+            dt.to_period("M")?.format(),
+            vec![
+                "1969-12".to_owned(),
+                "1970-01".to_owned(),
+                "2024-02".to_owned(),
+            ]
+        );
+
+        // to_index / to_flat_index render through the same Display, so the
+        // weekly range has to survive the trip into a flat Utf8 Index too.
+        assert_eq!(
+            dt.to_period("W")?.to_flat_index().labels(),
+            super::Index::from_utf8(vec![
+                "1969-12-29/1970-01-04".to_owned(),
+                "1969-12-29/1970-01-04".to_owned(),
+                "2024-02-26/2024-03-03".to_owned(),
+            ])
+            .labels()
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn period_index_asfreq_boundary_conversion_h1zia() -> Result<(), super::IndexError> {
         use fp_types::{Period, PeriodFreq};
