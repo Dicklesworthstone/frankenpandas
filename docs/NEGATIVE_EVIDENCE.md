@@ -35886,3 +35886,56 @@ pandas' promotion everywhere for parity, which costs type information and moves 
 behaviour and record all three as documented, intentional divergences with a DISC entry
 each. What must NOT happen is a third thing: patching one producer to match while the
 other two keep the opposite behaviour, which is where per-bead decisions lead.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-eay9h) — CORRECTING MY OWN COST ESTIMATE: flipping the oracle's hardcoded `sort=False` moves ONE fixture, not eight. I asserted "all eight" without measuring it
+
+When I landed the `pivot_dropna` knob (`2a8cc5bf6`) I left `sort` alone and justified it
+in the commit message: *"flipping it would reorder rows for every one of those eight
+fixtures at once, which is strictly the bigger blast radius."* **That was an assertion,
+not a measurement, and it is wrong.**
+
+**Counted mechanism.** Replayed each banked `dataframe_pivot_table` fixture's own frame
+payload through `pandas.pivot_table` at `sort=False` and `sort=True`, holding every other
+kwarg at what the oracle passes, and compared the resulting index and column ORDER:
+
+| fixture | sort=False vs sort=True |
+|---|---|
+| `fp_p2d_127_..._fill_hardened` | SAME |
+| `fp_p2d_127_..._margins_strict` | SAME |
+| `fp_p2d_127_..._mean_missing_strict` | SAME |
+| `fp_p2d_127_..._multi_values_strict` | **MOVED** — column order `[(sales,A),(sales,B),(profit,A),(profit,B)]` → `[(profit,…)…]` |
+| `fp_p2d_127_..._sum_strict` | SAME |
+| `fp_p2d_127_..._unsupported_agg_hardened` | SKIP — `geo_mean` is deliberately not a valid aggfunc |
+| `fp_p2d_128_..._margins_name_custom_strict` | SAME |
+| `fp_p2d_128_..._mean_fill_hardened` | SAME |
+
+**MOVED = 1, SAME = 6, SKIPPED = 1.** The six unchanged ones have inputs already in
+sorted order, so `sort` is a no-op for them. The single mover is a MULTI-VALUES pivot and
+what moves is the COLUMN order of its MultiIndex — not rows, which is what I claimed.
+
+**So the cost of aligning `sort` with pandas' default is one fixture's expectation, not a
+corpus-wide re-bank.** That materially changes the option I described as "strictly the
+bigger blast radius" on this bead: it is in fact the *smaller* of the two remaining
+items, since the `dropna` default still governs seven fixtures that do not ask for it.
+
+**WHAT I DID NOT DO, AND WHY.** I did not flip `sort`. The build hold is in force
+(`/data` at 56G, no cargo this turn), so I cannot run the conformance suite to verify the
+one fixture that would move, and landing an expectation change I cannot re-verify is the
+golden-regeneration shape this campaign is wariest of. The measurement is the deliverable;
+the change belongs in a turn where it can be gated.
+
+**A/A null control (same invocation):** not applicable — this entry reports index and
+column ordering from live-pandas replays, not timings. No ratio is claimed.
+
+```
+LOADAVG   7.36 / 10.69 / 18.88 ;  CPU IDLE 90.42%, iowait 0.03%, by mpstat
+DISK      /data 56G under the standing build hold; no cargo invoked
+```
+
+**THE PATTERN, because this is the third time this session and twice it was mine.** A
+plausible, self-consistent, unmeasured claim went into a commit message as justification.
+The other two: `v3q4j`, where I filed a parity bead against FrankenPandas off the oracle's
+answer and had to refute it; and the `read_csv` promotion probe, where
+`skip_blank_lines=True` silently removed the gap I thought I was measuring. **A cost
+estimate used to justify NOT doing something deserves the same evidence as a result used
+to justify doing it** — it is exactly as load-bearing, and nothing forces it to be checked.
