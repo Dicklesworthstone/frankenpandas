@@ -35675,3 +35675,93 @@ the only real control. Arms were clock-matched within 2.3% (4130.8 vs 4037.3 MHz
 3967.8 vs 3978.9 on the default). **The two builds ran under different loads, so their absolute
 numbers are not comparable to each other** — which is why the improvement factor above is derived
 from FP's own minimum and reported as robust to the incumbent, rather than as a cross-run ratio.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-u5cg4) — the grouped-rolling parallel gate was on the WRONG VARIABLE: it keyed on group count when total rows is the discriminator, so it both shipped a regression on small frames and blocked gains on low-cardinality groupbys
+
+The floor was `n_groups >= 64` with no row condition. I had flagged it twice as "never
+measured on this kernel" and deferred it. Measuring it did not just tune a constant — it
+found a live regression in shipped code.
+
+**Campaign result class:** `maintenance-self-speedup`.
+
+Both arms run in ONE process with no incumbent, so by section 1 this is maintenance and
+not a win. It is banked because it removes a shipped regression and decides a gate.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=e85e724ed71dce89ce0b2fdab0248ac87bb08dbf97f026f0aae7376f7b1524a5 (82635120 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**MEASURED**, `fp-bench --category sgb_rolling_policy --groups N`, self-speedup against a
+forced-serial baseline, ABBA over 15 rounds after 3 warmups, group count varied at FIXED
+rows so per-row work is identical by construction:
+
+| rows | groups | `auto` (old gate) | 2 | 4 | 8 | 16 |
+|---:|---:|---|---:|---:|---:|---:|
+| 10k | 100 | **0.234x PARALLEL** | 0.652x | 0.444x | 0.463x | 0.293x |
+| 10k | 64 | **0.391x PARALLEL** | 0.613x | 0.678x | 0.493x | 0.264x |
+| 10k | 32 | 1.023x serial | 0.643x | 0.749x | 0.623x | 0.446x |
+| 100k | 8 | 0.952x serial | 0.997x | 1.197x | **1.378x** | **1.456x** |
+| 100k | 16 | 1.014x serial | 1.042x | 1.075x | 1.288x | 1.324x |
+| 100k | 32 | 0.977x serial | 1.175x | **1.561x** | 1.492x | **1.608x** |
+| 1M | 8 | 0.998x serial | 1.052x | 1.269x | 1.393x | 1.407x |
+| 1M | 16 | 0.991x serial | 1.101x | 1.330x | **1.463x** | 1.436x |
+| 1M | 32 | 1.005x serial | 1.079x | 1.265x | 1.486x | **1.502x** |
+
+Every arm at every shape was bit-identical to serial.
+
+**READ THE `auto` COLUMN AGAINST THE REST — that is where both defects are.** At 10k rows
+EVERY worker count loses, and the old gate admitted 64+ groups anyway: `auto` 0.234x and
+0.391x are the SHIPPED path running 2.6-4.3x slower than serial. At 100k and 1M every
+worker count from 4 up wins, and the old gate refused below 64 groups, so a groupby on a
+boolean, a month, or any handful of levels never parallelised at any size.
+
+**Counted mechanism:** total rows is what the per-call `thread::scope` spawn is amortised
+against; group count only decides how the work is split, not how much there is. Gate is
+now `rows >= 100_000 && groups >= 2`. 100_000 is where the wins are PROVEN — the
+10k..100k band was not measured, and gating there preserves the pre-existing serial
+behaviour rather than guessing.
+
+**Median-CI decision:** effect median 1.463x at the 1M/16-group 8-worker arm against a
+forced-serial baseline in the same rounds; the decision threshold is unity and the SIGN,
+which is unambiguous — every 10k shape sits below it and every 100k/1M shape at 4+
+workers above it.
+
+**CV role:** provenance only, no vote. Magnitudes on this lane are load-sensitive: a
+re-check of the 10k/100-group case in a degraded window (load 38, idle 61.7%) read
+0.636x where the quiet window read 0.234x. **The SIGN was identical in both**, which is
+what the gate turns on, and it is why the constant is chosen from the shape of the table
+rather than any single figure.
+
+```
+LOADAVG   13.44 -> 17.92 across the banked sweeps; the re-check at load 38.29 is
+          quoted above and NOT banked
+CPU IDLE  81.65% at the banked sweeps, iowait 0.52%, by mpstat — verified directly
+OBSERVED MHz per sweep 2329.2-2965.1 mean, cross-core min 1429.0 max 4298.3
+THREADS   observed per arm in the table; forced-serial baseline 1 on every round
+```
+
+**A/A null control (same invocation):** no incumbent exists in this process, so the
+stand-in is the forced-serial baseline re-timed inside every ABBA round: on the 1M /
+64-group sweep its own median ratio across the two arms was 42639.8us against 44752.5us,
+a 4.9% spread. That figure is the noise floor this table's verdicts must clear, and every
+banked sign in it clears it by 20% or more.
+
+⚠ **GATE STATUS, STATED EXACTLY RATHER THAN ROUNDED UP.** After the final edits: clippy
+`-p fp-frame --all-targets -- -D warnings` CLEAN (it compiles every test target, so
+nothing is broken at build level), `fmt --check` clean, and the four `u5cg4` locks pass.
+**The FULL fp-frame runtime suite did NOT run.** One attempt died on a remote worker with
+`rustc-LLVM ERROR: IO failure on output stream: No space left on device`; every retry
+since returns `[RCH] remote required; refusing local fallback (no admissible workers:
+critical_pressure=1, insufficient_slots=1)`. I did not substitute a local build — one was
+already spent this turn on the measurement binary.
+
+The residual risk is bounded rather than hand-waved: every worker-count assertion in the
+workspace is inside the `u5cg4` module (all four pass) and `fp-bench`'s sweep always
+drives the explicit override, bypassing the gate. Any other test can be affected only
+through VALUES, and the bit-identity test proves values identical at every worker count.
+Re-run the full suite when the fleet recovers.
+
+**Two fixtures had to move, and the reason is the finding in miniature:** the bit-identity
+fixture (20k rows) and the divisor lock (64k rows) both sat BELOW the new floor, so they
+would have tested the serial path on both arms and their "the parallel arm actually ran"
+assertions would have been vacuously true. A threshold change silently voids every test
+fixture that straddles it.
