@@ -196217,3 +196217,111 @@ mod tz_surface_audit_00ze3 {
         );
     }
 }
+
+/// TIMEZONE CENSUS of the `.dt` surface (br-frankenpandas-gmp9c, br-frankenpandas-00ze3).
+///
+/// `00ze3` warns that a QUIET zone-loss is worse than the LOUD Utf8 divergence
+/// `t2n6i` reports. Censusing the surface found four calls that had already made
+/// that trade: `floor`, `ceil`, `round` and `normalize` return a well-formed
+/// datetime string that has silently lost its offset, where pandas 2.2.3 keeps it.
+///
+/// Both halves are pinned here on purpose. Locking only the correct calls would let
+/// the broken four drift further; locking only the broken four would read as
+/// endorsement. Every "WRONG" assertion below carries pandas' answer and the bead
+/// id, so a fix is expected to break it — and breaking it is the signal, not a
+/// regression.
+///
+/// The fixture uses `+05:30` deliberately: a half-hour zone is the case where
+/// "round the UTC instant and re-stamp the offset" gives a DIFFERENT answer from
+/// "round in the target zone", so it will catch the wrong fix as well as the
+/// missing one.
+#[cfg(test)]
+mod dt_timezone_census_gmp9c {
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    fn aware() -> Series {
+        Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15 10:30:00+05:30".to_owned())],
+        )
+        .expect("tz-aware series")
+    }
+
+    fn first(series: &Series) -> String {
+        match &series.values()[0] {
+            Scalar::Utf8(text) => text.clone(),
+            other => panic!("expected Utf8, got {other:?}"),
+        }
+    }
+
+    /// THE FIVE THAT ARE CORRECT. Measured against live pandas 2.2.3; these are the
+    /// evidence that the surface is not wholesale broken, which is what makes the
+    /// four below a bug rather than a missing feature.
+    #[test]
+    fn zone_preserving_accessors_match_pandas_gmp9c() {
+        let s = aware();
+        assert_eq!(
+            first(&s.dt().tz_convert(Some("UTC")).expect("tz_convert")),
+            "2024-01-15 05:00:00+00:00",
+            "tz_convert must convert the instant AND keep an offset"
+        );
+        assert_eq!(
+            first(&s.dt().tz_convert(None).expect("tz_convert none")),
+            "2024-01-15 05:00:00",
+            "tz_convert(None) converts to UTC then drops the zone, as pandas does"
+        );
+        assert_eq!(
+            first(&s.dt().tz_localize(None).expect("tz_localize none")),
+            "2024-01-15 10:30:00",
+            "tz_localize(None) keeps WALL-CLOCK and drops the zone, as pandas does"
+        );
+        assert_eq!(
+            first(&s.dt().timetz().expect("timetz")),
+            "10:30:00+05:30",
+            "timetz must keep the offset — it is the accessor that exists to"
+        );
+        assert_eq!(first(&s.dt().tz().expect("tz")), "+05:30");
+    }
+
+    /// THE FOUR THAT ARE WRONG. Each expects FrankenPandas' CURRENT answer and
+    /// names pandas' in the message. If one of these fails, someone fixed it —
+    /// update the expectation, do not weaken the assertion.
+    #[test]
+    fn zone_dropping_accessors_are_pinned_as_a_known_divergence_gmp9c() {
+        let s = aware();
+        for (label, got, pandas_gives) in [
+            (
+                "floor(D)",
+                first(&s.dt().floor("D").expect("floor")),
+                "2024-01-15 00:00:00+05:30",
+            ),
+            (
+                "ceil(D)",
+                first(&s.dt().ceil("D").expect("ceil")),
+                "2024-01-16 00:00:00+05:30",
+            ),
+            (
+                "round(H)",
+                first(&s.dt().round("H").expect("round")),
+                "2024-01-15 10:00:00+05:30",
+            ),
+            (
+                "normalize",
+                first(&s.dt().normalize().expect("normalize")),
+                "2024-01-15 00:00:00+05:30",
+            ),
+        ] {
+            assert!(
+                !got.contains("+05:30"),
+                "{label} now KEEPS the offset ({got}). If that is a deliberate fix for \
+                 br-frankenpandas-gmp9c, update this test — and check a half-hour zone \
+                 specifically, because rounding the UTC instant and re-stamping the \
+                 offset gives a DIFFERENT answer from rounding in the target zone. \
+                 pandas 2.2.3 gives {pandas_gives}."
+            );
+        }
+    }
+}
