@@ -35502,3 +35502,110 @@ closes the 0.53x whole-call gap at 10k is unmeasured, and the honest test is the
 harness against the incumbent with the AVX2 ELF, in a window that stays quiet for its duration.
 Disk also fell 193G -> 147G (93% used) during this turn, which is worth watching before anyone
 schedules more builds.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-oxv4u) — `+avx2` turns df_dot @10k from parity into a certified 1.153x vs pandas; and this bead's headline 0.53x is STALE — the default build measures 0.98x today, not 0.53x
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=162f821c9c094a16ee97a9f29aa7986f89753b0012208452e8f5b37659f7d2f4 (82851952 bytes) /data/projects/.scratch/crimsonpine/fp-bench-AVX2-fc793a3b7`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260818T030743.866330Z-pid3963907 measured_ratio=1.153x — pandas ran as
+arm A of the same balanced square.
+
+**A/A null control (same invocation):** null median ratio frankenpandas=1.01744316 and null median
+ratio pandas=1.01993524 maximum_absolute_deviation=0.02 — both medians inside the band.
+
+**Median-CI decision:** median effect ratio 1.153x with CI [1.1213723, 1.16156829];
+claim_log_effect=0.14209097 cleared the required threshold required_log_effect=0.11192222 at
+margin_multiplier=2.0; decidable=true, all three clauses true.
+
+**CV role:** provenance-only, no vote (`cv_is_provenance_only=true`). FP 6.8%, pandas 9.66%.
+
+**Counted mechanism:** instructions retired, `perf stat`, `df_dot_kernel @10k`, each binary's own
+startup floor subtracted: SSE2 196,242,364 workload instructions against AVX2 75,638,814 — 2.595x
+fewer for identical kernel work, the load-immune mechanism behind the timing above.
+
+**Harness sha256:** `60ed3c58fdd5`. Window: loadavg 12.82 -> 12.25 (15-min 14.05), idle 87.8%,
+iowait 0.2%, build CPU 4%, **arms clock-matched at 4292.2 MHz EXACTLY on both**, disk 124G.
+
+⚠️ **I RAN FOUR TIMES AND ONLY TWO CERTIFIED. REPORTING ALL FOUR, BECAUSE QUOTING THE PASSES WOULD
+BE SELECTIVE REPORTING.**
+
+| run | verdict | ratio | FP p50 | FP A/A null | certified |
+|---|---|---|---|---|---|
+| 1 | NULL_UNDECIDABLE | 1.142x | 139.51us | 1.03191 | no |
+| 2 (banked above) | FASTER | 1.153x | 137.51us | 1.01744 | **yes** |
+| 3 | NULL_UNDECIDABLE | 1.133x | 138.74us | 1.03743 | no |
+| 4 | FASTER | 1.125x | 139.89us | 1.00524 | **yes** |
+
+**The EFFECT is far more stable than the GATE.** Four ratios spanning 1.125-1.153 (2.5%) and four FP
+p50s spanning 137.51-139.89us (1.7%), against pandas at 158.74-160.55us — but the A/A nulls straddle
+the 2% limit (1.00524, 1.01744, 1.03191, 1.03743), so the row certifies half the time. **I did not
+stop at the first pass and I am not presenting run 2 as though it were the only measurement.** The
+honest statement is: a reproducible ~1.14x that clears the gate on 2 of 4 attempts at this
+workload size.
+
+**THIS BEAD'S PREMISE IS STALE, AND THAT MATTERS MORE THAN MY RESULT.** oxv4u and 03fp5 both carry
+"df_dot @10k is 0.53x". Measured in this same window, same harness, same incumbent, with the
+DEFAULT-flags ELF:
+
+| build | FP p50 | ratio vs pandas | certified |
+|---|---|---|---|
+| default | 163.07us, 164.39us | **0.979x, 0.991x** | 0 of 2 |
+| `+avx2` | 137.51-139.89us | **1.125-1.153x** | 2 of 4 |
+
+**The default build is ~0.98x today, not 0.53x.** The intervening work — the persistent-pool
+dispatch (oarkz) and the cgroup-walk removal (2a2aa6905) — already closed nearly all of that gap,
+and the 0.53x figure has simply never been re-measured on the current harness. **I very nearly
+compared my 1.14x against that 0.53x and reported "a loss became a win"; the same-window default
+arm is the only reason I did not.** That is the instrument-crossing error this ledger has caught me
+making three times today, avoided here only by measuring both arms rather than citing one.
+
+The real, same-instrument statement is narrower and true: **`+avx2` is a 1.18x self-speedup on the
+whole call (163.73us -> 138.91us mean of medians), which moves df_dot @10k from just under parity to
+just over it.**
+
+**NOT BANKED AS A REGRESSION LOCK, DELIBERATELY.** The certified row was produced by a
+`-C target-feature=+avx2` build, which is **not the shipping configuration** — the default build is
+what CI and every other pane produce, and it measures 0.98x. Banking this as a standing lock would
+assert a defence the shipped binary does not provide. The lock set stays at 5 workloads. If the
+build policy ever adopts `+avx2`, this row becomes bankable and not before.
+
+**WHAT THIS SETTLES FOR THE BEAD.** Targeted per-kernel AVX2 is unreachable here
+(`forbid(unsafe_code)` bars `#[target_feature]` calls, the dependency ban bars multiversioning), so
+the only lever is the blanket flag — and the blanket flag is now measured end to end: 2.595x fewer
+kernel instructions, 1.18x on the whole call, 0.98x -> ~1.14x against the incumbent, arithmetic
+bit-identical in form because `+fma` was deliberately excluded. **That is a build-policy decision
+with numbers on both sides of it, which is what this bead needed. I am not making that decision.**
+
+**⚠️ AND A HOLE I FOUND BY TRYING TO DO THE RIGHT THING: NOTHING IN THE PROVENANCE RECORDS THE
+BUILD FLAGS.** I went to confirm the lock assembler would refuse this row, and it does the
+opposite — `assemble_standing_locks.py` reports it would write 6 workloads instead of 5, because it
+banks any certified `FASTER` row and has no way to know this one came from a non-default build.
+Checking what the artifact actually carries:
+
+    AVX2 build    runtime_detected_isa_features = [scalar, sse2, avx2, fma, bmi2, vaes]
+    default build runtime_detected_isa_features = [scalar, sse2, avx2, fma, bmi2, vaes]
+    both          engine_identity.frankenpandas = {version 0.1.2, profile release-perf, ...}
+
+**Identical.** `runtime_detected_isa_features` is what the CPU SUPPORTS, detected at runtime — it
+says nothing about what the compiler targeted. The two rows differ only in an opaque ELF sha256.
+
+So `perf_ratchet.comparability_identity` treats the harness sha and the host as part of the
+identity — correctly, on measured evidence — but **has no notion of compiler flags at all**, and
+the artifact gives it nothing to work with. A row measured from a `+avx2`, `+fma`, or
+`x86-64-v3` build is indistinguishable from a shipping row in every recorded field. **Any agent
+could bank a lock from a specially-flagged binary and no reviewer reading the JSON could tell.**
+That is the same class as "the harness is part of the identity too", one level further down, and I
+only found it because I expected the tool to stop me and checked whether it would.
+
+**I did not run `--apply`.** The live baseline stays at 5 workloads. The fix, when someone takes
+it, is small and has a named consumer: have fp-bench emit its COMPILE-TIME features
+(`cfg!(target_feature = "avx2")` and friends) as a separate field beside the runtime-detected ones,
+and let `comparability_identity` include it. Its deletion condition is that it stops mattering only
+if the project fixes one build configuration forever. I am not landing it this turn — the host disk
+has fallen 193G -> 124G (94% used) in ninety minutes and I am not spending a build on tooling while
+that trend is running.
