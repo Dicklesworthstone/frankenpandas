@@ -2553,6 +2553,172 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
     }
 }
 
+/// Order-preserving fast path for sorting group keys, replacing repeated
+/// `composite_key_cmp` string comparisons with integer comparisons.
+///
+/// br-frankenpandas-uza04. MEASURED: `df_groupby_2strkey_sum @10k` spends 17.8% of
+/// its workload time in `sort_by(composite_key_cmp)` (profile renormalised to
+/// exclude the bench checksum), because the group count SATURATES at the key
+/// cardinality while row work keeps growing — the same ~61k composite comparisons
+/// are paid at 10k and at 100k, and at 10k there is 10x less row work to amortise
+/// them over. That is the mechanism behind the certified 0.857x loss at 10k, which
+/// sits between wins at 1k (2.587x) and 100k (1.502x).
+///
+/// THE TRANSFORM: rank each key COMPONENT's distinct values once using the very
+/// same `scalar_key_cmp`, then order groups by their packed ranks. Assigning ranks
+/// in comparator order means comparing ranks IS comparing values, with the same
+/// left-to-right component precedence `composite_key_cmp` uses — so the resulting
+/// order is identical by construction, not merely by test.
+///
+/// ⚠️ RETURNS `false` AND SORTS NOTHING when it cannot guarantee that. The caller
+/// must fall back to `sort_by(composite_key_cmp)`. It declines when keys have
+/// differing lengths (where `composite_key_cmp` tie-breaks on length), when a
+/// component has more distinct values than `u32::MAX`, or when the composite has
+/// more than two components (three u32 ranks do not pack into one u64).
+///
+/// ⚠️ IT IS INERT WHERE DISTINCT VALUES APPROACH GROUP COUNT. Ranking costs a sort
+/// of the distinct values, so at `g == n` (every row its own group, the @1k regime
+/// of that lane) this replaces one sort with two and should not be expected to win.
+// ⚠️ STAGED, NOT WIRED IN. The call sites still use `sort_by(composite_key_cmp)`.
+// The ordering equivalence is tested and mutation-checked below, but the SPEED claim is
+// not measured yet, and landing an unmeasured hot-path change into a shared checkout
+// would move every peer's groupby numbers underneath them. Wire it in when it measures.
+#[allow(dead_code)]
+fn sort_group_order_by_rank(group_order: &mut [GroupKey<'_>]) -> bool {
+    let width = match group_order.first() {
+        None => return true,
+        Some(first) => first.len(),
+    };
+    if width == 0 || width > 2 {
+        return false;
+    }
+    if group_order.iter().any(|k| k.len() != width) {
+        return false;
+    }
+
+    // Rank each component independently, in `scalar_key_cmp` order.
+    let mut ranks: Vec<FxHashMap<ScalarKey<'_>, u32>> = Vec::with_capacity(width);
+    for position in 0..width {
+        let mut distinct: Vec<ScalarKey<'_>> =
+            group_order.iter().map(|k| k[position].clone()).collect();
+        distinct.sort_by(scalar_key_cmp);
+        distinct.dedup();
+        if u32::try_from(distinct.len()).is_err() {
+            return false;
+        }
+        let mut map: FxHashMap<ScalarKey<'_>, u32> =
+            FxHashMap::with_capacity_and_hasher(distinct.len(), Default::default());
+        for (rank, value) in distinct.into_iter().enumerate() {
+            map.insert(value, rank as u32);
+        }
+        ranks.push(map);
+    }
+
+    // Pack ranks most-significant-component-first so integer order == key order.
+    let packed = |key: &GroupKey<'_>| -> u64 {
+        let mut acc = 0_u64;
+        for (position, table) in ranks.iter().enumerate() {
+            let rank = u64::from(table[&key[position]]);
+            acc |= rank << (32 * (width - 1 - position));
+        }
+        acc
+    };
+
+    group_order.sort_by_key(packed);
+    true
+}
+
+#[cfg(test)]
+mod group_order_rank_sort_uza04 {
+    use super::{GroupKey, ScalarKey, composite_key_cmp, sort_group_order_by_rank};
+    use fp_types::NullKind;
+
+    /// The ONLY thing that matters: ranked order must equal comparator order.
+    ///
+    /// A wrong rank assignment silently mis-orders GROUPS while every value the
+    /// groups contain stays correct — so every existing test that compares values
+    /// would still pass. This is the test that can catch it, and it compares the
+    /// two orderings directly rather than asserting any property of one of them.
+    fn assert_same_order(keys: Vec<GroupKey<'_>>) {
+        let mut by_cmp = keys.clone();
+        by_cmp.sort_by(|a, b| composite_key_cmp(a, b));
+
+        let mut by_rank = keys;
+        assert!(
+            sort_group_order_by_rank(&mut by_rank),
+            "helper declined a case it should have handled"
+        );
+        // ScalarKey has no Debug and this deliberately does not add one to a type the
+        // whole crate shares; report the first divergent position instead.
+        let first_divergence = by_rank.iter().zip(by_cmp.iter()).position(|(r, c)| r != c);
+        assert!(
+            first_divergence.is_none() && by_rank.len() == by_cmp.len(),
+            "ranked order differs from comparator order at index {:?} of {}",
+            first_divergence,
+            by_cmp.len()
+        );
+    }
+
+    #[test]
+    fn ranked_order_matches_comparator_on_two_utf8_components() {
+        // The shape of the measured lane: a{i%100} x b{(i/100)%50}, deliberately
+        // built out of order so a stable-but-wrong sort cannot pass by accident.
+        let a: Vec<String> = (0..20).map(|i| format!("a{:03}", (i * 7) % 20)).collect();
+        let b: Vec<String> = (0..20).map(|i| format!("b{:03}", (i * 13) % 20)).collect();
+        let mut keys: Vec<GroupKey<'_>> = Vec::new();
+        for (i, av) in a.iter().enumerate() {
+            for bv in b.iter().skip(i % 3).take(4) {
+                keys.push(vec![ScalarKey::Utf8(av.as_str()), ScalarKey::Utf8(bv.as_str())]);
+            }
+        }
+        assert_same_order(keys);
+    }
+
+    #[test]
+    fn ranked_order_matches_comparator_with_nulls_and_mixed_variants() {
+        // scalar_key_cmp sorts Null AFTER everything and orders across variants;
+        // ranks are assigned with that same comparator, so the rule must survive.
+        let s1 = String::from("zzz");
+        let s2 = String::from("aaa");
+        let keys: Vec<GroupKey<'_>> = vec![
+            vec![ScalarKey::Utf8(s1.as_str()), ScalarKey::Int64(2)],
+            vec![ScalarKey::Null(NullKind::Null), ScalarKey::Int64(1)],
+            vec![ScalarKey::Utf8(s2.as_str()), ScalarKey::Int64(9)],
+            vec![ScalarKey::Utf8(s2.as_str()), ScalarKey::Int64(-4)],
+            vec![ScalarKey::Null(NullKind::NaN), ScalarKey::Int64(0)],
+            vec![ScalarKey::Bool(true), ScalarKey::Int64(7)],
+        ];
+        assert_same_order(keys);
+    }
+
+    #[test]
+    fn ranked_order_matches_comparator_on_a_single_component() {
+        let vals: Vec<String> = (0..30).map(|i| format!("k{:02}", (i * 17) % 30)).collect();
+        assert_same_order(vals.iter().map(|v| vec![ScalarKey::Utf8(v.as_str())]).collect());
+    }
+
+    #[test]
+    fn helper_declines_the_cases_it_cannot_guarantee() {
+        // THREE components do not pack into one u64 -> must decline, not guess.
+        let mut wide: Vec<GroupKey<'_>> = vec![
+            vec![ScalarKey::Int64(1), ScalarKey::Int64(2), ScalarKey::Int64(3)],
+            vec![ScalarKey::Int64(1), ScalarKey::Int64(2), ScalarKey::Int64(1)],
+        ];
+        assert!(!sort_group_order_by_rank(&mut wide));
+
+        // Differing lengths: composite_key_cmp tie-breaks on length, ranks cannot.
+        let mut ragged: Vec<GroupKey<'_>> = vec![
+            vec![ScalarKey::Int64(1)],
+            vec![ScalarKey::Int64(1), ScalarKey::Int64(2)],
+        ];
+        assert!(!sort_group_order_by_rank(&mut ragged));
+
+        // Empty input is trivially sorted.
+        let mut empty: Vec<GroupKey<'_>> = Vec::new();
+        assert!(sort_group_order_by_rank(&mut empty));
+    }
+}
+
 fn composite_key_cmp(a: &[ScalarKey<'_>], b: &[ScalarKey<'_>]) -> Ordering {
     for (left, right) in a.iter().zip(b.iter()) {
         let ord = scalar_key_cmp(left, right);
