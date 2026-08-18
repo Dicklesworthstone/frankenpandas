@@ -4175,6 +4175,15 @@ impl ScalarValues {
         None
     }
 
+    /// ⚠️ `#[inline(never)]` IS LOAD-BEARING, NOT STYLE (br-frankenpandas-oxv4u step 3).
+    /// The extraction plan for this kernel moves it into a separately-flagged
+    /// crate so `+avx2,+fma` can apply to it ALONE. MEASURED TRAP recorded on that
+    /// bead: an `#[inline]` or generic entry point codegens in the CALLER's crate
+    /// at baseline ISA and the flag is silently lost — 0 ymm, 2 mulpd, a green
+    /// build with correct values and no speedup, invisible without disassembly.
+    /// The signature is already non-generic; this pins the other half so the
+    /// property holds BEFORE the move rather than being discovered after it.
+    #[inline(never)]
     fn materialize_float64_dot(a_cols: &[Float64DotInput], b_col: &[f64], len: usize) -> Vec<f64> {
         debug_assert_eq!(a_cols.len(), b_col.len());
         // AXPY loop order: outer over the k A-columns, inner streaming over the
@@ -6658,6 +6667,19 @@ fn ptp_nullable_i64(data: &[i64], validity: Option<&ValidityMask>) -> Scalar {
 /// `collect_finite(..).iter().sum()`, so the f64 accumulation is byte-identical to
 /// nanvar/nansem. `n == 0` ⇒ `(0, 0.0, 0.0)` (caller returns Null(NaN)).
 fn present_moments_f64(data: &[f64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
+    // FAST PATH (br-frankenpandas-8s4mb, sem/var half). Identical guard to
+    // `present_central_moments_f64`: no validity mask means the present-filter
+    // collapses to the NaN test, and a non-NaN blocked sum PROVES no element was
+    // NaN because NaN propagates through addition. Anything else falls through to
+    // the scalar loop below, unchanged.
+    if validity.is_none() && !data.is_empty() {
+        let sum = blocked_sum_f64(data);
+        if !sum.is_nan() {
+            let n = data.len();
+            let mean = sum / n as f64;
+            return (n, mean, blocked_sum_sq_f64(data, mean));
+        }
+    }
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &x) in data.iter().enumerate() {
@@ -6854,6 +6876,49 @@ fn blocked_central_moments_f64(data: &[f64], mean: f64) -> (f64, f64, f64) {
     (m2, m3, m4)
 }
 
+/// Second pass for the `sem`/`var` moment pair: `Sigma (x - mean)^2`, 8-lane
+/// blocked. The `sem` half of br-frankenpandas-8s4mb — the skew/kurt half uses
+/// [`blocked_central_moments_f64`], which also carries m3/m4 this caller does not
+/// need.
+///
+/// Same bit-identity property: under 8 elements `chunks_exact(8)` yields nothing,
+/// the whole slice flows through the remainder loop, and `powi(2)` there is
+/// verbatim what the scalar fold ran.
+fn blocked_sum_sq_f64(data: &[f64], mean: f64) -> f64 {
+    let mut acc = [0.0_f64; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            let d = c[l] - mean;
+            acc[l] += d * d;
+        }
+    }
+    let mut total =
+        ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+    for &x in chunks.remainder() {
+        total += (x - mean).powi(2);
+    }
+    total
+}
+
+/// Int64 sibling of [`blocked_sum_sq_f64`].
+fn blocked_sum_sq_i64(data: &[i64], mean: f64) -> f64 {
+    let mut acc = [0.0_f64; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            let d = c[l] as f64 - mean;
+            acc[l] += d * d;
+        }
+    }
+    let mut total =
+        ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+    for &v in chunks.remainder() {
+        total += (v as f64 - mean).powi(2);
+    }
+    total
+}
+
 /// Int64 sibling of [`blocked_central_moments_f64`].
 fn blocked_central_moments_i64(data: &[i64], mean: f64) -> (f64, f64, f64) {
     let mut a2 = [0.0_f64; 8];
@@ -6883,6 +6948,13 @@ fn blocked_central_moments_i64(data: &[i64], mean: f64) -> (f64, f64, f64) {
 /// Int64 sibling of [`present_moments_f64`]: present iff validity-set; folds
 /// `v as f64` (matching nanvar's `to_f64`), so bit-identical.
 fn present_moments_i64(data: &[i64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
+    // FAST PATH (br-frankenpandas-8s4mb, sem/var half). Int64 has no NaN, so with
+    // no validity mask the present-filter is vacuous.
+    if validity.is_none() && !data.is_empty() {
+        let n = data.len();
+        let mean = blocked_sum_i64_as_f64(data) / n as f64;
+        return (n, mean, blocked_sum_sq_i64(data, mean));
+    }
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &v) in data.iter().enumerate() {
@@ -42875,6 +42947,17 @@ mod tests {
             assert_eq!(n, 4);
             assert_eq!(m2, 5.0);
             assert_eq!(m4, 10.25);
+
+            // The sem/var pair takes the same guards. mean is exact in both cases.
+            let (n, mean, sum_sq) = crate::present_moments_f64(&[1.0, 2.0, 3.0, 4.0], None);
+            assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
+            let (n, mean, sum_sq) = crate::present_moments_f64(&[7.0; 8], None);
+            assert_eq!((n, mean, sum_sq), (8, 7.0, 0.0));
+            // NaN must fall back and be EXCLUDED, not propagate into mean.
+            let (n, mean, sum_sq) = crate::present_moments_f64(&[1.0, f64::NAN, 3.0], None);
+            assert_eq!((n, mean, sum_sq), (2, 2.0, 2.0));
+            let (n, mean, sum_sq) = crate::present_moments_i64(&[1, 2, 3, 4], None);
+            assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
         }
 
         #[test]
