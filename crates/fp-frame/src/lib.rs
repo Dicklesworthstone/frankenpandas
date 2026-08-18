@@ -1312,11 +1312,27 @@ fn pivot_table_counts_rows(aggfunc: &str) -> bool {
 /// the gate makes unreachable).
 fn pivot_utf8_key_strs(col: &Column, n: usize) -> Vec<&str> {
     if let Some((bytes, offsets)) = col.as_utf8_contiguous() {
+        // VALIDATE THE WHOLE BUFFER ONCE, then slice it (br-frankenpandas-uza04).
+        // The per-element form below calls `from_utf8` n times for the same total
+        // bytes, paying its setup n times; on this fixture's keys (10k rows of
+        // ~4-byte strings) that per-call cost dominates the validation itself.
+        // One call instead takes std's vectorized whole-buffer path, and each
+        // `get` is then an O(1) char-boundary check on an already-valid `&str`.
+        //
+        // Semantics are unchanged: the offsets are string boundaries by the
+        // LazyContiguousUtf8 invariant, so every `get` succeeds and yields the
+        // same borrow the per-element `from_utf8` produced. `unwrap_or("")`
+        // preserves the old behaviour for the case the gate makes unreachable.
+        if let Ok(all) = std::str::from_utf8(bytes) {
+            return (0..n)
+                .map(|i| all.get(offsets[i]..offsets[i + 1]).unwrap_or(""))
+                .collect();
+        }
+        // Buffer failed whole-validation (unreachable under the invariant): fall
+        // back to the per-slice form, which still yields "" for a bad slice
+        // rather than propagating a failure the old code never propagated.
         return (0..n)
             .map(|i| {
-                // Contiguous Utf8 buffers store valid UTF-8 with strictly
-                // increasing offsets (LazyContiguousUtf8 invariant); from_utf8
-                // is the safe-Rust equivalent of the unchecked borrow.
                 std::str::from_utf8(&bytes[offsets[i]..offsets[i + 1]]).unwrap_or("")
             })
             .collect();
