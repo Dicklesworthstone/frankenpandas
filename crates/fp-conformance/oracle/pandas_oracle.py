@@ -3808,11 +3808,37 @@ def dataframe_to_json(frame, datetime_as_typed: bool = False) -> dict[str, Any]:
             else str(name)
         )
         col = frame.iloc[:, position]
-        if (
-            datetime_as_typed
-            and _PD is not None
-            and _PD.api.types.is_datetime64_ns_dtype(col.dtype)
-        ):
+        if datetime_as_typed and _PD is None:
+            # br-frankenpandas-6c6mu. This used to be `and _PD is not None`, so a
+            # caller that reached this function without going through main() got
+            # the utf8 fallback below INSTEAD of the typed encoding it asked for
+            # — no error, no warning, just a different answer.
+            #
+            # `_PD` is populated only inside main() (see the `global _PD` there),
+            # so `import pandas_oracle; pandas_oracle.dispatch(pd, req)` — the
+            # obvious way to sweep the whole fixture corpus, and orders of
+            # magnitude faster than one subprocess per fixture — silently
+            # degrades EVERY datetime64 column to a string.
+            #
+            # MEASURED, one request, two callers:
+            #   subprocess (CLI)        {"kind":"datetime64","value":1705314600000000000}
+            #   in-process, _PD unset   {"kind":"utf8","value":"2024-01-15 10:30:00"}
+            # That cost a published "this fixture contradicts its oracle" finding
+            # on fp_p2d_432 that was entirely an artifact of the caller, plus a
+            # wrong explanation built on top of it.
+            #
+            # The other `_PD` sites are deliberately NOT swept in: the timedelta
+            # scalar parser already RAISES on None, and line ~5309 uses it
+            # unguarded so it dies with an AttributeError. Both are loud. This was
+            # the only one that answered quietly and wrongly.
+            raise OracleError(
+                "dataframe_to_json(datetime_as_typed=True) needs the module-level "
+                "pandas binding, which only main() sets. Set pandas_oracle._PD "
+                "before dispatching in-process, or drive the CLI. Without it every "
+                "datetime64 column silently degrades to utf8 "
+                "(br-frankenpandas-6c6mu)"
+            )
+        if datetime_as_typed and _PD.api.types.is_datetime64_ns_dtype(col.dtype):
             values = [
                 {"kind": "null", "value": "null"}
                 if _PD.isna(v)
