@@ -38492,3 +38492,88 @@ refute me rather than take one agent's read.
 LOADAVG   14.42 / 11.40 / 10.12; no cargo, no bench, no CPU taken.
 DISK      /data 96G.
 ```
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-l4vzc, br-frankenpandas-g0apw) — THE TRANSPOSE BOUNDARY MEASURED AT THREE SIZES: pandas is FLAT across 100x rows, we grow to 292ms, and all three rows are undecidable because THE INCUMBENT cannot hold a null
+
+**NO ROW HERE CERTIFIES AND I AM NOT CLAIMING A RATIO AS A VERDICT.** All three are
+NULL_UNDECIDABLE. The direction is unambiguous — `effect_ci_excludes_unity` and the margin clause
+are TRUE at every size and best-vs-best agrees at every size — but the null clause fails, so these
+are measurements, not certifications. Harness `50d3c3ffad4d`, ELF `2284f13da838856f` (83156608
+bytes, `compiled_target_features ["sse2"]`, the shipping arm), pinned as an immutable copy so a
+rebuild into the shared target could not swap it mid-run.
+
+| size | FP p50 | FP cv | pandas p50 | pandas cv | ratio | FP null | pandas null |
+|---|---|---|---|---|---|---|---|
+| 10k | 2135.9us | 3.99% | 45.2us | 15.42% | 43.5x slower | 0.99439 PASS | **1.12112 FAIL** |
+| 100k | 29113.1us | 3.45% | 44.6us | 11.85% | 500x slower | 0.99802 PASS | **0.96762 FAIL** |
+| 1M | 292369.7us | 1.59% | 44.65us | 11.60% | ~6100x slower | 0.99621 PASS | **0.90792 FAIL** |
+
+Per-arm clocks matched at every size (`arm_clock_ratio` 1.0001-1.0008); loadavg 8.4-9.8 across the
+ladder; FP threads 1 on every row.
+
+**PANDAS IS FLAT TO WITHIN 1.3% ACROSS A 100x CHANGE IN ROW COUNT — 45.2, 44.6, 44.65us.** This is
+the single most useful number in the entry and it is better evidence for l4vzc than any ratio,
+because a ratio conflates the representational gap with our constant factors and the flatness does
+not. **A per-column build grows. That does not grow.** pandas answers `df.T.to_numpy()` from its 2D
+BlockManager without ever constructing the transposed frame's `rows`-long column index; we have no
+whole-frame array output, so our arm must build one Column per output column, and at 1M the
+transposed frame is 10 rows x 1,000,000 COLUMNS.
+
+**MY PRE-REGISTERED PREDICTION, SCORED HONESTLY — TWO HITS, TWO MISSES.** Recorded at 04:22 before
+the first run:
+
+* **HIT, and it was the falsifiable half.** I wrote that I did NOT believe the bead's `@1M` figure
+  of 80ms, that superlinear growth predicted 300-400ms, and that **if 1M came back near 80ms my
+  story was wrong and I would say so.** It measured **292.4ms**. The bead's 80ms is stale.
+* **HIT.** Superlinear growth 10k->100k: 13.6x for 10x rows.
+* ⚠️ **MISS — THE MECHANISM, AND IT IS THE INTERESTING ONE.** I predicted FP's allocator churn
+  (~10k Column allocations per call) would blow **FP's** null. FP is the STABLE arm at every size,
+  cv falling 3.99% -> 1.59% as the work grows, nulls inside 0.4%. **It is pandas that cannot hold a
+  null, at cv 11.6-15.4%.**
+* ⚠️ **MISS — MAGNITUDES.** I predicted 19x / 163x / ~1500x. Measured 43.5x / 500x / ~6100x —
+  systematically low by 2.5-4x. Predicting the right verdict for the wrong reason is not a hit.
+
+**WHY THE INCUMBENT FAILS ITS OWN CONTROL, AND WHY NOTHING WE DO CAN FIX IT.** pandas' arm is ~45us
+and does not grow. An A/A control on a 45us operation is sampling timer and scheduler noise rather
+than the operation, and its null degrades as the paired FP arm gets LONGER (1.12112 -> 0.96762 ->
+0.90792 as our arm goes 2ms -> 29ms -> 292ms). **The row is undecidable because the opponent is too
+fast to measure, not because we are unstable.**
+
+**THIS IS A THIRD MECHANISM UNDER ONE SIGNATURE, AND IT INVERTS THE OTHER TWO** (g0apw, filed with
+SlateHeron). Wide or failing A/A nulls now have three distinct causes: per-call thread spawn
+(SlateHeron's `df_skew`, 10 threads, ~397us/call); allocator churn (FP-side, 1-thread); and **the
+incumbent floor (this row) — FP-side fixes are irrelevant.** A reader meeting the signature after
+only the first two examples would reach for a FrankenPandas lever and find nothing to pull.
+
+⚠️ **THE VERDICT DISCARDS THE ONE BIT THAT DISCRIMINATES THEM.** `NULL_UNDECIDABLE` does not say
+WHICH arm was unstable. Emitting the failing arm and its cv — "NULL_UNDECIDABLE (pandas null
+1.12112, cv 15.42%)" — would have told the whole story without opening an artifact, and it is also
+the bit that stops an agent from blaming its own engine by default.
+
+**A SECOND COST INSIDE THE GAP, WHICH IS NOT STRUCTURAL AND IS ADDRESSABLE (br-frankenpandas-3ya6b).**
+`DataFrame` has NO positional column accessor — no `column_at`, `column_by_position`, or
+`iter_columns`. The only public route to read every column is `column_name_at(position) -> Option<String>`
+(owned) then `column(name.as_str())` (string-keyed). `LazyDataFrameColumnOrder::name_at`
+(`fp-frame/src/lib.rs:54883`) on the `Int64UnitRange` variant — exactly what `transpose` returns for
+a homogeneous frame — formats `start.checked_add(position)?.to_string()`. **At 1M that is a million
+integer formats, a million allocations and a million keyed lookups before any materialization.**
+
+⚠️ **SO THE RATIO CONFLATES TWO THINGS AND MUST NOT BE READ AS PURE REPRESENTATION.** I told the
+other pane earlier that this gap was structural and that no build flag could close it. That was
+only partly true and I am correcting it here: part is structural (columnar vs 2D block) and part is
+an ordinary API tax. **The lane is not at fault** — the name route is the only public one, so it
+measures what the API actually costs a caller, which is the honest thing to measure. The finding is
+that the API has a hole.
+
+**PREDICTION FOR 3ya6b, RECORDED BEFORE ANY BUILD:** a positional accessor removes a large ABSOLUTE
+cost at 1M and produces NO sign change, because pandas' arm is O(1) from its block and flat while
+ours builds one Column per output column however it is addressed. **If someone measures it and gets
+a sign flip, l4vzc's structural story is wrong** — which is the outcome worth having.
+
+**WHAT THESE ROWS DO NOT ESTABLISH.** They do not certify a loss; they do not attribute the gap
+between its two causes; and they say nothing about `df_transpose` (the lazy shell) or
+`transpose_view`, which is DEFAULT since 2026-07-22 and measured 92-154x FASTER at 10k in this
+bead's own notes. **`transpose()` returns a lazy plan-backed frame here — the cost is paid on column
+ACCESS, not construction**, so this ladder measures the materialization boundary specifically.
+
