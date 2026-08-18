@@ -95318,6 +95318,33 @@ impl GroupByResample<'_> {
         )
     }
 
+    /// Grouped resample quantile.
+    ///
+    /// br-frankenpandas-a7faz, the last reduction-shaped aggregation `Resample`
+    /// implements that the grouped wrapper did not expose. Takes `q` rather than
+    /// defaulting it, matching `pd.Resampler.quantile(q)`.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), grp=[a,a,a,b,b,b],
+    /// v=[1,3,5,2,4,8], buckets a-Jan(1,3) a-Feb(5) b-Jan(2) b-Feb(4,8):
+    /// ```text
+    ///   quantile(0.5)  -> [2.0, 5.0, 2.0, 6.0]     equals median, as it should
+    ///   quantile(0.25) -> [1.5, 5.0, 2.0, 5.0]     LINEAR interpolation
+    /// ```
+    /// The 0.25 row is the load-bearing one: 1 + 0.25*(3-1) = 1.5 and
+    /// 4 + 0.25*(8-4) = 5.0, so an implementation picking a nearest or lower
+    /// order-statistic instead of interpolating would give 1.0 and 4.0 and still
+    /// pass every 0.5 assertion.
+    ///
+    /// ⚠️ NOT wired to `agg("quantile")`: that string form carries no q and is
+    /// pandas' default 0.5, which the pivot surface already established is the same
+    /// as median. This method is the one that can express any other q.
+    pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).quantile(q),
+            ResampleValueDomain::Numeric,
+        )
+    }
+
     /// Grouped resample median.
     ///
     /// br-frankenpandas-a7faz. `Resample` has implemented median/var/prod/std/sem/
@@ -160422,6 +160449,29 @@ mod tests {
         let var = gb.resample("M").var().unwrap();
         assert_eq!(var.column("v").unwrap().values()[0], Scalar::Float64(2.0));
         assert_eq!(var.column("v").unwrap().values()[3], Scalar::Float64(8.0));
+
+        // quantile, with the interpolating q that median cannot distinguish.
+        assert_eq!(
+            gb.resample("M").quantile(0.5).unwrap().column("v").unwrap().values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(6.0),
+            ]
+        );
+        // ⚠️ q=0.25 is the discriminator: 1 + 0.25*(3-1) = 1.5 and 4 + 0.25*(8-4) = 5.0.
+        // A nearest- or lower-order-statistic implementation gives 1.0 and 4.0 here
+        // and still passes every q=0.5 assertion above.
+        assert_eq!(
+            gb.resample("M").quantile(0.25).unwrap().column("v").unwrap().values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Float64(5.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(5.0),
+            ]
+        );
 
         // std and sem exist now too; only their SHAPE is pinned here, because pandas
         // raises on this frame (it tries to float-convert the utf8 group key) and so
