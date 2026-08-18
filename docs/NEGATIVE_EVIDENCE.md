@@ -39756,3 +39756,76 @@ which is the absence of an edit rendering as the success of the code.
 indistinguishable explanations: the lever did nothing, or the lever never ran.
 `FP_RANKSORT_WITNESS` makes the helper report each time it actually sorts, so the
 SAME binary can be asked which happened.
+
+---
+
+## br-frankenpandas-uza04 — REJECTED: the rank-sort lever is VACUOUS, and my own mechanism for the 0.853x loss was wrong in location AND in magnitude
+
+**Date:** 2026-08-18 · **Agent:** CrimsonPine · **Status:** lever built, wired,
+built into an ELF, and REVERTED unmeasured. `uptime` 1-min 10.69 against 5-min 9.16;
+CPU idle 92.8%; /data 57G. **No certification, no ratio claimed** — the experiment
+never reached measurement, for the reason below.
+
+**THE LEVER NEVER RAN. NOT ONCE.** A non-vacuity witness compiled into the AFTER
+ELF (`FP_RANKSORT_WITNESS`, string present in AFTER and absent from BEFORE, so the
+two arms provably differ) reports **0 rank-sort calls** on `df_groupby_2strkey_sum`
+and on five sibling groupby workloads. The eight `sort_by(composite_key_cmp)` sites
+I wired are **not on the path this benchmark takes**.
+
+**WITHOUT THE WITNESS I WOULD HAVE PUBLISHED A WRONG CONCLUSION.** The A/B would
+have returned ~1.00x, and my pre-registered reading of that outcome — recorded in
+`8c80acc7e` — was "the 17.8% profile share is not on the critical path, the
+mechanism account is WRONG, record a REJECT". I would have reached a REJECT by
+believing sorting does not matter here. **Sorting does matter here; a different
+sort, in a different function, over a different key type.** Right verdict, wrong
+reason, and the wrong reason is the part that would have misdirected the next agent.
+
+**WHERE THE TIME ACTUALLY GOES** (perf, dwarf call-graph, AFTER ELF, `@10k`):
+
+| symbol | share |
+|---|---|
+| `sha2::sha256::x86_sha::compress` | 28.03% |
+| `<fp_frame::DataFrameGroupBy>::multi_mixed_dense_grouping` | 11.42% |
+| `_copy_to_iter` (kernel) | 8.36% |
+| `__memcmp_avx2_movbe` (libc) | 7.47% |
+| `<fp_frame::DataFrameGroupBy>::moments_by_p…` | 7.35% |
+| `<fp_frame::DataFrameGroupBy>::multi_dense_…` | 5.66% |
+| `core::slice::sort::stable::drift::sort::<usize, …>` | 5.54% |
+| `fp_frame::pivot_utf8_key_strs` | 3.88% |
+
+`composite_key_cmp` appears in **ZERO** frames. `build_groups` appears in **ZERO**
+frames. The real path is `DataFrameGroupBy::multi_mixed_dense_grouping`
+(`lib.rs:85527`), and its sort is `<[usize]>::sort_by` ordering *positions* by
+`MixedKey` (`lib.rs:81986`) — **already an integer-indexed sort**, whose comparator
+does the string work visible as the 7.47% `memcmp`.
+
+⚠️ **I WITHDRAW THE 17.8% FIGURE.** I previously reported `sort::sort_by` at 17.8%
+of the renormalised profile at 10k and built this entire lever on it. Measured here:
+**5.54% raw, 8.71% renormalised.** `sort::sort_by` is a generic symbol and I
+attributed it to the comparator I had been reading rather than to the one that runs.
+
+**AND THE MECHANISM CANNOT RECOVER THE ROW EVEN IF PERFECTED.** Bench scaffolding —
+sha256 checksum plus the kernel's `_copy_to_iter` for the JSON times array — is
+**36.4%** of process time; renormalising to real work puts the sort at 8.71%. A
+**free** sort therefore moves the row from 0.853x to **0.934x**. Recovering parity
+needs 14.7% of workload time. **So this is not a REJECT of an implementation, it is
+a REJECT of the mechanism**: no amount of sort optimisation closes
+`df_groupby_2strkey_sum @10k`, and the next agent should look at
+`multi_mixed_dense_grouping` (11.42%) and `moments_by_p…` (7.35%) instead.
+
+**THE THREE PRE-REGISTERED PREDICTIONS ARE MOOT, NOT CONFIRMED.** @10k, @1k and
+@100k were all predictions about a lever that did not execute. The experiment did
+not test what it was designed to test, and none of those predictions may be scored.
+
+**WHAT IS KEPT.** `07b9bc1b4` leaves `sort_group_order_by_rank` STAGED and inert
+(`#[allow(dead_code)]`, no call sites) with its mutation-checked ordering test. It
+is now known to be **off the hot path for this workload and unmeasured on any
+workload** — it must not be assumed useful. Retargeting it would mean rewriting it
+against `MixedKey`, and the ceiling arithmetic above says that is not worth doing
+for this row. The wiring itself is reverted; the tree is clean.
+
+**TRANSFERABLE.** A profile symbol names a FUNCTION, not a CALLER. `sort::sort_by`
+told me a sort was hot and I supplied the caller from memory. One `perf report`
+with a call graph — the same command either way — would have shown `MixedKey` before
+I wrote a line of code. And build the witness BEFORE the measurement, not after: a
+null result and a lever that never ran are the same number.
