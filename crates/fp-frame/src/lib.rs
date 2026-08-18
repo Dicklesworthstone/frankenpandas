@@ -84275,6 +84275,56 @@ impl DataFrameGroupBy<'_> {
                     "skew" => fp_types::nanskew(&group_vals),
                     "kurt" | "kurtosis" => fp_types::nankurt(&group_vals),
                     "sem" => fp_types::nansem(&group_vals, 1),
+                    // br-frankenpandas-groupby-idxmax-idxmin: pandas' idxmax/idxmin
+                    // are the only string-dispatchable groupby aggregations that
+                    // return an INDEX LABEL rather than a number, which is likely why
+                    // they were missing while sixteen numeric ones were present.
+                    //
+                    // MEASURED, live pandas 2.2.3, index r0..r3, k = a,a,b,b,
+                    // v = 1.0, 3.0, NaN, NaN and w = 5.0, 2.0, 7.0, 1.0:
+                    //     g.agg('idxmax')   v: a is r1, b is NaN   w: a is r0, b is r2
+                    //     g.agg('idxmin')   v: a is r0, b is NaN   w: a is r1, b is r3
+                    // So nulls are SKIPPED, an ALL-NULL group yields a MISSING label
+                    // rather than an error, and the result is one value per (group,
+                    // column) — exactly this loop's shape. That is why these two fit
+                    // here and `size` does not: pandas' g.agg('size') returns a
+                    // SERIES, one value per group for the whole frame, which needs a
+                    // path of its own before the per-column loop.
+                    //
+                    // Ties: pandas documents the FIRST occurrence, which strictly
+                    // better wins gives.
+                    "idxmax" | "idxmin" => {
+                        let want_max = func_name == "idxmax";
+                        let mut best: Option<(f64, usize)> = None;
+                        for (gi, value) in group_vals.iter().enumerate() {
+                            let Ok(candidate) = value.to_f64() else {
+                                continue;
+                            };
+                            if candidate.is_nan() {
+                                continue;
+                            }
+                            let take = match best {
+                                None => true,
+                                Some((current, _)) => {
+                                    if want_max {
+                                        candidate > current
+                                    } else {
+                                        candidate < current
+                                    }
+                                }
+                            };
+                            if take {
+                                best = Some((candidate, gi));
+                            }
+                        }
+                        match best {
+                            Some((_, gi)) => index_label_to_scalar(&label_at(
+                                &self.df.index,
+                                row_indices[gi],
+                            )),
+                            None => Scalar::Null(NullKind::NaN),
+                        }
+                    }
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported groupby aggregation: '{other}'"
