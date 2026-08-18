@@ -6810,6 +6810,53 @@ fn blocked_min_max_f64(data: &[f64]) -> (f64, f64) {
     (min, max)
 }
 
+/// Blocked 8-lane min/max over an i64 slice, returning `None` for an empty slice.
+///
+/// ⚠️ UNLIKE EVERY OTHER BLOCKED HELPER HERE, THIS ONE IS EXACTLY BIT-IDENTICAL AT
+/// ALL LENGTHS. Integer min/max is associative and commutative, so regrouping the
+/// comparisons cannot change the result — there is no last-ULP trade to disclose,
+/// and no short-slice carve-out is needed to keep fixtures pinned.
+///
+/// Lanes start at `i64::MAX`/`i64::MIN`, which are ordinary values rather than
+/// sentinels: a lane that receives no element keeps them, and the remainder fold
+/// then corrects the combined result. An input consisting entirely of `i64::MAX`
+/// correctly yields `min == i64::MAX`.
+fn blocked_min_max_i64(data: &[i64]) -> Option<(i64, i64)> {
+    if data.is_empty() {
+        return None;
+    }
+    let mut lo = [i64::MAX; 8];
+    let mut hi = [i64::MIN; 8];
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        for l in 0..8 {
+            if c[l] < lo[l] {
+                lo[l] = c[l];
+            }
+            if c[l] > hi[l] {
+                hi[l] = c[l];
+            }
+        }
+    }
+    let mut min = lo[0]
+        .min(lo[1])
+        .min(lo[2].min(lo[3]))
+        .min(lo[4].min(lo[5]).min(lo[6].min(lo[7])));
+    let mut max = hi[0]
+        .max(hi[1])
+        .max(hi[2].max(hi[3]))
+        .max(hi[4].max(hi[5]).max(hi[6].max(hi[7])));
+    for &x in chunks.remainder() {
+        if x < min {
+            min = x;
+        }
+        if x > max {
+            max = x;
+        }
+    }
+    Some((min, max))
+}
+
 /// Int64 sibling of [`blocked_min_max_f64`]. Folds `v as f64` exactly where the
 /// scalar loop does, so the per-element conversion is unchanged; Int64 has no NaN
 /// so the sentinel case cannot arise from the data.
@@ -18704,20 +18751,24 @@ impl Column {
             return None;
         }
         let chunks = self.values.int64_chunks_ref()?;
+        // Blocked per chunk; integer min/max is associative so this is EXACTLY
+        // bit-identical to the element-at-a-time fold, at every length.
         let mut best: Option<i64> = None;
         for chunk in chunks {
-            for &x in chunk.as_slice() {
-                best = Some(match best {
-                    None => x,
-                    Some(b) => {
-                        if want_max {
-                            b.max(x)
-                        } else {
-                            b.min(x)
-                        }
+            let Some((lo, hi)) = blocked_min_max_i64(chunk.as_slice()) else {
+                continue;
+            };
+            let candidate = if want_max { hi } else { lo };
+            best = Some(match best {
+                None => candidate,
+                Some(b) => {
+                    if want_max {
+                        b.max(candidate)
+                    } else {
+                        b.min(candidate)
                     }
-                });
-            }
+                }
+            });
         }
         best
     }
@@ -18741,15 +18792,28 @@ impl Column {
         };
         let mut any = false;
         for chunk in chunks {
-            for &v in chunk.as_slice() {
-                any = true;
-                if want_max {
-                    if v > result {
-                        result = v;
-                    }
-                } else if v < result {
-                    result = v;
+            let slice = chunk.as_slice();
+            if slice.is_empty() {
+                continue;
+            }
+            any = true;
+            // Blocked 8-lane min/max per chunk (br-frankenpandas-8s4mb technique),
+            // reusing the helper the nullable `ptp` path uses.
+            //
+            // ⚠️ THE ALL-NaN QUIRK OF THIS FUNCTION IS PRESERVED DELIBERATELY, not
+            // fixed: `any` is set per non-empty CHUNK exactly as it was set per
+            // ELEMENT, so an all-NaN input still returns `Some(+inf)` for min and
+            // `Some(-inf)` for max rather than `None`. `blocked_min_max_f64` leaves
+            // its sentinels untouched for such a chunk, and comparing those
+            // sentinels against `result` is a no-op — the same no-op the old
+            // per-element `if v > result` performed for every NaN.
+            let (lo, hi) = blocked_min_max_f64(slice);
+            if want_max {
+                if hi > result {
+                    result = hi;
                 }
+            } else if lo < result {
+                result = lo;
             }
         }
         if any { Some(result) } else { None }
