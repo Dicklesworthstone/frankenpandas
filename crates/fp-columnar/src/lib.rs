@@ -7071,9 +7071,15 @@ fn present_central_moments_f64(
     for (i, &x) in data.iter().enumerate() {
         if validity.is_none_or(|v| v.get(i)) && !x.is_nan() {
             let d = x - mean;
-            m2 += d.powi(2);
-            m3 += d.powi(3);
-            m4 += d.powi(4);
+            // Reuse d2 instead of three independent powi calls: powi(3) lowers to
+            // (d*d)*d and powi(4) to (d*d)*(d*d), so this is BIT-IDENTICAL while
+            // costing 3 multiplies per element instead of 5. br-frankenpandas-8s4mb
+            // note from SlateHeron: the per-element powi chain may dominate this fold,
+            // in which case the accumulation was never the bottleneck.
+            let d2 = d * d;
+            m2 += d2;
+            m3 += d2 * d;
+            m4 += d2 * d2;
         }
     }
     (n, m2, m3, m4)
@@ -7111,9 +7117,15 @@ fn present_central_moments_i64(
     for (i, &v) in data.iter().enumerate() {
         if validity.is_none_or(|vm| vm.get(i)) {
             let d = v as f64 - mean;
-            m2 += d.powi(2);
-            m3 += d.powi(3);
-            m4 += d.powi(4);
+            // Reuse d2 instead of three independent powi calls: powi(3) lowers to
+            // (d*d)*d and powi(4) to (d*d)*(d*d), so this is BIT-IDENTICAL while
+            // costing 3 multiplies per element instead of 5. br-frankenpandas-8s4mb
+            // note from SlateHeron: the per-element powi chain may dominate this fold,
+            // in which case the accumulation was never the bottleneck.
+            let d2 = d * d;
+            m2 += d2;
+            m3 += d2 * d;
+            m4 += d2 * d2;
         }
     }
     (n, m2, m3, m4)
@@ -7198,9 +7210,12 @@ fn blocked_central_moments_f64(data: &[f64], mean: f64) -> (f64, f64, f64) {
     let (mut m2, mut m3, mut m4) = (combine(a2), combine(a3), combine(a4));
     for &x in chunks.remainder() {
         let d = x - mean;
-        m2 += d.powi(2);
-        m3 += d.powi(3);
-        m4 += d.powi(4);
+        // See the nullable sibling: d2 reuse is bit-identical to the three powi
+        // calls and costs 3 multiplies per element instead of 5.
+        let d2 = d * d;
+        m2 += d2;
+        m3 += d2 * d;
+        m4 += d2 * d2;
     }
     (m2, m3, m4)
 }
@@ -7267,9 +7282,12 @@ fn blocked_central_moments_i64(data: &[i64], mean: f64) -> (f64, f64, f64) {
     let (mut m2, mut m3, mut m4) = (combine(a2), combine(a3), combine(a4));
     for &v in chunks.remainder() {
         let d = v as f64 - mean;
-        m2 += d.powi(2);
-        m3 += d.powi(3);
-        m4 += d.powi(4);
+        // See the nullable sibling: d2 reuse is bit-identical to the three powi
+        // calls and costs 3 multiplies per element instead of 5.
+        let d2 = d * d;
+        m2 += d2;
+        m3 += d2 * d;
+        m4 += d2 * d2;
     }
     (m2, m3, m4)
 }
