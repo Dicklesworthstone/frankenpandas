@@ -1253,6 +1253,25 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
             }
             seen.len() as f64
         }
+        // br-frankenpandas-groupby-idxmax-idxmin, eighth surface. pandas'
+        // pivot_table accepts 18 aggfunc strings; this accepted 17.
+        //
+        // `quantile` carries no q through the string form, so it is pandas' default
+        // 0.5 — MEASURED, live pandas 2.2.3:
+        //     pivot_table(aggfunc='quantile').equals(pivot_table(aggfunc='median'))
+        //     -> True
+        // so it routes to the same computation rather than getting a second one.
+        //
+        // ⚠️ `any` and `all` are NOT added, and the reason is structural rather than
+        // effort. This dispatch takes `vals: &[f64]` and returns `f64`; pandas'
+        // pivot_table with aggfunc='any' returns a BOOL column (measured: dtypes
+        // ['bool','bool']). Emitting 1.0/0.0 would be a dtype divergence dressed as
+        // support. Closing those two needs the dispatch to carry a Scalar out, which
+        // is a signature change rather than an arm.
+        "quantile" => {
+            let scalars: Vec<Scalar> = vals.iter().map(|&v| Scalar::Float64(v)).collect();
+            fp_types::nanmedian(&scalars).to_f64().unwrap_or(f64::NAN)
+        }
         // Delegate sem/skew to the audited fp_types kernels rather than inlining
         // the formula (an inline groupby copy of skew/kurtosis was the f4dc5540
         // bug). nansem(ddof=1) = std/sqrt(n); nanskew = adjusted Fisher-Pearson
@@ -64298,6 +64317,29 @@ impl DataFrame {
                     "skew" => Scalar::Float64(s.skew()?),
                     "kurt" | "kurtosis" => Scalar::Float64(s.kurt()?),
                     "prod" | "product" => s.prod()?,
+                    // br-frankenpandas-groupby-idxmax-idxmin, seventh surface.
+                    // pandas' df.apply(str) accepts 22 names; this accepted 14.
+                    // Every one added here is an existing Series method, reached
+                    // through the per-column Series this loop already builds.
+                    //
+                    // MEASURED, live pandas 2.2.3: df.apply(name) works for all,
+                    // any, cumsum, idxmax, idxmin, nunique, quantile, rank and size
+                    // on a numeric frame. The seven below are the REDUCTION-shaped
+                    // ones — a scalar per column, which is what this match yields.
+                    // `cumsum` and `rank` return a DataFrame (one row per input row)
+                    // and cannot be expressed here, exactly as on the groupby
+                    // surfaces.
+                    //
+                    // `quantile` carries no q through the string form, so it is
+                    // pandas' default 0.5 — verified on the pivot surface in the
+                    // same commit that aggfunc='quantile' equals aggfunc='median'.
+                    "any" => Scalar::Bool(s.any()?),
+                    "all" => Scalar::Bool(s.all()?),
+                    "nunique" => Scalar::Int64(s.nunique() as i64),
+                    "size" => Scalar::Int64(s.len() as i64),
+                    "quantile" => s.quantile(0.5)?,
+                    "idxmax" => index_label_to_scalar(&s.idxmax()?),
+                    "idxmin" => index_label_to_scalar(&s.idxmin()?),
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported apply function: '{other}'"
@@ -64368,6 +64410,29 @@ impl DataFrame {
                     "sem" => Scalar::Float64(Self::row_sem(&row_vals)),
                     "skew" => Scalar::Float64(Self::row_skew(&row_vals)),
                     "kurt" | "kurtosis" => Scalar::Float64(Self::row_kurtosis(&row_vals)),
+                    // br-frankenpandas-groupby-idxmax-idxmin, seventh surface.
+                    // pandas' df.apply(str) accepts 22 names; this accepted 14.
+                    // Every one added here is an existing Series method, reached
+                    // through the per-column Series this loop already builds.
+                    //
+                    // MEASURED, live pandas 2.2.3: df.apply(name) works for all,
+                    // any, cumsum, idxmax, idxmin, nunique, quantile, rank and size
+                    // on a numeric frame. The seven below are the REDUCTION-shaped
+                    // ones — a scalar per column, which is what this match yields.
+                    // `cumsum` and `rank` return a DataFrame (one row per input row)
+                    // and cannot be expressed here, exactly as on the groupby
+                    // surfaces.
+                    //
+                    // `quantile` carries no q through the string form, so it is
+                    // pandas' default 0.5 — verified on the pivot surface in the
+                    // same commit that aggfunc='quantile' equals aggfunc='median'.
+                    "any" => Scalar::Bool(s.any()?),
+                    "all" => Scalar::Bool(s.all()?),
+                    "nunique" => Scalar::Int64(s.nunique() as i64),
+                    "size" => Scalar::Int64(s.len() as i64),
+                    "quantile" => s.quantile(0.5)?,
+                    "idxmax" => index_label_to_scalar(&s.idxmax()?),
+                    "idxmin" => index_label_to_scalar(&s.idxmin()?),
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported apply function: '{other}'"
