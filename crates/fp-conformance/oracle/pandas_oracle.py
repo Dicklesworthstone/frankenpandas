@@ -1702,6 +1702,85 @@ def op_series_dt_strftime(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def _dt_tz_argument(payload: dict[str, Any], op: str):
+    """`tz` for tz_convert / tz_localize. ABSENT means None, which is meaningful.
+
+    pandas gives `None` a real meaning in both calls — tz_convert(None) converts to
+    UTC and drops the zone, tz_localize(None) keeps wall-clock and drops it — so
+    "key absent" cannot be an error here the way it is for a required payload.
+    """
+    raw = payload.get("dt_tz")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise OracleError(f"{op} dt_tz must be a string or absent")
+    return raw
+
+
+def op_series_dt_tz_convert(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_tz_convert requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_tz_convert")
+    tz = _dt_tz_argument(payload, "series_dt_tz_convert")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.tz_convert(tz)
+    except Exception as exc:
+        raise OracleError(f"series_dt_tz_convert failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_tz_localize(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_tz_localize requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_tz_localize")
+    tz = _dt_tz_argument(payload, "series_dt_tz_localize")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.tz_localize(tz)
+    except Exception as exc:
+        raise OracleError(f"series_dt_tz_localize failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_timetz(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_timetz requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_timetz")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.timetz
+    except Exception as exc:
+        raise OracleError(f"series_dt_timetz failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_tz(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    """`.dt.tz` is a SCALAR property, not a per-element series.
+
+    pandas returns one tzinfo (or None) for the whole column, because the zone is
+    part of the dtype. FrankenPandas stores datetimes as Utf8 strings and returns a
+    per-element Series, which is a shape difference this fixture will expose rather
+    than paper over — so the expected value is rendered as a one-element series
+    carrying the zone's string form, and a mismatch here is a REAL finding about
+    br-frankenpandas-00ze3 rather than a fixture bug.
+    """
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_tz requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_tz")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        zone = dt_series.dt.tz
+    except Exception as exc:
+        raise OracleError(f"series_dt_tz failed: {exc}") from exc
+    rendered = None if zone is None else str(zone)
+    return {"expected_scalar": scalar_to_json(rendered)}
+
+
 def op_series_dt_floor(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     dt_freq = payload.get("dt_freq", "D")
@@ -8272,6 +8351,14 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_dt_month_name(pd, payload)
     if op == "series_dt_strftime":
         return op_series_dt_strftime(pd, payload)
+    if op == "series_dt_tz_convert":
+        return op_series_dt_tz_convert(pd, payload)
+    if op == "series_dt_tz_localize":
+        return op_series_dt_tz_localize(pd, payload)
+    if op == "series_dt_timetz":
+        return op_series_dt_timetz(pd, payload)
+    if op == "series_dt_tz":
+        return op_series_dt_tz(pd, payload)
     if op == "series_dt_floor":
         return op_series_dt_floor(pd, payload)
     if op == "series_dt_ceil":
