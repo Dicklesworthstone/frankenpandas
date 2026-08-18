@@ -36768,3 +36768,73 @@ decisive loss, on an op where the ISA question is worth 4.334x and is already si
 but small win competing for the same build slot as a measured 8x-larger effect. Recorded so the
 next agent inherits the corrected number rather than my optimistic one, and so "someone already
 looked at this" is on the record with the arithmetic attached.
+
+### 2026-08-18 SlateHeron (br-frankenpandas-3qpj4) — the third arm settles it: `+sse4.1` ALONE captures 4.00x of the 4.33x, so the LOWERING is the story and the extra width is ~7%. My bead's mechanism was right and its instruction COUNT was wrong
+
+The other pane disassembled `Column::floor` on their binaries and found the bead's central
+count does not hold: it claims floor "does NOT appear in the rounding-instruction symbol
+list of ANY flagged binary", and theirs carries ten. They could not settle the mechanism
+because `+avx2` implies `sse4.1`, so their comparison confounds the `roundpd` LOWERING
+with the wider LANES. I hold the third arm — `target-sse41`, ELF `ded4edcb`, sse4.1 with
+no avx2 — so the split is mine to run.
+
+**FIRST, MY COUNT WAS WRONG AND THEY ARE RIGHT.** Recounted on the exact binary the bead
+cites:
+
+| count on ELF `ded4edcb` | value |
+|---|---:|
+| rounding instructions, whole binary | **91** — the bead's figure, confirmed |
+| rounding instructions inside `Column::floor` alone | **7** |
+
+So the whole-binary 91 was right and the per-symbol claim was wrong. `floor` DOES get
+`roundpd`/`roundsd` under the flag; the hand-rolled kernel does not hide it. Their reading
+— that LLVM recognises the abs/or_sign/nearest_even/compare/subtract sequence and lowers
+it once the instruction exists — is consistent with what I now count, and their packed
+arithmetic collapsing 20 → 2 is the same effect seen from the other side.
+
+**SECOND, THE SPLIT THEY NEEDED.** `floor @1M`, both arms in one window, three interleaved
+repeats each, `thread_count_actually_used` 1 on every row:
+
+| arm | ELF | FP p50 (3 reps) | vs pandas |
+|---|---|---|---|
+| default (sse2) | `e85e724e` | 555.95 / 569.94 / 564.95us | 0.347 / 0.333 / 0.328 |
+| **`+sse4.1` only** | `ded4edcb` | **152.57 / 141.20 / 135.19us** | **1.302 / 1.367 / 1.372** |
+
+**Self-speedup default → sse4.1 = 565 / 141.2 = 4.00x.** The other pane measured
+`+avx2` at FP 139.7 / 131.1us, a 4.334x self-speedup from the same default baseline.
+
+**So sse4.1-only captures 4.00x of the 4.334x. The remaining width is worth 141.2 / 131.1
+= 1.077x — about 7%.** The `roundpd` lowering is essentially the entire effect, and the
+extra AVX2 lanes are a small increment on top. Their question is answered in the
+direction their hypothesis predicted, and the bead's MECHANISM stands even though its
+count did not.
+
+**Median-CI decision:** these six rows are all `NULL_UNDECIDABLE` on the vs-pandas
+statistic — CI width at a 141us arm, not null failures (every FP null is inside 2%:
+0.9916 to 1.0814 across the six). **The claim banked here is the SELF-speedup, not a
+certified vs-incumbent ratio:** 565us → 141us is a 4x effect measured on two binaries in
+one window with the incumbent arm moving only 175.97-201.79us across all six runs, which
+no CI width reaches.
+
+**CV role:** provenance only, no vote — FP 4.43-11.09%, pandas within the run.
+
+**A/A null control (same invocation):** FrankenPandas nulls 0.9962 / 0.9754 / 0.9841
+(default arm) and 1.0814 / 1.0058 / 0.9916 (sse4.1 arm), all inside the 2% limit; pandas
+0.9923-1.0690.
+
+```
+LOADAVG   13.98 -> 15.17 across the six runs (1-min, sampled per run)
+CPU IDLE  87.91%, iowait 1.14%, by mpstat immediately before — measured, not taken on
+          report; the figure quoted to me for this window was 71% idle
+MHz       per-run mean 3106.9-3488.9, cross-core min 1429.0 max 4294.8
+THREADS   FP 1 on every row, both arms
+DISK      /data 130G
+```
+
+**WHAT I AM CORRECTING IN MY OWN BEAD:** the sentence claiming floor appears in no flagged
+binary's rounding-instruction symbol list. It is false — 7 in `Column::floor` on
+`ded4edcb`, 10 in theirs. I am not editing the bead body out from under the record; the
+correction lives here and on the bead as a comment, because a wrong count that gets
+quietly overwritten teaches nobody why it was wrong. **The count was whole-binary and I
+described it as per-symbol** — the same error shape as reading an artifact as identity:
+a real measurement, generalised past what it measured.
