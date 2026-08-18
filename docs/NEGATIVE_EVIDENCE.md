@@ -38374,8 +38374,20 @@ same day:
 | `3qpj4_floor1M_avx2` | 1.384x |
 | **`3qpj4_floor_intrinsic` (the orphan)** | **1.544x** |
 
-Every default-build `floor @1M` row on that host reads 0.30-0.51x, across 65 rows and six harness
-shas.
+⚠️ **CORRECTION, SAME NIGHT, BEFORE ANYONE RELIED ON IT — THE TABLE ABOVE IS GROUPED BY FILENAME,
+AND FILENAME IS NOT PROVENANCE.** My first draft of this entry said "every default-build `floor @1M`
+row on that host reads 0.30-0.51x". That claim is not supportable, and I reached it by inferring the
+build from artifact NAMES — the exact inference this entry argues is impossible. Checked properly:
+
+* `floor @1M` has **65 rows spanning 0.072x to 1.544x across eight harness shas**. A cluster at
+  0.072-0.165x (harness `6d884360e4df`) sits well below the range I quoted.
+* Sorting those 65 rows by whether the filename contains a flag token puts `3qpj4b_floor_settled.json`
+  at **1.384x in the "default" group — exactly the `+avx2` value** — while `cu22b_floor_sse41_c.json`
+  lands at 0.415x in the "flagged" group. **The grouping does not separate.**
+
+**The finding does not depend on the table and is stronger without it:** the artifacts do not record
+which binary produced ANY of these 65 rows, so neither the orphan nor its neighbours can be
+attributed. I could not sort them even when I tried, which is the claim.
 
 ⚠️ **STATED PRECISELY, BECAUSE THE DISTINCTION IS THE WHOLE POINT: I am NOT claiming that row is
 false or that its number is wrong for whatever it measured.** I am claiming it is UNATTRIBUTABLE —
@@ -38408,3 +38420,82 @@ results are more dangerous than uniform failure, because a miss next to a hit re
 discrimination. **A hit means something; a miss means nothing.** Ask the binary instead — a 10k
 probe costs ~2s and its line-one self-hash is the ELF marker the ledger wants anyway.
 
+
+### 2026-08-18 SlateHeron (br-frankenpandas-tk0ig, br-frankenpandas-3qpj4) — CORRECTION: artifacts DO persist ELF identity (487 of 633), the standing `floor @1M` row IS attributable, and the non-shipping guard CAN fire — only `compiled_target_features` is genuinely dropped
+
+The other pane reported that no bench artifact records build-flag provenance OR an ELF
+identity, concluded the standing `floor @1M 1.544x` lock is **unattributable** and must not
+be re-locked, and filed `tk0ig` with a fix ordered. **Half of that is right. The half that
+would have removed a defensible lock is not.**
+
+**THE METHOD ERROR, and it is the one they warned me about an hour earlier.** They searched
+RECURSIVELY over whole artifact JSONs for the key names `elf_sha256` / `bench_elf_sha256`
+and got zero. The field exists and is called `sha256`, nested under `executable`. **Recursion
+does not save a search that has the wrong NAME — only searching by SHAPE does.** I looked
+for any 64-hex string under a path containing `execut` or `binar`:
+
+```
+.results[0].frankenpandas.executable.sha256 = 2284f13da838856f   (my 8s4mb rows, tonight)
+.results[0].frankenpandas.executable.sha256 = 0797b4b29b6bfe7e   (3qpj4_floor_intrinsic)
+.engine_identity.pandas.executable.sha256   = efb29ce53d36ebae   (the incumbent, too)
+```
+
+**Corpus-wide: 633 artifacts, 487 carry an executable digest, 112 do not** — the missing ones
+are the older `bench_<timestamp>` files. Not zero. I avoided this only because their own
+two false-absences tonight had made me distrust name searches, so the correction is
+downstream of their lesson rather than a better instinct on my part.
+
+**THE HALF THAT STANDS:** `compiled_target_features` really is absent — 0 hits by name
+anywhere in any artifact — while `fp-bench` prints it on every invocation. **The harness
+emits it to stdout and drops it before writing the artifact.** `tk0ig` is a real bead; it is
+narrower than "no build provenance persists".
+
+**AND THE STANDING ROW IS ATTRIBUTABLE — ITS SIBLINGS ON THE SAME BINARY AGREE WITH IT.**
+The cluster that looked undifferentiated separates cleanly once the ELF digest is read:
+
+| artifact | ratio | verdict | ELF |
+|---|---|---|---|
+| `3qpj4_floor_intrinsic` | **1.544x** | FASTER | `0797b4b29b6b` |
+| `3qpj4b_floor_settled` | 1.384x | NULL_UNDECIDABLE | `0797b4b29b6b` — SAME |
+| `3qpj4c_floor_r1` | 1.326x | FASTER | `0797b4b29b6b` — SAME |
+| `3qpj4c_floor_r2` | 1.337x | NULL_UNDECIDABLE | `0797b4b29b6b` — SAME |
+| `cu22b_floor_default` | 0.343x | SLOWER | `e94c077a329a` — different |
+| `cu22b_floor_sse41` | 0.512x | NULL_UNDECIDABLE | `017328ffba6f` — different |
+| `3qpj4_floor1M_default` | 0.493x | SLOWER | `a802073cf042` — different |
+
+**The 0.30-0.51x rows it was being compared against are DIFFERENT BINARIES.** That is
+exactly the separation the cluster appeared to lack. 1.544x does sit above its own siblings
+at 1.326-1.384x and that gap is worth examining on its merits — but "unattributable" is the
+wrong word for a row pinned to a binary that three other rows share.
+
+**THE SECOND-ORDER CLAIM REVERSES TOO.** They reported that `assemble_standing_locks`'
+non-shipping denylist "cannot ever fire" because no artifact records an ELF sha, and that
+this is worse than being wrong because it reads as coverage. The denylisted prefix
+`162f821c9c09` is PRESENT in the corpus — `3qpj4_floor1M_avx2_2026-08-18.json`, 1.384x. The
+guard is **applicable and would fire on at least one real artifact.**
+
+**WHAT REMAINS TRUE OF THE UNDERLYING WORRY, because it is not baseless:**
+`parameters.frankenpandas_binary_requested` is null on older rows, which makes the PATH
+unattributable even where the digest is not; 112 artifacts carry no digest at all; and the
+dropped `compiled_target_features` means a row cannot say which ISA flags built its binary,
+only which binary it was. All three are worth fixing, and the fix is correctly SEQUENCED in
+`tk0ig` to batch with the next harness change rather than orphaning 51 standing locks as a
+drive-by.
+
+**THE GENERAL LESSON, which is the reason this is its own entry.** Both panes have now
+produced the same failure three times in one night — searching for a thing by the name we
+expected it to have, and reading the miss as absence. It is the same shape as
+`grep`-on-an-ELF returning zero for `series_skew` while the lane runs fine, and as reading
+`compiled_target_features` as missing because it sits inside `thread_provenance` rather than
+at top level. **A name search answers "is it called what I think" and gets read as "is it
+there".** When the answer decides whether to edit the corpus, search by shape and verify by
+running the thing.
+
+```
+NO VERDICT, NO RATIO, NO ROW BANKED — a corpus-integrity correction, not a measurement.
+NOTHING WAS EDITED: I touched no lock, no artifact, and no bead of the other pane's. The
+correction was sent to them with an explicit request to re-run the check by shape and
+refute me rather than take one agent's read.
+LOADAVG   14.42 / 11.40 / 10.12; no cargo, no bench, no CPU taken.
+DISK      /data 96G.
+```
