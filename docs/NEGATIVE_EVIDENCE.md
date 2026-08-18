@@ -37672,3 +37672,38 @@ edge of the median-CI gate found by measurement today, after the false certifica
 **WHAT I AM NOT DOING.** Not re-running until a null cooperates — I committed to that before the
 second attempt and two failures in clean windows is the answer, not an invitation. Not widening the
 band. Not banking the row by hand. **The pair is half-defended and saying so is the accurate report.**
+
+**⚠️ CORRECTING MY CORRECTION: THE DRIFT HYPOTHESIS WAS RIGHT AND MY REFUTATION USED THE WRONG
+STATISTIC.** One entry above I hypothesised a within-run position effect on `mod @10M`, then declared
+it refuted because a first-half/last-half split showed only -0.19% drift while the PASSING `floordiv`
+row showed -1.56%. **That test was wrong.** The gate's null is `first two versus final two
+PLACEMENTS`, and a half-split averages away exactly the endpoint effect it is built to detect.
+
+Recomputed with the statistic the gate actually uses, from `balanced_square.rounds_detail`
+(17 rounds, 4 slots per arm per round):
+
+| row | first-2 median | final-2 median | first/final | FP null | verdict |
+|---|---|---|---|---|---|
+| `mod @10M` | 14.068 ms | 13.481 ms | **1.04352** | 0.96767 | FAILS |
+| `floordiv @10M` | 14.799 ms | 14.734 ms | **1.00441** | 0.98922 | passes |
+
+**`mod`'s FP arm is 4.4% slower in its first two placements than its last two; `floordiv`'s is 0.4%.**
+The FP per-round series for `mod` ends at its two fastest rounds (13.50, 13.46 ms) after starting
+near 14.5. The null is not malfunctioning — **it is correctly reporting a position effect that is
+really there**, and my "reproducible and unexplained" framing was premature.
+
+**THIS IS THE THIRD TIME TODAY I HAVE MEASURED SOMETHING ADJACENT TO THE CLAIM.** The first was
+offering serial `log` rows against a parallel-arm hypothesis; the second was testing a harness
+drift-null with fp-bench's in-process null; this is the third, and the most self-inflicted, because I
+had already written the rule down. **When checking a gate's verdict, compute the gate's own
+statistic — not a reasonable-looking proxy for it.** `rounds_detail` was in the artifact the whole
+time.
+
+**WHAT THIS DOES AND DOES NOT CHANGE.** `mod @10M` still does not certify and I am still not
+re-running it: the refusal is correct, not noise. What changes is the reason — it is a real warmup or
+settling effect on this workload, not an unexplained quirk of the gate, and it is the FIRST of the
+three gate edges found today that is a property of the WORKLOAD rather than of the instrument.
+**Note the harness already warms up** (`WARMUP_ITERATIONS = 3`, and fp-bench does WARMUP=3 + ITERS=25
+per slot), so per-slot warmup does not cover it; the effect persists across rounds. Why `mod` shows
+it and `floordiv` — same size, same binary, same window — does not, I have not established, and I am
+not going to guess at it a fourth time.
