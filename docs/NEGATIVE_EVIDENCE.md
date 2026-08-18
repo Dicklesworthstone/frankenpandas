@@ -36746,3 +36746,25 @@ worth doing on its own terms (three ops, shipping build, no policy decision) and
 substitute for the build-policy question. Anyone taking it should predict the ratio BEFORE building
 and check the witness is actually cheaper than the branch it replaces — a per-column scan that costs
 a pass over the data would give back everything it saves.
+
+**⚠️ CORRECTING THE LEVER I PROPOSED ONE ENTRY AGO, BEFORE ANYONE SPENDS A BUILD ON IT.** I claimed
+hoisting floor's `abs < TWO_POW_52` range guard would remove "4 of roughly 13 ops per vector". That
+counted only the REMOVAL and ignored what the replacement costs.
+
+Two facts I checked afterwards, both by source reading:
+
+  * `Column::floor` currently dispatches through `typed_float_witness_free_unary`, which pays **no
+    domain check at all**. There is no existing per-column predicate to piggyback on.
+  * The machinery that would provide one, `par_map_slice_f64_domain_fused`, evaluates
+    `domain_held &= in_domain(x)` **per element** — a compare plus an AND accumulate.
+
+So the trade is not "remove 4, add 0". It is **remove 4 (cmppd + 3-op and/andn/or select), add 2
+(cmppd + andpd accumulate) — a net saving of ~2 of ~13 ops, about 15%, not 30%.** My figure was
+roughly double the real one.
+
+**That changes the recommendation.** ~15% moves floor @1M from 0.493x to about 0.567x: still a
+decisive loss, on an op where the ISA question is worth 4.334x and is already sitting with a human.
+**I am not taking it and I do not think it should be taken ahead of that decision** — it is a real
+but small win competing for the same build slot as a measured 8x-larger effect. Recorded so the
+next agent inherits the corrected number rather than my optimistic one, and so "someone already
+looked at this" is on the record with the arithmetic attached.
