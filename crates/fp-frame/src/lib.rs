@@ -92217,11 +92217,36 @@ impl GroupByRolling<'_> {
             .cloned()
             .collect();
 
-        // Until row MultiIndex support is real, keep the long-standing
-        // fallback contract: preserve the original flat row index and expose
-        // group keys as regular columns instead of emitting lossy tuple
-        // strings that only look MultiIndex-like.
-        let n = self.groupby.df.len();
+        // Group keys stay REGULAR COLUMNS rather than becoming a row MultiIndex —
+        // that half of the old fallback contract is unchanged, and it is what the
+        // conformance oracle expects too: its normalize_groupby_rolling_frame
+        // flattens pandas' MultiIndex into (group-key column + inner label index).
+        //
+        // ⚠️ WHAT CHANGED (br-frankenpandas-nyjxf): rows are now emitted in GROUP
+        // ORDER, not original order. pandas reorders; we did not. MEASURED, pandas
+        // 2.2.3, grp = [a,b,a,b,a,b,a,b] at index 0..7:
+        //     pandas  df.groupby('grp').rolling(2).mean() index MultiIndex
+        //             [('a',0),('a',2),('a',4),('a',6),('b',1),('b',3),('b',5),('b',7)]
+        //     FP before this change  [0,1,2,3,4,5,6,7]
+        // The VALUES always agreed; only the row order did not, and it diverged
+        // identically across all seven aggregations (count/max/mean/min/std/sum/var).
+        // The oracle's expected inner index for that input is [0,2,4,6,1,3,5,7] —
+        // exactly the group-visit order built below.
+        //
+        // ⚠️ AND THE OUTPUT ROW COUNT IS NOW order.len(), NOT df.len(). Those differ
+        // when build_groups drops rows (a null group key is not a group), and the old
+        // length-n buffers left those rows in the output as all-null rolled values —
+        // rows pandas does not emit at all. Sizing by the permutation fixes that as a
+        // side effect. UNVERIFIED: a second behaviour change in the same edit, and the
+        // build freeze meant no test could be run against it.
+        let order: Vec<usize> = {
+            let mut order = Vec::with_capacity(self.groupby.df.len());
+            for gkey in &group_order {
+                order.extend_from_slice(&groups[gkey]);
+            }
+            order
+        };
+        let n = order.len();
         let window = self.window;
         let min_periods = self.min_periods;
 
@@ -92256,6 +92281,9 @@ impl GroupByRolling<'_> {
                 // on <2 pts) are written explicitly below.
                 let mut out_f64 = vec![0.0_f64; n];
                 let mut out_valid = fp_columnar::ValidityMask::all_invalid(n);
+                // `base` walks the same group_order the permutation was built from, so
+                // every column lands its group's rows at the identical output offsets.
+                let mut base = 0_usize;
                 for gkey in &group_order {
                     let indices = &groups[gkey];
                     // Rolling is positional; the group index is unused, so a lazy
@@ -92273,7 +92301,7 @@ impl GroupByRolling<'_> {
                         agg(&gs, window, min_periods)?
                     };
                     if let Some((rdata, rvalid)) = rolled.column().as_f64_slice_with_validity() {
-                        for (gi, &orig) in indices.iter().enumerate() {
+                        for gi in 0..indices.len() {
                             // Copy the value UNCONDITIONALLY (validity only where
                             // truly valid): a std/var <2-pt result is Float64(NaN)
                             // with validity=false, which values() surfaces as
@@ -92281,19 +92309,20 @@ impl GroupByRolling<'_> {
                             // rule) — so its NaN must land in the buffer. Genuine
                             // min_periods-unmet nulls carry the 0.0 sentinel, so they
                             // stay Null(NaN) with validity=false.
-                            out_f64[orig] = rdata[gi];
+                            out_f64[base + gi] = rdata[gi];
                             if rvalid.get(gi) {
-                                out_valid.set(orig, true);
+                                out_valid.set(base + gi, true);
                             }
                         }
                     } else if let Some(rdata) = rolled.column().as_f64_slice() {
-                        for (gi, &orig) in indices.iter().enumerate() {
-                            out_f64[orig] = rdata[gi];
-                            out_valid.set(orig, true);
+                        for gi in 0..indices.len() {
+                            out_f64[base + gi] = rdata[gi];
+                            out_valid.set(base + gi, true);
                         }
                     } else {
                         unreachable!("GroupByRolling agg output is nullable-f64");
                     }
+                    base += indices.len();
                 }
                 return Ok((
                     col_name.to_string(),
@@ -92302,6 +92331,7 @@ impl GroupByRolling<'_> {
             }
             // Nullable / non-typed columns keep the Scalar path.
             let mut out = vec![Scalar::Null(NullKind::NaN); n];
+            let mut base = 0_usize;
             for gkey in &group_order {
                 let indices = &groups[gkey];
                 let group_vals: Vec<Scalar> =
@@ -92310,9 +92340,10 @@ impl GroupByRolling<'_> {
                     (0..group_vals.len() as i64).map(IndexLabel::from).collect();
                 let gs = Series::from_values(col_name, group_idx, group_vals)?;
                 let rolled = agg(&gs, window, min_periods)?;
-                for (gi, &orig_idx) in indices.iter().enumerate() {
-                    out[orig_idx] = rolled.values()[gi].clone();
+                for gi in 0..indices.len() {
+                    out[base + gi] = rolled.values()[gi].clone();
                 }
+                base += indices.len();
             }
             Ok((col_name.to_string(), Column::from_values(out)?))
         };
@@ -92368,7 +92399,13 @@ impl GroupByRolling<'_> {
         let mut col_order = Vec::new();
         for col_name in &self.groupby.df.column_order {
             if self.groupby.by.contains(col_name) {
-                cols.insert(col_name.clone(), self.groupby.df.columns[col_name].clone());
+                // Gathered through the same permutation as the value columns —
+                // cloning the source column whole would pair group-ordered values with
+                // original-ordered keys, which is worse than either order alone.
+                cols.insert(
+                    col_name.clone(),
+                    self.groupby.df.columns[col_name].take_positions(&order),
+                );
                 col_order.push(col_name.clone());
             }
         }
@@ -92382,7 +92419,14 @@ impl GroupByRolling<'_> {
         Ok(DataFrame {
             columns: cols.into(),
             column_order: col_order.into(),
-            index: self.groupby.df.index.clone(),
+            // Inner labels in group-visit order. rename_index keeps the axis name,
+            // per br-frankenpandas-43269's rule for every take-like path.
+            index: self
+                .groupby
+                .df
+                .index
+                .take(&order)
+                .rename_index(self.groupby.df.index.name()),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.groupby.df.allows_duplicate_labels,
