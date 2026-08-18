@@ -921,6 +921,11 @@ pub enum FixtureOperation {
         alias = "series_dt_to_pydatetime_default"
     )]
     SeriesDtToPydatetime,
+    #[serde(
+        rename = "series_dt_to_pytimedelta",
+        alias = "series_dt_to_pytimedelta_default"
+    )]
+    SeriesDtToPytimedelta,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_identity", alias = "data_frame_identity")]
@@ -1526,6 +1531,7 @@ impl FixtureOperation {
             Self::SeriesDtNanoseconds => "series_dt_nanoseconds",
             Self::SeriesDtToTimestamp => "series_dt_to_timestamp",
             Self::SeriesDtToPydatetime => "series_dt_to_pydatetime",
+            Self::SeriesDtToPytimedelta => "series_dt_to_pytimedelta",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIdentity => "dataframe_identity",
             Self::DataFrameIloc => "dataframe_iloc",
@@ -2892,6 +2898,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDtMicroseconds
         | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPytimedelta
         | FixtureOperation::SeriesDtToPydatetime
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
@@ -11541,6 +11548,7 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesDtMicroseconds
         | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPytimedelta
         | FixtureOperation::SeriesDtToPydatetime => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
@@ -13214,6 +13222,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtMicroseconds
         | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPytimedelta
         | FixtureOperation::SeriesDtToPydatetime
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
@@ -13946,6 +13955,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtMicroseconds
         | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPytimedelta
         | FixtureOperation::SeriesDtToPydatetime
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
@@ -17491,6 +17501,9 @@ fn execute_series_module_utility_fixture_operation(
                 .dt()
                 .to_pydatetime_with_warn(warn)
                 .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtToPytimedelta => {
+            series.dt().to_pytimedelta().map_err(|err| err.to_string())
         }
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"
@@ -21277,6 +21290,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesDtMicroseconds
         | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPytimedelta
         | FixtureOperation::SeriesDtToPydatetime => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();

@@ -2031,6 +2031,50 @@ def op_series_dt_nanoseconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return timedelta_component_from_payload(pd, payload, "series_dt_nanoseconds", "nanoseconds")
 
 
+def op_series_dt_to_pytimedelta(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    """`pd.Series.dt.to_pytimedelta()` — resolution reduced to microseconds.
+
+    ⚠️ IT ROUNDS HALF-TO-EVEN, IT DOES NOT TRUNCATE. Measured, 2.2.3, ns in -> ns out:
+    999 -> 1000, -999 -> -1000, 500 -> 0, 1500 -> 2000, 2500 -> 2000. A truncating
+    reference would agree only on the +/-1 cases.
+
+    The raw return is an OBJECT ndarray of datetime.timedelta, which
+    `series_to_expected` cannot encode as a timedelta column. Re-wrapping through
+    `pd.to_timedelta` restores the timedelta64 dtype while KEEPING the microsecond
+    rounding pandas just applied — the rounding is the observable effect under test,
+    not the container.
+
+    Carries the same two gates as the component helpers (br-frankenpandas-7btvv /
+    f9xlz): a numeric series is refused by reaching for `.dt` directly, and
+    `errors="raise"` keeps a non-timedelta string from degrading to NaT.
+    """
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_to_pytimedelta requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_to_pytimedelta")
+
+    if (
+        len(series) > 0
+        and pd.api.types.is_numeric_dtype(series)
+        and not pd.api.types.is_timedelta64_dtype(series)
+    ):
+        try:
+            series.dt.to_pytimedelta()
+        except Exception as exc:  # noqa: BLE001 - re-raised with pandas as __cause__
+            raise OracleError(f"series_dt_to_pytimedelta: {exc}") from exc
+        raise OracleError(
+            "series_dt_to_pytimedelta: .dt.to_pytimedelta() unexpectedly succeeded on a "
+            f"non-timedelta numeric series of dtype {series.dtype}"
+        )
+
+    try:
+        td_series = pd.to_timedelta(series, errors="raise")
+        reduced = pd.Series(pd.to_timedelta(td_series.dt.to_pytimedelta()), index=td_series.index)
+    except Exception as exc:
+        raise OracleError(f"series_dt_to_pytimedelta failed: {exc}") from exc
+    return {"expected_series": series_to_expected(reduced)}
+
+
 def op_series_dt_total_seconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return timedelta_total_seconds_from_payload(pd, payload, "series_dt_total_seconds")
 
@@ -8470,6 +8514,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_dt_round(pd, payload)
     if op == "series_dt_total_seconds":
         return op_series_dt_total_seconds(pd, payload)
+    if op == "series_dt_to_pytimedelta":
+        return op_series_dt_to_pytimedelta(pd, payload)
     if op == "series_dt_days":
         return op_series_dt_days(pd, payload)
     if op == "series_dt_seconds":
