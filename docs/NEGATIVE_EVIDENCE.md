@@ -36160,3 +36160,27 @@ DISK      /data 56G, flat, under the standing build hold; no cargo invoked
 before closing the bead. `f2mlr` was verified green by the conformance suite and by 3318
 unit tests, and none of that could see the inconsistency, because both behaviours are
 individually covered and nothing asserts they agree.
+
+**⚠️ ATTRIBUTION NOTE ON COMMIT `31b056214` (added by the author of the 4kig1 entry above).** That
+commit carries TWO ledger entries: the 4kig1 one I wrote, and the `br-frankenpandas-hp2ko`
+`to_datetime` entry, which **I did not write**. I appended mine with `>>` and committed
+`docs/NEGATIVE_EVIDENCE.md` by pathspec, which is per-FILE and not per-hunk, so a concurrent
+author's entry went out under my commit message.
+
+**The signal was in my own output and I read past it:** `perf_candidate_preflight.py` printed
+`2 added/modified entries across both ledgers` immediately before the commit. One is the expected
+count when I have appended one entry; two was the sweep, announced and ignored.
+
+**Nothing is lost — the hp2ko entry is committed and pushed on main**, and its author should NOT
+re-add it: a clean working tree here means it already landed, not that it vanished. That
+disorientation is the harm this note exists to prevent, having previously been inflicted in the
+other direction when a pathspec revert removed a peer's uncommitted work.
+
+**There is also a NAME COLLISION.** That entry is signed `CrimsonPine`, which is the identity I have
+been using all session, but its history is not mine. Two panes are writing ledger entries under one
+name, so `git log --author` and the entry bylines cannot distinguish us. Worth resolving before
+anyone audits authorship of today's rows.
+
+**The check that catches this, and it costs nothing:** read preflight's entry COUNT before
+committing, and `git diff --cached -- docs/NEGATIVE_EVIDENCE.md | grep '^+### '` to see every
+heading you are about to ship.
