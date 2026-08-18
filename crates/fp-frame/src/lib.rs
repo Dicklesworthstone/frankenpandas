@@ -48600,6 +48600,39 @@ impl DatetimeAccessor<'_> {
                     .unwrap_or(time_with_tz);
                 if Self::parse_time(time_part).is_some() {
                     let timezone = &time_with_tz[time_part.len()..];
+                    // ⚠️ 'Z' IS NORMALISED TO '+00:00' (br-frankenpandas-t2n6i).
+                    // The suffix used to be appended VERBATIM, so a Zulu input came
+                    // back as "10:30:00Z". pandas renders the tzinfo, never the
+                    // source spelling, and a parsed 'Z' becomes a fixed UTC offset.
+                    //
+                    // MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18),
+                    // pd.to_datetime(Series(...)).dt.timetz rendered with str():
+                    // ```text
+                    //   '2024-01-15T10:30:00Z'       -> '10:30:00+00:00'   NOT '...Z'
+                    //   '2024-01-15 10:30:00+05:30'  -> '10:30:00+05:30'
+                    //   '2024-01-15 10:30:00-05:00'  -> '10:30:00-05:00'
+                    //   '2024-01-15 10:30:00'        -> '10:30:00'
+                    // ```
+                    // Only the Zulu row diverged; the offset rows and the naive row
+                    // already agreed, which is why the one banked fixture
+                    // (fp_p2d_240, a single +05:30 case) could never catch it.
+                    //
+                    // ⚠️ A NAMED zone is a different question and is NOT handled here:
+                    // pandas' `.dt.timetz` on a pytz zone renders NO offset at all
+                    // ('10:30:00'), because `datetime.time.utcoffset()` returns None
+                    // for a DstTzInfo that has no date to resolve DST against — so a
+                    // named-zone column and a naive column are indistinguishable in
+                    // this accessor. FrankenPandas cannot reach that case today (it
+                    // carries offsets, not zone names), and it belongs with the
+                    // carrier decision this bead is really about.
+                    // ⚠️ CASE-SENSITIVE, and that is measured, not stylistic. pandas
+                    // treats only an UPPERCASE 'Z' as UTC; a lowercase 'z' is not a
+                    // timezone at all. MEASURED, live pandas 2.2.3:
+                    //   to_datetime('2024-01-15T10:30:00Z') -> tz-aware, tz='UTC'
+                    //   to_datetime('2024-01-15T10:30:00z') -> NAIVE Timestamp
+                    // so `eq_ignore_ascii_case` here would wrongly promote the
+                    // lowercase form to +00:00. Same trap as the ms/MS freq alias.
+                    let timezone = if timezone == "Z" { "+00:00" } else { timezone };
                     return Scalar::Utf8(format!(
                         "{}{}",
                         Self::trim_zero_time_fraction(time_part),
@@ -156902,6 +156935,73 @@ mod tests {
         );
     }
 
+    /// `.dt.timetz` across EVERY offset spelling, not one.
+    ///
+    /// br-frankenpandas-t2n6i. The tz family's only banked fixture
+    /// (fp_p2d_240_series_dt_timetz_keeps_offset_strict) carries a single `+05:30`
+    /// case, and it AGREES with pandas — I replayed its own payload through the
+    /// oracle against live 2.2.3 and got its banked value back. It still could not
+    /// see the defect, because the only spelling that diverged was Zulu. That is the
+    /// one-sign-census failure: a positive fixed offset passes against a bug that
+    /// only fires on `Z`.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18),
+    /// `pd.to_datetime(pd.Series([...])).dt.timetz` rendered with `str()`:
+    /// ```text
+    ///   '2024-01-15 10:30:00'        -> '10:30:00'          naive, no suffix
+    ///   '2024-01-15 10:30:00+05:30'  -> '10:30:00+05:30'    positive offset
+    ///   '2024-01-15 10:30:00-05:00'  -> '10:30:00-05:00'    NEGATIVE offset
+    ///   '2024-01-15T10:30:00Z'       -> '10:30:00+00:00'    Zulu becomes +00:00
+    /// ```
+    /// Each case is built as its OWN single-element series on purpose: `.dt` takes
+    /// pandas' one-format lock, so mixing these spellings in one column would NaT
+    /// every element after the first and the test would assert nothing about them.
+    #[test]
+    fn dt_timetz_renders_every_offset_spelling_like_pandas_t2n6i() {
+        let one = |value: &str| {
+            Series::from_values(
+                "ts",
+                vec![0_i64.into()],
+                vec![Scalar::Utf8(value.to_string())],
+            )
+            .unwrap()
+            .dt()
+            .timetz()
+            .unwrap()
+            .column()
+            .values()[0]
+                .clone()
+        };
+
+        assert_eq!(one("2024-01-15 10:30:00"), Scalar::Utf8("10:30:00".into()));
+        assert_eq!(
+            one("2024-01-15 10:30:00+05:30"),
+            Scalar::Utf8("10:30:00+05:30".into())
+        );
+        // ⚠️ The negative case is not symmetric plumbing: timetz slices the suffix off
+        // after splitting on '-', which is also the DATE separator, so a sign error
+        // here would surface only on this row.
+        assert_eq!(
+            one("2024-01-15 10:30:00-05:00"),
+            Scalar::Utf8("10:30:00-05:00".into())
+        );
+        // ⚠️ THE ROW THAT WAS WRONG: the source spelling 'Z' must not survive.
+        assert_eq!(
+            one("2024-01-15T10:30:00Z"),
+            Scalar::Utf8("10:30:00+00:00".into())
+        );
+        // ⚠️ LOWERCASE 'z' IS DELIBERATELY NOT ASSERTED HERE, and the reason is a
+        // second divergence rather than an oversight. MEASURED, live pandas 2.2.3:
+        //   to_datetime('2024-01-15T10:30:00z') -> NAIVE Timestamp, timetz '10:30:00'
+        // i.e. pandas ignores the lowercase suffix and still yields a TIME.
+        // FrankenPandas' `timetz` splits `time_part` on an uppercase 'Z' only, so
+        // "10:30:00z" reaches `parse_time` with the letter attached, fails, and the
+        // element becomes Null — a missing value where pandas has a time. Asserting
+        // FP's Null would bank a divergence as the contract (the laundering pattern
+        // nvnvr documents), and asserting pandas' '10:30:00' would fail until the
+        // parser accepts the suffix. Filed rather than pinned either way.
+    }
+
     #[test]
     fn test_dt_timetz() {
         // CORRECTED with test_dt_tz (br-frankenpandas-hzayc): `T`-separated
@@ -156919,9 +157019,13 @@ mod tests {
         )
         .unwrap();
         let result = mixed.dt().timetz().unwrap();
+        // ⚠️ '+00:00', NOT 'Z' (br-frankenpandas-t2n6i). This pinned the raw source
+        // spelling; pandas renders the tzinfo, and a parsed 'Z' is a fixed UTC
+        // offset. MEASURED live 2.2.3: to_datetime('...T10:30:00Z').dt.timetz
+        // is '10:30:00+00:00'.
         assert_eq!(
             result.column().values()[0],
-            Scalar::Utf8("14:35:22Z".to_string())
+            Scalar::Utf8("14:35:22+00:00".to_string())
         );
         assert!(result.column().values()[1].is_missing());
         assert!(result.column().values()[2].is_missing());
@@ -156938,7 +157042,7 @@ mod tests {
         let result = s.dt().timetz().unwrap();
         assert_eq!(
             result.column().values()[0],
-            Scalar::Utf8("14:35:22Z".to_string())
+            Scalar::Utf8("14:35:22+00:00".to_string())
         );
         assert_eq!(
             result.column().values()[1],
