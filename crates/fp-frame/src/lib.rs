@@ -157383,6 +157383,60 @@ mod tests {
         assert!(one("not a date").is_missing());
     }
 
+    /// `resample().size()` counts ROWS; `count()` counts NON-MISSING. Not the same.
+    ///
+    /// br-frankenpandas-a7faz. `Resample::size` is `vals.len()` and `count` is
+    /// `nancount`, which is correct — but every existing assertion for `size` uses
+    /// an all-valid bucket, where the two agree and neither can distinguish the
+    /// other. A "simplification" of one into the other would pass the suite.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), values [1.0, None, 3.0]
+    /// at 2024-01-01 / 2024-01-15 / 2024-03-05, resampled monthly:
+    /// ```text
+    ///   buckets  ['2024-01-31', '2024-02-29', '2024-03-31']
+    ///   size     [2, 0, 1]      January holds a null and still counts 2 rows
+    ///   count    [1, 0, 1]      January counts only the non-missing one
+    /// ```
+    /// February is an EMPTY bucket in the middle of the range — it must appear, with
+    /// zero, in BOTH. A grid built from the observed rows rather than from the freq
+    /// would drop it and shift every later bucket.
+    #[test]
+    fn resample_size_counts_rows_where_count_counts_non_missing_a7faz() {
+        let s = Series::from_values(
+            "v",
+            vec![
+                IndexLabel::Utf8("2024-01-01".into()),
+                IndexLabel::Utf8("2024-01-15".into()),
+                IndexLabel::Utf8("2024-03-05".into()),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        let size = s.resample("M").size().unwrap();
+        assert_utf8_index_labels(size.index(), &["2024-01-31", "2024-02-29", "2024-03-31"]);
+        assert_eq!(
+            size.values(),
+            &[Scalar::Int64(2), Scalar::Int64(0), Scalar::Int64(1)],
+            "size counts rows, so the null in January still counts"
+        );
+
+        let count = s.resample("M").count().unwrap();
+        assert_eq!(
+            count.values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)],
+            "count skips the null, which is the whole difference from size"
+        );
+
+        // ⚠️ The load-bearing inequality: if these ever agree on bucket 0, one of the
+        // two has been redefined as the other.
+        assert_ne!(size.values()[0], count.values()[0]);
+    }
+
     #[test]
     fn test_dt_time() {
         // CORRECTED (br-frankenpandas-hzayc): three different shapes in one
