@@ -149679,6 +149679,59 @@ mod tests {
         assert_eq!(result.values()[1], Scalar::Utf8("Saturday".to_string()));
     }
 
+    /// br-frankenpandas-timedelta-nat-days-returns-zero-406ni: the four
+    /// Timedelta component accessors, against pandas' measured answers.
+    ///
+    /// MEASURED, pandas 2.2.3, `pd.to_timedelta([1, None, -1, 90061.5], unit='s')`:
+    /// ```text
+    ///   .dt.days         -> [0.0, nan, -1.0, 1.0]        dtype float64
+    ///   .dt.seconds      -> [1.0, nan, 86399.0, 3661.0]
+    ///   .dt.microseconds -> [0.0, nan, 0.0, 500000.0]
+    ///   .dt.nanoseconds  -> [0.0, nan, 0.0, 0.0]
+    /// ```
+    ///
+    /// The -1s row is the one an implementation gets wrong: the day/second split
+    /// is EUCLIDEAN, so it is days -1 / seconds 86399, not 0 / -1. The NaT row is
+    /// the other: `Timedelta::days(NAT)` returns 0 internally, and the accessor
+    /// must emit MISSING before that value can escape.
+    #[test]
+    fn dt_timedelta_components_match_pandas_406ni() {
+        use fp_types::Timedelta;
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Timedelta64(Timedelta::NANOS_PER_SEC),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Timedelta64(-Timedelta::NANOS_PER_SEC),
+                Scalar::Timedelta64(90_061_500_000_000),
+            ],
+        )
+        .unwrap();
+
+        let days = s.dt().days().expect("days");
+        assert_eq!(days.values()[0], Scalar::Float64(0.0));
+        assert!(days.values()[1].is_missing(), "NaT must not become 0");
+        assert_eq!(days.values()[2], Scalar::Float64(-1.0));
+        assert_eq!(days.values()[3], Scalar::Float64(1.0));
+
+        let secs = s.dt().seconds().expect("seconds");
+        assert_eq!(secs.values()[0], Scalar::Float64(1.0));
+        assert!(secs.values()[1].is_missing());
+        assert_eq!(secs.values()[2], Scalar::Float64(86399.0), "euclidean remainder");
+        assert_eq!(secs.values()[3], Scalar::Float64(3661.0));
+
+        let micros = s.dt().microseconds().expect("microseconds");
+        assert_eq!(micros.values()[0], Scalar::Float64(0.0));
+        assert!(micros.values()[1].is_missing());
+        assert_eq!(micros.values()[3], Scalar::Float64(500_000.0));
+
+        let nanos = s.dt().nanoseconds().expect("nanoseconds");
+        assert_eq!(nanos.values()[0], Scalar::Float64(0.0));
+        assert!(nanos.values()[1].is_missing());
+        assert_eq!(nanos.values()[3], Scalar::Float64(0.0));
+    }
+
     #[test]
     fn dt_total_seconds() {
         // Per br-frankenpandas-i9bah: pandas dt.total_seconds() is for

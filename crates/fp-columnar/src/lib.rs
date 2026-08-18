@@ -42769,6 +42769,48 @@ mod tests {
             }
         }
 
+        /// br-frankenpandas-8s4mb: the blocked 8-lane fast path must agree with
+        /// the scalar fold it replaced, and the guarded fallbacks must still take
+        /// the scalar path.
+        ///
+        /// Under 8 elements `chunks_exact(8)` yields nothing and the whole slice
+        /// flows through the remainder loop, so those cases are BIT-IDENTICAL —
+        /// which is the regime every reduction conformance fixture lives in. The
+        /// hand-computed values below are exact in f64 (all dyadic rationals), so
+        /// `assert_eq!` on them is a real equality check rather than a tolerance.
+        #[test]
+        fn blocked_central_moments_match_scalar_8s4mb() {
+            // len 4 (< 8): entirely remainder. mean 2.5; deviations -1.5,-0.5,0.5,1.5.
+            let (n, m2, m3, m4) = crate::present_central_moments_f64(&[1.0, 2.0, 3.0, 4.0], None);
+            assert_eq!(n, 4);
+            assert_eq!(m2, 5.0);
+            assert_eq!(m3, 0.0);
+            assert_eq!(m4, 10.25);
+
+            // len 8 constant: takes the BLOCKED path; every deviation is exactly 0.
+            let (n, m2, m3, m4) = crate::present_central_moments_f64(&[7.0; 8], None);
+            assert_eq!((n, m2, m3, m4), (8, 0.0, 0.0, 0.0));
+
+            // A NaN makes the blocked sum NaN, which must fall back to the scalar
+            // loop — and that loop EXCLUDES the NaN from n rather than poisoning it.
+            let (n, m2, m3, m4) = crate::present_central_moments_f64(&[1.0, f64::NAN, 3.0], None);
+            assert_eq!(n, 2);
+            assert_eq!(m2, 2.0);
+            assert_eq!(m3, 0.0);
+            assert_eq!(m4, 2.0);
+
+            // Empty stays on the scalar path via the !is_empty() guard.
+            assert_eq!(crate::present_central_moments_f64(&[], None), (0, 0.0, 0.0, 0.0));
+
+            // Int64 sibling: same two regimes.
+            let (n, m2, m3, m4) = crate::present_central_moments_i64(&[5_i64; 8], None);
+            assert_eq!((n, m2, m3, m4), (8, 0.0, 0.0, 0.0));
+            let (n, m2, m3, m4) = crate::present_central_moments_i64(&[1, 2, 3, 4], None);
+            assert_eq!(n, 4);
+            assert_eq!(m2, 5.0);
+            assert_eq!(m4, 10.25);
+        }
+
         #[test]
         fn skew_kurt_nullable_typed_match_nan_reference() {
             // Typed nullable Int64/Float64 skew/kurt (present central moments) must
