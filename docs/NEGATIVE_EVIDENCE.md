@@ -37260,3 +37260,70 @@ looks like a defence in the directory listing.** Reclaim and deletion are the us
 standing orders, so I am flagging it rather than removing it, and I did NOT give the assembler a
 delete path — a banking tool that can erase baselines is a worse hazard than the stale file it would
 clean up.
+
+### 2026-08-18 SlateHeron (br-frankenpandas-vw0uu) — DataFrameGroupBy grouped rolling had NO LANE; on its first measurement ever it CERTIFIES at 7.251x, and its "~14-32ms residual" turns out to sit 7x AHEAD of the incumbent
+
+`vw0uu` has named a "~14-32ms residual" on this path since July. Nobody could tell whether
+that residual was a gap or a rounding error, because the surface had never been compared
+to pandas at all — it had no bench lane. Same gap that left SeriesGroupBy rolling
+unmeasured until `13c0caf1f`.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=c5ae0dd000fc5892cabbbcd553c7af3d55d6501a14dd9abf83405111e3e52f84 (82785016 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260818T055217.914752Z-pid1972520 , giving
+measured_ratio=7.251x for this row.
+
+| `df_groupby_rolling_mean_w10 @1M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **34332.27us** | 2.24% | 1.007350 — PASSES |
+| pandas | 248641.83us | 3.35% | 1.001024 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 1.007350 and pandas
+median ratio 1.001024, both inside the 2% limit.
+
+**Median-CI decision:** effect median 7.251x, 95% CI [6.99821444, 7.39544032], excluding
+unity; claimed log effect 1.98115048 against a required threshold of 0.05346143, cleared
+by 37x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 2.24%, pandas 3.35%.
+
+Three repeats, all certified: **7.251x / 6.908x / 7.160x**, nulls 1.0073 / 1.0099 /
+0.9933.
+
+**I CHECKED min/min MYSELF THIS TIME, rather than leaving it for the re-lock.** The other
+pane established that a row can pass all three clauses with clean nulls and still be false
+when the incumbent is multithreaded, and pandas' `peak_process_threads` is 67 here as it
+was on my `u5cg4` row. Best-vs-best across the three repeats: **7.136 / 7.070 / 7.075,
+every one agreeing with its median and within ~2% of it.** That is the check I applied too
+weakly last time.
+
+```
+LOADAVG   9.29 -> 9.77 across the three repeats
+THREADS   FP 3 · pandas peak 67
+```
+
+**THE THREE-COLUMN FIXTURE IS LOAD-BEARING, not incidental.** This path parallelises
+per-COLUMN (`GBROLL_PAR_MIN_COLS = 2`, workers capped at `ncols`), unlike its Series
+sibling which parallelises per-group. `thread_count_actually_used` came back **3** —
+exactly the column count — confirming the parallel arm engaged. **A one-column fixture
+would have routed serial and measured a different code path while looking identical in
+every recorded field.**
+
+**WHAT THIS DOES TO THE BEAD.** The residual is the right order — FP's arm is 34.3-34.9ms
+against the bead's 14-32ms figure — but the op is already **7x ahead of pandas**, so the
+residual is not a gap against the incumbent. It is headroom against ourselves. That
+reframes `vw0uu`'s remaining lever from "close a gap" to "widen a win", which is a lower
+priority under the campaign's ordering, and it could not have been known without the lane.
+
+⚠ **AND HALF THE BEAD'S STATED LEVER IS ALREADY REFUTED.** `vw0uu` proposes "single
+bounded-Int64 key → `int64_dense_grouping` instead of `build_groups` SipHash" — but
+`u5cg4` measured `build_groups` at 20.65% of instructions, 15.69% debug, 10.18% wall, and
+says explicitly "DO NOT re-attack build_groups. Its share is now measured three ways and
+it is not the floor." The other half of the lever — per-group agg inline over the raw
+slice, no per-group Series — targets the 79-90% and remains the right idea.
