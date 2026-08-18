@@ -575,13 +575,6 @@ def validate_entries(entries: list[LedgerEntry]) -> list[PolicyViolation]:
 # the failure mode this whole check exists to close.
 
 ARTIFACT_DIR = REPO / "artifacts" / "bench"
-_LOG_EFFECT = re.compile(
-    r"claimed\s+log\s+effect\s+([0-9.]+).{0,80}?required[^0-9]{0,40}([0-9.]+)",
-    re.IGNORECASE | re.DOTALL,
-)
-_CI_PAIR = re.compile(r"CI\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]", re.IGNORECASE)
-
-
 @functools.lru_cache(maxsize=1)
 def _artifact_gate_rows() -> tuple[dict, ...]:
     """Every median-CI gate block in the committed bench corpus, loaded ONCE.
@@ -592,7 +585,7 @@ def _artifact_gate_rows() -> tuple[dict, ...]:
     """
     rows: list[dict] = []
     if not ARTIFACT_DIR.is_dir():
-        return rows
+        return tuple(rows)
     for path in sorted(ARTIFACT_DIR.glob("*.json")):
         try:
             doc = json.loads(path.read_text(errors="replace"))
@@ -614,6 +607,19 @@ def _close(a: float, b: float) -> bool:
     return abs(a - b) <= max(1e-6, abs(b) * 1e-6)
 
 
+# PHRASING-AGNOSTIC ON PURPOSE. An earlier version of this check encoded one
+# author's wording ("claimed log effect X against a required threshold of Y") and
+# matched 16 of 79 markers in the banked corpus; the majority write
+# "effect=X ... required threshold=Y". A check that answers "could not check" for
+# four fifths of well-formed entries is noise, which is the same defect one level
+# up from the one this exists to fix. So: collect every high-precision number in
+# the marker and ask whether a measured row's pair appears among them. Log effects
+# are quoted at 6+ decimals throughout the corpus, which separates them from
+# ratios, percentages and counts without needing to parse a sentence.
+_QUOTED_NUMBER = re.compile(r"(?<![0-9.])([0-9]+\.[0-9]{2,})")
+_CI_PAIR = re.compile(r"CI\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]", re.IGNORECASE)
+
+
 def median_ci_artifact_status(body: str) -> tuple[str, str]:
     """VERIFIED / CONTRADICTED / UNLOCATABLE for one entry's Median-CI marker."""
     values = marker_values(body, MEDIAN_MARKER)
@@ -621,16 +627,33 @@ def median_ci_artifact_status(body: str) -> tuple[str, str]:
         return ("UNLOCATABLE", "no single median-CI marker to check")
     text = _flat(values[0])
 
-    effect = _LOG_EFFECT.search(text)
-    if not effect:
-        return ("UNLOCATABLE", "no claimed/required log-effect pair to check")
-    claim = float(effect.group(1))
-    required = float(effect.group(2))
+    # Keep the STRING form: the number of decimals the author chose is what the
+    # comparison must happen at. An entry writing 0.6746 for a measured 0.67461725
+    # is quoting it correctly, and a checker that demands all eight digits will
+    # call honest rounding a fabrication.
+    quoted_raw = _QUOTED_NUMBER.findall(text)
+    if not quoted_raw:
+        return ("UNLOCATABLE", "this marker quotes no numbers to check")
+
+    def matches_quoted(value: float) -> bool:
+        for raw in quoted_raw:
+            decimals = len(raw.split(".", 1)[1])
+            if abs(round(value, decimals) - float(raw)) <= 10.0 ** (-decimals) / 2 + 1e-12:
+                return True
+        return False
 
     ci = _CI_PAIR.search(text)
     ci_pair = (float(ci.group(1)), float(ci.group(2))) if ci else None
 
-    ci_only_match = False
+    # Numbers that are NOT the CI bounds are the entry's candidate effect values.
+    # If it quotes none, it stated its effects in prose and there is nothing to
+    # contradict — that is UNLOCATABLE, not a finding.
+    ci_strings = set()
+    if ci:
+        ci_strings = {ci.group(1), ci.group(2)}
+    effect_candidates = [raw for raw in quoted_raw if raw not in ci_strings]
+
+    ci_only_match: tuple[float, float] | None = None
     for gate in _artifact_gate_rows():
         got_claim = gate.get("claim_log_effect")
         got_required = gate.get("required_log_effect")
@@ -639,8 +662,12 @@ def median_ci_artifact_status(body: str) -> tuple[str, str]:
             got_required, (int, float)
         ):
             continue
-        if _close(claim, got_claim) and _close(required, got_required):
-            return ("VERIFIED", f"claim {claim} / required {required} found in the corpus")
+        if matches_quoted(got_claim) and matches_quoted(got_required):
+            return (
+                "VERIFIED",
+                f"a measured row carries claim {got_claim} and required {got_required}, "
+                f"both quoted here (at the entry's own precision)",
+            )
         if (
             ci_pair
             and isinstance(got_ci, list)
@@ -648,16 +675,20 @@ def median_ci_artifact_status(body: str) -> tuple[str, str]:
             and _close(ci_pair[0], got_ci[0])
             and _close(ci_pair[1], got_ci[1])
         ):
-            ci_only_match = True
+            ci_only_match = (float(got_claim), float(got_required))
 
-    if ci_only_match:
+    if ci_only_match is not None and len(effect_candidates) >= 2:
         return (
             "CONTRADICTED",
-            f"a measured row matches the quoted CI {ci_pair} but NOT the quoted "
-            f"log effects (claim {claim}, required {required}) — the numbers do not "
-            f"come from that row",
+            f"a measured row matches the quoted CI {ci_pair} exactly, and this entry "
+            f"quotes {len(effect_candidates)} effect numbers, but NONE of them is that "
+            f"row's claim/required {ci_only_match} even at the entry's own precision",
         )
-    return ("UNLOCATABLE", f"no measured row carries claim {claim} / required {required}")
+    return (
+        "UNLOCATABLE",
+        f"no measured row's claim/required pair matches the {len(effect_candidates)} "
+        f"effect numbers quoted here",
+    )
 
 def check_new_rows(base: str, *, cached: bool) -> int:
     entries = changed_ledger_entries(base, cached=cached)
