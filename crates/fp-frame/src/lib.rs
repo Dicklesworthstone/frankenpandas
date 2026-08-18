@@ -81190,6 +81190,10 @@ impl DataFrame {
         // align_axis == 1: self/other laid out side by side per column.
         let mut columns = BTreeMap::new();
         let mut column_order = Vec::new();
+        // The two column-axis levels, built alongside the flat names
+        // (br-frankenpandas-ums1z).
+        let mut col_level0: Vec<IndexLabel> = Vec::with_capacity(per_col.len() * 2);
+        let mut col_level1: Vec<IndexLabel> = Vec::with_capacity(per_col.len() * 2);
         for (col_name, self_vals, other_vals, col_has_diff) in &per_col {
             // keep_shape keeps every column pair even when fully equal.
             if !(keep_shape || *col_has_diff) {
@@ -81205,6 +81209,19 @@ impl DataFrame {
             columns.insert(other_name.clone(), Column::from_values(other_filtered)?);
             column_order.push(self_name);
             column_order.push(other_name);
+            // br-frankenpandas-ums1z: the column axis is TWO LEVELS in pandas, and
+            // we were emitting only the flattened names. MEASURED, pandas 2.2.3:
+            //   df.compare(other, result_names=('left','right')).columns
+            //     -> MultiIndex, nlevels 2, [('a','left'), ('a','right')]
+            // The flat spelling below is unchanged and still correct — the oracle
+            // renders a multi column axis by joining the tuple with '_', which is
+            // exactly `{col}_{result_name}` — so this ADDS the axis rather than
+            // renaming anything. Level 1 is unnamed in pandas, as level 1 already
+            // is on the align_axis=0 row axis assembled below.
+            col_level0.push(IndexLabel::Utf8(col_name.clone()));
+            col_level0.push(IndexLabel::Utf8(col_name.clone()));
+            col_level1.push(IndexLabel::Utf8(result_names.0.to_owned()));
+            col_level1.push(IndexLabel::Utf8(result_names.1.to_owned()));
         }
 
         let new_labels: Vec<IndexLabel> = row_indices
@@ -81214,7 +81231,24 @@ impl DataFrame {
         // Per br-frankenpandas-mu31x: pandas df.compare preserves
         // self.index.name on the result.
         let new_index = Index::new(new_labels).rename_index(self.index.name());
-        Self::new_with_column_order(new_index, columns, column_order)
+        // An empty result keeps a flat axis: MultiIndex::from_arrays on empty
+        // levels would assert a two-level shape onto a frame with no columns,
+        // which pandas does not do either.
+        let column_multiindex = if col_level0.is_empty() {
+            None
+        } else {
+            Some(
+                fp_index::MultiIndex::from_arrays(vec![col_level0, col_level1])?
+                    .set_names(vec![None, None]),
+            )
+        };
+        Self::new_with_axes(
+            new_index,
+            None,
+            columns,
+            column_order,
+            column_multiindex,
+        )
     }
 
     /// Assemble the `align_axis=0` (stacked) compare result: the original
