@@ -2420,6 +2420,29 @@ def bench_rolling_std_w50_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df["col_0"].rolling(50).std())
 
 
+def bench_df_groupby_rolling_mean_w10_pandas(df: pd.DataFrame) -> list[float]:
+    """DataFrameGroupBy grouped rolling mean over THREE value columns.
+
+    br-frankenpandas-vw0uu. The DataFrame-level grouped rolling surface had no
+    lane, so its residual has never been compared to the incumbent.
+
+    Three value columns, not one, because FrankenPandas parallelises this path
+    per-COLUMN (``GBROLL_PAR_MIN_COLS = 2``, workers capped at ncols) rather than
+    per-group like its Series sibling — a one-column fixture would route serial
+    on the FrankenPandas side and measure the wrong thing.
+
+    ``droplevel(0).sort_index()`` for the same reason as the Series lane: pandas
+    returns a two-level (key, original-index) MultiIndex ordered group-by-group,
+    and that is what a user writes to get FrankenPandas' flat, original-order
+    frame back. Key derived from the row index so both lanes group identically.
+    """
+    key = pd.Series(np.arange(len(df)) % 100, index=df.index)
+    values = df[["col_0", "col_1", "col_2"]]
+    return time_operation(
+        lambda: values.groupby(key).rolling(10).mean().droplevel(0).sort_index()
+    )
+
+
 def bench_groupby_rolling_mean_w10_pandas(df: pd.DataFrame) -> list[float]:
     """Grouped rolling mean, flattened back onto the original row order.
 
@@ -2982,6 +3005,7 @@ PANDAS_WORKLOADS = {
         "rolling_mean_w10": bench_rolling_mean_w10_pandas,
         "rolling_std_w50": bench_rolling_std_w50_pandas,
         "groupby_rolling_mean_w10": bench_groupby_rolling_mean_w10_pandas,
+        "df_groupby_rolling_mean_w10": bench_df_groupby_rolling_mean_w10_pandas,
         "rolling_apply_stateful": bench_rolling_apply_stateful_pandas,
         "expanding_sum": bench_expanding_sum_pandas,
         "expanding_apply_stateful": bench_expanding_apply_stateful_pandas,

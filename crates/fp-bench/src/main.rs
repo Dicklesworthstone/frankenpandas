@@ -3064,6 +3064,44 @@ fn run(
                     .expect("grouped rolling mean");
             })
         }
+        ("rolling", "df_groupby_rolling_mean_w10") => {
+            // br-frankenpandas-vw0uu. The DataFrameGroupBy grouped-rolling surface
+            // had NO lane, so its "~14-32ms residual" has never been compared to
+            // the incumbent — same gap that left SeriesGroupBy rolling unmeasured
+            // until `groupby_rolling_mean_w10`.
+            //
+            // THREE value columns, not one, because this path's parallel arm is
+            // per-COLUMN (`GBROLL_PAR_MIN_COLS = 2`, worker_count capped at
+            // ncols) rather than per-group like its Series sibling. A one-column
+            // fixture would route serial and measure the wrong thing entirely.
+            //
+            // Key from the row index (`i % 100`) exactly as the Series lane does,
+            // so the two lanes group identically and their numbers are
+            // comparable.
+            let keys: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
+            let mut columns = BTreeMap::new();
+            columns.insert("key".to_string(), Column::from_i64_values(keys));
+            let mut order = vec!["key".to_string()];
+            for (c, column) in raw.iter().enumerate().take(3) {
+                let n = format!("v{c}");
+                columns.insert(n.clone(), Column::from_f64_values(column.clone()));
+                order.push(n);
+            }
+            let gdf = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                columns,
+                order,
+            )
+            .expect("df grouped rolling frame");
+            time_us(|| {
+                let _ = gdf
+                    .groupby(&["key"])
+                    .expect("groupby")
+                    .rolling(10)
+                    .mean()
+                    .expect("df grouped rolling mean");
+            })
+        }
         ("rolling", "expanding_skew") => {
             let series = df.get_column("col_0");
             time_us(|| {
