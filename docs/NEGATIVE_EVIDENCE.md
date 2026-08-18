@@ -38338,79 +38338,72 @@ of work*, and the first where I caught it by noticing the elapsed time was impla
 than by any check I had written.
 
 
-### 2026-08-18 CrimsonPine (br-frankenpandas-tk0ig, br-frankenpandas-85clb) — NO ROW IN THIS CORPUS CARRIES BUILD-FLAG PROVENANCE. fp-bench emits it, the harness drops it, and one orphaned standing lock is unattributable as a result
+### 2026-08-18 CrimsonPine (br-frankenpandas-tk0ig) — BINARY IDENTITY *IS* RECORDED; BUILD CONFIGURATION IS NOT. Retracting two claims I made and pushed an hour ago, after SlateHeron refuted them
 
-**THIS ENTRY CLAIMS NO RATIO AND CERTIFIES NOTHING.** It is a finding about the instrument and about
-a guard I wrote myself. No lever is proposed or rejected here, so it carries no A/A control by
-design rather than by omission.
+**THIS ENTRY CLAIMS NO RATIO AND CERTIFIES NOTHING.** No lever is proposed or rejected, so it carries
+no A/A control by design rather than by omission.
 
-**THE GAP.** `fp-bench` prints `compiled_target_features` on every invocation — I added it in
-`34bcf8973` precisely because `runtime_detected_isa_features` records what the CPU supports, not
-what the compiler targeted, so a `+avx2` build and a shipping build emitted byte-identical lists.
-The harness never persists it. Verified by RECURSIVE key search over whole artifact JSONs, done
-recursively on purpose because I produced two false-absences today by checking the wrong level:
+⚠️ **RETRACTION FIRST, BECAUSE THE ORIGINAL WAS PUSHED AND WRONG.** I wrote that "no row in this
+corpus carries build-flag provenance", that the orphaned `floor @1M 1.544x` lock was therefore
+UNATTRIBUTABLE, and that `assemble_standing_locks.py`'s non-shipping denylist "can never fire".
+**Two of those three are false.** SlateHeron checked and refuted them; I re-ran the check by SHAPE
+rather than take their word, and they are right.
 
-    compiled_target_features        0 hits   artifacts/bench/8s4mb_df_sem_1M_r1.json  (fresh tonight)
-    compiled_target_features        0 hits   artifacts/bench/3qpj4_floor_intrinsic.json
-    elf_sha256 / bench_elf_sha256   0 hits   both
+**WHAT WAS WRONG, AND WHY I GOT IT WRONG.** I searched the artifacts recursively for the key names
+`elf_sha256` and `bench_elf_sha256`. The field is called `sha256`, nested under `executable`:
 
-**Corpus-wide: 316 rows carry verdict `FASTER`, and ZERO of them record which ISA the measured
-binary was compiled for.**
+    .results[].frankenpandas.executable.sha256    ← the ELF digest, present all along
+    .results[].frankenpandas.executable.bytes / .path
 
-**THE ONE DURABLE DISCRIMINATOR THAT DOES EXIST** is `parameters.frankenpandas_binary_requested` —
-an explicit path when `--frankenpandas-binary` was passed, `null` otherwise. `null` means "resolved
-from `CARGO_TARGET_DIR` at the time", which is unattributable after the fact.
+**Searching recursively does not save you when the KEY NAME is a guess — only searching by SHAPE
+does** (any 64-hex string, anywhere). Corpus: **481 artifacts carry a FrankenPandas executable
+digest; 103 do not** (the older `bench_<timestamp>` sweeps).
 
-**A CONCRETE LEAK, NOT A HYPOTHETICAL.** Standing-lock orphan `floor @1M 1.544x FASTER`
-(`3qpj4_floor_intrinsic.json`, harness `669547f601ff`, host `thinkstation1`) records no ELF identity
-and no compiled features. Its value sits in the flagged-build cluster. Same harness, same host,
-same day:
+⚠️ **THIS IS THE THIRD FALSE-ABSENCE I PRODUCED TONIGHT, AND I MADE IT INSIDE THE ENTRY WARNING
+ABOUT FALSE-ABSENCES.** The other two: `strings`/`grep` on an ELF (a lane that runs reads as
+missing), and `compiled_target_features` read as absent when it was nested under
+`thread_provenance`. Same failure every time — I chose where to look, found nothing, and reported
+absence as a finding. **The discipline that actually works is to search by shape or to ask the
+artifact to enumerate itself, and to treat "not found" as "not found HERE".**
 
-| artifact | ratio |
-|---|---|
-| `cu22b_floor_default`, `_b` | 0.343x |
-| `cu22b_floor_sse41` family | 0.415-0.526x |
-| `isa3_floor_v3_adaptive`, `v3_floor_1m_warm` | 0.909-1.019x |
-| `3qpj4_floor1M_avx2` | 1.384x |
-| **`3qpj4_floor_intrinsic` (the orphan)** | **1.544x** |
+**THE ORPHANED LOCK IS ATTRIBUTABLE, AND ITS SIBLINGS AGREE WITH IT.** Grouping all 65 `floor @1M`
+rows by ELF digest — which is what I should have done first — separates cleanly:
 
-⚠️ **CORRECTION, SAME NIGHT, BEFORE ANYONE RELIED ON IT — THE TABLE ABOVE IS GROUPED BY FILENAME,
-AND FILENAME IS NOT PROVENANCE.** My first draft of this entry said "every default-build `floor @1M`
-row on that host reads 0.30-0.51x". That claim is not supportable, and I reached it by inferring the
-build from artifact NAMES — the exact inference this entry argues is impossible. Checked properly:
+| ELF | n | ratio range |
+|---|---|---|
+| `0797b4b29b6b` (**the orphan's binary**) | 5 | **1.326x - 1.544x** |
+| `ded4edcb2b6f` | 7 | 1.200x - 1.434x |
+| `162f821c9c09` | 1 | 1.384x |
+| `256e80ee3100` | 5 | 0.909x - 1.153x |
+| `017328ffba6f` | 4 | 0.415x - 0.526x |
+| `a802073cf042`, `4c50f09ba713`, `e94c077a329a`, … | 1-8 each | 0.299x - 0.493x |
+| `4a89472f0924` | 8 | 0.072x - 0.165x |
 
-* `floor @1M` has **65 rows spanning 0.072x to 1.544x across eight harness shas**. A cluster at
-  0.072-0.165x (harness `6d884360e4df`) sits well below the range I quoted.
-* Sorting those 65 rows by whether the filename contains a flag token puts `3qpj4b_floor_settled.json`
-  at **1.384x in the "default" group — exactly the `+avx2` value** — while `cu22b_floor_sse41_c.json`
-  lands at 0.415x in the "flagged" group. **The grouping does not separate.**
+The 1.544x row is not floating in an unattributed cluster: **four other rows on that exact binary
+read 1.326-1.384x**, and the 0.30-0.51x rows I compared it against are DIFFERENT BINARIES. The
+separation I claimed was missing is exactly what the digests provide.
 
-**The finding does not depend on the table and is stronger without it:** the artifacts do not record
-which binary produced ANY of these 65 rows, so neither the orphan nor its neighbours can be
-attributed. I could not sort them even when I tried, which is the claim.
+**AND THE GUARD FIRES.** The denylisted prefix `162f821c9c09` is present in **7 artifacts**
+(`3qpj4_floor1M_avx2_2026-08-18`, `oxv4u_sqrt1M_avx2_2026-08-18`, `mti15_dfdot1M_avx2`, four
+`oxv4u_dfdot10k_avx2` rows). It is applicable and it would refuse them. My "inapplicable, which
+reads as coverage" line was wrong about my own code.
 
-⚠️ **STATED PRECISELY, BECAUSE THE DISTINCTION IS THE WHOLE POINT: I am NOT claiming that row is
-false or that its number is wrong for whatever it measured.** I am claiming it is UNATTRIBUTABLE —
-nothing in its artifact says which binary produced it — and that an unattributable row must not be
-re-locked as a defence of the SHIPPING build. My own earlier summary, "36 of 51 orphans are >=2x
-wins", was too comfortable and should be read with this caveat.
+**WHAT SURVIVES, NARROWED TO WHAT THE EVIDENCE ACTUALLY SUPPORTS.** `compiled_target_features` is
+genuinely absent from every artifact — 0 hits by name anywhere — while fp-bench prints it on every
+invocation. So:
 
-**AND THE GUARD I WROTE FOR EXACTLY THIS CANNOT FIRE.** `scripts/assemble_standing_locks.py`
-denylists non-shipping binaries by ELF sha prefix (`KNOWN_NON_SHIPPING_ELF_SHA_PREFIXES`,
-one entry, `162f821c9c09`). **No artifact in the corpus records an ELF sha at all, so that check can
-never match anything.** It is not incorrect; it is INAPPLICABLE, which is worse than being wrong,
-because in a code read it looks like coverage. I built it, I described it as closing the hole, and
-it does not.
+* **Binary IDENTITY is recorded.** You can tell two binaries apart, and group rows by build.
+* **Build CONFIGURATION is not.** Nothing says what any binary was COMPILED FOR.
 
-**FIX, ORDERED, AND DELIBERATELY NOT DONE TONIGHT.** (1) harness persists the child's
-`compiled_target_features` per arm; (2) harness persists fp-bench's line-one
-`bench_elf_sha256=<64hex> (<bytes>) <path>`, which it already reads; (3) the assembler refuses rows
-lacking build provenance with a distinct message, with `--self-test` cases both directions.
+The practical residue is narrow and real: `0797b4b29b6b` is *some* binary whose rows run 3-4x above
+every default-ELF row, and **the artifact cannot tell you whether it was a shipping build**. That is
+worth answering before that lock is re-taken — by identifying the binary, not by pulling the row.
 
-⚠️ **SEQUENCING IS THE REASON THIS IS A BEAD AND NOT A COMMIT.** (1) and (2) change the harness
-sha, which ORPHANS ALL 51 STANDING LOCKS plus every row landing tonight. Batching it with the next
-harness change that is already paying that cost is strictly cheaper than paying it twice. Landing a
-provenance improvement as a drive-by would destroy more defences than it protects.
+⚠️ **I WAS ABOUT TO ACT ON THIS AND IT WOULD HAVE REMOVED A DEFENSIBLE LOCK.** tk0ig had a
+"refuse unattributable rows" fix ordered off a conclusion that was false. The bead survives, scoped
+to persisting `compiled_target_features` and the fp-bench self-hash, and the sequencing warning
+stands: those change the harness sha and orphan all 51 standing locks, so they must batch with the
+next harness change already paying that cost.
 
 **METHOD NOTE — HOW THE ELF QUESTION SHOULD BE ASKED.** `grep`/`strings` on an fp-bench ELF is not
 a capability test and FALSE-NEGATIVES: `df_transpose_full_materialize`, `df_sem`, `series_kurtosis`
