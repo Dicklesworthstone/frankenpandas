@@ -6373,9 +6373,51 @@ impl Period {
                 let month = ord.rem_euclid(12) + 1;
                 write!(rendered, "{year:04}-{month:02}")
             }
-            PeriodFreq::Daily | PeriodFreq::Business | PeriodFreq::Weekly => {
+            PeriodFreq::Daily => {
                 let (y, m, d) = civil_from_days(ord);
                 write!(rendered, "{y:04}-{m:02}-{d:02}")
+            }
+            // ⚠️ NOT DAYS SINCE THE EPOCH. A business ordinal counts BUSINESS
+            // DAYS — five per week — so handing it to `civil_from_days` (which
+            // wants a day count) put the label decades out: ordinal 14141 is
+            // 2024-03-15 and rendered as 2008-09-19.
+            //
+            // The forward map in fp-index is
+            //     days.div_euclid(7) * 5 + {Thu:0, Fri:1, Mon:2, Tue:3, Wed:4}
+            // measured against pandas at every sampled date, so this is its
+            // inverse: five ordinals per seven days, with the remainder naming a
+            // weekday offset from the Thursday the epoch falls on.
+            PeriodFreq::Business => {
+                const WEEKDAY_OFFSET: [i64; 5] = [0, 1, 4, 5, 6];
+                // Euclidean, so a pre-epoch ordinal keeps a remainder in 0..5:
+                // ordinal -1 is 1969-12-31, not a negative weekday index.
+                let offset = WEEKDAY_OFFSET[ord.rem_euclid(5) as usize];
+                let days = ord
+                    .div_euclid(5)
+                    .saturating_mul(7)
+                    .saturating_add(offset);
+                let (y, m, d) = civil_from_days(days);
+                write!(rendered, "{y:04}-{m:02}-{d:02}")
+            }
+            // ⚠️ TWO BUGS IN ONE ARM. A weekly ordinal counts WEEKS from the
+            // Monday 1969-12-22 (ten days before the epoch), and pandas renders a
+            // weekly period as the RANGE it spans, not as one date:
+            //     Period('2024-03-15', 'W') -> '2024-03-11/2024-03-17'
+            // ordinal 2829, which this arm rendered as '1977-09-30'.
+            //
+            // fp-frame's `format_period_label` already produced the range form
+            // for the same freq, so the two renderers disagreed on every weekly
+            // period; this makes them agree.
+            PeriodFreq::Weekly => {
+                // Days-since-epoch of the anchor Monday 1969-12-22.
+                const WEEK_ANCHOR_DAY: i64 = -10;
+                let start = ord.saturating_mul(7).saturating_add(WEEK_ANCHOR_DAY);
+                let (sy, sm, sd) = civil_from_days(start);
+                let (ey, em, ed) = civil_from_days(start.saturating_add(6));
+                write!(
+                    rendered,
+                    "{sy:04}-{sm:02}-{sd:02}/{ey:04}-{em:02}-{ed:02}"
+                )
             }
             PeriodFreq::Hourly => {
                 let (y, m, d) = civil_from_days(ord.div_euclid(24));
@@ -13241,6 +13283,81 @@ mod tests {
         );
         assert_eq!(
             Scalar::Period(Period::new(i64::MIN, PeriodFreq::Daily)).to_string(),
+            "NaT"
+        );
+    }
+
+    /// The two frequencies whose ordinal is NOT a day count. Both rendered
+    /// through `civil_from_days` and came out decades wrong; the test above
+    /// covered Y/Q/M/D and never touched either, which is how it survived.
+    ///
+    /// Every string is `str(pd.Period(ordinal=..., freq=...))` on live pandas
+    /// 2.2.3, and FrankenPandas' own ordinals were confirmed to agree with
+    /// pandas' at each sampled date before these were taken.
+    #[test]
+    fn weekly_and_business_periods_do_not_index_days() {
+        // ⚠️ WEEKLY IS A RANGE, not a date: the ordinal counts WEEKS from the
+        // Monday 1969-12-22, and pandas prints the seven days it spans.
+        // Ordinal 2829 is the week of 2024-03-15 and used to render
+        // "1977-09-30" — the result of reading a week count as a day count.
+        for (ordinal, want) in [
+            (0_i64, "1969-12-22/1969-12-28"),
+            (1, "1969-12-29/1970-01-04"),
+            (2829, "2024-03-11/2024-03-17"),
+            (1540, "1999-06-28/1999-07-04"),
+            (15237, "2261-12-30/2262-01-05"),
+            // Pre-epoch, where Euclidean division matters.
+            (-1, "1969-12-15/1969-12-21"),
+            (-2829, "1915-10-04/1915-10-10"),
+        ] {
+            assert_eq!(
+                Period::new(ordinal, PeriodFreq::Weekly).to_string(),
+                want,
+                "weekly ordinal {ordinal}"
+            );
+        }
+
+        // ⚠️ BUSINESS COUNTS BUSINESS DAYS — five per week — so consecutive
+        // ordinals skip the weekend. Ordinal 14141 is 2024-03-15 and used to
+        // render "2008-09-19".
+        for (ordinal, want) in [
+            (0_i64, "1970-01-01"), // a Thursday: the epoch anchors the cycle
+            (1, "1970-01-02"),     // Friday
+            (2, "1970-01-05"),     // Monday — the weekend is SKIPPED
+            (3, "1970-01-06"),
+            (4, "1970-01-07"),
+            (5, "1970-01-08"),
+            (14141, "2024-03-15"),
+            (76179, "2262-01-01"),
+            // A Sunday input rolls FORWARD when the ordinal is taken, so 7697
+            // is the Monday 1999-07-05 rather than 1999-07-04.
+            (7697, "1999-07-05"),
+            (-1, "1969-12-31"),
+            (-5, "1969-12-25"),
+            (-6, "1969-12-24"),
+        ] {
+            assert_eq!(
+                Period::new(ordinal, PeriodFreq::Business).to_string(),
+                want,
+                "business ordinal {ordinal}"
+            );
+        }
+
+        // Five business ordinals per seven calendar days, checked as a property
+        // rather than as a table: the same arithmetic the forward map in
+        // fp-index uses, read backwards.
+        for ordinal in -400_i64..400 {
+            let rendered = Period::new(ordinal, PeriodFreq::Business).to_string();
+            let later = Period::new(ordinal + 5, PeriodFreq::Business).to_string();
+            assert_ne!(rendered, later, "business ordinals must not repeat");
+        }
+
+        assert_eq!(
+            Period::new(i64::MIN, PeriodFreq::Weekly).to_string(),
+            "NaT"
+        );
+        assert_eq!(
+            Period::new(i64::MIN, PeriodFreq::Business).to_string(),
             "NaT"
         );
     }
