@@ -3389,8 +3389,21 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
     // Recorded rather than left implicit: 'W', 'Q', 'H', 'T' and 'S' have no arm at
     // all below, and 'M'/'Y' implement calendar addition rather than pandas' period
     // -end anchoring. Both are capability work, and both want a compiler.
-    let unit = offset.chars().last().unwrap_or('D');
-    let num_str = &offset[..offset.len() - 1];
+    // The ANCHORED aliases are marked with a lowercase unit, which the uppercase
+    // path below can never produce, so the two namespaces cannot collide.
+    // (br-frankenpandas-offset-alias-2-2)
+    let (num_str, unit) = if let Some(head) = offset.strip_suffix("ME") {
+        (head, 'e')
+    } else if let Some(head) = offset.strip_suffix("QE") {
+        (head, 'q')
+    } else if let Some(head) = offset.strip_suffix("YE") {
+        (head, 'y')
+    } else {
+        (
+            &offset[..offset.len() - 1],
+            offset.chars().last().unwrap_or('D'),
+        )
+    };
     let count: i32 = if num_str.is_empty() {
         1
     } else {
@@ -3398,6 +3411,11 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
             .parse()
             .map_err(|_| FrameError::CompatibilityRejected(format!("invalid offset: '{offset}'")))?
     };
+    // Lowercase markers are anchored units and must survive verbatim; every other
+    // unit keeps its long-standing case-insensitive handling.
+    if unit.is_ascii_lowercase() && matches!(unit, 'e' | 'q' | 'y') {
+        return Ok((count, unit));
+    }
     Ok((count, unit.to_ascii_uppercase()))
 }
 
@@ -3485,6 +3503,54 @@ fn shift_date_string(date_str: &str, count: i32, unit: char) -> Result<String, F
             let nd = day.min(days_in_month(ny, month));
             Ok(format!("{ny:04}-{month:02}-{nd:02}"))
         }
+        // ANCHORED PERIOD-END OFFSETS (br-frankenpandas-offset-alias-2-2). These are
+        // pandas' ME/QE/YE, and they are NOT the calendar addition the 'M'/'Y' arms
+        // above perform — that difference is what made a naive alias table wrong and
+        // got the first attempt reverted.
+        //
+        // MEASURED, live pandas 2.2.3, one step:
+        //     2024-01-03 + ME -> 2024-01-31    2024-01-31 + ME -> 2024-02-29
+        //     2024-02-29 + ME -> 2024-03-31    2024-12-31 + ME -> 2025-01-31
+        //     2024-01-03 + QE -> 2024-03-31    2024-02-29 + QE -> 2024-03-31
+        //     2024-03-31 + QE -> 2024-06-30    2024-12-31 + QE -> 2025-03-31
+        //     2024-01-03 + YE -> 2024-12-31    2024-12-31 + YE -> 2025-12-31
+        //
+        // The rule those share: roll to the END of the current period, EXCEPT when
+        // already sitting on it, in which case advance a whole period first. So a
+        // count of n costs n periods from an anchor and n-1 from anywhere else —
+        // which is why `steps` is computed from `on_anchor` rather than fixed.
+        'e' => {
+            let on_anchor = day == days_in_month(year, month);
+            let steps = if on_anchor { count } else { count - 1 };
+            let total_months = (year * 12 + (month - 1)) + steps;
+            let ny = total_months.div_euclid(12);
+            let nm = total_months.rem_euclid(12) + 1;
+            Ok(format!("{ny:04}-{nm:02}-{:02}", days_in_month(ny, nm)))
+        }
+        'q' => {
+            // The quarter's last month is the next multiple of 3.
+            let quarter_end_month = ((month - 1) / 3) * 3 + 3;
+            let on_anchor =
+                month == quarter_end_month && day == days_in_month(year, quarter_end_month);
+            let steps = if on_anchor { count } else { count - 1 };
+            let total_months = (year * 12 + (quarter_end_month - 1)) + steps * 3;
+            let ny = total_months.div_euclid(12);
+            let nm = total_months.rem_euclid(12) + 1;
+            Ok(format!("{ny:04}-{nm:02}-{:02}", days_in_month(ny, nm)))
+        }
+        'y' => {
+            let on_anchor = month == 12 && day == 31;
+            let steps = if on_anchor { count } else { count - 1 };
+            let ny = year + steps;
+            Ok(format!("{ny:04}-12-31"))
+        }
+        // ⚠️ 'W' IS DELIBERATELY ABSENT. pandas' W is anchored on SUNDAY — measured,
+        // 2024-01-06 (Sat) + W is 2024-01-07 and 2024-01-07 (Sun) + W is 2024-01-14,
+        // so it follows the same on-anchor rule. Implementing it needs a WEEKDAY,
+        // and that means knowing which convention `date_to_jdn` uses. I could not
+        // verify that without a compiler, and guessing a weekday offset produces
+        // answers that are wrong by a constant — the quietest possible bug. Left for
+        // a turn with a build.
         _ => Err(FrameError::CompatibilityRejected(format!(
             "unsupported offset unit: '{unit}'"
         ))),
@@ -40585,13 +40651,37 @@ impl SeriesGroupBy<'_> {
                 // same `f64::min`/`f64::max` (matches the fold incl. signed zero);
                 // std/var reuse the exact two-pass mean-centered form
                 // (mean=sum/n; ssd=Σ(x-mean)² in row order; n<2 ⇒ NaN).
+                // Demand flags, extending the `need_var` this function already had.
+                // The first pass maintained min/max/prod for EVERY row regardless of
+                // what was asked for; the emission below reads `mn[g]` only under
+                // `"min"`, `mx[g]` only under `"max"` and `prod[g]` only under
+                // `"prod"`, so an unrequested accumulator was pure waste — a scattered
+                // read-modify-write per row plus an ngroups-sized allocation.
+                //
+                // `sum` and `cnt` stay unconditional: sum, mean, std and var all read
+                // them, so no reachable func list leaves them unused.
                 let need_var = funcs.iter().any(|f| *f == "std" || *f == "var");
+                let need_min = funcs.iter().any(|f| *f == "min");
+                let need_max = funcs.iter().any(|f| *f == "max");
+                let need_prod = funcs.iter().any(|f| *f == "prod");
                 let mut order: Vec<IndexLabel> = Vec::with_capacity(ngroups);
                 let mut sum = vec![0.0_f64; ngroups];
                 let mut cnt = vec![0_usize; ngroups];
-                let mut mn = vec![f64::INFINITY; ngroups];
-                let mut mx = vec![f64::NEG_INFINITY; ngroups];
-                let mut prod = vec![1.0_f64; ngroups];
+                let mut mn = if need_min {
+                    vec![f64::INFINITY; ngroups]
+                } else {
+                    Vec::new()
+                };
+                let mut mx = if need_max {
+                    vec![f64::NEG_INFINITY; ngroups]
+                } else {
+                    Vec::new()
+                };
+                let mut prod = if need_prod {
+                    vec![1.0_f64; ngroups]
+                } else {
+                    Vec::new()
+                };
                 let val_at = |i: usize| -> f64 {
                     if let Some(f) = vf {
                         f[i]
@@ -40614,11 +40704,23 @@ impl SeriesGroupBy<'_> {
                     let x = val_at(i);
                     sum[g] += x;
                     cnt[g] += 1;
-                    mn[g] = mn[g].min(x);
-                    mx[g] = mx[g].max(x);
-                    prod[g] *= x;
+                    if need_min {
+                        mn[g] = mn[g].min(x);
+                    }
+                    if need_max {
+                        mx[g] = mx[g].max(x);
+                    }
+                    if need_prod {
+                        prod[g] *= x;
+                    }
                 }
-                let mut ssd = vec![0.0_f64; ngroups];
+                // Only the std/var arm reads `ssd`, and that arm is unreachable
+                // unless `need_var`, so the allocation follows the same flag.
+                let mut ssd = if need_var {
+                    vec![0.0_f64; ngroups]
+                } else {
+                    Vec::new()
+                };
                 if need_var {
                     for (i, &g) in gids.iter().enumerate() {
                         let mean = sum[g] / cnt[g] as f64;
