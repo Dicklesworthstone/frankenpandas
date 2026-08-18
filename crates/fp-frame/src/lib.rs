@@ -83379,11 +83379,22 @@ impl DataFrameGroupBy<'_> {
             "tail" => return self.tail(5),
             "corr" => return self.corr(),
             "cov" => return self.cov(),
-            // `ohlc` is the one name left with no DataFrameGroupBy method to route
-            // to — pandas emits four columns per value column (2 groups x 2 columns
-            // gives 8) and FrankenPandas has no such method on this type, so it
-            // needs implementing rather than wiring. `size` is left out for the
-            // shape reason recorded above.
+            // ohlc emits FOUR columns per value column on a two-level column axis
+            // (2 groups x 2 value columns gives 8), which is why it cannot join the
+            // reduction loop. It routes like the rest: DataFrameGroupBy::ohlc
+            // already exists and already carries the column MultiIndex.
+            //
+            // ⚠️ I claimed in 7127d4686 that ohlc had NO method to route to and
+            // needed implementing. That was wrong, and the cause is worth naming:
+            // I searched for the method with an arbitrary line-range bound
+            // (`$1 > 82300 && $1 < 92000`) and the definition sits at 92185, just
+            // past it. The bound was invented to keep the output short, and it
+            // silently answered a narrower question than I asked.
+            "ohlc" => return self.ohlc(),
+            // `size` is genuinely different and stays out: pandas' g.agg('size')
+            // returns a SERIES, and DataFrameGroupBy::size() correctly returns
+            // Result<Series, FrameError> while this function returns a DataFrame.
+            // That signature was read directly rather than inferred from a range.
             _ => {}
         }
 
