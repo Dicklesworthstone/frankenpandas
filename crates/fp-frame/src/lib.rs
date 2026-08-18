@@ -3400,6 +3400,11 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
         (head, 'y')
     } else if let Some(head) = offset.strip_suffix('W') {
         (head, 'w')
+    } else if let Some(head) = offset.strip_suffix("min") {
+        // pandas 2.2's spelling of the deprecated 'T'. Lowercase marker for the same
+        // reason as the anchored units: the uppercase path cannot produce it, and
+        // "min" would otherwise read unit 'n' with count "mi".
+        (head, 'i')
     } else {
         (
             &offset[..offset.len() - 1],
@@ -3415,7 +3420,7 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
     };
     // Lowercase markers are anchored units and must survive verbatim; every other
     // unit keeps its long-standing case-insensitive handling.
-    if unit.is_ascii_lowercase() && matches!(unit, 'e' | 'q' | 'y' | 'w') {
+    if unit.is_ascii_lowercase() && matches!(unit, 'e' | 'q' | 'y' | 'w' | 'i') {
         return Ok((count, unit));
     }
     Ok((count, unit.to_ascii_uppercase()))
@@ -3490,6 +3495,30 @@ fn shift_date_string(date_str: &str, count: i32, unit: char) -> Result<String, F
         .split(' ')
         .next()
         .unwrap_or(date_str);
+    // The time part, which the calendar units below still ignore. Only the fixed
+    // duration units ('H', 'T'/'i', 'S') read it, and they must: pandas keeps the
+    // time of day and carries across the date boundary.
+    // MEASURED, live pandas 2.2.3: 2024-02-29 23:45:30 + 2h is 2024-03-01 01:45:30.
+    let time_part = date_str
+        .split_once('T')
+        .or_else(|| date_str.split_once(' '))
+        .map(|(_, rest)| rest);
+    let (in_hour, in_minute, in_second) = match time_part {
+        Some(text) => {
+            let mut fields = text.trim().split(':');
+            let hour = fields.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+            let minute = fields.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+            // Seconds may carry a fraction; the offsets below are whole-second, so
+            // the fraction is dropped rather than mis-parsed.
+            let second = fields
+                .next()
+                .and_then(|v| v.split('.').next())
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(0);
+            (hour, minute, second)
+        }
+        None => (0, 0, 0),
+    };
     let parts: Vec<&str> = date_part.split('-').collect();
     if parts.len() < 3 {
         return Err(FrameError::CompatibilityRejected(format!(
@@ -3600,6 +3629,43 @@ fn shift_date_string(date_str: &str, count: i32, unit: char) -> Result<String, F
             };
             let (ny, nm, nd) = jdn_to_date(shifted);
             Ok(format!("{ny:04}-{nm:02}-{nd:02}"))
+        }
+        // FIXED DURATION OFFSETS. Unlike the anchored units above these do not
+        // snap to anything — they add a constant number of seconds and carry across
+        // the date boundary. MEASURED, live pandas 2.2.3:
+        //     2024-01-03          + 2h   -> 2024-01-03 02:00:00
+        //     2024-01-03          - 2h   -> 2024-01-02 22:00:00
+        //     2024-01-03 10:30:00 + 2min -> 2024-01-03 10:32:00
+        //     2024-02-29 23:45:30 + 2h   -> 2024-03-01 01:45:30
+        //     2024-01-03          - 2s   -> 2024-01-02 23:59:58
+        // so a date-only input GAINS a time of day, and February 29 rolls into March.
+        //
+        // ⚠️ i64 THROUGHOUT. This file is i32 elsewhere, but a JDN in seconds is
+        // about 2.1e11 — 2460311 * 86400 — which overflows i32 by two orders of
+        // magnitude. The conversion is done once, here, rather than by widening the
+        // whole function.
+        'H' | 'T' | 'i' | 'S' => {
+            let per_step: i64 = match unit {
+                'H' => 3600,
+                'T' | 'i' => 60,
+                _ => 1,
+            };
+            let day_seconds = i64::from(date_to_jdn(year, month, day)) * 86_400;
+            let total = day_seconds
+                + in_hour * 3600
+                + in_minute * 60
+                + in_second
+                + i64::from(count) * per_step;
+            let jdn = total.div_euclid(86_400);
+            let rest = total.rem_euclid(86_400);
+            let jdn = i32::try_from(jdn).map_err(|_| {
+                FrameError::CompatibilityRejected(format!(
+                    "offset '{count}{unit}' moves '{date_str}' out of range"
+                ))
+            })?;
+            let (ny, nm, nd) = jdn_to_date(jdn);
+            let (h, m, sec) = (rest / 3600, (rest % 3600) / 60, rest % 60);
+            Ok(format!("{ny:04}-{nm:02}-{nd:02} {h:02}:{m:02}:{sec:02}"))
         }
         _ => Err(FrameError::CompatibilityRejected(format!(
             "unsupported offset unit: '{unit}'"
@@ -38219,9 +38285,14 @@ impl SeriesGroupBy<'_> {
             let v = data[row];
             if v.is_finite() {
                 let d = v - mean[g];
-                m2[g] += d.powi(2);
-                m3[g] += d.powi(3);
-                m4[g] += d.powi(4);
+                // d2 reuse: 3 multiplies per element instead of 5. powi(3) lowers to
+                // two multiplies of {d, d*d} and powi(4) to (d*d)*(d*d), and float
+                // MULTIPLY is commutative bit-for-bit, so this is bit-identical — no
+                // addition order changes. (br-frankenpandas-8s4mb)
+                let d2 = d * d;
+                m2[g] += d2;
+                m3[g] += d2 * d;
+                m4[g] += d2 * d2;
             }
         }
         let labels = order;
@@ -88661,17 +88732,33 @@ impl DataFrameGroupBy<'_> {
                 let mut sumsq = vec![0.0_f64; ngroups];
                 let need_m3 = needs("skew");
                 let need_m4 = needs("kurt") || needs("kurtosis");
-                let mut m3v = vec![0.0_f64; ngroups];
-                let mut m4v = vec![0.0_f64; ngroups];
+                // Allocation follows the same demand flags the loop already used.
+                // m3v is read only under `needs("skew")` (== need_m3) and m4v only
+                // under `need_m4`, so an unrequested moment costs nothing at all now
+                // rather than an ngroups-sized zeroed Vec.
+                let mut m3v = if need_m3 {
+                    vec![0.0_f64; ngroups]
+                } else {
+                    Vec::new()
+                };
+                let mut m4v = if need_m4 {
+                    vec![0.0_f64; ngroups]
+                } else {
+                    Vec::new()
+                };
                 for (row, &v) in vals.iter().enumerate() {
                     let g = gid_per_row[row];
                     let d = v - means[g];
-                    sumsq[g] += d.powi(2);
+                    // d2 reuse; see group_moment_dense. When only sumsq is wanted the
+                    // cost is unchanged (one multiply either way), so the gated arms
+                    // below lose nothing by it.
+                    let d2 = d * d;
+                    sumsq[g] += d2;
                     if need_m3 {
-                        m3v[g] += d.powi(3);
+                        m3v[g] += d2 * d;
                     }
                     if need_m4 {
-                        m4v[g] += d.powi(4);
+                        m4v[g] += d2 * d2;
                     }
                 }
                 // sem / skew / kurt reproduce fp_types::nansem/nanskew/nankurt
