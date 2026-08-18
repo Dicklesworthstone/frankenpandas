@@ -35446,3 +35446,59 @@ whole-call AVX2 row ambiguous — and let that number decide whether a build-pol
 worth having at all. **If the width does not convert to throughput, the targeted-versus-blanket
 question is moot and the bead can close.** That measurement needs one more build (default flags
 from `fc793a3b7`) and a quiet window, and this window had neither.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-oxv4u) — blanket `+avx2` converts width into real work on the dot kernel: 2.595x FEWER INSTRUCTIONS retired, measured load-immune while the host was at 1151% build CPU
+
+**THIS ENTRY CARRIES NO PERF VERDICT AND IS NOT VERDICT-BEARING.** FP-vs-FP only: no incumbent arm,
+no A/A null, no pandas ratio, nothing banked as a lock. It decides an internal engineering question
+for oxv4u — does the vector width the flag delivers turn into less work — not a campaign win.
+
+**Counted mechanism:** instructions retired, `perf stat -e instructions`, `df_dot_kernel @10k`,
+each binary's OWN startup floor measured and subtracted (the floors differ because `+avx2` also
+vectorizes the sha256 self-hash): SSE2 426,076,445 total - 229,834,081 floor = **196,242,364**
+workload instructions; AVX2 256,134,324 total - 180,495,510 floor = **75,638,814** workload
+instructions. **Ratio 2.595x fewer instructions for identical kernel work.**
+
+**BOTH ARMS ARE SOURCE-MATCHED, AND I CAN NOW PROVE IT — WHICH RETRACTS MY OWN CAVEAT.** I
+previously labelled the default ELF `-dirty` and said the pair was "NOT yet valid for a timing A/B"
+because it was built while a peer's fp-frame work was uncommitted. That caveat is now withdrawn on
+evidence: `crates/fp-frame/src/lib.rs` has mtime 17:41:33, `crates/fp-bench/src/main.rs` 17:47:47,
+the binary 17:48:53 — newer than every source; the peer's commit `71971cda2` landed at 17:47:22
+WITHOUT rewriting the working file; and the tree is clean against HEAD with
+`git diff fc793a3b7..HEAD -- crates benches` empty. So the bytes I compiled are the bytes at HEAD.
+A re-build confirmed it by refusing to do anything.
+
+⚠️ **AND THAT NO-OP IS THE TRAP, NOT THE PROOF.** The rebuild printed `Finished in 0.13s`, which is
+the exact shape that has previously handed me a peer's stale binary. **`Finished` proved nothing;
+the sha did** — the product is byte-identical to the earlier ELF (`038855bf697c`), and only the
+mtime ordering above makes that identity legitimate rather than stale. I checked the sha before
+believing the word.
+
+**THE EVIDENCE, IN ORDER OF HOW MUCH THE HOST CAN CORRUPT IT.**
+
+  1. **Static, uncorruptible** (prior entry): the kernel's packed FP arithmetic goes from 4 ops all
+     `%xmm` 128-bit to 10 ops all `%ymm` 256-bit, with `vfmadd` at zero in both because `+fma` was
+     deliberately not enabled, so the arms stay bit-identical in arithmetic form.
+  2. **Counted, load-immune** (this entry): 2.595x fewer instructions retired.
+  3. **Timed, and CONTAMINATED — reported, not claimed:** an interleaved ABAB run measured 2.202x
+     at dim=100, 2.173x at dim=316, 1.604x at dim=1000. **These are NOT the number.** Load went
+     14.73 -> 37.31 DURING the run and CPU MHz fell 3965.4 -> 3041.1; the same SSE2 lane that read
+     162.69us in a quiet window read 336.70us here. Interleaving protects a ratio better than an
+     absolute, and the three sizes are internally coherent (~2x where compute-bound, tapering where
+     bandwidth-bound), which is why they are worth recording — but by the rule I set for myself
+     after retracting a bad-window figure, **a number the window disqualifies does not go in the
+     table as a result.** The instruction count is what this entry stands on.
+
+**WHAT IT MEANS FOR THE BEAD.** oxv4u asks for a TARGETED AVX2 rather than a blanket policy, and
+the prior entry established that targeted runtime dispatch is unreachable here — `forbid(unsafe_code)`
+rules out `#[target_feature]` calls and the dependency ban rules out multiversioning. This entry
+supplies the other half: **the blanket flag is worth arguing about, because it removes ~61% of the
+kernel's instructions.** That is a large, real effect on the term 03fp5 measured to be 84-95% of
+the 10k `df.dot` call. The question is now a build-policy decision with a number attached, not an
+open engineering search.
+
+**WHAT I HAVE NOT DONE.** No vs-pandas row. Whether a 2.6x instruction reduction on the kernel
+closes the 0.53x whole-call gap at 10k is unmeasured, and the honest test is the balanced-square
+harness against the incumbent with the AVX2 ELF, in a window that stays quiet for its duration.
+Disk also fell 193G -> 147G (93% used) during this turn, which is worth watching before anyone
+schedules more builds.
