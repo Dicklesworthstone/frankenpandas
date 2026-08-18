@@ -35818,3 +35818,71 @@ the oracle's own pytest suite has ONE pre-existing failure
 (`test_setup_pandas_strict_legacy_allows_system_fallback`) which I confirmed against
 HEAD's unmodified `pandas_oracle.py` in a scratch copy rather than assuming it was
 unrelated to my edit.
+
+### 2026-08-17 CrimsonPine (br-frankenpandas-b8n0q, -nywa8, -09ygw) — the missing-value promotion rule is ONE rule, measured across SIX producers and NINE dtypes. These three beads are one decision, not three
+
+`b8n0q` (read_csv `Int64(1)` vs `Float64(1.0)`) has been decision-gated on "the same
+promotion rule as `nywa8` and `09ygw`, decide it once for all three". Nobody had measured
+whether it IS one rule. It is, and here it is.
+
+**Counted mechanism — live pandas 2.2.3, declared dtype × producer, recording the dtype
+after a gap is introduced:**
+
+| declared | reindex | where | shift | concat | read_csv | Series.compare |
+|---|---|---|---|---|---|---|
+| `int64` | **float64** | **float64** | **float64** | **float64** | **float64** | **float64** |
+| `float64` | float64 | float64 | float64 | float64 | float64 | float64 |
+| `bool` | **object** | **object** | **object** | **object** | **object** | **object** |
+| `object` | object | object | object | object | object | object |
+| `Int64` | Int64 | Int64 | Int64 | Int64 | Int64 | Int64 |
+| `boolean` | boolean | boolean | boolean | boolean | boolean | boolean |
+| `datetime64[ns]` | datetime64 | datetime64 | datetime64 | datetime64 | — | — |
+| `timedelta64[ns]` | timedelta64 | timedelta64 | timedelta64 | timedelta64 | — | — |
+| `category` | category | category | category | category | — | — |
+
+**Not one producer disagrees.** The rule is a pure function of the DECLARED DTYPE:
+
+> A numpy dtype that cannot represent a missing value widens to the narrowest one that
+> can — `int64` → `float64` (NaN), `bool` → `object`. Every dtype with a native missing
+> sentinel is exempt: the nullable extensions (`Int64`, `boolean`), the temporal types
+> (NaT), and `category`.
+
+So `b8n0q`, `nywa8` (81 fixtures) and `09ygw` are **one decision**. Deciding it per-bead
+would be deciding the same thing three times, with three chances to decide it
+differently.
+
+**AND THE DECISION IS NOT "FIX A BUG" — IT IS A PARITY CHOICE, because the forcing
+function does not apply to us.** pandas promotes because a numpy `int64` array
+physically cannot hold NaN. Every FrankenPandas `Column` carries a validity mask, so an
+`Int64` column with a missing slot is representable exactly. FrankenPandas keeping
+`Int64` is arguably the better behaviour and is certainly the more information-preserving
+one; matching pandas here means deliberately discarding type information to copy a
+limitation. That is a legitimate choice for a parity-targeted library — it is simply not
+a bug fix, and the ledger should not record it as one.
+
+⚠ **MY FIRST read_csv PROBE WAS WRONG AND I ALMOST BANKED IT.** Feeding
+`"a\n1\n\n3\n"` returned `int64`, which would have made `read_csv` the one producer that
+disagrees and wrecked the whole table. Cause: `skip_blank_lines=True` is pandas' default,
+so the blank line was DROPPED and there was never a gap to promote. The fix is a
+multi-column fixture where the row is non-empty and only the field is
+(`"a,b\n1,x\n,y\n3,z\n"`), which gives `float64` like every other producer. **A probe
+that produces a plausible number is not thereby a correct probe** — the tell was that one
+cell contradicted a rule the other five producers agreed on, and the right response to a
+single outlier is to distrust the instrument before the finding.
+
+**A/A null control (same invocation):** not applicable — this entry reports dtypes from
+live-pandas probes, not timings. No ratio is claimed and nothing was certified.
+
+```
+LOADAVG   12.92 / 15.41 / 22.53 ;  CPU IDLE 90.25%, iowait 0.01%, by mpstat
+DISK      /data at 59G under the standing build hold; no cargo was invoked this turn
+```
+
+**WHAT THIS UNBLOCKS AND WHAT IT DOES NOT.** It removes the excuse that the rule is
+unknown: any of the three beads can now be decided on one line of policy. It does NOT
+decide which way — that is the corpus owner's call, and the two options are (1) adopt
+pandas' promotion everywhere for parity, which costs type information and moves 81
+`nywa8` fixtures plus `b8n0q` and `09ygw`, or (2) keep FrankenPandas' nullable-native
+behaviour and record all three as documented, intentional divergences with a DISC entry
+each. What must NOT happen is a third thing: patching one producer to match while the
+other two keep the opposite behaviour, which is where per-bead decisions lead.
