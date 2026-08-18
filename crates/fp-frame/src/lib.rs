@@ -156958,6 +156958,60 @@ mod tests {
         );
     }
 
+    /// `.dt.time` drops the offset for EVERY spelling — the census `test_dt_time` lacks.
+    ///
+    /// br-frankenpandas-t2n6i. The suffix-cleaning chain stripped only '+' and 'Z',
+    /// so a NEGATIVE offset or a lowercase 'z' stayed glued to the time, `parse_time`
+    /// failed, and the element came back Null — a MISSING value where pandas has a
+    /// time. `test_dt_time` above carries only naive and fractional inputs, so no
+    /// existing assertion could see it.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18). `.dt.time` returns the
+    /// WALL CLOCK and never a suffix, whatever the zone:
+    /// ```text
+    ///   '2024-01-15 10:30:00'         -> '10:30:00'
+    ///   '2024-01-15 10:30:00+05:30'   -> '10:30:00'
+    ///   '2024-01-15 10:30:00-05:00'   -> '10:30:00'
+    ///   '2024-01-15T10:30:00Z'        -> '10:30:00'
+    ///   '2024-01-15T10:30:00z'        -> '10:30:00'
+    ///   '2024-01-15 10:30:00.500000'  -> '10:30:00.500000'
+    /// ```
+    /// ⚠️ CONTRAST `.dt.timetz`, which KEEPS the offset ('10:30:00+05:30') and renders
+    /// a parsed 'Z' as '+00:00'. The two accessors clean the suffix differently on
+    /// purpose; a shared helper would have to get both wrong or both right.
+    ///
+    /// Each case is its own single-element series: `.dt` takes pandas' one-format
+    /// lock, so mixing spellings in one column NaTs everything after the first.
+    #[test]
+    fn dt_time_drops_every_offset_spelling_t2n6i() {
+        let one = |value: &str| {
+            Series::from_values(
+                "ts",
+                vec![0_i64.into()],
+                vec![Scalar::Utf8(value.to_string())],
+            )
+            .unwrap()
+            .dt()
+            .time()
+            .unwrap()
+            .column()
+            .values()[0]
+                .clone()
+        };
+        assert_eq!(one("2024-01-15 10:30:00"), Scalar::Utf8("10:30:00".into()));
+        assert_eq!(one("2024-01-15 10:30:00+05:30"), Scalar::Utf8("10:30:00".into()));
+        // ⚠️ the row the old chain turned into Null: '-' was never stripped
+        assert_eq!(one("2024-01-15 10:30:00-05:00"), Scalar::Utf8("10:30:00".into()));
+        assert_eq!(one("2024-01-15T10:30:00Z"), Scalar::Utf8("10:30:00".into()));
+        // ⚠️ and lowercase 'z', likewise Null before
+        assert_eq!(one("2024-01-15T10:30:00z"), Scalar::Utf8("10:30:00".into()));
+        // a nonzero fraction survives; this is the one case the old test did cover
+        assert_eq!(
+            one("2024-01-15 10:30:00.500000"),
+            Scalar::Utf8("10:30:00.500000".into())
+        );
+    }
+
     #[test]
     fn test_dt_time() {
         // CORRECTED (br-frankenpandas-hzayc): three different shapes in one
