@@ -892,6 +892,26 @@ pub enum FixtureOperation {
     )]
     SeriesDtTotalSeconds,
     #[serde(
+        rename = "series_dt_days",
+        alias = "series_dt_days_default"
+    )]
+    SeriesDtDays,
+    #[serde(
+        rename = "series_dt_seconds",
+        alias = "series_dt_seconds_default"
+    )]
+    SeriesDtSeconds,
+    #[serde(
+        rename = "series_dt_microseconds",
+        alias = "series_dt_microseconds_default"
+    )]
+    SeriesDtMicroseconds,
+    #[serde(
+        rename = "series_dt_nanoseconds",
+        alias = "series_dt_nanoseconds_default"
+    )]
+    SeriesDtNanoseconds,
+    #[serde(
         rename = "series_dt_to_timestamp",
         alias = "series_dt_to_timestamp_default"
     )]
@@ -1500,6 +1520,10 @@ impl FixtureOperation {
             Self::SeriesDtMonthName => "series_dt_month_name",
             Self::SeriesDtDayName => "series_dt_day_name",
             Self::SeriesDtTotalSeconds => "series_dt_total_seconds",
+            Self::SeriesDtDays => "series_dt_days",
+            Self::SeriesDtSeconds => "series_dt_seconds",
+            Self::SeriesDtMicroseconds => "series_dt_microseconds",
+            Self::SeriesDtNanoseconds => "series_dt_nanoseconds",
             Self::SeriesDtToTimestamp => "series_dt_to_timestamp",
             Self::SeriesDtToPydatetime => "series_dt_to_pydatetime",
             Self::DataFrameLoc => "dataframe_loc",
@@ -2863,6 +2887,10 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDtMonthName
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
+        | FixtureOperation::SeriesDtDays
+        | FixtureOperation::SeriesDtSeconds
+        | FixtureOperation::SeriesDtMicroseconds
+        | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
         | FixtureOperation::SeriesDtToPydatetime
         | FixtureOperation::SeriesIsNa
@@ -11508,6 +11536,10 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesDtMonthName
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
+        | FixtureOperation::SeriesDtDays
+        | FixtureOperation::SeriesDtSeconds
+        | FixtureOperation::SeriesDtMicroseconds
+        | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
         | FixtureOperation::SeriesDtToPydatetime => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -13177,6 +13209,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtMonthName
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
+        | FixtureOperation::SeriesDtDays
+        | FixtureOperation::SeriesDtSeconds
+        | FixtureOperation::SeriesDtMicroseconds
+        | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
         | FixtureOperation::SeriesDtToPydatetime
         | FixtureOperation::SeriesAtTime
@@ -13905,6 +13941,10 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtMonthName
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
+        | FixtureOperation::SeriesDtDays
+        | FixtureOperation::SeriesDtSeconds
+        | FixtureOperation::SeriesDtMicroseconds
+        | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
         | FixtureOperation::SeriesDtToPydatetime
         | FixtureOperation::SeriesAtTime
@@ -17425,6 +17465,18 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesDtDayName => series.dt().day_name().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtTotalSeconds => {
             series.dt().total_seconds().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtDays => {
+            series.dt().days().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtSeconds => {
+            series.dt().seconds().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtMicroseconds => {
+            series.dt().microseconds().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtNanoseconds => {
+            series.dt().nanoseconds().map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtToTimestamp => {
             let how = fixture.dt_how.as_deref().unwrap_or("start");
@@ -21220,6 +21272,10 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesDtMonthName
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
+        | FixtureOperation::SeriesDtDays
+        | FixtureOperation::SeriesDtSeconds
+        | FixtureOperation::SeriesDtMicroseconds
+        | FixtureOperation::SeriesDtNanoseconds
         | FixtureOperation::SeriesDtToTimestamp
         | FixtureOperation::SeriesDtToPydatetime => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
