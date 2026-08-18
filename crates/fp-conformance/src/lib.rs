@@ -867,6 +867,12 @@ pub enum FixtureOperation {
     SeriesDtIsQuarterEnd,
     #[serde(rename = "series_dt_strftime", alias = "series_dt_strftime_default")]
     SeriesDtStrftime,
+    #[serde(rename = "series_dt_tz_convert")]
+    SeriesDtTzConvert,
+    #[serde(rename = "series_dt_tz_localize")]
+    SeriesDtTzLocalize,
+    #[serde(rename = "series_dt_timetz")]
+    SeriesDtTimetz,
     #[serde(rename = "series_dt_floor", alias = "series_dt_floor_default")]
     SeriesDtFloor,
     #[serde(rename = "series_dt_ceil", alias = "series_dt_ceil_default")]
@@ -1485,6 +1491,9 @@ impl FixtureOperation {
             Self::SeriesDtIsQuarterStart => "series_dt_is_quarter_start",
             Self::SeriesDtIsQuarterEnd => "series_dt_is_quarter_end",
             Self::SeriesDtStrftime => "series_dt_strftime",
+            Self::SeriesDtTzConvert => "series_dt_tz_convert",
+            Self::SeriesDtTzLocalize => "series_dt_tz_localize",
+            Self::SeriesDtTimetz => "series_dt_timetz",
             Self::SeriesDtFloor => "series_dt_floor",
             Self::SeriesDtCeil => "series_dt_ceil",
             Self::SeriesDtRound => "series_dt_round",
@@ -2398,6 +2407,12 @@ pub struct PacketFixture {
     pub quantile_value: Option<f64>,
     #[serde(default)]
     pub dt_freq: Option<String>,
+    /// `tz` for `series_dt_tz_convert` / `series_dt_tz_localize`. ABSENT means
+    /// None, which pandas gives a real meaning in both calls, so this is not a
+    /// "required but missing" field. Spelled identically in the oracle
+    /// (br-frankenpandas-t2n6i).
+    #[serde(default)]
+    pub dt_tz: Option<String>,
     #[serde(default)]
     pub dt_strftime_format: Option<String>,
     #[serde(default)]
@@ -2822,6 +2837,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDtIsQuarterStart
         | FixtureOperation::SeriesDtIsQuarterEnd
         | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtTzConvert
+        | FixtureOperation::SeriesDtTzLocalize
+        | FixtureOperation::SeriesDtTimetz
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
@@ -3927,6 +3945,8 @@ struct OracleRequest {
     quantile_value: Option<f64>,
     #[serde(default)]
     dt_freq: Option<String>,
+    #[serde(default)]
+    dt_tz: Option<String>,
     #[serde(default)]
     dt_strftime_format: Option<String>,
     #[serde(default)]
@@ -11462,6 +11482,9 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesDtIsQuarterStart
         | FixtureOperation::SeriesDtIsQuarterEnd
         | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtTzConvert
+        | FixtureOperation::SeriesDtTzLocalize
+        | FixtureOperation::SeriesDtTimetz
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
@@ -13128,6 +13151,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtIsQuarterStart
         | FixtureOperation::SeriesDtIsQuarterEnd
         | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtTzConvert
+        | FixtureOperation::SeriesDtTzLocalize
+        | FixtureOperation::SeriesDtTimetz
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
@@ -13597,6 +13623,7 @@ fn capture_live_oracle_expected(
         resample_freq: fixture.resample_freq.clone(),
         quantile_value: fixture.quantile_value,
         dt_freq: fixture.dt_freq.clone(),
+        dt_tz: fixture.dt_tz.clone(),
         dt_strftime_format: fixture.dt_strftime_format.clone(),
         dt_how: fixture.dt_how.clone(),
         dt_warn: fixture.dt_warn,
@@ -13852,6 +13879,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtIsQuarterStart
         | FixtureOperation::SeriesDtIsQuarterEnd
         | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtTzConvert
+        | FixtureOperation::SeriesDtTzLocalize
+        | FixtureOperation::SeriesDtTimetz
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
@@ -17336,6 +17366,21 @@ fn execute_series_module_utility_fixture_operation(
                 .unwrap_or("%Y-%m-%d %H:%M:%S");
             series.dt().strftime(format).map_err(|err| err.to_string())
         }
+        // `dt_tz` ABSENT means None, which is meaningful rather than missing:
+        // tz_convert(None) converts to UTC and drops the zone, tz_localize(None)
+        // keeps wall-clock and drops it. So these use as_deref() with no
+        // ok_or_else — unlike dt_freq, where absence really is an error.
+        // The key is spelled EXACTLY as the oracle spells it; a key only one arm
+        // understands is the hazard 4645db2b8 guards against.
+        FixtureOperation::SeriesDtTzConvert => series
+            .dt()
+            .tz_convert(fixture.dt_tz.as_deref())
+            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesDtTzLocalize => series
+            .dt()
+            .tz_localize(fixture.dt_tz.as_deref())
+            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesDtTimetz => series.dt().timetz().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtFloor => {
             let freq = fixture
                 .dt_freq
@@ -21132,6 +21177,9 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesDtIsQuarterStart
         | FixtureOperation::SeriesDtIsQuarterEnd
         | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtTzConvert
+        | FixtureOperation::SeriesDtTzLocalize
+        | FixtureOperation::SeriesDtTimetz
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
