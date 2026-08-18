@@ -39390,3 +39390,82 @@ a hunt.
 candidates by guessing where FP would be weak (object strings, string keys, IO parsing) — a
 selection that FAILED to find weakness, which is informative but not coverage. The remaining 111 are
 unmeasured, not known-good.
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-uza04, br-frankenpandas-g0apw) — WIN `cumsum @1k` 3.206x, and a STRUCTURAL finding that matters more: arms under 100us fail their own A/A null ~60% of the time, so the gate is BLINDEST exactly where fixed-cost losses would live
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=7414864069469f80471fa2afc5eb4addc76889f176932049c54b7ca79f7c7b80 (83278512 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-BEFORE-exppar`
+— pinned artifact matching HEAD, reused rather than rebuilt. Harness `50d3c3ffad4d`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f (2922 files), run
+in the SAME process as the subject under
+invocation_id=vs-pandas-20260818T123546.536204Z-pid279756 , giving measured_ratio=3.206x for this row.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 1.01721 and pandas null
+median ratio 1.00134, both inside the 0.02 maximum absolute deviation.
+
+**Median-CI decision:** effect median 3.2060x, CI [2.8135238, 3.41248179], claimed log effect
+1.16499959 against a required threshold of 0.6254228 at margin multiplier 2.0 . Best-vs-best 3.163x
+agrees.
+
+**CV role:** provenance-only, no vote. FP p50 19.7us cv 24.9% against pandas 63.1us cv 9.9%.
+Arms clock-matched at 4292.2 MHz on both (ratio 1.0).
+
+**WHY I PROBED SMALL SIZES — A SAMPLING CHANGE AFTER MY OWN METHOD FAILED TWICE.** Rounds 1 and 2
+chose candidates by guessing which OPERATIONS would be weak (object strings, string keys, IO
+parsing). Six probes, zero gaps. Guessing by operation was not working, so I switched axis using the
+corpus's own coverage: **below 10k there are 30 rows out of ~1100** (12 at 1k, 18 at 100) against
+428 at 1M. That is where fixed costs dominate — the documented 66.5us cgroup-walk constant, per-call
+setup, allocation — and where a 12x win at 1M can invert. `kko5z` added sub-10k lanes for exactly
+this reason.
+
+**NO LOSS WAS FOUND. WHAT WAS FOUND IS WHY THE CORPUS CANNOT SEE DOWN THERE.**
+
+`cumsum` on one ladder, same workload, same binary, same session:
+
+| size | FP arm | FP null deviation | verdict |
+|---|---|---|---|
+| 100 | **3.3us** | **11.0%** | NULL_UNDECIDABLE (direction 9.519x, bvb 9.382x) |
+| 1k | 19.7us | 1.7% | **FASTER 3.206x, certified** |
+| 1M | 6950us | 0.3% | FASTER 12.229x, certified |
+
+As the arm shortens its own A/A control degrades monotonically. At 3.3us the null sits 11% off
+unity — more than five times the gate's limit — while the effect it is refusing to certify is 9.5x
+and not remotely in doubt.
+
+**AND IT IS NOT ONE WORKLOAD. Corpus-wide, 463 rows carrying both an FP p50 and an FP null:**
+
+| FP arm length | n | median null deviation | over the 2% limit |
+|---|---|---|---|
+| 0-10 us | 32 | 2.72% | **62%** |
+| 10-100 us | 19 | 3.19% | **58%** |
+| 100-1000 us | 152 | 1.08% | 27% |
+| 1000-10000 us | 147 | 1.20% | 39% |
+| over 10000 us | 113 | 1.08% | 25% |
+
+**Arms under 100us fail their own null roughly 60% of the time, against 25-39% for longer arms.**
+
+⚠️ **THE CONSEQUENCE FOR uza04, AND IT IS UNCOMFORTABLE.** The mandate is to close ALL vs-upstream
+perf gaps. Fixed-cost losses — the kind a 66.5us constant produces — live at small n by
+construction. **That is precisely the regime where the gate refuses ~60% of rows.** So if such a gap
+exists, the instrument is more likely than not to decline the row that would reveal it, and the
+corpus's 30-rows-below-10k is plausibly a CONSEQUENCE of the gate rather than an oversight nobody
+got round to.
+
+**WHAT THIS DOES NOT SAY.** It does not say the gate is wrong: a control that cannot hold unity is
+correctly refused, and certifying on a noisy null is how false wins are banked. It says the gate has
+a KNOWN BLIND REGIME, that the blind regime coincides with where a whole class of defect lives, and
+that "no losses found at small n" currently means "no losses CERTIFIABLE at small n" — a much weaker
+statement that nobody should read as coverage.
+
+⚠️ **ONE NON-MONOTONICITY I AM NOT EXPLAINING AWAY:** the 1000-10000us bucket fails at 39%, above the
+100-1000us bucket's 27%. Arm length is clearly not the only variable — dispersion, thread count and
+allocator behaviour all matter (see `g0apw`'s three mechanisms). The 0-100us signal is strong enough
+to act on; the middle of the range is not a clean gradient and I am not going to pretend it is.
+
+**RUNNING TALLY, so "no gaps" cannot be selective reporting: nine probes, six categories, three
+sizes, ZERO gaps found.** Two of the nine were refused by the gate rather than answered.
