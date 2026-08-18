@@ -4744,8 +4744,14 @@ pub fn nanskew(values: &[Scalar]) -> Scalar {
     let (mut m2, mut m3) = (0.0_f64, 0.0_f64);
     for x in nums {
         let delta = x - mean;
-        m2 += delta.powi(2);
-        m3 += delta.powi(3);
+        // d2 reuse: 2 multiplies per element instead of 3. powi(3) lowers to two
+        // multiplies of {delta, delta*delta}, and float MULTIPLY is commutative
+        // bit-for-bit, so both sums observe the identical terms — the comment above
+        // about preserving results bit-for-bit still holds. No ADDITION order changed.
+        // (br-frankenpandas-8s4mb)
+        let d2 = delta * delta;
+        m2 += d2;
+        m3 += d2 * delta;
     }
     let s2 = m2 / (n - 1.0);
     if s2 == 0.0 {
@@ -4774,8 +4780,11 @@ pub fn nankurt(values: &[Scalar]) -> Scalar {
     let (mut m2, mut m4) = (0.0_f64, 0.0_f64);
     for x in nums {
         let delta = x - mean;
-        m2 += delta.powi(2);
-        m4 += delta.powi(4);
+        // d2 reuse; see `nanskew`. powi(4) lowers to (d*d)*(d*d), which is exactly
+        // d2 * d2, so this is bit-identical.
+        let d2 = delta * delta;
+        m2 += d2;
+        m4 += d2 * d2;
     }
     let s2 = m2 / (n - 1.0);
     if s2 == 0.0 {
