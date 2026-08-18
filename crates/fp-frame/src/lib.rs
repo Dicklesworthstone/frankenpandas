@@ -14232,6 +14232,95 @@ impl Series {
         total
     }
 
+    /// Blocked (8-lane) central moments off a contiguous f64 slice: returns
+    /// `(Σ(v-mean)², Σ(v-mean)^K)` with `K = 4` when `FOURTH`, else `K = 3`.
+    /// The moment analogue of [`Self::blocked_sum_f64`], and admissible for the
+    /// same reason (br-frankenpandas-8s4mb).
+    ///
+    /// `skew`/`kurtosis` accumulated both moments in ONE ordered scalar loop, so
+    /// every `m2 +=` depended on the previous one — a sequential dependency chain
+    /// LLVM cannot break, because f64 add is non-associative. Eight independent
+    /// lanes break it; the `d * d` / `d2 * d` / `d2 * d2` products are the same
+    /// expansions `powi(2)`/`powi(3)`/`powi(4)` lower to, so only the ADDITION
+    /// order changes.
+    ///
+    /// BIT-IDENTITY, stated precisely because this is a numerics change and
+    /// `br-frankenpandas-jawxr` rejected FMA for changing bits: `as_chunks::<8>()`
+    /// is EMPTY below 8 elements, so a short slice flows entirely through the
+    /// remainder loop — which deliberately calls `.powi()` rather than the
+    /// unrolled products, making it bit-identical to the loop it replaces. Every
+    /// conformance fixture for these ops has 2 to 6 elements, so the pinned
+    /// surface is untouched by construction. Above 8 it diverges in the last few
+    /// ULP, and (like `blocked_sum_f64` before it) toward numpy, which sums
+    /// pairwise rather than as a left-fold.
+    fn blocked_central_moments_f64<const FOURTH: bool>(data: &[f64], mean: f64) -> (f64, f64) {
+        let mut a2 = [0.0_f64; 8];
+        let mut ak = [0.0_f64; 8];
+        let (chunks, remainder) = data.as_chunks::<8>();
+        for c in chunks {
+            for l in 0..8 {
+                let d = c[l] - mean;
+                let d2 = d * d;
+                a2[l] += d2;
+                ak[l] += if FOURTH { d2 * d2 } else { d2 * d };
+            }
+        }
+        let mut m2 = ((a2[0] + a2[1]) + (a2[2] + a2[3])) + ((a2[4] + a2[5]) + (a2[6] + a2[7]));
+        let mut mk = ((ak[0] + ak[1]) + (ak[2] + ak[3])) + ((ak[4] + ak[5]) + (ak[6] + ak[7]));
+        for &v in remainder {
+            let d = v - mean;
+            m2 += d.powi(2);
+            mk += if FOURTH { d.powi(4) } else { d.powi(3) };
+        }
+        (m2, mk)
+    }
+
+    /// Int64 sibling of [`Self::blocked_central_moments_f64`], widening each
+    /// element with `as f64` exactly where the scalar loop did. Kept separate
+    /// rather than made generic so the lane bodies stay concrete slices and the
+    /// widening stays inside the vectorizable chunk loop.
+    fn blocked_central_moments_i64<const FOURTH: bool>(data: &[i64], mean: f64) -> (f64, f64) {
+        let mut a2 = [0.0_f64; 8];
+        let mut ak = [0.0_f64; 8];
+        let (chunks, remainder) = data.as_chunks::<8>();
+        for c in chunks {
+            for l in 0..8 {
+                let d = c[l] as f64 - mean;
+                let d2 = d * d;
+                a2[l] += d2;
+                ak[l] += if FOURTH { d2 * d2 } else { d2 * d };
+            }
+        }
+        let mut m2 = ((a2[0] + a2[1]) + (a2[2] + a2[3])) + ((a2[4] + a2[5]) + (a2[6] + a2[7]));
+        let mut mk = ((ak[0] + ak[1]) + (ak[2] + ak[3])) + ((ak[4] + ak[5]) + (ak[6] + ak[7]));
+        for &iv in remainder {
+            let d = iv as f64 - mean;
+            m2 += d.powi(2);
+            mk += if FOURTH { d.powi(4) } else { d.powi(3) };
+        }
+        (m2, mk)
+    }
+
+    /// Blocked widening sum of an `&[i64]` as f64 — the `as f64` sibling of
+    /// [`Self::blocked_sum_f64`], for the Int64 arms of `skew`/`kurtosis` whose
+    /// mean was `data.iter().map(|&v| v as f64).sum::<f64>()`. Same 8-lane
+    /// structure, same empty-below-8 degeneration to the left-fold.
+    fn blocked_sum_i64_as_f64(data: &[i64]) -> f64 {
+        let mut acc = [0.0_f64; 8];
+        let (chunks, remainder) = data.as_chunks::<8>();
+        for c in chunks {
+            for l in 0..8 {
+                acc[l] += c[l] as f64;
+            }
+        }
+        let mut total =
+            ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+        for &x in remainder {
+            total += x as f64;
+        }
+        total
+    }
+
     fn f64_valid_sum_count(data: &[f64], validity: &ValidityMask) -> (f64, usize) {
         // All-valid fast path: no missing slots, so the sum is over the whole
         // contiguous slice — use the vectorizable blocked sum instead of the
@@ -19944,14 +20033,13 @@ impl Series {
                 return Ok(f64::NAN);
             }
             let n = count as f64;
-            let mean = data.iter().sum::<f64>() / n;
-            let mut m2 = 0.0_f64;
-            let mut m3 = 0.0_f64;
-            for &v in data {
-                let d = v - mean;
-                m2 += d.powi(2);
-                m3 += d.powi(3);
-            }
+            // perf (br-frankenpandas-8s4mb): the mean was `iter().sum()` — the same
+            // 0.0-seeded left-fold `blocked_sum_f64` was written to replace — and the
+            // moments were an ordered scalar loop. Both are now 8-lane blocked. Below
+            // 8 elements both degenerate to the original fold, so every conformance
+            // fixture (all 2-6 elements) keeps its exact bits.
+            let mean = Self::blocked_sum_f64(data) / n;
+            let (m2, m3) = Self::blocked_central_moments_f64::<false>(data, mean);
             let s2 = m2 / (n - 1.0);
             if s2 == 0.0 {
                 return Ok(0.0);
@@ -19973,14 +20061,10 @@ impl Series {
                 return Ok(f64::NAN);
             }
             let n = count as f64;
-            let mean = data.iter().map(|&v| v as f64).sum::<f64>() / n;
-            let mut m2 = 0.0_f64;
-            let mut m3 = 0.0_f64;
-            for &iv in data {
-                let d = iv as f64 - mean;
-                m2 += d.powi(2);
-                m3 += d.powi(3);
-            }
+            // perf (br-frankenpandas-8s4mb): blocked mean + blocked moments, as in
+            // the Float64 arm above; identical below 8 elements.
+            let mean = Self::blocked_sum_i64_as_f64(data) / n;
+            let (m2, m3) = Self::blocked_central_moments_i64::<false>(data, mean);
             let s2 = m2 / (n - 1.0);
             if s2 == 0.0 {
                 return Ok(0.0);
@@ -20021,14 +20105,10 @@ impl Series {
                 return Ok(f64::NAN);
             }
             let n = count as f64;
-            let mean = data.iter().sum::<f64>() / n;
-            let mut m2 = 0.0_f64;
-            let mut m4 = 0.0_f64;
-            for &v in data {
-                let d = v - mean;
-                m2 += d.powi(2);
-                m4 += d.powi(4);
-            }
+            // perf (br-frankenpandas-8s4mb): blocked mean + blocked moments (fourth
+            // power); identical below 8 elements, where `as_chunks::<8>()` is empty.
+            let mean = Self::blocked_sum_f64(data) / n;
+            let (m2, m4) = Self::blocked_central_moments_f64::<true>(data, mean);
             let s2 = m2 / (n - 1.0);
             if s2 == 0.0 {
                 return Ok(0.0);
@@ -20047,14 +20127,10 @@ impl Series {
                 return Ok(f64::NAN);
             }
             let n = count as f64;
-            let mean = data.iter().map(|&v| v as f64).sum::<f64>() / n;
-            let mut m2 = 0.0_f64;
-            let mut m4 = 0.0_f64;
-            for &iv in data {
-                let d = iv as f64 - mean;
-                m2 += d.powi(2);
-                m4 += d.powi(4);
-            }
+            // perf (br-frankenpandas-8s4mb): blocked mean + blocked moments, mirroring
+            // the Float64 arm; identical below 8 elements.
+            let mean = Self::blocked_sum_i64_as_f64(data) / n;
+            let (m2, m4) = Self::blocked_central_moments_i64::<true>(data, mean);
             let s2 = m2 / (n - 1.0);
             if s2 == 0.0 {
                 return Ok(0.0);
@@ -195606,6 +195682,213 @@ mod dot_small_shape_phase_split_03fp5 {
              PER-OUTPUT-COLUMN fixed={:.4}us (x100 = {:.4}ms of the dim=100 call)",
             per_col_fixed * 1000.0,
             per_col_fixed * 100.0
+        );
+    }
+}
+
+/// Locks for the blocked moment accumulation in `Series::skew` / `Series::kurtosis`
+/// (br-frankenpandas-8s4mb).
+///
+/// The whole change is admissible only because it is bit-identical below 8
+/// elements — `br-frankenpandas-jawxr` rejected FMA for changing pinned bits, and
+/// every conformance fixture for these ops has 2 to 6 elements. These tests assert
+/// that property directly rather than trusting the `as_chunks::<8>()` argument, and
+/// then assert the lane path is genuinely exercised above 8 so the first assertion
+/// is not passing vacuously.
+#[cfg(test)]
+mod blocked_moments_8s4mb {
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::Series;
+
+    fn f64_series(values: Vec<f64>) -> Series {
+        let n = values.len() as i64;
+        Series::new(
+            "v",
+            Index::from_range(0, n, 1),
+            Column::from_f64_values(values),
+        )
+        .unwrap()
+    }
+
+    fn i64_series(values: Vec<i64>) -> Series {
+        let n = values.len() as i64;
+        Series::new(
+            "v",
+            Index::from_range(0, n, 1),
+            Column::from_i64_values(values),
+        )
+        .unwrap()
+    }
+
+    /// The EXACT algorithm the blocked version replaced, kept here as the oracle:
+    /// a 0.0-seeded left-fold mean and an ordered `powi` moment loop.
+    fn left_fold_skew(data: &[f64]) -> f64 {
+        let n = data.len() as f64;
+        let mean = data.iter().sum::<f64>() / n;
+        let (mut m2, mut m3) = (0.0_f64, 0.0_f64);
+        for &v in data {
+            let d = v - mean;
+            m2 += d.powi(2);
+            m3 += d.powi(3);
+        }
+        let s2 = m2 / (n - 1.0);
+        if s2 == 0.0 {
+            return 0.0;
+        }
+        (n / ((n - 1.0) * (n - 2.0))) * (m3 / s2.powf(1.5))
+    }
+
+    fn left_fold_kurtosis(data: &[f64]) -> f64 {
+        let n = data.len() as f64;
+        let mean = data.iter().sum::<f64>() / n;
+        let (mut m2, mut m4) = (0.0_f64, 0.0_f64);
+        for &v in data {
+            let d = v - mean;
+            m2 += d.powi(2);
+            m4 += d.powi(4);
+        }
+        let s2 = m2 / (n - 1.0);
+        if s2 == 0.0 {
+            return 0.0;
+        }
+        let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+        let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+        adj * (m4 / (s2 * s2)) - sub
+    }
+
+    /// Every length the conformance corpus actually pins (fixtures run 2-6
+    /// elements) plus 7, the last length before the first chunk exists.
+    #[test]
+    fn below_eight_elements_must_be_bit_identical_to_the_left_fold_8s4mb() {
+        for n in 3..8_usize {
+            let data: Vec<f64> = (0..n)
+                .map(|i| 1.0 + i as f64 * 1.5 + (i % 3) as f64)
+                .collect();
+            let got = f64_series(data.clone()).skew().unwrap();
+            assert_eq!(
+                got.to_bits(),
+                left_fold_skew(&data).to_bits(),
+                "skew n={n} must be BIT-identical, not merely close"
+            );
+            if n >= 4 {
+                let got = f64_series(data.clone()).kurtosis().unwrap();
+                assert_eq!(
+                    got.to_bits(),
+                    left_fold_kurtosis(&data).to_bits(),
+                    "kurtosis n={n} must be BIT-identical, not merely close"
+                );
+            }
+        }
+    }
+
+    /// The Int64 arms widen with `as f64` and must land on the same bits as the
+    /// Float64 arm fed the widened values — they share the pinned fixture surface.
+    #[test]
+    fn int64_arm_below_eight_must_be_bit_identical_to_the_left_fold_8s4mb() {
+        for n in 4..8_usize {
+            let ints: Vec<i64> = (0..n as i64).map(|i| i * 3 - 4).collect();
+            let widened: Vec<f64> = ints.iter().map(|&v| v as f64).collect();
+            assert_eq!(
+                i64_series(ints.clone()).skew().unwrap().to_bits(),
+                left_fold_skew(&widened).to_bits(),
+                "i64 skew n={n} must be BIT-identical"
+            );
+            assert_eq!(
+                i64_series(ints).kurtosis().unwrap().to_bits(),
+                left_fold_kurtosis(&widened).to_bits(),
+                "i64 kurtosis n={n} must be BIT-identical"
+            );
+        }
+    }
+
+    /// Neumaier-compensated `Σ(v-mean)²` — materially more accurate than either
+    /// candidate, so it can adjudicate between them. Not a candidate itself: the
+    /// compensation costs more than the blocking saves.
+    fn compensated_m2(data: &[f64], mean: f64) -> f64 {
+        let (mut sum, mut c) = (0.0_f64, 0.0_f64);
+        for &v in data {
+            let d = v - mean;
+            let term = d * d;
+            let t = sum + term;
+            if sum.abs() >= term.abs() {
+                c += (sum - t) + term;
+            } else {
+                c += (term - t) + sum;
+            }
+            sum = t;
+        }
+        sum + c
+    }
+
+    /// Two claims in one test, because the second is what keeps the first honest:
+    /// the lane path must ACTUALLY run above 8 elements (otherwise the
+    /// bit-identity test above proves nothing), and where it runs it must land
+    /// CLOSER to the compensated value — the acceptance evidence `9ab0f8cc1` used
+    /// for `blocked_sum_f64`, not merely "faster".
+    #[test]
+    fn above_eight_the_lane_path_runs_and_lands_closer_to_the_compensated_value_8s4mb() {
+        // Alternating magnitudes so summation order is decidable at all: a
+        // uniform array would let both orders agree and the test would pass
+        // while measuring nothing.
+        let data: Vec<f64> = (0..4096)
+            .map(|i| {
+                if i % 2 == 0 {
+                    1e7 + i as f64
+                } else {
+                    1e-3 * i as f64
+                }
+            })
+            .collect();
+        let mean = data.iter().sum::<f64>() / data.len() as f64;
+
+        let (blocked, _) = Series::blocked_central_moments_f64::<false>(&data, mean);
+        let mut folded = 0.0_f64;
+        for &v in &data {
+            folded += (v - mean).powi(2);
+        }
+
+        assert_ne!(
+            blocked.to_bits(),
+            folded.to_bits(),
+            "NON-VACUITY: at n=4096 the 8-lane path must produce a different sum \
+             from the left-fold, or the bit-identity test below 8 is meaningless"
+        );
+
+        let reference = compensated_m2(&data, mean);
+        let blocked_err = (blocked - reference).abs();
+        let folded_err = (folded - reference).abs();
+        assert!(
+            blocked_err <= folded_err,
+            "blocked m2 must be at least as close to the compensated value as the \
+             left-fold: blocked_err={blocked_err:e} folded_err={folded_err:e}"
+        );
+    }
+
+    /// The Int64 lane path needs its own non-vacuity witness; the Float64 test
+    /// above cannot reach it.
+    #[test]
+    fn the_int64_lane_path_must_actually_run_above_eight_8s4mb() {
+        // Magnitudes chosen so the accumulated sum LEAVES the exactly-representable
+        // integer range (2^53): my first witness used values near 1e6, whose squared
+        // deviations summed exactly in f64, so both orders agreed bitwise and the
+        // assertion below failed — correctly, because the test was measuring nothing.
+        // Squared deviations here are ~1e18 and 4096 of them total ~1e21, far past
+        // 2^53, so rounding occurs and summation order is observable.
+        let data: Vec<i64> = (0..4096)
+            .map(|i| if i % 2 == 0 { 2_000_000_000 + i } else { i })
+            .collect();
+        let mean = data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
+        let (blocked, _) = Series::blocked_central_moments_i64::<true>(&data, mean);
+        let mut folded = 0.0_f64;
+        for &v in &data {
+            folded += (v as f64 - mean).powi(2);
+        }
+        assert_ne!(
+            blocked.to_bits(),
+            folded.to_bits(),
+            "NON-VACUITY: the i64 8-lane path must differ from the i64 left-fold at n=4096"
         );
     }
 }
