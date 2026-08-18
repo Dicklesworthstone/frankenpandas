@@ -39,6 +39,20 @@ TWO SELECTION RULES, both chosen conservatively and both arguable:
      same day, no source change. Banking the capped figure would lock in a
      baseline the engine beats by 3.74x for free.
 
+A KNOWN BLIND SPOT, STATED SO NOBODY TRUSTS THIS TOOL FURTHER THAN IT DESERVES:
+this script CANNOT tell which compiler flags produced a row. Measured 2026-08-18:
+a `-C target-feature=+avx2` build and a default build recorded IDENTICAL
+`runtime_detected_isa_features` (that field is what the CPU supports, detected at
+runtime, not what the compiler targeted) and identical
+`engine_identity.frankenpandas`. The two differ only in an opaque ELF sha256. So a
+row measured from a specially-flagged binary is indistinguishable from a shipping
+row in every recorded field, and banking one would assert a defence the shipped
+binary does not provide. `perf_ratchet.comparability_identity` treats the harness
+and the host as identity but has no notion of build flags. Until fp-bench emits
+its COMPILE-TIME features (`cfg!(target_feature = ...)`) beside the runtime ones,
+the operator -- not this script -- is responsible for not pointing it at rows from
+a non-shipping build.
+
 Read-only with respect to measurements: it runs no build, starts no benchmark,
 and never edits an artifact. It only assembles what is already on disk.
 """
@@ -82,6 +96,45 @@ def is_certified(result: dict[str, Any]) -> bool:
     return bool(clauses) and all(clauses.values())
 
 
+def best_vs_best_contradicts(result: dict[str, Any]) -> bool:
+    """Does each arm's BEST sample disagree in DIRECTION with the p50 verdict?
+
+    MEASURED 2026-08-18 (br-frankenpandas-mti15): `df_dot @1M` returned verdict
+    FASTER at a p50 ratio of 1.299x with ALL THREE gate clauses true and A/A nulls
+    of 0.98592 / 0.98024 — and best-vs-best on the same run read 0.552x, a 1.8x
+    LOSS. The incumbent's samples spanned 10.88-27.70ms (2.55x within ONE arm,
+    cv 22.82%) while the subject's spanned 1.07x. Comparing the median of a tight
+    distribution against a wide one measures the WIDTH, not the engine.
+
+    The A/A nulls cannot see this: an A/A control tests an arm against ITSELF
+    across placements, never whether the two arms' distributions are comparable in
+    shape. So the gate can pass a row that is false, and this assembler would have
+    banked it — the run that found this reported 7 workloads instead of 5.
+
+    Refuses ONLY on a sign disagreement: p50 says the subject is faster while the
+    best-of-each says it is slower (or vice versa). A row where both agree is
+    banked as before, and a row missing per-sample data is NOT refused here — this
+    is a guard against a known false positive, not a new certification hurdle.
+
+    Deletion condition: delete this when the harness itself gates on distribution
+    shape, at which point the check belongs there and not in the banking tool.
+    """
+    frankenpandas = result.get("frankenpandas") or {}
+    pandas = result.get("pandas") or {}
+    fp_samples = frankenpandas.get("samples_us")
+    pd_samples = pandas.get("samples_us")
+    if not isinstance(fp_samples, list) or not isinstance(pd_samples, list):
+        return False
+    fp_best = min((v for v in fp_samples if isinstance(v, (int, float)) and v > 0), default=None)
+    pd_best = min((v for v in pd_samples if isinstance(v, (int, float)) and v > 0), default=None)
+    if fp_best is None or pd_best is None:
+        return False
+    ratio = result.get("ratio")
+    if not isinstance(ratio, (int, float)) or ratio <= 0:
+        return False
+    return (ratio > 1.0) != ((pd_best / fp_best) > 1.0)
+
+
 def is_thread_capped(result: dict[str, Any]) -> bool:
     """Did the subject see fewer logical CPUs than the host has? See rule 2."""
     provenance = result.get("thread_provenance") or {}
@@ -121,6 +174,13 @@ def collect() -> dict[str, dict[str, Any]]:
             if not isinstance(result, dict) or not is_certified(result):
                 continue
             if is_thread_capped(result):
+                continue
+            if best_vs_best_contradicts(result):
+                print(
+                    f"    !! REFUSED {result.get('workload')} @{result.get('size')}: "
+                    f"p50 says {result.get('ratio')}x but best-vs-best disagrees in "
+                    f"direction — the incumbent's spread, not the engine"
+                )
                 continue
             row_key = (result.get("workload"), result.get("size"), result.get("dtype"))
             current = bucket["best"].get(row_key)
