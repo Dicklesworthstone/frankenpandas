@@ -3206,6 +3206,24 @@ fn run(
             // Anything else and the two lanes stop being comparable, which is the
             // whole reason to mirror rather than invent one.
             //
+            // ⚠️ FP-BENCH-ONLY BY DESIGN — THERE IS NO PANDAS ARM FOR THIS LANE.
+            // `benches/vs_pandas_harness.py` has no `groupby_expanding_mean` key
+            // (its `df_groupby_expanding_mean` is a different lane), so running
+            // this through the harness yields NO incumbent and the row can never
+            // certify. That is deliberate, not half-built: adding a pandas arm
+            // means editing the harness, which changes `harness_source.sha256`
+            // and ORPHANS ALL 49 STANDING LOCKS including floordiv/mod @10M. The
+            // question this lane was built to answer — does grouped expanding run
+            // its groups in parallel? — is answered by fp-bench's own
+            // `thread_provenance` without an incumbent at all, and it answered it:
+            // ONE thread against its rolling sibling's twelve.
+            //
+            // SO WHAT THIS LANE MAY AND MAY NOT CLAIM: FP-side absolute cost,
+            // thread counts and before/after self-speedups, yes. Anything
+            // vs-pandas, no — not "unmeasured", STRUCTURALLY UNAVAILABLE until a
+            // harness batch that is already paying the orphan cost adds the arm.
+            // Whoever pays that pass should add it; it is about six lines.
+            //
             // ⚠️ EXPANDING IS NOT ROLLING WITH A BIG WINDOW. Each group's window
             // grows from 1 to the group's length, so the per-element work differs
             // from `rolling(10)` and the two lanes' ABSOLUTE times must not be

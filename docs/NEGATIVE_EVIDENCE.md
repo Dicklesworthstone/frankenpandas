@@ -39034,3 +39034,86 @@ LOADAVG   9.50 / 11.14 / 12.75, CPU idle 89.83% by my own mpstat; no cargo invok
 DISK      /data 70G — 28G above the brake, and down from 88G at the session's start. The
           direction is steady rather than noisy and is worth watching.
 ```
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-vw0uu) — REJECT: group-parallel grouped EXPANDING buys 1.432x for 12 cores and pushes its own A/A null to 2.73%, outside the gate. Implemented, measured, REVERTED
+
+**THIS IS A REJECT AND THE CHANGE IS NOT IN THE TREE.** FP-vs-FP; no incumbent arm ran — the lane
+has no pandas counterpart by design (see `692bd2ddf`). No result class is claimed because nothing is
+kept: the lever was implemented, measured, and reverted.
+
+**A/A null control (same invocation):** at 1M the serial arm's null median ratio ran 0.9901 to
+0.9995 across three repeats, and the parallel arm's null median ratio ran 0.9727 to 0.9957 — a worst
+deviation of 0.0273 from unity, outside the 0.02 maximum absolute deviation the gate allows. At 100k
+the serial null median ratio ran 0.9983 to 1.0003 against the parallel arm's 1.0089 to 1.0129.
+
+**Counted mechanism:** worker count 1 becomes 12 at 1M, recorded on the calling thread before any
+spawn.
+
+**CV role:** provenance-only, no vote — no CV figure is used in this rejection, which rests on the
+A/A deviation and the worker count.
+
+**THE LEVER.** `SeriesGroupByExpanding::apply_grouped_expanding` had no parallel arm at all — the
+bead recorded it as "typed+parallel DONE (qui93)" but only the typed half had ever been applied, and
+`groupby_expanding_mean @1M` ran on ONE thread while its rolling sibling used twelve on identical
+data. I gave it the same group-parallel arm rolling has, with rolling's thresholds unchanged rather
+than re-tuned.
+
+**COUNTED MECHANISM:** worker count 1 becomes 12 at 1M (recorded on the calling thread before any
+spawn, via a dedicated `sgb_expanding_last_worker_count` cell kept separate from rolling's so an
+expanding call cannot overwrite a value a rolling test asserts on).
+
+**THE MEASUREMENT.** BEFORE `7414864069469f80` (serial), AFTER `91bbb9288184146d` (parallel), same
+lane, alternating arms, 3 repeats, release-perf on `thinkstation1`. Verified idle 88.79%, loadavg
+9.66, checksums identical between arms at both sizes.
+
+| size | before | after | ratio | threads before/after |
+|---|---|---|---|---|
+| 100k | 2.49ms | 2.22ms | 1.121x | 1 / 10-12 |
+| 1M | 27.55ms | 19.24ms | **1.432x** | 1 / 12 |
+
+**A/A null control (same invocation), in-process, and this is what decides it:**
+
+| size | arm | max deviation from unity |
+|---|---|---|
+| 100k | serial | 0.17% |
+| 100k | parallel | 1.29% |
+| 1M | serial | 0.99% |
+| 1M | **parallel** | **2.73% — OUTSIDE the 2% limit** |
+
+**WHY IT IS REJECTED, against a threshold I wrote before building it.** My pre-registered refutation
+condition was "below 1.5x at 1M means per-group work is not the dominant term and the serial
+structure was not the reason, in which case the parallel arm should NOT be landed for its own sake."
+**Measured 1.432x — below that floor.** Twelve cores bought 43%, so the serial remainder
+(`build_groups`, the scatter, the output index) dominates; parallelising the per-group work cannot
+fix what is not per-group work.
+
+**And the A/A evidence makes it worse than merely disappointing.** I also recorded, before building,
+that parallelising might make the row HARDER TO CERTIFY because per-call `thread::scope` spawn is
+`g0apw`'s first mechanism. It did exactly that: the 1M null deviation goes 0.99% to 2.73%, crossing
+the gate's 2% limit. **So the change would trade a certifiable 27.55ms row for an UNCERTIFIABLE
+19.24ms one, while consuming twelve cores on a shared host.** That is a bad trade at any ratio, and
+it is the reason the prediction was worth writing down: I would not have looked at the nulls if I
+had not flagged the risk in advance.
+
+**PREDICTION SCORED: BADLY WRONG.** I predicted 2.5x-4x at 1M. Measured 1.432x — roughly half the
+bottom of my band. Third prediction in a row whose magnitude missed, and the direction of the miss
+keeps changing (`3ya6b` over, pre-size under, this one over), which is consistent with my estimates
+being noise rather than a correctable bias.
+
+**WHAT WAS KEPT AND WHAT WAS NOT.** REVERTED: the parallel arm, its worker-count observability, the
+`+ Sync` bound, and the bit-identity test — `git apply -R` of a saved patch rather than
+`git checkout --`, so the work is recoverable at
+`scratchpad/expanding_parallel_arm.patch` (237 lines) if anyone wants to re-try it against a
+different serial remainder. KEPT: the `groupby_expanding_mean` lane (`692bd2ddf`), which is what made
+any of this observable and which stands on its own.
+
+**CORRECTNESS OF THE REVERT:** `cargo test -p fp-frame --lib` **3336 passed, 0 failed**, 32 ignored.
+(The count differs from earlier runs because other agents commit tests into this shared working
+tree; the signal is 0 failed.)
+
+**WHAT THIS SAYS ABOUT THE REMAINING vw0uu WORK.** The serial remainder dominating at 12 workers is
+direct evidence for the CSR lever rather than against it: `build_groups` and the scatter are exactly
+the serial terms Amdahl is charging here. A future parallel arm for expanding should be attempted
+only AFTER that remainder shrinks, and re-measured with the A/A null as a first-class outcome rather
+than a footnote.
