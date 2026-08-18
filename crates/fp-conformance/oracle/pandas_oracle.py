@@ -573,12 +573,9 @@ def op_series_binary_numeric(
     else:
         raise OracleError(f"unsupported series arithmetic operation: {operation!r}")
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_add(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -749,12 +746,9 @@ def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[
     # multikey) already pin na_n, i.e. they were RIGHT and the oracle was the
     # only party disagreeing. Rendering now goes through the same
     # scalar_to_json every other aggregation uses.
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_groupby_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1181,10 +1175,34 @@ def optional_series_payload(
 
 
 def series_to_expected(series) -> dict[str, Any]:
-    return {
+    # br-frankenpandas-xi5li: `name` is emitted here rather than patched in by
+    # individual handlers. It used to be omitted entirely, and exactly ONE handler
+    # (op_series_map) added it locally with the note "emit it locally here rather
+    # than globally to avoid perturbing the ~569 fixtures that omit name".
+    #
+    # MEASURED, live pandas 2.2.3, s = Series([...], name="values"):
+    #   mode / rank / duplicated / drop_duplicates / where / mask / replace / map
+    #   ALL return a result whose .name is "values"; update is in-place and leaves
+    #   it "values" too.
+    # So the 24 fixtures that pin name="values" for those ops pin PANDAS' answer,
+    # and the oracle simply never wrote the field. That is an omission on our side,
+    # not a drift in theirs.
+    #
+    # PERTURBING NOTHING IS MEASURED, NOT ASSUMED: the fixtures that omit `name`
+    # cannot notice an added key, and compare_series_expected does not read `name`
+    # at all (it compares index, value length, and values). The corpus is 1277/1277
+    # green with this emitted. ⚠️ That the comparator ignores it is the OTHER half
+    # of xi5li and is deliberately not fixed here — turning the check on is a
+    # separate change that has to answer whether FrankenPandas propagates names,
+    # which no test currently asks.
+    expected = {
         "index": [label_to_json(v) for v in series.index.tolist()],
         "values": [scalar_to_json(v) for v in series.tolist()],
     }
+    name = getattr(series, "name", None)
+    if name is not None:
+        expected["name"] = str(name)
+    return expected
 
 
 def op_series_constructor(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2419,12 +2437,9 @@ def op_series_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except KeyError as exc:
         raise OracleError(f"series_loc label lookup failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_iloc(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2446,12 +2461,9 @@ def op_series_iloc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except IndexError as exc:
         raise OracleError(f"series_iloc position lookup failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2473,12 +2485,9 @@ def op_series_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except IndexError as exc:
         raise OracleError(f"series_take position lookup failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_repeat(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2512,12 +2521,9 @@ def op_series_repeat(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_repeat failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_at_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2610,12 +2616,9 @@ def op_series_filter(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_filter mask application failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_filter(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2666,12 +2669,9 @@ def op_series_head(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = fixture_series_from_payload(pd, left, "series_head")
     out = series.head(n)
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_tail(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2693,12 +2693,9 @@ def op_series_tail(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = fixture_series_from_payload(pd, left, "series_tail")
     out = series.tail(n)
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_isna(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2711,12 +2708,9 @@ def op_series_isna(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = pd.Series(values, index=index, name=left.get("name", "series"))
     out = series.isna()
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_notna(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2729,12 +2723,9 @@ def op_series_notna(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = pd.Series(values, index=index, name=left.get("name", "series"))
     out = series.notna()
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_isnull(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2747,12 +2738,9 @@ def op_series_isnull(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = pd.Series(values, index=index, name=left.get("name", "series"))
     out = series.isnull()
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_notnull(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2765,12 +2753,9 @@ def op_series_notnull(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = pd.Series(values, index=index, name=left.get("name", "series"))
     out = series.notnull()
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2856,13 +2841,9 @@ def op_series_map(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = series.map(parsed_map, na_action=na_action)
     except Exception as exc:
         raise OracleError(f"series_map failed: {exc}") from exc
-    expected = series_to_expected(out)
-    # series.map preserves the input name; series_map fixtures pin it (unlike
-    # most ops, whose expected_series omits name). Emit it locally here rather
-    # than globally to avoid perturbing the ~569 fixtures that omit name.
-    if getattr(out, "name", None) is not None:
-        expected["name"] = str(out.name)
-    return {"expected_series": expected}
+    # br-frankenpandas-xi5li: the local name patch that used to live here is now
+    # in series_to_expected, so every series op emits it rather than this one.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_to_timedelta(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3203,12 +3184,9 @@ def op_series_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = pd.Series(values, index=index, name=left.get("name", "series"))
     out = series.rank(method=method, ascending=ascending, na_option=na_option, pct=pct)
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_argsort(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3243,12 +3221,9 @@ def op_series_argsort(pd, payload: dict[str, Any]) -> dict[str, Any]:
         )
         out = pd.Series(sorted_positions, index=index, name=series.name)
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_any(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3301,12 +3276,9 @@ def op_series_to_numeric(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_to_numeric failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_cut(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3325,12 +3297,9 @@ def op_series_cut(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_cut failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_qcut(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3349,12 +3318,9 @@ def op_series_qcut(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_qcut failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_xs(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3379,12 +3345,9 @@ def op_series_xs(pd, payload: dict[str, Any]) -> dict[str, Any]:
             "series_xs currently requires duplicate-label selections that return a Series"
         )
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3448,12 +3411,9 @@ def op_series_sort_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = fixture_series_from_payload(pd, left, "series_sort_index")
     out = series.sort_index(ascending=bool(ascending))
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_sort_values(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3470,12 +3430,9 @@ def op_series_sort_values(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = fixture_series_from_payload(pd, left, "series_sort_values")
     out = series.sort_values(ascending=bool(ascending), na_position="last")
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_diff(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3489,12 +3446,9 @@ def op_series_diff(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = pd.Series(values, index=index, name=left.get("name", "series"))
     out = series.diff(periods=int(periods))
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_diff(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3523,12 +3477,9 @@ def op_series_shift(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = pd.Series(values, index=index, name=left.get("name", "series"))
     out = series.shift(periods=int(periods))
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_shift(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3586,12 +3537,9 @@ def op_series_pct_change(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = pd.Series(values, index=index, name=left.get("name", "series"))
     out = series.pct_change(periods=int(periods))
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_extractall(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -6656,12 +6604,9 @@ def op_dataframe_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
         payload, "count_numeric_only", "dataframe_count"
     )
     out = frame.count(axis=0, **{"numeric_only": False, **numeric_only})
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_mode(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7454,12 +7399,9 @@ def op_series_nlargest(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_nlargest failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_nsmallest(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7483,12 +7425,9 @@ def op_series_nsmallest(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_nsmallest failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_describe(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7505,12 +7444,9 @@ def op_series_describe(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_describe failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_between(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7538,12 +7474,9 @@ def op_series_between(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_between failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_duplicated(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7569,12 +7502,9 @@ def op_series_duplicated(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_duplicated failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_cumsum(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7591,12 +7521,9 @@ def op_series_cumsum(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_cumsum failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_cumprod(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7613,12 +7540,9 @@ def op_series_cumprod(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_cumprod failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_cummax(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7635,12 +7559,9 @@ def op_series_cummax(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_cummax failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_cummin(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7657,12 +7578,9 @@ def op_series_cummin(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_cummin failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_drop_duplicates(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7690,12 +7608,9 @@ def op_series_drop_duplicates(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_drop_duplicates failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_unique(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7773,12 +7688,9 @@ def op_series_astype(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_astype failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 
@@ -7794,12 +7706,9 @@ def op_series_abs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_abs failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7818,12 +7727,9 @@ def op_series_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_round failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7852,12 +7758,9 @@ def op_series_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_replace failed: {exc}") from exc
 
-    return {
-        "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
-        }
-    }
+    # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
+    # which meant it never picked up the `name` key that emitter now writes.
+    return {"expected_series": series_to_expected(out)}
 
 
 def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
