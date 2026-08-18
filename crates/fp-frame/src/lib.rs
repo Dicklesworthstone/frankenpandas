@@ -12382,6 +12382,21 @@ impl Series {
     }
 
     pub fn map(&self, mapping: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
+        // ⚠️ A CATEGORICAL COLUMN HOLDS CODES. The Int64 fast path below accepts
+        // one (its codes ARE an all-valid Int64 buffer), so an Int64-keyed
+        // mapping was resolved against code positions. MEASURED, live pandas
+        // 2.2.3, on Categorical([10, 20, 10, 30]) whose codes are [0, 1, 0, 2]:
+        //
+        //   s.map({10: 'a'}) -> ['a', nan, 'a', nan]   the VALUES
+        //   s.map({0:  'a'}) -> [nan, nan, nan, nan]   code 0 exists, value 0 does not
+        //
+        // Unguarded, FrankenPandas answered the second one as if 0 were a value.
+        // The two comments further down call this "the common categorical
+        // re-encode" — the case was known here as a PERFORMANCE shape while the
+        // correctness question went unasked. Same trap as isin (8626123fd).
+        if let Some(categorical) = self.cat() {
+            return categorical.to_values()?.map(mapping);
+        }
         // Typed all-Int64 fast path: an all-valid Int64 column with an
         // all-Int64-keyed mapping resolves over the raw `&[i64]` view with an
         // inline-key `FxHashMap<i64, &Scalar>`, skipping (a) the `.values()`
@@ -161837,6 +161852,58 @@ mod tests {
             labels.unique(),
             vec![Scalar::Utf8("y".to_owned()), Scalar::Utf8("x".to_owned())]
         );
+    }
+
+    /// `map` on a categorical resolved the mapping against CODES. From live
+    /// pandas 2.2.3 on `Categorical([10, 20, 10, 30])`, codes `[0, 1, 0, 2]`.
+    #[test]
+    fn map_on_a_categorical_resolves_values_not_codes() {
+        let numbers = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(10),
+                Scalar::Int64(30),
+            ],
+            false,
+        )
+        .unwrap();
+
+        let by_value = numbers
+            .map(&[(Scalar::Int64(10), Scalar::Utf8("a".into()))])
+            .unwrap();
+        assert_eq!(by_value.values()[0], Scalar::Utf8("a".to_owned()));
+        assert!(by_value.values()[1].is_missing());
+        assert_eq!(by_value.values()[2], Scalar::Utf8("a".to_owned()));
+        assert!(by_value.values()[3].is_missing());
+
+        // ⚠️ THE ROW THAT FAILS WITHOUT THE GUARD: keying on 0 hits code 0.
+        let by_code = numbers
+            .map(&[(Scalar::Int64(0), Scalar::Utf8("a".into()))])
+            .unwrap();
+        for value in by_code.values() {
+            assert!(
+                value.is_missing(),
+                "a CODE must not resolve as a value, got {value:?}"
+            );
+        }
+
+        let labels = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("x".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        let hits = labels
+            .map(&[(Scalar::Utf8("x".into()), Scalar::Utf8("hit".into()))])
+            .unwrap();
+        assert_eq!(hits.values()[0], Scalar::Utf8("hit".to_owned()));
+        assert!(hits.values()[1].is_missing());
     }
 
     #[test]
