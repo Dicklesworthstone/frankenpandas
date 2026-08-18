@@ -1,0 +1,74 @@
+{
+  "packet_id": "FP-P2D-466",
+  "case_id": "series_str_contains_with_unicode_strict",
+  "mode": "strict",
+  "operation": "series_str_contains",
+  "regex_pattern": "caf\u00e9",
+  "left": {
+    "name": "txt",
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
+    ],
+    "values": [
+      {
+        "kind": "utf8",
+        "value": "I love caf\u00e9"
+      },
+      {
+        "kind": "utf8",
+        "value": "no match"
+      },
+      {
+        "kind": "utf8",
+        "value": "two caf\u00e9s"
+      }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
+    ],
+    "values": [
+      {
+        "kind": "bool",
+        "value": true
+      },
+      {
+        "kind": "bool",
+        "value": false
+      },
+      {
+        "kind": "bool",
+        "value": true
+      }
+    ],
+    "name": "txt"
+  },
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
+    "generated_at": "2026-08-18T16:16:31Z"
+  }
+}

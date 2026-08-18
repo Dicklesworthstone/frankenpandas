@@ -1,0 +1,38 @@
+{
+  "packet_id": "FP-P2D-466",
+  "case_id": "series_first_valid_index_all_null_strict",
+  "mode": "strict",
+  "operation": "series_first_valid_index",
+  "left": {
+    "name": "all_null",
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "values": [
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      }
+    ]
+  },
+  "expected_scalar": {
+    "kind": "null",
+    "value": "null"
+  },
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
+    "generated_at": "2026-08-18T16:16:28Z"
+  }
+}
