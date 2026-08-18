@@ -49845,6 +49845,65 @@ impl DatetimeAccessor<'_> {
             .collect()
     }
 
+    /// Convert each datetime VALUE to its period label. Matches
+    /// `pd.Series.dt.to_period(freq)`.
+    ///
+    /// ⚠️ NOT THE SAME OPERATION AS [`Series::to_period`], which converts the
+    /// INDEX — pandas draws the same distinction (`Series.to_period` is the index
+    /// one, `Series.dt.to_period` is the values one). FrankenPandas had only the
+    /// index form, so `.dt.to_period` was absent.
+    ///
+    /// MEASURED, pandas 2.2.3, on ['2024-03-10 01:30:45', '2024-12-31 23:59:59', NaT]:
+    /// ```text
+    ///   'Y' -> 2024,    2024,       NaT
+    ///   'Q' -> 2024Q1,  2024Q4,     NaT
+    ///   'M' -> 2024-03, 2024-12,    NaT
+    ///   'D' -> 2024-03-10, 2024-12-31, NaT
+    /// ```
+    ///
+    /// IMPLEMENTED BY REUSING THE INDEX PATH rather than re-deriving the calendar
+    /// arithmetic: the values are lifted to `IndexLabel`s, run through
+    /// `period_index_from_datetime_like_index`, and read back. That inherits the
+    /// anchored-frequency handling (W-MON.., Y-JAN.., Q-anchored), the NaT
+    /// convention and the contiguous-buffer fast path already tested there, none of
+    /// which would survive a hand-rolled second implementation.
+    ///
+    /// Output is Utf8 period labels, following the convention `Series::to_period`
+    /// documents — canonical period strings until a dedicated Period value variant
+    /// lands.
+    pub fn to_period(&self, freq: &str) -> Result<Series, FrameError> {
+        let values = self.series.column().values();
+        let mut labels: Vec<IndexLabel> = Vec::with_capacity(values.len());
+        for value in values {
+            let label = match value {
+                Scalar::Datetime64(nanos) => IndexLabel::Datetime64(*nanos),
+                Scalar::Utf8(text) => IndexLabel::Utf8(text.clone()),
+                other if other.is_missing() => IndexLabel::Utf8("NaT".to_owned()),
+                other => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "to_period requires datetime-like values, got {other:?}"
+                    )));
+                }
+            };
+            labels.push(label);
+        }
+
+        let converted = period_index_from_datetime_like_index(&Index::new(labels), freq)?;
+        let out: Vec<Scalar> = converted
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Utf8(text) if text == "NaT" => Scalar::Null(NullKind::NaT),
+                IndexLabel::Utf8(text) => Scalar::Utf8(text.clone()),
+                other => Scalar::Utf8(format!("{other:?}")),
+            })
+            .collect();
+
+        let index = self.series.index().clone();
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
+    }
+
     /// Reduce each Timedelta to Python `datetime.timedelta` resolution.
     /// Matches `pd.Series.dt.to_pytimedelta()`.
     ///
