@@ -83359,6 +83359,31 @@ impl DataFrameGroupBy<'_> {
             "diff" => return self.diff(1),
             "pct_change" => return self.pct_change(1),
             "rank" => return self.rank("average", true, "keep"),
+            // Fourth slice: the remaining names whose method already returns a
+            // DataFrame. Same routing gap, same verification — live pandas 2.2.3:
+            //     g.agg('head').equals(g.head(5))   True    shape (6, 3)
+            //     g.agg('tail').equals(g.tail(5))   True    shape (6, 3)
+            //     g.agg('corr').equals(g.corr())    True    shape (4, 2)
+            //     g.agg('cov').equals(g.cov())      True    shape (4, 2)
+            //
+            // head/tail keep the GROUP KEY COLUMNS (3 columns out of 2 value
+            // columns) because they are row slices rather than aggregations, and
+            // n defaults to 5 — checked against g.head(2), which returns 4 rows
+            // where g.head(5) returns all 6, so the default really is being
+            // exercised rather than saturating.
+            //
+            // corr/cov emit a matrix per group: 2 groups x 2 value columns gives
+            // 4 rows, not 2. That is why they cannot go in the reduction loop
+            // either, despite looking like ordinary pairwise statistics.
+            "head" => return self.head(5),
+            "tail" => return self.tail(5),
+            "corr" => return self.corr(),
+            "cov" => return self.cov(),
+            // `ohlc` is the one name left with no DataFrameGroupBy method to route
+            // to — pandas emits four columns per value column (2 groups x 2 columns
+            // gives 8) and FrankenPandas has no such method on this type, so it
+            // needs implementing rather than wiring. `size` is left out for the
+            // shape reason recorded above.
             _ => {}
         }
 
