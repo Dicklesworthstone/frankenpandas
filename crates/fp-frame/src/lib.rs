@@ -83326,6 +83326,42 @@ impl DataFrameGroupBy<'_> {
 
     /// Aggregate each value column per group with the given function.
     fn aggregate_named_func(&self, func_name: &str) -> Result<DataFrame, FrameError> {
+        // br-frankenpandas-groupby-idxmax-idxmin, third slice: the TRANSFORM-SHAPED
+        // names. Every one of these was already implemented as a method and was
+        // still rejected through `.agg("name")` with "unsupported groupby
+        // aggregation" — a ROUTING gap, not a missing capability, which is why the
+        // fix is a dispatch and not an algorithm.
+        //
+        // They cannot join the reduction loop below: that loop emits ONE VALUE PER
+        // (GROUP, COLUMN) and these emit one row per INPUT row. MEASURED on 2 groups
+        // and 2 value columns, a reduction gives rows=2 cols=2 while each of these
+        // gives rows=3 cols=2.
+        //
+        // The default arguments are pandas', verified rather than assumed —
+        // live pandas 2.2.3:
+        //     g.agg('diff').equals(g.diff(1))              True
+        //     g.agg('pct_change').equals(g.pct_change(1))  True
+        //     g.agg('rank').equals(g.rank())               True
+        //     g.agg('cumsum').equals(g.cumsum())           True
+        // and g.rank()'s own defaults are method='average', ascending=True,
+        // na_option='keep'.
+        //
+        // `size` is deliberately NOT here: pandas' g.agg('size') returns a SERIES,
+        // one value per group for the whole frame, and this function returns a
+        // DataFrame. FrankenPandas already has `size()` with the right Series
+        // return type; wiring it needs a caller that can carry that shape, which is
+        // a change to the agg entry point rather than one more arm.
+        match func_name {
+            "cumsum" => return self.cumsum(),
+            "cumprod" => return self.cumprod(),
+            "cummax" => return self.cummax(),
+            "cummin" => return self.cummin(),
+            "diff" => return self.diff(1),
+            "pct_change" => return self.pct_change(1),
+            "rank" => return self.rank("average", true, "keep"),
+            _ => {}
+        }
+
         // Determine value columns (all columns not in group-by keys)
         let value_cols: Vec<String> = self
             .df
