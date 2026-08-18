@@ -5864,6 +5864,42 @@ def normalize_groupby_resample_frame(frame, groupby_columns: list[str], freq: st
     out = frame.copy()
     if getattr(out.index, "nlevels", 1) > 1:
         group_levels = list(range(out.index.nlevels - 1))
+        # br-frankenpandas-3826s: drop AGGREGATED copies of the group keys before
+        # restoring them as labels, or reset_index collides and every
+        # dataframe_groupby_resample_* case dies with
+        #     ValueError: cannot insert grp, already exists
+        #
+        # WHY THE COLLISION EXISTS HERE AND NOT IN THE ROLLING TWIN BELOW, measured
+        # on the fixtures' own input:
+        #   groupby('grp').resample('ME').count()  columns ['grp', 'val']
+        #   groupby('grp').rolling(2).count()      columns ['val']
+        # resample AGGREGATES THE GROUP KEY COLUMN TOO and keeps the result, while
+        # also naming the outer index level after it; rolling excludes the key. So
+        # the level and the column both want the name `grp`.
+        #
+        # WHAT THE DROPPED COLUMN CONTAINED, and why discarding it is right rather
+        # than merely convenient — measured across all five aggregations the corpus
+        # exercises:
+        #   count -> [2, 1, 1, 1, 2]              the BUCKET SIZE, i.e. count(grp)
+        #   first -> ['a', 'a', 'a', 'b', 'b']    the group label
+        #   last  -> ['a', 'a', 'a', 'b', 'b']
+        #   max   -> ['a', 'a', 'a', 'b', 'b']
+        #   min   -> ['a', 'a', 'a', 'b', 'b']
+        # For four of the five it is the group label already, because aggregating a
+        # constant returns the constant — so dropping it and restoring the label
+        # from the index changes NOTHING. Only `count` differs, where the column
+        # held count(grp), an aggregate of the grouping key over itself. That is not
+        # the group label and it is not what a groupby(k).resample(f) result is asked
+        # for; keeping it would make `grp` mean something different for count than
+        # for the other four.
+        #
+        # ⚠️ THE ALTERNATIVE, if the corpus ever wants count(grp) preserved: rename
+        # the aggregated column (e.g. to f"{key}__agg") instead of dropping it, and
+        # reset the level afterwards. That keeps both values at the cost of a column
+        # name no pandas call produces. Recorded on the bead rather than chosen here.
+        collisions = [key for key in groupby_columns if key in out.columns]
+        if collisions:
+            out = out.drop(columns=collisions)
         out = out.reset_index(level=group_levels)
         rename_map: dict[Any, str] = {}
         for position, column in enumerate(groupby_columns):
