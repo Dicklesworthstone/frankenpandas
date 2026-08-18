@@ -49660,6 +49660,80 @@ impl DatetimeAccessor<'_> {
             .collect()
     }
 
+    /// Reduce each Timedelta to Python `datetime.timedelta` resolution.
+    /// Matches `pd.Series.dt.to_pytimedelta()`.
+    ///
+    /// ⚠️ IT ROUNDS, IT DOES NOT TRUNCATE, and the tie rule is HALF-TO-EVEN.
+    /// I assumed truncation first; pandas disagrees. MEASURED, 2.2.3, nanoseconds
+    /// in -> nanoseconds out:
+    /// ```text
+    ///      1 ->     0        -1 ->     0
+    ///    999 ->  1000      -999 -> -1000     (rounds AWAY from zero, not toward)
+    ///   1001 ->  1000     -1001 -> -1000
+    ///    500 ->     0       -500 ->     0     tie -> 0 is even
+    ///   1500 ->  2000      -1500 -> -2000     tie -> 2 is even
+    ///   2500 ->  2000      -2500 -> -2000     tie -> 2 is even, NOT 3
+    ///   3500 ->  4000
+    /// ```
+    /// Half-away-from-zero reproduces only 3 of those 7 tie cases, so the
+    /// distinction is observable rather than academic. This is the same rule
+    /// [`Self::round`] documents for datetimes.
+    ///
+    /// The result stays a Timedelta64 column: the observable effect of
+    /// `to_pytimedelta` is the RESOLUTION LOSS, and FrankenPandas has no Python
+    /// object dtype to model the container. NaT stays NaT.
+    pub fn to_pytimedelta(&self) -> Result<Series, FrameError> {
+        use fp_types::Timedelta as Td;
+
+        // Round `ns` to the nearest microsecond, ties to even, in integer
+        // arithmetic. div_euclid/rem_euclid keep the remainder non-negative so the
+        // negative cases fall out of the same three branches rather than needing
+        // their own sign handling.
+        fn round_half_even_micros(ns: i64) -> i64 {
+            let mut q = ns.div_euclid(Td::NANOS_PER_MICRO);
+            let r = ns.rem_euclid(Td::NANOS_PER_MICRO);
+            let half = Td::NANOS_PER_MICRO / 2;
+            if r > half || (r == half && q % 2 != 0) {
+                q += 1;
+            }
+            q * Td::NANOS_PER_MICRO
+        }
+
+        let out: Vec<Scalar> = if let Some(slice) = self.series.column().as_timedelta64_slice()
+        {
+            slice
+                .iter()
+                .map(|&n| {
+                    if n == Td::NAT {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Timedelta64(round_half_even_micros(n))
+                    }
+                })
+                .collect()
+        } else {
+            self.series
+                .column()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Timedelta64(n) if *n != Td::NAT => {
+                        Scalar::Timedelta64(round_half_even_micros(*n))
+                    }
+                    Scalar::Utf8(text) => match Td::parse(text) {
+                        Ok(n) if n != Td::NAT => Scalar::Timedelta64(round_half_even_micros(n)),
+                        _ => Scalar::Null(NullKind::NaN),
+                    },
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect()
+        };
+
+        let index = self.series.index().clone();
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
+    }
+
     /// Split each Timedelta into its calendar parts. Matches
     /// `pd.Series.dt.components`, returning a 7-column DataFrame.
     ///
