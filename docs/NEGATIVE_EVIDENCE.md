@@ -38796,3 +38796,74 @@ arm cannot hold an A/A null. **The instrument is sound on the FP side; the undec
 in 778a7eeb2 is entirely the incumbent's 45us arm**, which this cross-check now independently
 supports.
 
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-vw0uu) — grouped rolling/expanding rebuilt the SOURCE INDEX from itself: an O(n) deep copy removed for 1.138x-1.177x at 1M, and NOTHING at 100k
+
+**FP-vs-FP SELF-SPEEDUP, NOT CAMPAIGN OUTPUT.** No incumbent arm ran. This is a maintenance
+improvement to a shipped path, measured before and after on two binaries, and it must not be quoted
+as a vs-pandas ratio.
+
+**WHAT WAS WRONG.** Both `SeriesGroupByRolling::apply_grouped_rolling` and
+`SeriesGroupByExpanding::apply_grouped_expanding` ended with:
+
+    let index = Index::new(self.groupby.series.index().labels().to_vec())
+        .rename_index(self.groupby.series.index().name());
+
+Grouped rolling SCATTERS its results back into source-row order, so the output index IS the source
+index — same labels, same order — and the `rename_index` target was that same index's own `name()`,
+making it a no-op. **The line was an O(n) deep copy that reproduced its own input**, and it defeated
+two separate existing optimisations: `Index` holds labels behind an `Arc` precisely so a clone is an
+O(1) refcount bump (`br-frankenpandas-idxclone`), and a lazily-labelled `int64_unit_range` index
+MATERIALISES every `IndexLabel` the moment `.labels()` is called. Replaced with
+`self.groupby.series.index().clone()`.
+
+**HOW IT WAS FOUND — BY PROFILING, AFTER MY OWN REASONING SENT ME THE WRONG WAY.** `perf record`
+over `groupby_rolling_mean_w10 @1M` (ELF `34a4487b113f`, release-perf, -F 499):
+
+| symbol | share |
+|---|---|
+| `SeriesGroupBy::build_groups` | 29.34% |
+| `apply_grouped_rolling::<mean>` | 10.33% |
+| `Rolling::rolling_online_sum_mean` — **the actual math** | 10.10% |
+| `Arc<Vec<IndexLabel>>::drop_slow` | 9.73% |
+| `ValidityMask::set` | 6.82% |
+| `__memmove_avx_unaligned_erms` | 6.23% |
+| `IndexLabel::to_vec` | 5.41% |
+
+⚠️ One turn earlier I had argued in a bead comment that `build_groups` could NOT be the dominant
+cost — "hashing 1M keys should be ~1-2ms against a ~19ms overhead" — and proposed per-group call
+overhead instead. **It is the largest single symbol.** The estimate that convinced me was never
+measured. The profile cost one command and settled what two turns of reasoning got wrong.
+
+**THE MEASUREMENT.** Same lane, two binaries, ALTERNATING BEFORE/AFTER so host drift hits both arms
+equally. BEFORE `34a4487b113f1d38`, AFTER `764aaa36b75dbaab`, both release-perf on `thinkstation1`,
+built with the sanctioned `RCH_CARGO_WRAPPER_BYPASS=1` into a non-shared target dir.
+
+| size | before | after | ratio | checksums |
+|---|---|---|---|---|
+| 100k | 2.26ms | 2.26ms | **0.998x** | MATCH |
+| 1M (set A, 2 reps) | 26.29ms | 22.35ms | **1.177x** | MATCH |
+| 1M (set B, 3 reps) | 26.65ms | 23.42ms | **1.138x** | MATCH |
+
+loadavg 8.26-9.08 across every invocation; busy-core MHz max 4191.7-4294.9; 11-12 worker threads on
+both arms. Checksums identical between arms at both sizes — the check that matters here, because the
+index is PART OF THE RESULT, so a changed output was the plausible failure mode rather than a
+hypothetical one.
+
+**THE 100k NULL RESULT IS THE INFORMATIVE HALF AND IT IS NOT NOISE.** At 100k the label vector is
+~3MB and the copy disappears into the work; at 1M it is ~32MB and dominates. An O(n) copy against
+O(n) work should show exactly this size-dependence, so 0.998x at 100k CONFIRMS the mechanism rather
+than contradicting it. **Anyone quoting 1.177x without the size will be quoting a number that does
+not exist at 100k.**
+
+**CORRECTNESS.** `cargo test -p fp-frame --lib`: 3365 tests, **3333 passed, 0 failed**, 32 ignored —
+identical to the pre-change baseline run minutes earlier. The change is observationally identical by
+construction (`Arc` labels are set once and never mutated, and the clone preserves the name), and it
+additionally PRESERVES `label_identity`, where the old path minted a fresh one — which can only
+enable downstream same-index fast paths, never disable them.
+
+**WHAT THIS DOES NOT DO.** It does not touch `build_groups` (29.34%), which remains this bead's
+main lever, nor the per-group Series materialisation (~15%). vw0uu stays OPEN. The pre-registered
+prediction for the full fused path is unchanged at 2.0x-2.6x, with below 1.5x refuting the
+per-group-rebuild mechanism.
+

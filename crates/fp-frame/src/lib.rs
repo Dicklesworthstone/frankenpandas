@@ -40638,8 +40638,22 @@ impl SeriesGroupByExpanding<'_, '_> {
                 unreachable!("SeriesGroupByExpanding agg output is nullable-f64");
             }
         }
-        let index = Index::new(self.groupby.series.index().labels().to_vec())
-            .rename_index(self.groupby.series.index().name());
+        // br-frankenpandas-vw0uu. Grouped rolling/expanding SCATTERS results back
+        // into source-row order, so the output index IS the source index —
+        // same labels, same order, same name (the old `rename_index` target was
+        // this very index's own `name()`, i.e. a no-op).
+        //
+        // Rebuilding it via `labels().to_vec()` was an O(n) deep copy that
+        // reproduced its own input, and it defeated TWO separate optimisations
+        // at once: `Index` keeps its labels behind an `Arc` precisely so a clone
+        // is an O(1) refcount bump (br-frankenpandas-idxclone), and a lazily
+        // labelled index (`int64_unit_range`) MATERIALISES every `IndexLabel`
+        // the moment `.labels()` is called.
+        //
+        // MEASURED, `perf record` over groupby_rolling_mean_w10 @1M: 5.41% in
+        // `IndexLabel::to_vec` and 9.73% in `Arc<Vec<IndexLabel>>::drop_slow`
+        // — together more than the 10.10% spent in the actual rolling kernel.
+        let index = self.groupby.series.index().clone();
         Series::new(
             self.groupby.series.name(),
             index,
@@ -41058,8 +41072,22 @@ impl SeriesGroupByRolling<'_, '_> {
                 unreachable!("SeriesGroupByRolling agg output is nullable-f64");
             }
         }
-        let index = Index::new(self.groupby.series.index().labels().to_vec())
-            .rename_index(self.groupby.series.index().name());
+        // br-frankenpandas-vw0uu. Grouped rolling/expanding SCATTERS results back
+        // into source-row order, so the output index IS the source index —
+        // same labels, same order, same name (the old `rename_index` target was
+        // this very index's own `name()`, i.e. a no-op).
+        //
+        // Rebuilding it via `labels().to_vec()` was an O(n) deep copy that
+        // reproduced its own input, and it defeated TWO separate optimisations
+        // at once: `Index` keeps its labels behind an `Arc` precisely so a clone
+        // is an O(1) refcount bump (br-frankenpandas-idxclone), and a lazily
+        // labelled index (`int64_unit_range`) MATERIALISES every `IndexLabel`
+        // the moment `.labels()` is called.
+        //
+        // MEASURED, `perf record` over groupby_rolling_mean_w10 @1M: 5.41% in
+        // `IndexLabel::to_vec` and 9.73% in `Arc<Vec<IndexLabel>>::drop_slow`
+        // — together more than the 10.10% spent in the actual rolling kernel.
+        let index = self.groupby.series.index().clone();
         Series::new(
             self.groupby.series.name(),
             index,
