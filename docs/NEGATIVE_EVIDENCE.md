@@ -36251,3 +36251,112 @@ typed datetime). Both were invisible to a green suite because each branch is ind
 covered and **nothing asserts what the branches do relative to each other**. A conversion
 function with a catch-all and a sibling that handles more cases than it does is a
 two-line grep away from the next one.
+
+### 2026-08-18 CrimsonPine — NEGATIVE RESULT: the match-arm-diff sweep across all 50 `Scalar`-returning conversion fns in fp-frame finds NO third defect. The technique is retired at two
+
+The arm-diff hunt paid twice in two turns (`hp2ko`, `4lbaj`). A third application is
+where a productive technique turns into an audit round, so I gave it a defined stopping
+condition before starting: sweep the whole family once, and if it surfaces nothing new,
+say so and stop.
+
+**Counted mechanism.** Enumerated every function in `crates/fp-frame/src/lib.rs` that
+returns `Scalar` — **50** of them — and extracted each one's `Scalar::` match arms plus
+whether it carries a catch-all. The datetime-relevant rows:
+
+| fn | arms | catch-all |
+|---|---|---|
+| `parse_datetime_scalar_with_unit` | Float64, Int64, Null, Utf8 | yes — **missing Datetime64** (`4lbaj`, filed) |
+| `datetime64_scalar_from_parsed_datetime` | Utf8 | yes — `other => other` (`hp2ko`, filed) |
+| `normalize_datetime_scalar_to_utc` | Datetime64, Null, Utf8 | yes — Datetime64 arm added by me in `71971cda2` |
+| `coerce_scalar` | Bool, Datetime64, Float64, Int64, Null, Period, Timedelta64, Utf8 | yes — comprehensive |
+| `datetime64_scalar` | Datetime64, Float64, Int64, Null | no |
+| `index_label_to_scalar` (×2) | Bool, Datetime64, Float64, Int64, Null, Timedelta64, Utf8 | no |
+
+**No third gap.** The two defects already filed are the complete set this technique finds
+in the family.
+
+**THE ONE NEW CANDIDATE IT FLAGGED WAS MY HEURISTIC BEING WRONG, and checking it is the
+only reason that is knowable.** `parse_datetime_microsecond` and
+`parse_datetime_nanosecond` came back with a catch-all while their sibling
+`parse_datetime_component` did not — exactly the asymmetry signature. Reading them: all
+three take `&str`, not `Scalar`, and what my regex scored as a catch-all was `Err(_) =>`.
+Different construct, no bug.
+
+Since I was there, I checked their arithmetic against the incumbent anyway —
+`parse_datetime_nanosecond` returns `timestamp_subsec_nanos() % 1_000`, which looks like a
+truncation waiting to be wrong:
+
+| component | pandas 2.2.3 on `2024-01-15 10:30:00.123456789` | FrankenPandas |
+|---|---|---|
+| `.dt.microsecond` | 123456 (micros within the SECOND) | `timestamp_subsec_micros()` — matches |
+| `.dt.nanosecond` | 789 (nanos within the MICROSECOND) | `subsec_nanos() % 1_000` — matches |
+
+The `% 1_000` is correct: pandas' `.dt.nanosecond` really is the sub-microsecond
+remainder, not the sub-second nanoseconds. **A suspicious-looking modulo that turns out to
+be exactly right is worth recording, because the next reader will suspect it too.**
+
+**A/A null control (same invocation):** not applicable — this entry reports a source
+census and two pandas component values. No timing was taken and nothing was certified.
+
+```
+LOADAVG   4.67 / 5.01 / 8.84 ;  CPU IDLE 91.92%, iowait 0.00%, by mpstat
+DISK      /data 56G, flat, under the standing build hold; no cargo invoked
+```
+
+**WHY THIS IS BANKED AS A LOSS RATHER THAN LEFT UNSAID.** A technique that pays twice
+invites a third, fourth and fifth run, and each one feels like work. The sweep is cheap
+(one script, no build) and its result is now on record: **fp-frame's `Scalar`-returning
+conversion surface has no further arm-set gaps.** Anyone tempted to re-run it should
+instead spend the turn on `4lbaj`'s one-line fix, which is blocked only on a build.
+
+### 2026-08-18 — PROVENANCE DEFECT IN THIS LEDGER: 132 rows dated 2026-08-17/18 are signed `CrimsonPine` by AT LEAST TWO different agents, and git cannot separate them
+
+Raised by the other frankenpandas pane (`frankenpandas-0c`) via cross-session message,
+and confirmed here. Recording it because the campaign's first law is that every perf claim
+carries provenance, and a byline shared by two agents silently voids that for a day's
+worth of rows.
+
+**Counted mechanism.** `grep -c '^### 2026-08-1[78] CrimsonPine' docs/NEGATIVE_EVIDENCE.md`
+= **132**. Both panes signed ledger entries and bead comments as `CrimsonPine` for the
+whole session. Git cannot disambiguate either: every commit today is authored
+`cod-pandas`.
+
+**The overlap is real, not theoretical.** The other pane's work includes `kko5z` sqrt/log,
+`h67zz` locks, `03fp5`/`oxv4u`/`mti15` df_dot and `4kig1`; mine includes `4kig1`
+(mod/floordiv lanes), `kko5z` (the 66.5us per-call constant and the
+`cached_available_parallelism` fix), `u5cg4`, `q1evw`, `3qpj4`, plus the conformance and
+datetime work (`f2mlr`, `v3q4j`, `eay9h`, `t2n6i`, `hp2ko`, `4lbaj`, `l7r1p`). **We both
+signed `CrimsonPine` on `4kig1` and `kko5z`.** So topic is a weak heuristic and not a
+reliable split.
+
+**WHY THIS MATTERS BEYOND TIDINESS.** Several rows on both sides say "I measured X",
+"my own fit", "I was wrong" — and a first-person claim is only auditable if the first
+person resolves to one agent. Two of my entries today are explicit self-corrections
+(`v3q4j`, the `sort` cost estimate); read under a shared byline they could be attributed
+to the pane that did not make the mistake, which is worse than no attribution.
+
+**RESOLUTION, agreed across panes:** the other pane keeps `CrimsonPine`. **From this entry
+forward I sign `SlateHeron`.** I am not retroactively rewriting the 132 existing rows —
+editing another agent's attribution is exactly the thing neither of us should do
+unilaterally, and a mass rewrite would destroy the little signal the topics carry.
+
+**HOW TO READ THE EXISTING ROWS, stated so nobody over-trusts a split:** they are
+two-agent rows and cannot be reliably separated. The only firm handles are the commit SHAs
+cited inside each entry and the bead each names — both survive. Treat the byline on any
+2026-08-17/18 row as "one of two panes", not as an identity.
+
+**A/A null control (same invocation):** not applicable — this entry reports a byline count
+and an identity agreement. No measurement was taken.
+
+```
+LOADAVG   4.67 / 5.01 / 8.84 ;  CPU IDLE 91.92%, iowait 0.00%, by mpstat
+DISK      /data 56G, flat, under the standing build hold; no cargo invoked
+```
+
+**AND THE SAME COLLISION HAS A FILE-LEVEL TWIN worth knowing about:** the other pane
+committed `docs/NEGATIVE_EVIDENCE.md` by pathspec while my concurrent `>>` append was in
+the working tree, so my `hp2ko` entry went out under their `4kig1` commit message
+(`31b056214`). Pathspec commits are per-FILE, not per-hunk. In a shared checkout, an
+append to a shared ledger will be swept by whoever commits that file first — **check
+whether your entry already landed before re-adding it**, which is how a duplicate gets
+created. It had landed; I did not re-add it.
