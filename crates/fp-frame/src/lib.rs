@@ -62790,9 +62790,45 @@ impl DataFrame {
     /// Added by br-frankenpandas-oxodo: the conformance harness had been
     /// applying constructor `dtype=` ITSELF, so every `constructor_dtype`
     /// fixture was green against a capability FrankenPandas did not expose.
+    /// Apply the DataFrame constructor's `dtype=` to every column.
+    ///
+    /// **A NON-NULLABLE `int64` REFUSES A MISSING VALUE.** numpy's `int64` has no
+    /// NA representation, and pandas aborts the whole construction rather than
+    /// inventing one - it does NOT fall back to a nullable dtype or to NaN.
+    /// br-frankenpandas-v1zy1. MEASURED, live pandas 2.2.3, on
+    /// `[[True, None], [False, True]]`:
+    ///
+    /// | `dtype=` | pandas | why |
+    /// |---|---|---|
+    /// | `int64` | **TypeError** | numpy int64 cannot hold NA |
+    /// | `Int64` | `[1, <NA>]` | the nullable extension dtype can |
+    /// | `float64` | `[1.0, nan]` | NaN IS float64's missing value |
+    /// | `Float64` | `[1.0, <NA>]` | extension dtype |
+    ///
+    /// Before this check FrankenPandas returned `[1, Null]` for BOTH spellings, so
+    /// `int64` and `Int64` were behaviourally identical at the constructor and no
+    /// value fixture could detect them being confused - which is why
+    /// br-frankenpandas-jozfk's spec-resolution fix, correct on its own terms, did
+    /// not make the corpus able to catch a regression that reverted it.
+    ///
+    /// The check lives HERE and deliberately NOT in `Column::new`: numpy-int64
+    /// semantics are a property of the CONSTRUCTOR's `dtype=`, while `Column::new`
+    /// is shared with `astype` and with internal builders that legitimately pair
+    /// `DType::Int64` with missing values.
     pub fn with_constructor_dtype(&self, dtype: DType) -> Result<Self, FrameError> {
         let mut columns = BTreeMap::new();
         for (name, column) in &self.columns {
+            // Checked in the SAME pass that builds the columns, so a lazy column
+            // representation is walked once rather than twice.
+            if dtype == DType::Int64
+                && column.values().iter().any(|v| matches!(v, Scalar::Null(_)))
+            {
+                // pandas' own message, verbatim - it surfaces from int(None).
+                return Err(FrameError::CompatibilityRejected(
+                    "int() argument must be a string, a bytes-like object or a real number, not 'NoneType'"
+                        .to_string(),
+                ));
+            }
             let coerced = Column::new(dtype, column.values().to_vec())?;
             columns.insert(name.clone(), coerced);
         }
@@ -95004,6 +95040,61 @@ mod tests {
             err.to_string(),
             "compatibility gate rejected operation: dataframe_from_records row width 3 exceeds columns length 2"
         );
+    }
+
+    /// `dtype='int64'` REFUSES a missing value; `dtype='Int64'` keeps it.
+    /// br-frankenpandas-v1zy1. MEASURED, live pandas 2.2.3, on
+    /// `[[True, None], [False, True]]`: `int64` -> TypeError, `Int64` ->
+    /// `[[1, <NA>], [0, 1]]`. Before the fix FrankenPandas returned `[1, Null]`
+    /// for both, so the two dtypes were behaviourally identical here.
+    #[test]
+    fn constructor_dtype_int64_refuses_a_missing_value_but_nullable_int64_keeps_it_v1zy1() {
+        use fp_types::NullKind;
+        let with_missing = || {
+            DataFrame::from_dict(
+                &["a"],
+                vec![("a", vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)])],
+            )
+            .expect("frame")
+        };
+
+        // numpy int64 cannot hold NA -> the construction is refused outright.
+        let err = with_missing()
+            .with_constructor_dtype(DType::Int64)
+            .expect_err("int64 must refuse a missing value");
+        assert!(
+            format!("{err}").contains("not 'NoneType'"),
+            "expected pandas' int(None) message, got: {err}"
+        );
+
+        // The nullable extension dtype accepts it, and the null SURVIVES.
+        let kept = with_missing()
+            .with_constructor_dtype(DType::Int64Nullable)
+            .expect("Int64 accepts a missing value");
+        assert_eq!(
+            kept.columns["a"].values(),
+            &[Scalar::Int64(1), Scalar::Null(NullKind::Null)]
+        );
+
+        // NON-VACUITY: the refusal is about the MISSING VALUE, not about int64
+        // itself. Without this arm, a check that rejected every int64 cast would
+        // pass the assertions above.
+        let clean = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Bool(true), Scalar::Bool(false)])],
+        )
+        .expect("frame")
+        .with_constructor_dtype(DType::Int64)
+        .expect("int64 accepts a column with no missing value");
+        assert_eq!(
+            clean.columns["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(0)]
+        );
+
+        // float64 is NOT restricted: NaN is float64's own missing value.
+        with_missing()
+            .with_constructor_dtype(DType::Float64)
+            .expect("float64 represents a missing value as NaN");
     }
 
     /// The constructor's `dtype=` REFUSES a lossy float->int; pandas' `astype`
