@@ -39702,3 +39702,57 @@ slower with FP at 0.727ms against pandas' 0.567ms, and `df_groupby_2strkey_sum @
 at 1.619ms against 1.422ms. Both are small-n rows where fixed costs dominate — consistent with
 `d4cs8`'s account of where FrankenPandas is structurally weakest — and neither has a mechanism yet.
 Finding the mechanism is the next step and is NOT done here.
+
+---
+
+## br-frankenpandas-uza04 — PREPARED EXPERIMENT (not yet run): does rank-sorting group keys recover the certified 0.853x loss at 10k?
+
+**Date:** 2026-08-18 · **Agent:** CrimsonPine · **Status:** lever staged and
+ordering-tested (`07b9bc1b4`), NOT wired in, NOT measured. `uptime` at decision
+time: 1-min 7.05 against 5-min 6.95, flat; CPU idle 87.8%; /data 58G.
+
+**THE MECHANISM UNDER TEST.** `df_groupby_2strkey_sum` is a certified **0.853x
+LOSS at 10k** sitting between wins at 1k (2.587x) and 100k (1.502x) — a
+non-monotonic V that already refuted my fixed-cost account and a parallelism
+account (`thread_count_actually_used` = 1 at all three sizes). The renormalised
+profile puts `sort::sort_by` at **17.8% at 10k against 6.2% at 100k**. The
+fixture's keys — `a{i%100}` x `b{(i/100)%50}` — SATURATE the group count at 5,000,
+so the same composite comparisons are paid at both sizes while row work grows 10x.
+Only the small size fails to amortise them.
+
+**THE LEVER.** Rank each key component's distinct values once using the very same
+`scalar_key_cmp`, then order groups by packed integer ranks. Comparing ranks IS
+comparing values, with the same left-to-right precedence `composite_key_cmp` uses.
+It DECLINES (falls back, sorts nothing) on >2 components, ragged key lengths, and
+>u32::MAX distinct values.
+
+**PREDICTIONS, RECORDED BEFORE THE RUN:**
+
+* **@10k moves TOWARD parity but does NOT clearly cross it.** sort_by is 17.8% of
+  the renormalised profile, so deleting ALL of it caps the gain near 1.22x on a
+  0.853x row — about **1.04x**, which is inside the noise this lane has shown
+  (cv 29.9%). ⚠️ A result far ABOVE ~1.05x would mean something other than the sort
+  changed, and is a reason to DISTRUST the mechanism story rather than bank the number.
+* **@1k is INERT or slightly WORSE** — there `g == n`, so ranking sorts as many
+  distinct values as there are groups: one sort replaced by two.
+* **@100k is INERT** — the sort is 6.2% there and already amortised.
+* **If @10k does not improve at all**, the 17.8% profile share is not on the
+  critical path, the mechanism account is WRONG, and this gets recorded as a REJECT.
+
+**WHY THE TEST CAME FIRST.** A wrong rank assignment silently mis-orders GROUPS
+while every value inside them stays correct — the whole 3343-test fp-frame suite
+would still pass. The committed test compares ranked order directly against
+comparator order, and is mutation-checked: descending ranks kill 3 of 4 tests,
+swapped component precedence kills 2 of 4 (single-component correctly survives,
+precedence being meaningless at width 1).
+
+⚠️ **TWO ERRORS OF MINE ALREADY CORRECTED ON THIS LEVER.** I reported **five** sort
+call sites from stale line numbers; there are **eight**, and the wiring script
+asserts that count rather than trusting it. And my first mutation attempt silently
+did not apply — `sed`'s `|` delimiter collided with `|=` — while reporting 4 passed,
+which is the absence of an edit rendering as the success of the code.
+
+**A NON-VACUITY WITNESS IS BUILT IN.** Without it a null result has two
+indistinguishable explanations: the lever did nothing, or the lever never ran.
+`FP_RANKSORT_WITNESS` makes the helper report each time it actually sorts, so the
+SAME binary can be asked which happened.
