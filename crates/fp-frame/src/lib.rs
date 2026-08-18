@@ -95318,6 +95318,78 @@ impl GroupByResample<'_> {
         )
     }
 
+    /// Grouped resample median.
+    ///
+    /// br-frankenpandas-a7faz. `Resample` has implemented median/var/prod/std/sem/
+    /// nunique all along; `GroupByResample` exposed only seven aggregations, so
+    /// `df.groupby(k).resample(f).median()` could not be expressed at all. These
+    /// six wrappers close that gap; each declares the dtype domain its pandas
+    /// counterpart accepts.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), grp=[a,a,a,b,b,b],
+    /// v=[1,3,5,2,4,8], buckets a-Jan(1,3) a-Feb(5) b-Jan(2) b-Feb(4,8):
+    /// ```text
+    ///   median  [2.0, 5.0, 2.0, 6.0]
+    ///   var     [2.0, NaN, NaN, 8.0]      single-element buckets are NaN
+    ///   prod    [3.0, 5.0, 2.0, 32.0]
+    ///   nunique [2, 1, 1, 2]
+    /// ```
+    /// std and sem RAISE on this frame in pandas — not because the aggregation is
+    /// undefined but because it tries to convert the utf8 GROUP KEY to float. They
+    /// are still added here: FrankenPandas excludes the key from `value_cols` by
+    /// construction, so the numeric columns aggregate cleanly and the raise has no
+    /// FrankenPandas counterpart to reproduce.
+    pub fn median(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).median(),
+            ResampleValueDomain::Numeric,
+        )
+    }
+
+    /// Grouped resample variance.
+    pub fn var(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).var(),
+            ResampleValueDomain::Numeric,
+        )
+    }
+
+    /// Grouped resample standard deviation.
+    pub fn std(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).std(),
+            ResampleValueDomain::Numeric,
+        )
+    }
+
+    /// Grouped resample standard error of the mean.
+    pub fn sem(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).sem(),
+            ResampleValueDomain::Numeric,
+        )
+    }
+
+    /// Grouped resample product.
+    pub fn prod(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).prod(),
+            ResampleValueDomain::Numeric,
+        )
+    }
+
+    /// Grouped resample distinct-value count.
+    ///
+    /// The one of the six that is NOT numeric-only: pandas counts distinct values
+    /// for utf8, bool, datetime64 and category alike, which is the same domain
+    /// count/min/max/first/last already take.
+    pub fn nunique(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(
+            |s, freq| s.resample(freq).nunique(),
+            ResampleValueDomain::OrderableAndCountable,
+        )
+    }
+
     /// Grouped resample last.
     pub fn last(&self) -> Result<DataFrame, FrameError> {
         // positional, dtype-independent in pandas (a7faz).
@@ -160267,6 +160339,95 @@ mod tests {
             &[Scalar::Int64(0), utf8("ru")],
             "an all-missing bucket is pandas' integer identity, not an empty string"
         );
+    }
+
+    /// The six aggregations `GroupByResample` could not express (a7faz).
+    ///
+    /// `Resample` implemented median/var/std/sem/prod/nunique all along; the grouped
+    /// wrapper exposed only seven, so `df.groupby(k).resample(f).median()` did not
+    /// exist. This pins the four with unambiguous values against live pandas.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), grp=[a,a,a,b,b,b],
+    /// v=[1,3,5,2,4,8], buckets a-Jan(1,3) a-Feb(5) b-Jan(2) b-Feb(4,8):
+    /// ```text
+    ///   median  [2.0, 5.0, 2.0, 6.0]
+    ///   prod    [3.0, 5.0, 2.0, 32.0]
+    ///   nunique [2, 1, 1, 2]
+    ///   var     [2.0, NaN, NaN, 8.0]   single-element buckets are NaN
+    /// ```
+    /// Only var's two DEFINED buckets are asserted: a one-element sample variance is
+    /// NaN in pandas, and whether FrankenPandas renders that as a valid NaN or as a
+    /// missing value is a separate question this test should not silently decide.
+    #[test]
+    fn groupby_resample_exposes_median_var_prod_nunique_a7faz() {
+        let utf8 = |v: &str| Scalar::Utf8(v.to_string());
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![utf8("a"), utf8("a"), utf8("a"), utf8("b"), utf8("b"), utf8("b")],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(8.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+                "2024-01-05".into(),
+                "2024-02-05".into(),
+                "2024-02-20".into(),
+            ],
+        )
+        .unwrap();
+        let gb = df.groupby(&["grp"]).unwrap();
+
+        assert_eq!(
+            gb.resample("M").median().unwrap().column("v").unwrap().values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(6.0),
+            ]
+        );
+        assert_eq!(
+            gb.resample("M").prod().unwrap().column("v").unwrap().values(),
+            &[
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(32.0),
+            ]
+        );
+        assert_eq!(
+            gb.resample("M").nunique().unwrap().column("v").unwrap().values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ]
+        );
+
+        let var = gb.resample("M").var().unwrap();
+        assert_eq!(var.column("v").unwrap().values()[0], Scalar::Float64(2.0));
+        assert_eq!(var.column("v").unwrap().values()[3], Scalar::Float64(8.0));
+
+        // std and sem exist now too; only their SHAPE is pinned here, because pandas
+        // raises on this frame (it tries to float-convert the utf8 group key) and so
+        // offers no value to compare against.
+        assert_eq!(gb.resample("M").std().unwrap().len(), 4);
+        assert_eq!(gb.resample("M").sem().unwrap().len(), 4);
     }
 
     #[test]
