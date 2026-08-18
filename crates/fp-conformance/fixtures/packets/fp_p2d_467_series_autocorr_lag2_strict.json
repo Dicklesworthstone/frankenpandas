@@ -1,10 +1,11 @@
 {
-  "packet_id": "FP-P2D-466",
-  "case_id": "series_dot_basic_strict",
+  "packet_id": "FP-P2D-467",
+  "case_id": "series_autocorr_lag2_strict",
   "mode": "strict",
-  "operation": "series_dot",
+  "operation": "series_autocorr",
+  "autocorr_lag": 2,
   "left": {
-    "name": "a",
+    "name": "vals",
     "index": [
       {
         "kind": "int64",
@@ -21,6 +22,18 @@
       {
         "kind": "int64",
         "value": 3
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "int64",
+        "value": 5
+      },
+      {
+        "kind": "int64",
+        "value": 6
       }
     ],
     "values": [
@@ -34,60 +47,33 @@
       },
       {
         "kind": "float64",
-        "value": 3.0
-      },
-      {
-        "kind": "float64",
         "value": 4.0
-      }
-    ]
-  },
-  "right": {
-    "name": "b",
-    "index": [
-      {
-        "kind": "int64",
-        "value": 0
-      },
-      {
-        "kind": "int64",
-        "value": 1
-      },
-      {
-        "kind": "int64",
-        "value": 2
-      },
-      {
-        "kind": "int64",
-        "value": 3
-      }
-    ],
-    "values": [
-      {
-        "kind": "float64",
-        "value": 1.0
       },
       {
         "kind": "float64",
-        "value": 1.0
+        "value": 8.0
       },
       {
         "kind": "float64",
-        "value": 1.0
+        "value": 16.0
       },
       {
         "kind": "float64",
-        "value": 1.0
+        "value": 32.0
+      },
+      {
+        "kind": "float64",
+        "value": 64.0
       }
     ]
   },
   "expected_scalar": {
     "kind": "float64",
-    "value": 10.0
+    "value": 1.0
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",
     "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
-    "generated_at": "2026-08-18T16:16:25Z"
+    "generated_at": "2026-08-18T16:16:24Z"
   }
 }

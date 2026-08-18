@@ -1,10 +1,10 @@
 {
-  "packet_id": "FP-P2D-466",
-  "case_id": "series_argsort_strings_ascending_strict",
+  "packet_id": "FP-P2D-467",
+  "case_id": "series_factorize_ints_strict",
   "mode": "strict",
-  "operation": "series_argsort",
+  "operation": "series_factorize",
   "left": {
-    "name": "vals",
+    "name": "int_series",
     "index": [
       {
         "kind": "int64",
@@ -21,24 +21,40 @@
       {
         "kind": "int64",
         "value": 3
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "int64",
+        "value": 5
       }
     ],
     "values": [
       {
-        "kind": "utf8",
-        "value": "banana"
+        "kind": "int64",
+        "value": 100
       },
       {
-        "kind": "utf8",
-        "value": "apple"
+        "kind": "int64",
+        "value": 200
       },
       {
-        "kind": "utf8",
-        "value": "cherry"
+        "kind": "int64",
+        "value": 100
       },
       {
-        "kind": "utf8",
-        "value": "apricot"
+        "kind": "int64",
+        "value": 300
+      },
+      {
+        "kind": "int64",
+        "value": 200
+      },
+      {
+        "kind": "int64",
+        "value": 100
       }
     ]
   },
@@ -59,16 +75,24 @@
       {
         "kind": "int64",
         "value": 3
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "int64",
+        "value": 5
       }
     ],
     "values": [
       {
         "kind": "int64",
-        "value": 1
+        "value": 0
       },
       {
         "kind": "int64",
-        "value": 3
+        "value": 1
       },
       {
         "kind": "int64",
@@ -77,13 +101,20 @@
       {
         "kind": "int64",
         "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 0
       }
-    ],
-    "name": "vals"
+    ]
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",
     "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
-    "generated_at": "2026-08-18T16:16:22Z"
+    "generated_at": "2026-08-18T16:16:27Z"
   }
 }

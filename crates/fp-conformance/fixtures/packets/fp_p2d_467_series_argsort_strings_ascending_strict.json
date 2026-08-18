@@ -1,10 +1,10 @@
 {
-  "packet_id": "FP-P2D-466",
-  "case_id": "series_dot_with_nulls_strict",
+  "packet_id": "FP-P2D-467",
+  "case_id": "series_argsort_strings_ascending_strict",
   "mode": "strict",
-  "operation": "series_dot",
+  "operation": "series_argsort",
   "left": {
-    "name": "a",
+    "name": "vals",
     "index": [
       {
         "kind": "int64",
@@ -25,25 +25,24 @@
     ],
     "values": [
       {
-        "kind": "float64",
-        "value": 1.0
+        "kind": "utf8",
+        "value": "banana"
       },
       {
-        "kind": "null",
-        "value": "null"
+        "kind": "utf8",
+        "value": "apple"
       },
       {
-        "kind": "float64",
-        "value": 3.0
+        "kind": "utf8",
+        "value": "cherry"
       },
       {
-        "kind": "float64",
-        "value": 4.0
+        "kind": "utf8",
+        "value": "apricot"
       }
     ]
   },
-  "right": {
-    "name": "b",
+  "expected_series": {
     "index": [
       {
         "kind": "int64",
@@ -64,30 +63,27 @@
     ],
     "values": [
       {
-        "kind": "float64",
-        "value": 2.0
+        "kind": "int64",
+        "value": 1
       },
       {
-        "kind": "float64",
-        "value": 2.0
+        "kind": "int64",
+        "value": 3
       },
       {
-        "kind": "float64",
-        "value": 2.0
+        "kind": "int64",
+        "value": 0
       },
       {
-        "kind": "float64",
-        "value": 2.0
+        "kind": "int64",
+        "value": 2
       }
-    ]
-  },
-  "expected_scalar": {
-    "kind": "null",
-    "value": "na_n"
+    ],
+    "name": "vals"
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",
     "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
-    "generated_at": "2026-08-18T16:16:26Z"
+    "generated_at": "2026-08-18T16:16:22Z"
   }
 }

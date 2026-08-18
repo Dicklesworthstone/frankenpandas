@@ -1,11 +1,11 @@
 {
-  "packet_id": "FP-P2D-466",
-  "case_id": "series_argsort_integers_strict",
+  "packet_id": "FP-P2D-467",
+  "case_id": "series_str_contains_substring_strict",
   "mode": "strict",
-  "operation": "series_argsort",
-  "sort_ascending": true,
+  "operation": "series_str_contains",
+  "regex_pattern": "abc",
   "left": {
-    "name": "int_series",
+    "name": "txt",
     "index": [
       {
         "kind": "int64",
@@ -26,20 +26,20 @@
     ],
     "values": [
       {
-        "kind": "int64",
-        "value": 10
+        "kind": "utf8",
+        "value": "abcdef"
       },
       {
-        "kind": "int64",
-        "value": -5
+        "kind": "utf8",
+        "value": "no match"
       },
       {
-        "kind": "int64",
-        "value": 3
+        "kind": "utf8",
+        "value": "starts abc"
       },
       {
-        "kind": "int64",
-        "value": 0
+        "kind": "utf8",
+        "value": ""
       }
     ]
   },
@@ -64,27 +64,27 @@
     ],
     "values": [
       {
-        "kind": "int64",
-        "value": 1
+        "kind": "bool",
+        "value": true
       },
       {
-        "kind": "int64",
-        "value": 3
+        "kind": "bool",
+        "value": false
       },
       {
-        "kind": "int64",
-        "value": 2
+        "kind": "bool",
+        "value": true
       },
       {
-        "kind": "int64",
-        "value": 0
+        "kind": "bool",
+        "value": false
       }
     ],
-    "name": "int_series"
+    "name": "txt"
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",
     "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
-    "generated_at": "2026-08-18T16:16:22Z"
+    "generated_at": "2026-08-18T16:16:30Z"
   }
 }

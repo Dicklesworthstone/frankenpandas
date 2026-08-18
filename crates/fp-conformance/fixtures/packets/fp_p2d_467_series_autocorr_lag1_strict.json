@@ -1,9 +1,9 @@
 {
-  "packet_id": "FP-P2D-466",
-  "case_id": "series_autocorr_lag3_strict",
+  "packet_id": "FP-P2D-467",
+  "case_id": "series_autocorr_lag1_strict",
   "mode": "strict",
   "operation": "series_autocorr",
-  "autocorr_lag": 3,
+  "autocorr_lag": 1,
   "left": {
     "name": "vals",
     "index": [
@@ -34,10 +34,6 @@
       {
         "kind": "int64",
         "value": 6
-      },
-      {
-        "kind": "int64",
-        "value": 7
       }
     ],
     "values": [
@@ -47,15 +43,7 @@
       },
       {
         "kind": "float64",
-        "value": 3.0
-      },
-      {
-        "kind": "float64",
         "value": 2.0
-      },
-      {
-        "kind": "float64",
-        "value": 5.0
       },
       {
         "kind": "float64",
@@ -63,25 +51,29 @@
       },
       {
         "kind": "float64",
-        "value": 7.0
+        "value": 8.0
       },
       {
         "kind": "float64",
-        "value": 6.0
+        "value": 16.0
       },
       {
         "kind": "float64",
-        "value": 9.0
+        "value": 32.0
+      },
+      {
+        "kind": "float64",
+        "value": 64.0
       }
     ]
   },
   "expected_scalar": {
     "kind": "float64",
-    "value": 0.3287979746107145
+    "value": 1.0
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",
     "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
-    "generated_at": "2026-08-18T16:16:24Z"
+    "generated_at": "2026-08-18T16:16:23Z"
   }
 }
