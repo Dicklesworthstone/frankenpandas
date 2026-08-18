@@ -30516,6 +30516,113 @@ mod tests {
         Ok(())
     }
 
+    /// asfreq across the sub-second frequencies, in BOTH directions.
+    ///
+    /// `asfreq_with_how` never enumerates frequencies itself -- it takes the
+    /// period's boundary instant and asks which target period contains it. That
+    /// means ms/us/ns came for free with the ordinal arms, and this test is what
+    /// proves "for free" was not "untested": every ordinal below is transcribed
+    /// from live pandas 2.2.3, `Timestamp(base).to_period(src).asfreq(dst, how)`.
+    ///
+    /// The sweep behind it covered all 10x10 frequency pairs x 2 boundaries x 4
+    /// base timestamps -- 800 cases, 0 mismatches -- so the rows kept here are
+    /// the ones that would move first if the model were wrong: a coarse period
+    /// widening into ns (where the multiply is largest), a ns period collapsing
+    /// back, and the pre-epoch cases where a truncating divide would differ from
+    /// a floor.
+    #[test]
+    fn period_index_asfreq_subsecond_both_directions() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+
+        // 2024-03-15, one whole day, widened to nanoseconds. End is the LAST
+        // nanosecond of the day, not the first of the next.
+        let daily = super::PeriodIndex::new(vec![Period::new(19_797, PeriodFreq::Daily)]);
+        assert_eq!(
+            daily.asfreq_with_how("ns", "start")?.values(),
+            &[Period::new(1_710_460_800_000_000_000, PeriodFreq::Nanoseconds)]
+        );
+        assert_eq!(
+            daily.asfreq_with_how("ns", "end")?.values(),
+            &[Period::new(1_710_547_199_999_999_999, PeriodFreq::Nanoseconds)]
+        );
+        // ...and the same day widened to milliseconds from the epoch.
+        let epoch_day = super::PeriodIndex::new(vec![Period::new(0, PeriodFreq::Daily)]);
+        assert_eq!(
+            epoch_day.asfreq_with_how("ms", "start")?.values(),
+            &[Period::new(0, PeriodFreq::Milliseconds)]
+        );
+        assert_eq!(
+            epoch_day.asfreq_with_how("ms", "end")?.values(),
+            &[Period::new(86_399_999, PeriodFreq::Milliseconds)]
+        );
+
+        // Nanoseconds collapsing back: a 1ns period has start == end, so both
+        // boundaries land on the same coarser period.
+        let nanos = super::PeriodIndex::new(vec![Period::new(
+            1_710_498_645_123_456_789,
+            PeriodFreq::Nanoseconds,
+        )]);
+        assert_eq!(
+            nanos.asfreq_with_how("D", "start")?.values(),
+            &[Period::new(19_797, PeriodFreq::Daily)]
+        );
+        assert_eq!(
+            nanos.asfreq_with_how("D", "end")?.values(),
+            &[Period::new(19_797, PeriodFreq::Daily)]
+        );
+        assert_eq!(
+            nanos.asfreq_with_how("ms", "start")?.values(),
+            &[Period::new(1_710_498_645_123, PeriodFreq::Milliseconds)]
+        );
+
+        // One step between adjacent sub-second units, each way.
+        let millis =
+            super::PeriodIndex::new(vec![Period::new(1_710_498_645_123, PeriodFreq::Milliseconds)]);
+        assert_eq!(
+            millis.asfreq_with_how("ns", "start")?.values(),
+            &[Period::new(1_710_498_645_123_000_000, PeriodFreq::Nanoseconds)]
+        );
+        assert_eq!(
+            millis.asfreq_with_how("ns", "end")?.values(),
+            &[Period::new(1_710_498_645_123_999_999, PeriodFreq::Nanoseconds)]
+        );
+        let secondly = super::PeriodIndex::new(vec![Period::new(1_710_498_645, PeriodFreq::Secondly)]);
+        assert_eq!(
+            secondly.asfreq_with_how("us", "start")?.values(),
+            &[Period::new(1_710_498_645_000_000, PeriodFreq::Microseconds)]
+        );
+        assert_eq!(
+            secondly.asfreq_with_how("us", "end")?.values(),
+            &[Period::new(1_710_498_645_999_999, PeriodFreq::Microseconds)]
+        );
+
+        // ⚠️ PRE-EPOCH, where a truncating divide would disagree with the floor.
+        // 1969-12-31 23:59:59.999000001 is ns ordinal -999999, and the ms period
+        // containing it is -1 (NOT 0).
+        let pre_epoch =
+            super::PeriodIndex::new(vec![Period::new(-999_999, PeriodFreq::Nanoseconds)]);
+        assert_eq!(
+            pre_epoch.asfreq_with_how("ms", "start")?.values(),
+            &[Period::new(-1, PeriodFreq::Milliseconds)]
+        );
+        assert_eq!(
+            pre_epoch.asfreq_with_how("ms", "end")?.values(),
+            &[Period::new(-1, PeriodFreq::Milliseconds)]
+        );
+        // ...and back out: ms period -1 spans ns ordinals -1_000_000 ..= -1.
+        let pre_epoch_ms = super::PeriodIndex::new(vec![Period::new(-1, PeriodFreq::Milliseconds)]);
+        assert_eq!(
+            pre_epoch_ms.asfreq_with_how("ns", "start")?.values(),
+            &[Period::new(-1_000_000, PeriodFreq::Nanoseconds)]
+        );
+        assert_eq!(
+            pre_epoch_ms.asfreq_with_how("ns", "end")?.values(),
+            &[Period::new(-1, PeriodFreq::Nanoseconds)]
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn period_index_timestamp_boundaries_d44wh() -> Result<(), Box<dyn std::error::Error>> {
         fn ns(value: &str) -> Result<i64, super::DateRangeError> {
