@@ -3362,36 +3362,35 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
             "empty offset string".into(),
         ));
     }
-    // br-frankenpandas-offset-alias-2-2: pandas 2.2 RENAMED the offset aliases and
-    // deprecated the old spellings — M became ME, Q became QE, Y/A became YE, H
-    // became h, T became min, S became s. MEASURED, live pandas 2.2.3, resampling a
-    // daily series: D W M ME Q QE Y YE A H h T min S s B are all accepted, and M, Q,
-    // Y, A, H, T and S each emit a FutureWarning naming their replacement.
+    // br-frankenpandas-offset-alias-2-2. ⚠️ THE ALIAS MAPPING THAT WAS HERE IS
+    // REVERTED, because measuring the incumbent showed it would have turned a loud
+    // rejection into a QUIET WRONG ANSWER.
     //
-    // This parser read the LAST CHARACTER as the unit, so a multi-character alias
-    // could never work: "ME" read unit 'E' with count "M" and failed as an invalid
-    // offset. The CANONICAL pandas 2.2 spellings were exactly the ones that broke,
-    // while only the deprecated single letters worked.
+    // pandas 2.2 renamed the offset aliases (M -> ME, Q -> QE, Y/A -> YE, H -> h,
+    // T -> min, S -> s) and this parser reads the LAST CHARACTER as the unit, so the
+    // canonical new spellings fail as invalid offsets while only the deprecated
+    // single letters work. That much is a real defect and still stands.
     //
-    // ⚠️ SCOPE, stated rather than implied: this only lets the new spellings reach
-    // the SAME arms as before. `shift_date_string` implements 'D', 'M' and 'Y'/'A';
-    // 'W', 'Q', 'H', 'T' and 'S' still fall to its catch-all and still error, so
-    // aliasing "min" to 'T' would only change which message you get. QE is mapped
-    // because Q is what pandas calls it, not because quarterly shifting works yet.
-    // Those need real date arithmetic, which is separate work and not something to
-    // write without a compiler.
-    let (num_str, unit) = if let Some(head) = offset.strip_suffix("ME") {
-        (head, 'M')
-    } else if let Some(head) = offset.strip_suffix("YE") {
-        (head, 'Y')
-    } else if let Some(head) = offset.strip_suffix("QE") {
-        (head, 'Q')
-    } else {
-        (
-            &offset[..offset.len() - 1],
-            offset.chars().last().unwrap_or('D'),
-        )
-    };
+    // The tempting fix — map "ME" onto this file's 'M' arm — is WRONG. MEASURED,
+    // live pandas 2.2.3, from Wednesday 2024-01-03:
+    //     + ME  -> 2024-01-31     month END
+    //     + YE  -> 2024-12-31     year END
+    //     + QE  -> 2024-03-31     quarter END   (and QE == 3ME, confirmed)
+    //     + W   -> 2024-01-07     the next SUNDAY, NOT +7 days (W != 7D, confirmed)
+    // while `shift_date_string`'s 'M' arm adds a CALENDAR MONTH keeping the day
+    // (2024-02-03) and its 'Y' arm adds a calendar year (2025-01-03). Those are
+    // different operations, not different spellings of one.
+    //
+    // So the alias table cannot be written until the anchored (period-end) offsets
+    // exist. Rejecting "ME" is currently the HONEST answer: an unsupported spelling
+    // that errors is recoverable, an unsupported spelling that silently returns
+    // 2024-02-03 where pandas returns 2024-01-31 is not.
+    //
+    // Recorded rather than left implicit: 'W', 'Q', 'H', 'T' and 'S' have no arm at
+    // all below, and 'M'/'Y' implement calendar addition rather than pandas' period
+    // -end anchoring. Both are capability work, and both want a compiler.
+    let unit = offset.chars().last().unwrap_or('D');
+    let num_str = &offset[..offset.len() - 1];
     let count: i32 = if num_str.is_empty() {
         1
     } else {
