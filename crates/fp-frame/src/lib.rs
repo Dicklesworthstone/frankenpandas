@@ -2370,6 +2370,94 @@ fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
 /// FOLLOWING one. Labels with no present neighbor in the fill direction stay
 /// `None` (→ the reindex NaN fill), matching pandas' leading-gap ffill /
 /// trailing-gap bfill behavior.
+/// Numeric value of a label, for `reindex(method="nearest")` distance.
+///
+/// br-frankenpandas-reindex-nearest. Only the ORDERED NUMERIC labels have a
+/// meaningful distance. pandas will happily do `nearest` on a datetime index too
+/// (the distance is the timedelta), and this returns `None` for those and for
+/// strings so the caller can refuse explicitly rather than invent an order.
+/// Extending it to Datetime64/Timedelta64 is a follow-up, not an oversight.
+fn nearest_label_value(label: &IndexLabel) -> Option<f64> {
+    match label {
+        IndexLabel::Int64(v) => Some(*v as f64),
+        IndexLabel::Float64(v) => Some(f64::from(*v)),
+        _ => None,
+    }
+}
+
+/// Resolve absent labels to the CLOSEST source label, as `reindex(method="nearest")`.
+///
+/// MEASURED, live pandas 2.2.3, source index [0, 10, 20] with values [10, 20, 30]:
+///     target   4 -> 10.0     (label 0 is nearer)
+///     target   6 -> 20.0     (label 10 is nearer)
+///     target   5 -> 20.0     TIE, and it breaks toward the HIGHER label
+///     target  15 -> 30.0     TIE again, higher label again
+///     target  14 -> 20.0
+///     target  -3 -> 10.0     outside the range clamps; no NaN
+///     target  25 -> 30.0
+/// and on a non-monotonic source pandas raises
+///     ValueError: index must be monotonic increasing or decreasing
+/// which this mirrors as a CompatibilityRejected.
+///
+/// Present labels keep their own position — including a source NaN VALUE — for
+/// the same reason `reindex_with_method` documents: only ABSENT labels are filled.
+fn nearest_reindex_positions(
+    source: &[IndexLabel],
+    target: &[IndexLabel],
+    positions: &[Option<usize>],
+) -> Result<Vec<Option<usize>>, FrameError> {
+    if source.is_empty() {
+        return Ok(positions.to_vec());
+    }
+    let source_values: Vec<f64> = source
+        .iter()
+        .map(nearest_label_value)
+        .collect::<Option<Vec<f64>>>()
+        .ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "reindex method 'nearest' needs a numeric index".to_owned(),
+            )
+        })?;
+    // pandas' own precondition, and it is checked BEFORE any filling so a
+    // non-monotonic index fails the same way whether or not a label is absent.
+    let increasing = source_values.windows(2).all(|w| w[0] <= w[1]);
+    let decreasing = source_values.windows(2).all(|w| w[0] >= w[1]);
+    if !(increasing || decreasing) {
+        return Err(FrameError::CompatibilityRejected(
+            "index must be monotonic increasing or decreasing".to_owned(),
+        ));
+    }
+    let mut out = Vec::with_capacity(positions.len());
+    for (slot, label) in positions.iter().zip(target.iter()) {
+        if slot.is_some() {
+            out.push(*slot);
+            continue;
+        }
+        let Some(want) = nearest_label_value(label) else {
+            return Err(FrameError::CompatibilityRejected(
+                "reindex method 'nearest' needs a numeric index".to_owned(),
+            ));
+        };
+        let mut best: Option<(f64, f64, usize)> = None;
+        for (i, &have) in source_values.iter().enumerate() {
+            let distance = (have - want).abs();
+            // Strictly-better distance wins; an EQUAL distance wins only when the
+            // candidate label is GREATER, which is the tie rule measured above.
+            let take = match best {
+                None => true,
+                Some((best_distance, best_value, _)) => {
+                    distance < best_distance || (distance == best_distance && have > best_value)
+                }
+            };
+            if take {
+                best = Some((distance, have, i));
+            }
+        }
+        out.push(best.map(|(_, _, i)| i));
+    }
+    Ok(out)
+}
+
 fn carry_reindex_positions(positions: &[Option<usize>], forward: bool) -> Vec<Option<usize>> {
     let n = positions.len();
     let mut out = vec![None; n];
@@ -8508,9 +8596,14 @@ impl Series {
                 "reindex cannot handle duplicate index labels".to_owned(),
             ));
         }
+        // br-frankenpandas-reindex-nearest: 'nearest' is pandas' third method and
+        // was rejected here as unsupported. It is not a direction, so it cannot be
+        // folded into `forward` — it resolves each absent label to the CLOSEST
+        // source label instead of the closest one in a direction.
         let forward = match method {
-            "ffill" | "pad" => true,
-            "bfill" | "backfill" => false,
+            "ffill" | "pad" => Some(true),
+            "bfill" | "backfill" => Some(false),
+            "nearest" => None,
             other => {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "unsupported reindex method: '{other}'"
@@ -8526,7 +8619,10 @@ impl Series {
                 .unwrap_or_else(|| self.index.get_indexer(&new_index));
         // Absent labels inherit the nearest present source position in the fill
         // direction; present labels (incl. source NaNs) keep their own position.
-        let filled = carry_reindex_positions(&positions, forward);
+        let filled = match forward {
+            Some(direction) => carry_reindex_positions(&positions, direction),
+            None => nearest_reindex_positions(self.index.labels(), new_index.labels(), &positions)?,
+        };
         let col = self.column.reindex_by_positions(&filled)?;
         Self::new(self.name.clone(), new_index, col)
     }
@@ -70164,9 +70260,14 @@ impl DataFrame {
                 "reindex cannot handle duplicate index labels".to_owned(),
             ));
         }
+        // br-frankenpandas-reindex-nearest: 'nearest' is pandas' third method and
+        // was rejected here as unsupported. It is not a direction, so it cannot be
+        // folded into `forward` — it resolves each absent label to the CLOSEST
+        // source label instead of the closest one in a direction.
         let forward = match method {
-            "ffill" | "pad" => true,
-            "bfill" | "backfill" => false,
+            "ffill" | "pad" => Some(true),
+            "bfill" | "backfill" => Some(false),
+            "nearest" => None,
             other => {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "unsupported reindex method: '{other}'"
@@ -70199,7 +70300,10 @@ impl DataFrame {
             };
         // Absent labels inherit the nearest present source position in the fill
         // direction; present labels (incl. source NaNs) keep their own position.
-        let filled = carry_reindex_positions(&positions, forward);
+        let filled = match forward {
+            Some(direction) => carry_reindex_positions(&positions, direction),
+            None => nearest_reindex_positions(self.index.labels(), new_index.labels(), &positions)?,
+        };
         // Gather each column from the carried positions. Remaining `None` slots
         // (leading gap for ffill / trailing gap for bfill) become the column's
         // dtype-appropriate missing sentinel — `Null(NaN)` for Float64, but
