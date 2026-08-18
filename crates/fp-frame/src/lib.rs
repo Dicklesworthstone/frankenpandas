@@ -48863,6 +48863,48 @@ impl DatetimeAccessor<'_> {
         };
         self.extract_component(
             |s| {
+                // TZ-AWARE INPUT SNAPS IN ITS OWN ZONE AND KEEPS ITS OFFSET.
+                // br-frankenpandas-gmp9c. This used to fall through to the naive
+                // branch below, which parses to a UTC instant, snaps THAT, and
+                // formats with no offset — two errors compounding: the result was
+                // naive where pandas keeps `datetime64[ns, tz]`, AND it was a
+                // DIFFERENT INSTANT, because flooring the UTC instant is not
+                // flooring the local wall-clock. Measured on 2.2.3:
+                //   "2024-01-15 10:30:00+05:30".floor("D")
+                //     pandas -> 2024-01-15 00:00:00+05:30   (local midnight)
+                //     was    -> 2024-01-15 00:00:00         (UTC midnight, naive)
+                // A half-hour zone makes the two answers differ by more than the
+                // dropped suffix, which is why the guard fixture uses +05:30.
+                //
+                // 00ze3 calls a silently-shifted value worse than a visibly wrong
+                // dtype, and this was that: a well-formed datetime string a
+                // consumer would happily parse, compare and aggregate.
+                let trimmed = s.trim();
+                if has_tz_suffix(trimmed) {
+                    let Ok(parsed) = parse_tz_aware_datetime(trimmed) else {
+                        return Scalar::Null(NullKind::NaN);
+                    };
+                    // Snap the LOCAL wall-clock, then re-attach the ORIGINAL
+                    // suffix verbatim — offset and any `[Zone]` annotation — so a
+                    // named zone survives exactly as it arrived rather than being
+                    // re-derived and possibly re-spelled.
+                    let Some(local_ns) = parsed.fixed.naive_local().and_utc().timestamp_nanos_opt()
+                    else {
+                        return Scalar::Null(NullKind::NaN);
+                    };
+                    let snapped = snap_datetime_ns(local_ns, freq_ns, mode);
+                    let base = format_datetime_ns(snapped);
+                    let naive_part = if frac_digits == 0 {
+                        base
+                    } else {
+                        let stem = &base[..19];
+                        let subsec = snapped.rem_euclid(Timedelta::NANOS_PER_SEC);
+                        let frac = subsec / 10_i64.pow(9 - frac_digits as u32);
+                        format!("{stem}.{frac:0width$}", width = frac_digits)
+                    };
+                    let suffix = &trimmed[strip_tz_suffix(trimmed).len()..];
+                    return Scalar::Utf8(format!("{naive_part}{suffix}"));
+                }
                 let ns = match Timestamp::parse(s) {
                     Ok(ts) if ts.nanos != Timestamp::NAT => ts.nanos,
                     _ => return Scalar::Null(NullKind::NaN),
@@ -196222,14 +196264,16 @@ mod tz_surface_audit_00ze3 {
 ///
 /// `00ze3` warns that a QUIET zone-loss is worse than the LOUD Utf8 divergence
 /// `t2n6i` reports. Censusing the surface found four calls that had already made
-/// that trade: `floor`, `ceil`, `round` and `normalize` return a well-formed
-/// datetime string that has silently lost its offset, where pandas 2.2.3 keeps it.
+/// that trade: `floor`, `ceil`, `round` and `normalize` snapped the UTC instant and
+/// formatted it naked, so a tz-aware input came back naive AND at a different
+/// instant than pandas gives.
 ///
-/// Both halves are pinned here on purpose. Locking only the correct calls would let
-/// the broken four drift further; locking only the broken four would read as
-/// endorsement. Every "WRONG" assertion below carries pandas' answer and the bead
-/// id, so a fix is expected to break it — and breaking it is the signal, not a
-/// regression.
+/// **They are now FIXED** — they snap the local wall-clock and re-attach the
+/// original suffix. This module was written as a known-divergence pin BEFORE the
+/// fix, and it worked exactly as intended: it failed the moment the behaviour
+/// changed, and its message carried pandas' answer so the new value could be
+/// checked against it rather than merely observed to be different. The assertions
+/// below are now parity assertions against measured pandas 2.2.3 output.
 ///
 /// The fixture uses `+05:30` deliberately: a half-hour zone is the case where
 /// "round the UTC instant and re-stamp the offset" gives a DIFFERENT answer from
@@ -196286,13 +196330,17 @@ mod dt_timezone_census_gmp9c {
         assert_eq!(first(&s.dt().tz().expect("tz")), "+05:30");
     }
 
-    /// THE FOUR THAT ARE WRONG. Each expects FrankenPandas' CURRENT answer and
-    /// names pandas' in the message. If one of these fails, someone fixed it —
-    /// update the expectation, do not weaken the assertion.
+    /// THE FOUR THAT WERE WRONG, now asserted against measured pandas 2.2.3 output.
+    ///
+    /// Each expectation is the string pandas prints for the same input, read off a
+    /// live 2.2.3 run rather than derived. The `+05:30` fixture is load-bearing: a
+    /// half-hour zone is where "snap the UTC instant then re-stamp the offset"
+    /// gives a DIFFERENT answer from "snap the local wall-clock", so this catches
+    /// the plausible wrong fix as well as the original bug.
     #[test]
-    fn zone_dropping_accessors_are_pinned_as_a_known_divergence_gmp9c() {
+    fn zone_aware_rounding_matches_pandas_gmp9c() {
         let s = aware();
-        for (label, got, pandas_gives) in [
+        for (label, got, want) in [
             (
                 "floor(D)",
                 first(&s.dt().floor("D").expect("floor")),
@@ -196314,14 +196362,35 @@ mod dt_timezone_census_gmp9c {
                 "2024-01-15 00:00:00+05:30",
             ),
         ] {
-            assert!(
-                !got.contains("+05:30"),
-                "{label} now KEEPS the offset ({got}). If that is a deliberate fix for \
-                 br-frankenpandas-gmp9c, update this test — and check a half-hour zone \
-                 specifically, because rounding the UTC instant and re-stamping the \
-                 offset gives a DIFFERENT answer from rounding in the target zone. \
-                 pandas 2.2.3 gives {pandas_gives}."
+            assert_eq!(
+                got, want,
+                "{label} must snap in the LOCAL zone and keep its offset \
+                 (br-frankenpandas-gmp9c). A result without `+05:30` means the zone \
+                 was dropped again; a result WITH it but at a different clock time \
+                 means the UTC instant was snapped and the offset re-stamped, which \
+                 is the wrong fix."
             );
         }
+    }
+
+    /// Naive input must be untouched by the fix. The tz branch is new code on a
+    /// path every naive datetime also takes, so this pins that the common case did
+    /// not move.
+    #[test]
+    fn naive_rounding_is_unchanged_by_the_zone_fix_gmp9c() {
+        let naive = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15 10:30:00".to_owned())],
+        )
+        .expect("naive series");
+        assert_eq!(
+            first(&naive.dt().floor("D").expect("floor")),
+            "2024-01-15 00:00:00"
+        );
+        assert_eq!(
+            first(&naive.dt().round("H").expect("round")),
+            "2024-01-15 10:00:00"
+        );
     }
 }
