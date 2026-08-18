@@ -36401,3 +36401,60 @@ DISK      /data 56G under the build hold; no cargo invoked, nothing re-measured
 **Byline note:** this is the first entry signed `SlateHeron`. See the provenance entry in
 `327cde0eb` — `CrimsonPine` on 2026-08-17/18 rows is two agents, and the other pane keeps
 that name.
+
+### 2026-08-18 SlateHeron — two provenance-integrity results: the ROOT CAUSE of the byline collision was an artifact read as identity, and an audit of my own gate logs finds NO green resting on a silent rch refusal
+
+Two follow-ups to `327cde0eb`, both prompted by the other pane and both verified here
+rather than accepted.
+
+**1. THE ROOT CAUSE, which is sharper than the collision itself.** I did not choose the
+name `CrimsonPine`. At session start I read a `br-frankenpandas-cu22b` ledger entry signed
+`CrimsonPine`, noted that its content matched work I was continuing, and concluded "so I
+am CrimsonPine." It was almost certainly the other pane's entry. **I inferred my own
+identity from an artifact in a shared file and never checked it** — no `whois`, no
+registration lookup, nothing. Every downstream row I signed inherited that error.
+
+This is the same failure class as the rest of the day's corrections, one level up:
+`v3q4j` (read the oracle's answer as pandas' answer), the `read_csv` probe
+(`skip_blank_lines` silently removed the gap), the `sort` estimate (asserted a cost
+without measuring it). **An artifact read as identity, without a check.** The ledger is
+full of warnings about trusting recorded values; none of them covered trusting a recorded
+byline about who you are.
+
+The concrete guard: `mcp__mcp-agent-mail__whois` / `list_agents` resolves a pane to a
+registered identity in one call. It costs nothing and it is now the first thing to do in a
+session that will sign anything.
+
+**2. AN AUDIT OF MY OWN GATES, because "green because it never ran" is the failure my own
+notes are loudest about.** The other pane checked theirs and found them clean; I checked
+mine the same way rather than assume. Every gate log this session, cross-checked in both
+directions:
+
+| check | result |
+|---|---|
+| logs containing an rch refusal (`no admissible` / `refusing local fallback` / `No space left` / `RCH-E`) | **6**: `bpy1`, `g7`, `t12`, `t13`, `t14`, `t15` |
+| logs claiming a `test result` line | 25 |
+| logs in BOTH sets — a refusal misread as a pass | **0** |
+| `test result` logs hiding a refusal line | **0** |
+
+**The two sets are disjoint.** No banked green rests on a refusal. Each of the six was
+caught and handled at the time: `bpy1` (`RCH-E309`, artifact-retrieval timeout) was re-run
+to exit 0; `g7` (`RCH-E301`, shell-wrapped cargo) was re-run as separate invocations;
+`t12` (remote worker `No space left on device`) and `t13`/`t14`/`t15` (`no admissible
+workers: critical_pressure=1, insufficient_slots=1, insufficient_total_slots=7`) were the
+full fp-frame suite, which I reported as NOT RUN at the time and later paid off locally at
+3318 passed / 0 failed.
+
+**What made this auditable was a habit, not luck:** every `rch exec` in this session was
+wrapped in `grep -ciE 'no admissible|refusing local fallback|insufficient_slots|RCH-E'`
+alongside the exit code, so a refusal could not read as silence. **An rch refusal exits
+NON-ZERO and prints NO test output — the shape that looks identical to a clean run if you
+only check for the absence of failures.**
+
+**A/A null control (same invocation):** not applicable — this entry reports log counts and
+an identity trace. No measurement was taken and nothing was certified.
+
+```
+LOADAVG   4.67 / 5.01 / 8.84 ;  CPU IDLE 91.92%, iowait 0.00%, by mpstat
+DISK      /data 56G, flat, under the standing build hold; no cargo invoked
+```
