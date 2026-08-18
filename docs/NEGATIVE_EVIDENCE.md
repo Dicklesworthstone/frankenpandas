@@ -38951,3 +38951,86 @@ untouched, and a CSR layout (counts, then offsets, then ONE flat `Vec<usize>` of
 remaining allocation lever — it removes the Vec-of-Vecs entirely but changes `build_groups`' return
 shape, which many callers consume. vw0uu stays OPEN. **`apply_grouped_expanding` shares both fixed
 code paths but was NOT measured**; only the rolling lane was.
+
+### 2026-08-18 SlateHeron (br-frankenpandas-00ze3, t2n6i, hp2ko, qfyn0, 59hi4) — THE DATETIME VALUE CONTRACT, ALL FIVE ENTRY POINTS MEASURED IN ONE PLACE: the decision is blocked on a question nobody had assembled the evidence for
+
+`hp2ko` says it plainly: **"do not patch this one in isolation. Three entry points now
+diverge the same way for the same reason; fixing them one at a time is how a codebase ends
+up with three carriers."** It is right, and the reason the decision has not been taken is
+that the evidence for it was scattered across five beads. This assembles it. Everything
+below was measured against live pandas 2.2.3 tonight, on this host, by execution rather
+than by reading.
+
+**WHAT ALREADY MATCHES — and it is most of the surface, which is the part that reframes the
+question.** These are not "close enough"; they are character-for-character or nanosecond
+identical:
+
+| call | FrankenPandas | pandas 2.2.3 |
+|---|---|---|
+| `to_datetime(tz-aware, utc=true)` | `Datetime64` correct instant | `datetime64[ns, UTC]` — **same nanos** |
+| `to_datetime(mixed offsets)` | Utf8, both values, own offsets | object, both values, own offsets — **same values** |
+| `to_datetime(mixed offsets, utc)` | both converted | **same nanos** |
+| `tz_convert(fixed offset)` | matches | matches |
+| `tz_convert(None)` / `tz_localize(None)` | match | match |
+| `timetz` | `02:00:00+05:30` | same |
+| `floor` / `ceil` / `round` / `normalize` | **fixed tonight** (`gmp9c`) | match |
+| `day`/`hour`/`date`/`dayofyear`/`day_name`/`dayofweek` | read LOCAL | match |
+| DST transitions | `-05:00` before, `-04:00` after | **both correct** |
+
+**WHAT DIVERGES, and each row is a DIFFERENT decision rather than one bug repeated:**
+
+| # | divergence | FrankenPandas | pandas | family |
+|---|---|---|---|---|
+| 1 | `to_datetime(tz-aware, utc=false)` | `Utf8` | `datetime64[ns, tz]` | no dtype-level zone (`00ze3`) |
+| 2 | named-zone rendering | `...-05:00[America/New_York]` | `...-05:00` | extension vs parity (`59hi4`) |
+| 3 | `to_datetime` on an annotated value | **drops the annotation** | cannot parse it at all | INTERNAL inconsistency |
+| 4 | `.dt.tz` shape | per-element Series | ONE scalar | dtype-level zone (`00ze3`) |
+| 5 | mixed naive+offset | coerces `[1]` to NaT | **RAISES** (default) | more-permissive (`n8aqm` family) |
+| 6 | mixed-zone `.dt` accessor | answers | **refuses** — object dtype | more-permissive |
+
+**THE THREE OBSERVATIONS THAT SHOULD DRIVE THE DECISION, none of which is visible from any
+single bead:**
+
+**(a) ONLY TWO OF THE SIX ARE ACTUALLY THE STRUCTURAL QUESTION.** Rows 1 and 4 are
+`DType::Datetime64` having no zone slot. Rows 5 and 6 are FrankenPandas being MORE PERMISSIVE
+than pandas, which is the `n8aqm`/`0g9m9` family and survives any dtype decision untouched.
+Row 2 is a rendering choice. Row 3 is an inconsistency with ourselves. **Deciding the value
+contract fixes two rows, not six** — and a plan that assumes otherwise will look like it
+failed.
+
+**(b) ROW 3 IS SETTLEABLE NOW, WITHOUT THE STRUCTURAL DECISION, AND IT BLOCKS NOTHING.**
+`floor`/`ceil`/`round` preserve the `[Zone]` annotation (that is `gmp9c`'s fix re-attaching
+the suffix verbatim); `to_datetime` strips it. Two operations on the same representation
+disagree about whether the name is part of the value. Whichever way rows 1 and 2 go, those
+two should agree with each other first — and making them agree is a small change that
+narrows the larger question rather than pre-empting it.
+
+**(c) THE PERMISSIVENESS ROWS HAVE A HIDDEN COST IN THE STRUCTURAL FIX.** If
+`DType::Datetime64` gains a zone, a mixed-offset column becomes UNREPRESENTABLE, exactly as
+in pandas. Today `to_datetime` on mixed offsets silently succeeds and keeps both values.
+After the fix it must do something else — object-equivalent, error, or coerce — and that
+behaviour is currently pinned by a lock I added tonight. **The structural fix therefore
+CHANGES a behaviour that presently matches pandas.** Anyone scoping it should count that as
+part of the work rather than discovering it during migration.
+
+**WHAT I DID NOT DO, and why.** I did not take the decision, patch any single entry point, or
+wire `series_dt_tz` — its oracle half exists and emits `expected_scalar`, but wiring the Rust
+comparison would force a choice between reducing FP's Series to a scalar (which HIDES row 4
+by construction) and failing every fixture on shape (which encodes an untaken decision).
+Neither is a fixture's job.
+
+**Coverage now exists where it did not.** `t2n6i` recorded ZERO tz-aware differential
+coverage this morning; the corpus now carries 16 tz-aware fixtures, all green, all
+discriminating by construction, plus three new conformance operations. The rows above are
+findable BECAUSE that coverage exists — which is the argument for building coverage before
+taking a representation decision, not after.
+
+```
+NO VERDICT, NO RATIO, NO ROW BANKED — a consolidation of parity measurements, not a
+performance result.
+LOADAVG   9.50 / 11.14 / 12.75, CPU idle 89.83% by my own mpstat; no cargo invoked for
+          this entry, and the build slot was checked by resolving each running cargo's
+          cwd (frankensqlite, not this project).
+DISK      /data 70G — 28G above the brake, and down from 88G at the session's start. The
+          direction is steady rather than noisy and is worth watching.
+```
