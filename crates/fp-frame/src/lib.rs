@@ -196441,3 +196441,109 @@ mod dt_timezone_census_gmp9c {
         );
     }
 }
+
+/// `to_datetime` on MIXED OFFSETS, both arms measured against pandas 2.2.3
+/// (br-frankenpandas-00ze3, br-frankenpandas-t2n6i).
+///
+/// pandas cannot hold mixed offsets in a `datetime64` column, so:
+///   * `to_datetime(mixed)` falls back to **object** dtype and keeps every value at
+///     its OWN offset, unconverted
+///   * `to_datetime(mixed, utc=True)` gives `datetime64[ns, UTC]` with every value
+///     converted to the same instant scale
+///
+/// FrankenPandas stores datetimes as Utf8, so a mixed column is unremarkable to it.
+/// I flagged on `00ze3` that this "silently succeeds" and was UNTESTED — which is
+/// how a silent divergence survives. Measuring it turned the worry into a positive
+/// result: **both arms agree with pandas**, and this pins it.
+///
+/// ⚠️ THE DTYPES ARE NOT EQUAL AND THAT IS NOT HIDDEN HERE. pandas returns `object`
+/// where we return `Utf8`. `Utf8` is the closest thing we have to a column of
+/// per-element Timestamps, and the VALUES match exactly — but a reader must not take
+/// these tests as a claim of dtype parity. The dtype question is `00ze3`'s.
+#[cfg(test)]
+mod to_datetime_mixed_offsets_00ze3 {
+    use fp_types::{DType, Scalar};
+
+    use super::{Series, ToDatetimeOptions, to_datetime_with_options};
+
+    fn mixed() -> Series {
+        Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 02:00:00+05:30".to_owned()),
+                Scalar::Utf8("2024-01-15 02:00:00+01:00".to_owned()),
+            ],
+        )
+        .expect("mixed-offset series")
+    }
+
+    /// Default arm: each value keeps its OWN offset, unconverted — the same values
+    /// pandas puts in its object-dtype fallback.
+    #[test]
+    fn mixed_offsets_without_utc_keep_their_own_offsets_00ze3() {
+        let out =
+            to_datetime_with_options(&mixed(), ToDatetimeOptions::default()).expect("to_datetime");
+        assert_eq!(out.dtype(), DType::Utf8);
+        assert_eq!(
+            out.values(),
+            vec![
+                Scalar::Utf8("2024-01-15 02:00:00+05:30".to_owned()),
+                Scalar::Utf8("2024-01-15 02:00:00+01:00".to_owned()),
+            ],
+            "pandas 2.2.3 to_datetime(mixed) gives object dtype holding exactly these \
+             two values, each at its own offset. If they start converting or losing \
+             their suffix here, that is a silent shift — take 00ze3's decision rather \
+             than restamping this."
+        );
+    }
+
+    /// `utc=true` arm: every value converted to the SAME instant scale. These nanos
+    /// are pandas' own — `pd.to_datetime(..., utc=True)` then `.value` — not
+    /// derived by hand.
+    #[test]
+    fn mixed_offsets_with_utc_converge_on_pandas_instants_00ze3() {
+        let out = to_datetime_with_options(
+            &mixed(),
+            ToDatetimeOptions {
+                utc: true,
+                ..ToDatetimeOptions::default()
+            },
+        )
+        .expect("to_datetime utc");
+        assert_eq!(out.dtype(), DType::Datetime64);
+        assert_eq!(
+            out.values(),
+            vec![
+                Scalar::Datetime64(1_705_264_200_000_000_000),
+                Scalar::Datetime64(1_705_280_400_000_000_000),
+            ],
+            "these are pandas' own nanosecond instants for 2024-01-14 20:30:00+00:00 \
+             and 2024-01-15 01:00:00+00:00 — the +05:30 and +01:00 inputs converge \
+             only if each offset is APPLIED rather than stripped"
+        );
+    }
+
+    /// NON-VACUITY for the pair above: the two arms must disagree. If `utc` stopped
+    /// being honoured, both would return the same thing and both assertions could
+    /// not hold at once.
+    #[test]
+    fn the_utc_flag_must_actually_change_the_answer_00ze3() {
+        let plain =
+            to_datetime_with_options(&mixed(), ToDatetimeOptions::default()).expect("plain");
+        let utc = to_datetime_with_options(
+            &mixed(),
+            ToDatetimeOptions {
+                utc: true,
+                ..ToDatetimeOptions::default()
+            },
+        )
+        .expect("utc");
+        assert_ne!(
+            plain.dtype(),
+            utc.dtype(),
+            "utc=true must change the result; if both arms agree the flag is inert and \
+             the two tests above are pinning one behaviour twice"
+        );
+    }
+}
