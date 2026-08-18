@@ -36383,6 +36383,30 @@ applied the weaker check.** Anyone re-certifying this op should take min/min exp
 rather than inherit my word for it. I am not withdrawing the row; I am marking it as
 verified to a lower standard than the one now available.
 
+**AMENDMENT, same day — I stated the trigger too broadly and the other pane's
+formulation is sharper.** I wrote the hazard as "the INCUMBENT is multithreaded". That is
+a proxy, and a leaky one in both directions. The actual hazard is that **the incumbent's
+run-to-run SPREAD is comparable in size to the effect being claimed.** When it is,
+median-vs-median can be decided by which part of each arm's distribution the run happened
+to land in, and min/min — each arm's own best — is what strips the contention out. Thread
+count matters only through that channel, by widening the incumbent's spread; a
+single-threaded incumbent on a contended host is exactly as dangerous, and a 67-thread
+incumbent with a tight distribution is not dangerous at all.
+
+**Applied to this row with its own recorded fields, the sharper criterion is not close.**
+pandas' cv is **10.35%** and FP's is 7.54%, against a claimed effect of **7.505x** — the
+spread is roughly one part in sixty of the effect. That, not the 4% median/best agreement,
+is the real reason the row stands. The corollary is the useful half: at a ratio of ~1.1x
+with a 10% incumbent cv, direction-agreement would have been worth nothing and min/min
+would have been mandatory. **The threshold for taking min/min is a spread-to-effect
+comparison, not a thread count.**
+
+Worth noting where that leaves the gate: `CV role: provenance only, no vote` is recorded
+right on the original row. The gate deliberately gives cv no vote — and the min/min
+question is precisely the judgement where cv is the deciding field. That is not a bug in
+the gate (cv is too easy to game as a pass/fail clause) but it does mean this particular
+check cannot be automated out of a reader's hands.
+
 **A/A null control (same invocation):** the underlying row's nulls are FrankenPandas
 1.002896 and pandas 1.011302, both inside the 2% limit — unchanged by this caveat, which
 concerns the incumbent's thread count and not the null.
