@@ -3695,6 +3695,14 @@ enum AsFreqUnit {
     ///
     /// `YE-MAR` puts the year end at 31 March; plain `YE` is `YE-DEC`.
     YearEnd(u8),
+    /// Monthly, anchored on the FIRST day of each month (`MS`).
+    MonthStart,
+    /// Quarterly, anchored on the first day of the quarter's FIRST month
+    /// (1..=12, default 1 = January, i.e. `QS` == `QS-JAN`).
+    QuarterStart(u8),
+    /// Annual, anchored on the first day of the year's first month
+    /// (1..=12, default 1 = January, i.e. `YS` == `YS-JAN`).
+    YearStart(u8),
     /// Weekly, anchored on a WEEKDAY expressed as days-from-Sunday (0 = Sunday).
     ///
     /// br-frankenpandas-week-anchor-days. pandas has seven weekly frequencies —
@@ -3784,6 +3792,18 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
         //     A-JUN   -> 06-30 each year                  (deprecated spelling)
         // The quarter rule is `month % 3 == anchor % 3`, which for the December
         // default reduces to the `month % 3 == 0` this code already had.
+        // PERIOD STARTS. MEASURED, live pandas 2.2.3, date_range 2024-02-10..2025-06-30:
+        //     MS     -> 2024-03-01, 2024-04-01, ... first of EVERY month
+        //     QS     -> 2024-04-01, 2024-07-01, 2024-10-01, 2025-01-01   (QS == QS-JAN)
+        //     QS-FEB -> 2024-05-01, 2024-08-01, 2024-11-01, 2025-02-01
+        //     YS     -> 2025-01-01                                        (YS == YS-JAN)
+        //     YS-JUL -> 2024-07-01
+        // The quarter anchor names the quarter's FIRST month here, where QE names its
+        // last — so the defaults differ (QS is January, QE is December) even though
+        // both reduce to the same modulo-3 test.
+        "MS" => AsFreqUnit::MonthStart,
+        "QS" => AsFreqUnit::QuarterStart(1),
+        "YS" | "AS" => AsFreqUnit::YearStart(1),
         "Q" | "QE" | "QUARTER" | "QUARTERS" => AsFreqUnit::QuarterEnd(12),
         "Y" | "A" | "YE" | "YEAR" | "YEARS" => AsFreqUnit::YearEnd(12),
         // MEASURED, live pandas 2.2.3, from Wednesday 2024-01-03:
@@ -3808,11 +3828,13 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
                 match head {
                     "Q" | "QE" => return Ok((count, AsFreqUnit::QuarterEnd(month))),
                     "Y" | "A" | "YE" => return Ok((count, AsFreqUnit::YearEnd(month))),
+                    "QS" => return Ok((count, AsFreqUnit::QuarterStart(month))),
+                    "YS" | "AS" => return Ok((count, AsFreqUnit::YearStart(month))),
                     _ => {}
                 }
             }
             return Err(FrameError::CompatibilityRejected(format!(
-                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC)"
+                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC), MS, QS (and QS-JAN..QS-DEC), YS (and YS-JAN..YS-DEC)"
             )));
         }
     };
@@ -3883,6 +3905,15 @@ fn asfreq_midnight(date: NaiveDate) -> Result<NaiveDateTime, FrameError> {
 }
 
 /// Last calendar day of `(year, month)` at midnight.
+/// Midnight on the FIRST day of `month`, the period-start mirror of
+/// [`asfreq_month_end`].
+fn asfreq_month_start(year: i32, month: u32) -> Result<NaiveDateTime, FrameError> {
+    asfreq_midnight(
+        NaiveDate::from_ymd_opt(year, month, 1)
+            .ok_or_else(|| FrameError::CompatibilityRejected("asfreq date overflow".to_owned()))?,
+    )
+}
+
 fn asfreq_month_end(year: i32, month: u32) -> Result<NaiveDateTime, FrameError> {
     let last = period_last_day_of_month(year, month)
         .ok_or_else(|| FrameError::CompatibilityRejected("asfreq date overflow".to_owned()))?;
@@ -3907,12 +3938,28 @@ fn anchored_asfreq_anchors(
         }
     };
     match unit {
-        AsFreqUnit::MonthEnd | AsFreqUnit::QuarterEnd(_) | AsFreqUnit::YearEnd(_) => {
+        AsFreqUnit::MonthEnd
+        | AsFreqUnit::QuarterEnd(_)
+        | AsFreqUnit::YearEnd(_)
+        | AsFreqUnit::MonthStart
+        | AsFreqUnit::QuarterStart(_)
+        | AsFreqUnit::YearStart(_) => {
             let (mut year, mut month) = (start.year(), start.month());
             // Walk month-ends from the start month up to (and including) the end
             // month, keeping only the ones the unit anchors on and in range.
             loop {
-                let me = asfreq_month_end(year, month)?;
+                // Period STARTS anchor on day 1, ends on the last day; the month
+                // walk and the range logic are identical either way.
+                let me = if matches!(
+                    unit,
+                    AsFreqUnit::MonthStart
+                        | AsFreqUnit::QuarterStart(_)
+                        | AsFreqUnit::YearStart(_)
+                ) {
+                    asfreq_month_start(year, month)?
+                } else {
+                    asfreq_month_end(year, month)?
+                };
                 if me > end && me.year() > end.year() {
                     break;
                 }
@@ -3924,6 +3971,9 @@ fn anchored_asfreq_anchors(
                     // which is the `month % 3 == 0` this line used to hard-code.
                     AsFreqUnit::QuarterEnd(anchor) => month % 3 == u32::from(anchor) % 3,
                     AsFreqUnit::YearEnd(anchor) => month == u32::from(anchor),
+                    AsFreqUnit::MonthStart => true,
+                    AsFreqUnit::QuarterStart(anchor) => month % 3 == u32::from(anchor) % 3,
+                    AsFreqUnit::YearStart(anchor) => month == u32::from(anchor),
                     _ => unreachable!(),
                 };
                 if keep {
