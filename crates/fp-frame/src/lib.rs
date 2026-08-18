@@ -3686,8 +3686,15 @@ enum AsFreqUnit {
     // last calendar day, Week anchors on Sunday (`W`/`W-SUN`), BusinessDay on
     // weekdays.
     MonthEnd,
-    QuarterEnd,
-    YearEnd,
+    /// Quarterly, anchored on the month the quarters END in (1..=12, default 12).
+    ///
+    /// br-frankenpandas-week-anchor-days, second slice. pandas anchors quarters:
+    /// `QE-NOV` ends quarters in Feb/May/Aug/Nov, and plain `QE` is `QE-DEC`.
+    QuarterEnd(u8),
+    /// Annual, anchored on the month the year ENDS in (1..=12, default 12).
+    ///
+    /// `YE-MAR` puts the year end at 31 March; plain `YE` is `YE-DEC`.
+    YearEnd(u8),
     /// Weekly, anchored on a WEEKDAY expressed as days-from-Sunday (0 = Sunday).
     ///
     /// br-frankenpandas-week-anchor-days. pandas has seven weekly frequencies —
@@ -3713,6 +3720,25 @@ enum AsFreqLabelStyle {
     DateOnlyUtf8,
     DateTimeUtf8,
     Datetime64,
+}
+
+/// Month number for a pandas frequency anchor suffix ("JAN".."DEC").
+fn asfreq_anchor_month(name: &str) -> Option<u8> {
+    Some(match name {
+        "JAN" => 1,
+        "FEB" => 2,
+        "MAR" => 3,
+        "APR" => 4,
+        "MAY" => 5,
+        "JUN" => 6,
+        "JUL" => 7,
+        "AUG" => 8,
+        "SEP" => 9,
+        "OCT" => 10,
+        "NOV" => 11,
+        "DEC" => 12,
+        _ => return None,
+    })
 }
 
 fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
@@ -3749,8 +3775,17 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
         // `M`/`ME` are month-END anchored in pandas (the legacy `M` alias too),
         // not a day-of-month-preserving month step.
         "M" | "ME" | "MONTH" | "MONTHS" => AsFreqUnit::MonthEnd,
-        "Q" | "QE" | "QUARTER" | "QUARTERS" => AsFreqUnit::QuarterEnd,
-        "Y" | "A" | "YE" | "YEAR" | "YEARS" => AsFreqUnit::YearEnd,
+        // MEASURED, live pandas 2.2.3, date_range over 2024:
+        //     QE      -> 03-31, 06-30, 09-30, 12-31       plain QE is QE-DEC
+        //     QE-NOV  -> 02-29, 05-31, 08-31, 11-30       quarters END in Nov
+        //     Q-JAN   -> 01-31, 04-30, 07-31, 10-31       (deprecated spelling)
+        //     YE      -> 12-31 each year                  plain YE is YE-DEC
+        //     YE-MAR  -> 03-31 each year
+        //     A-JUN   -> 06-30 each year                  (deprecated spelling)
+        // The quarter rule is `month % 3 == anchor % 3`, which for the December
+        // default reduces to the `month % 3 == 0` this code already had.
+        "Q" | "QE" | "QUARTER" | "QUARTERS" => AsFreqUnit::QuarterEnd(12),
+        "Y" | "A" | "YE" | "YEAR" | "YEARS" => AsFreqUnit::YearEnd(12),
         // MEASURED, live pandas 2.2.3, from Wednesday 2024-01-03:
         //     W-MON -> 2024-01-08   W-TUE -> 2024-01-09   W-WED -> 2024-01-10
         //     W-THU -> 2024-01-04   W-FRI -> 2024-01-05   W-SAT -> 2024-01-06
@@ -3765,9 +3800,19 @@ fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
         "W-FRI" => AsFreqUnit::Week(5),
         "W-SAT" => AsFreqUnit::Week(6),
         "B" | "BDAY" | "BUSINESS" => AsFreqUnit::BusinessDay,
-        _ => {
+        other => {
+            // Anchored quarter/year suffixes: QE-NOV, Q-JAN, YE-MAR, A-JUN, ...
+            if let Some((head, month_name)) = other.split_once('-')
+                && let Some(month) = asfreq_anchor_month(month_name)
+            {
+                match head {
+                    "Q" | "QE" => return Ok((count, AsFreqUnit::QuarterEnd(month))),
+                    "Y" | "A" | "YE" => return Ok((count, AsFreqUnit::YearEnd(month))),
+                    _ => {}
+                }
+            }
             return Err(FrameError::CompatibilityRejected(format!(
-                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE, Y/A/YE"
+                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, W (and W-MON..W-SUN), B, M/ME, Q/QE (and QE-JAN..QE-DEC), Y/A/YE (and YE-JAN..YE-DEC)"
             )));
         }
     };
@@ -3862,7 +3907,7 @@ fn anchored_asfreq_anchors(
         }
     };
     match unit {
-        AsFreqUnit::MonthEnd | AsFreqUnit::QuarterEnd | AsFreqUnit::YearEnd => {
+        AsFreqUnit::MonthEnd | AsFreqUnit::QuarterEnd(_) | AsFreqUnit::YearEnd(_) => {
             let (mut year, mut month) = (start.year(), start.month());
             // Walk month-ends from the start month up to (and including) the end
             // month, keeping only the ones the unit anchors on and in range.
@@ -3873,8 +3918,12 @@ fn anchored_asfreq_anchors(
                 }
                 let keep = match unit {
                     AsFreqUnit::MonthEnd => true,
-                    AsFreqUnit::QuarterEnd => month % 3 == 0,
-                    AsFreqUnit::YearEnd => month == 12,
+                    // A quarter anchored on month `a` ends in every month
+                    // congruent to `a` modulo 3 — measured above: QE-NOV keeps
+                    // Feb/May/Aug/Nov, and the December default keeps 3/6/9/12,
+                    // which is the `month % 3 == 0` this line used to hard-code.
+                    AsFreqUnit::QuarterEnd(anchor) => month % 3 == u32::from(anchor) % 3,
+                    AsFreqUnit::YearEnd(anchor) => month == u32::from(anchor),
                     _ => unreachable!(),
                 };
                 if keep {
