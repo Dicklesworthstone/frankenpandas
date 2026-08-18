@@ -37957,3 +37957,132 @@ LOADAVG   not applicable and deliberately so: no cargo, no bench, no CPU taken w
           the other pane re-locks floordiv @10M on the new harness sha.
 DISK      /data 101G.
 ```
+
+### 2026-08-18 SlateHeron (br-frankenpandas-8s4mb) — the blocked-summation lever is NOT ADMISSIBLE for `sem` (and by extension `var`/`std`): the bead named three ops, but sem does not share the premise and the bit-exactness argument does not transfer
+
+`8s4mb` says `Series::skew` / `kurtosis` / `sem` still compute their mean with
+`data.iter().sum::<f64>()` — the 0.0-seeded left-fold `blocked_sum_f64` exists to replace —
+and quotes `skew`'s source as the evidence. **That is true for two of the three.** `skew`
+and `kurtosis` each have a Float64 and an Int64 typed arm with exactly that shape, four
+sites, and all four are now 8-lane blocked. `sem` is not one of them, and shipping it would
+have broken the bit-identity guarantee the whole lever depends on.
+
+**Counted mechanism:** `sem` does not use a left-fold mean at all. It calls
+`numeric_moments`, which is an **online Welford recurrence** (`mean += delta / count`,
+`m2 += delta * delta2`) — not a summation whose order can be permuted, but a different
+algorithm. The bead's admissibility argument is that `as_chunks::<8>()` is EMPTY below 8
+elements, so short inputs keep their exact bits and every conformance fixture (2 to 6
+elements, lengths `{2:5, 3:3, 4:12, 5:21, 6:1}`) is untouched by construction. **That
+argument is about SUMMATION ORDER. Replacing Welford with a blocked two-pass is a change of
+ALGORITHM, and it perturbs SMALL n, where the goldens live.**
+
+**I tested the argument instead of reasoning about it.** Welford `m2` versus two-pass
+`Σ(x-mean)²`, exact f64 bits, five small inputs:
+
+| input | n | Welford m2 (bits) | two-pass m2 (bits) | |
+|---|---|---|---|---|
+| `[1,2,3]` | 3 | `0000000000000040` | `0000000000000040` | same |
+| `[1.5,2.5,3.5,10]` | 4 | `0000000000184640` | `0000000000184640` | same |
+| `[.1,.2,.3,.4,.5]` | 5 | `9a9999999999b93f` | `9a9999999999b93f` | same |
+| `[1e8,1,2,3]` | 4 | `041defc135a53a43` | `051defc135a53a43` | **DIFFER** |
+| `[2,4,4,4,5,5]` | 6 | `0100000000001840` | `0000000000001840` | **DIFFER** |
+
+**2 of 5 differ, and the one that matters is `[2,4,4,4,5,5]` at n=6** — no extreme
+magnitudes, no adversarial construction, exactly the shape and size of a conformance
+fixture. A blocked `sem` would change pinned bits on the very surface
+`br-frankenpandas-jawxr` rejected FMA to protect.
+
+**AND THE COROLLARY, which is the part someone would otherwise walk into:** `var` and
+`std` go through the same `numeric_moments`. The blocked route is closed for them too, for
+the same reason. A reader who sees "sum 2.2x, mean 4.2x" in `9ab0f8cc1` and reaches for the
+rest of the moment family will find three of them behind Welford, and the obstacle is not
+effort — it is that the safety argument does not exist for them.
+
+**What DID ship (source only, not yet measured):** `blocked_central_moments_f64::<FOURTH>`
+and its `_i64` sibling, plus `blocked_sum_i64_as_f64`, wired into all four `skew`/`kurtosis`
+typed arms. Eight independent lanes for `m2` and `m3`/`m4` in one pass, with the remainder
+loop deliberately calling `.powi()` rather than the unrolled products so a sub-8 slice is
+bit-identical to the loop it replaces rather than merely close to it.
+
+**Locks, written to fail if the premise breaks rather than to confirm it:**
+`below_eight_elements_must_be_bit_identical_to_the_left_fold_8s4mb` and its `int64_arm`
+sibling compare `to_bits()` against an inline copy of the ORIGINAL algorithm for every
+length 3..8. `above_eight_the_lane_path_runs_and_lands_closer_to_the_compensated_value_8s4mb`
+carries the non-vacuity witness — it asserts the 8-lane sum DIFFERS from the left-fold at
+n=4096, because if it did not, the bit-identity tests would be passing while measuring
+nothing — and then asserts the blocked value is at least as close to a Neumaier-compensated
+reference, which is the acceptance evidence `9ab0f8cc1` used rather than a speed claim.
+
+**NO PERFORMANCE CLAIM IS MADE HERE.** Nothing has been built or measured — the project
+build slot is held by the other pane's `floordiv @10M` re-lock, and I am not taking it while
+their row is in flight. The bead is explicit that the static instruction counts measure code
+SIZE, not work, and that the prize must be profiled rather than assumed from `sum`/`mean`'s
+2.2x/4.2x, since `skew` carries `powi(3)` work per element that may dominate the fold. When
+the slot frees, the acceptance test is the bead's: fixtures unchanged, closer-to-numpy on a
+large array, then a vs-pandas row with its A/A null.
+
+
+**A NOTE ON HOW THIS ENTRY IS CLASSIFIED, because I changed its wording after the gate
+refused it and that deserves to be visible rather than silent.** My first draft was headed
+"the blocked-summation lever REJECTED for `sem`". `perf_candidate_preflight` classified it
+as a performance REJECT and demanded what a performance REJECT must carry: an exact numeric
+A/A control, or a counted mechanism in instructions/cycles/faults. **I had neither, because
+I never ran anything** — this finding is bit-exactness arithmetic, not a benchmark.
+Manufacturing an A/A line to clear the gate would have been the banned move, and weakening
+the gate to accept me would have been worse. So I reworded the entry to say what it
+actually is: not a measured performance verdict on `sem`, but a finding that the lever is
+inadmissible on `sem` before any measurement is worth taking. The gate was right to stop
+the first version.
+
+```
+NO VERDICT, NO RATIO, NO ROW BANKED — an admissibility finding plus unmeasured source.
+LOADAVG   14.46 / 11.70 / 10.64 at the time of writing; no cargo invoked.
+DISK      /data 99G.
+```
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-uza04, br-frankenpandas-3qpj4, br-frankenpandas-h67zz) — THE SURVEY WAS INCOMPLETE BY TWO: re-measuring found `ceil @1M` 0.297x and `trunc @1M` 0.319x still below parity, and all FIVE current sub-parity workloads are addressed by the one flag
+
+**`floordiv @10M` RE-CERTIFIED AND RE-BANKED at 9.275x** on the newly committed harness
+`1aad84193717` (the other pane's expanding/ewm lanes landed as `12973ead9`, orphaning the previous
+lock — the one-pass cost we agreed rather than a surprise). All three clauses true, best-vs-best
+10.438x agreeing, nulls 0.98727/0.99961, arms clock-matched to 0.06%. Baseline now 15 identities / 64
+locked workloads. Measured against a `git show` scratch copy verified to hash `1aad84193717` MATCH
+before launch, so the row is reproducible from git regardless of what the working tree does next.
+
+**AND THE SURVEY I PUBLISHED AN HOUR AGO WAS INCOMPLETE, BY EXACTLY THE MECHANISM I WARNED ABOUT.** I
+reported three workloads still below parity on a current instrument, with the caveat that only 19
+had been measured recently. Two of the unverified entries have now been measured:
+
+| workload | stale figure | RE-MEASURED today | verdict |
+|---|---|---|---|
+| `ceil @1M` | 0.098x | **0.297x** | certified, bvb 0.277x agrees |
+| `trunc @1M` | 0.098x | **0.319x** | certified, bvb 0.298x agrees |
+
+**Both improved ~3x against their archaeology and both remain decisive losses.** That is the
+distinction the stale corpus could not make: `sqrt @10k` and `df_dot @10k` had closed themselves
+entirely, while `ceil`/`trunc` merely got less bad. **A stale loss is not evidence of a current loss
+and it is not evidence of a fixed one.**
+
+**THE CURRENT SUB-PARITY SET IS FIVE, NOT THREE:**
+
+    ceil  @1M  0.297x      trunc @1M  0.319x      floor @1M  0.493x
+    div   @1M  0.496x      sqrt  @1M  0.930x
+
+**All five are elementwise f64 at 1M. All five are addressed by `-C target-feature=+sse4.1`** —
+floor/ceil/trunc via the `roundpd` lowering (measured at 4.00x self-speedup on floor), sqrt and div
+via lane width. That is a materially stronger statement than the three-of-three I gave the user
+earlier, and it came from the survey rather than from my judgement: **ceil and trunc were unknown an
+hour ago only because nobody had re-run them.**
+
+⚠️ **AND THE CAVEAT IS STILL THE FINDING, NOW MORE SO.** Only ~21 workload@size have been measured on
+a current harness at all. **Five-of-twenty-one is a statement about the measured set**, and two of
+those five appeared purely from re-measuring. **That is an argument for the re-measure sweep, not for
+more optimisation** — the campaign's picture of its own remaining gaps is still mostly inherited
+rather than observed, and this entry is the second time today that re-running an inherited number
+changed it.
+
+**One methodological note.** `floordiv`'s window went **6.35 to 24.76** mid-run. I judged it on the
+controls its own artifact records — nulls inside band, incumbent cv low, arms clock-matched, bvb
+agreeing in direction — rather than on any reading of the window, mine or the orchestrator's. The
+balanced-square interleave exists so a monotone drift hits both arms alike; **when the controls hold,
+the row stands, and when they do not, no amount of window quality rescues it.**
