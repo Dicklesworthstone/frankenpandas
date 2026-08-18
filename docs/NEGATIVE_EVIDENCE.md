@@ -35774,3 +35774,47 @@ fixture (20k rows) and the divisor lock (64k rows) both sat BELOW the new floor,
 would have tested the serial path on both arms and their "the parallel arm actually ran"
 assertions would have been vacuously true. A threshold change silently voids every test
 fixture that straddles it.
+
+### 2026-08-17 CrimsonPine — the live-oracle differential suite this session: from ~0 cases verified to 163 passing and 1 known-open, with every step of the arithmetic on record
+
+Recording the progression in one place because each step was banked separately and the
+shape of it is the argument for running the suite at all.
+
+| step | passed | failed | what changed |
+|---|---:|---:|---|
+| default (legacy oracle absent) | 9 | 0 | nothing ran — 9 cases "passing" in **0.01s**, all skipping |
+| `FP_ALLOW_SYSTEM_PANDAS_FALLBACK=1` | 160 | **4** | the suite actually ran for the first time |
+| after `f2mlr` fix (`71971cda2`) | 162 | 2 | `to_datetime(utc=True)` stopped returning `Utf8` |
+| after `v3q4j` refutation | 162 | 2 | one "divergence" was the ORACLE; FrankenPandas was right |
+| after `eay9h` knob (`2a8cc5bf6`) | **163** | **1** | the `dropna_default` fixture now tests its name |
+
+**Counted mechanism:** 164 cases go from unverified to verified by one environment
+variable that already existed. The single remaining failure is `b8n0q` (read_csv
+`Int64(1)` vs `Float64(1.0)`), decision-gated on the same int64→float64 promotion rule as
+`nywa8` and `09ygw` and correctly left red.
+
+**THE SCORE IS 3-FOR-4, NOT 4-FOR-4, AND THAT IS THE USEFUL PART.** Of the four
+divergences the first real run produced, three were genuine FrankenPandas defects and one
+(`v3q4j`) was an oracle artifact I filed without probing live pandas first. One in four
+being wrong is the argument for probing the incumbent BEFORE filing, and it is why the
+`eay9h` fix keeps the old default rather than flipping it: the same class of mistake at
+corpus scale would re-bank eight fixtures.
+
+**A/A null control (same invocation):** not applicable — this entry reports pass/fail
+counts, not timings. No ratio is claimed.
+
+```
+LOADAVG   8.98 -> 29.37 across the runs; CPU IDLE 86.69% at the start, iowait 0.02%
+DISK      /data fell 80G -> 61G during this turn under peer builds. Above the 42G
+          floor, recorded because the slope is steep and an rch worker had already
+          died with "No space left on device" earlier in the day.
+```
+
+**Two gates that were NOT available and are named rather than glossed:** the rch fleet
+refused every remote invocation this turn (`critical_pressure=1, insufficient_slots=1,
+insufficient_total_slots=7`), so the fp-frame suite and the conformance runs were done
+locally under `RCH_CARGO_WRAPPER_BYPASS=1` with `df` checked immediately before each. And
+the oracle's own pytest suite has ONE pre-existing failure
+(`test_setup_pandas_strict_legacy_allows_system_fallback`) which I confirmed against
+HEAD's unmodified `pandas_oracle.py` in a scratch copy rather than assuming it was
+unrelated to my edit.
