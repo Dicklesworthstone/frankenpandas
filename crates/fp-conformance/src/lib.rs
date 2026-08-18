@@ -1689,6 +1689,7 @@ pub struct FixtureSeries {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureExpectedSeries {
     pub index: Vec<IndexLabel>,
     pub values: Vec<Scalar>,
@@ -1876,6 +1877,7 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureMultiIndex {
     pub tuples: Vec<Vec<IndexLabel>>,
     #[serde(default)]
@@ -1883,6 +1885,7 @@ pub struct FixtureMultiIndex {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureExpectedDataFrame {
     pub index: Vec<IndexLabel>,
     pub columns: BTreeMap<String, Vec<Scalar>>,
@@ -1914,6 +1917,7 @@ pub struct FixtureColumnRename {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureExpectedAlignment {
     pub union_index: Vec<IndexLabel>,
     pub left_positions: Vec<Option<usize>>,
@@ -1921,6 +1925,7 @@ pub struct FixtureExpectedAlignment {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureExpectedJoin {
     pub index: Vec<IndexLabel>,
     pub left_values: Vec<Scalar>,
