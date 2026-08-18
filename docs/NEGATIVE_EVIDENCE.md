@@ -38199,3 +38199,140 @@ which I am adopting. Roughly **24 of ~600** workload@size have now been measured
 harness. Every number I have given about the "current loss surface" describes that 24. **The
 unmeasured remainder is where the campaign's actual unknowns live**, and eight-of-eight-changed is
 the evidence that measuring it changes answers rather than confirming them.
+
+### 2026-08-18 SlateHeron (br-frankenpandas-8s4mb) — the blocked moment change MEASURES: `series_skew` certifies at 17.116x and `series_kurtosis` at 17.490x; `df_skew` is ~29x FASTER and CANNOT CERTIFY, because its own A/A null fails on FrankenPandas' side
+
+`8s4mb` shipped in `3a13c31d6` with no way to measure it — the only skew/kurt lanes in
+fp-bench were the GROUPBY ones, which route through a different kernel. `116472398` added
+the lanes. This banks what they found, including the row that does not certify.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=2284f13da838856f940872f52032222fd7c0f0e5db973674f44b44dbf2afa4a3 (83156608 bytes) /data/projects/frankenpandas/target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+(2922 files), run in the SAME process as the subject under
+invocation_id=vs-pandas-20260818T080931.014210Z-pid3492127 , giving
+measured_ratio=17.116x for this row.
+
+| `series_skew @1M` | p50 | cv | A/A null |
+|---|---|---|---|
+| FrankenPandas | **492.49us** | 6.25% | 0.986898 — PASSES |
+| pandas | 8541.74us | 5.02% | 0.993604 — PASSES |
+
+**A/A null control (same invocation):** FrankenPandas median ratio 0.986898 and pandas
+median ratio 0.993604, both inside the 2% limit.
+
+**Median-CI decision:** effect median 17.116x, 95% CI [16.48068815, 18.25918860], excluding
+unity; claimed log effect 2.84002284 against a required threshold of 0.18498157, cleared
+by 15x. All three clauses true.
+
+**CV role:** provenance only, no vote — FP 6.25%, pandas 5.02%.
+
+**ALL TWELVE ROWS, three repeats per lane, ELF `2284f13d`:**
+
+| lane | r | ratio | verdict | FP p50 | pandas p50 | FP null | pandas null | bvb | clauses |
+|---|---|---|---|---|---|---|---|---|---|
+| `series_skew` | r0 | 17.116x | FASTER | 492.5us | 8541.7us | 0.9869 | 0.9936 | 16.0425 | 3/3 |
+| `series_skew` | r1 | 16.608x | FASTER | 489.1us | 8148.8us | 1.0006 | 0.9972 | 15.5922 | 3/3 |
+| `series_skew` | r2 | 19.273x | FASTER | 491.8us | 9479.6us | 0.9975 | 1.0037 | 18.2157 | 3/3 |
+| `series_kurtosis` | r0 | 17.490x | FASTER | 496.3us | 8670.8us | 0.9966 | 0.9930 | 17.1314 | 3/3 |
+| `series_kurtosis` | r1 | 17.446x | FASTER | 496.2us | 8722.1us | 1.0047 | 0.9975 | 16.8631 | 3/3 |
+| `series_kurtosis` | r2 | 17.773x | FASTER | 496.8us | 8862.3us | 0.9966 | 0.9957 | 17.2104 | 3/3 |
+| `df_skew` | r0 | 28.806x | FASTER | 3183.9us | 90415.3us | 0.9854 | 1.0033 | 35.7027 | 3/3 |
+| `df_skew` | r1 | 30.702x | NULL_UNDECIDABLE | 2961.2us | 90264.2us | 0.9644 | 1.0008 | 38.2584 | 2/3 |
+| `df_skew` | r2 | 30.683x | NULL_UNDECIDABLE | 3004.5us | 90093.7us | 0.9461 | 0.9933 | 45.5100 | 2/3 |
+| `df_sem` | r0 | 14.003x | NULL_UNDECIDABLE | 6523.6us | 91016.7us | 1.0233 | 0.9901 | 14.1626 | 2/3 |
+| `df_sem` | r1 | 14.782x | FASTER | 6311.5us | 93585.8us | 0.9987 | 0.9953 | 14.2612 | 3/3 |
+| `df_sem` | r2 | 14.862x | FASTER | 6353.5us | 94560.9us | 0.9947 | 1.0045 | 16.1845 | 3/3 |
+
+```
+LOADAVG   per-row 1-min range, min 6.38 to max 20.44 across every row
+CPU MHz   busy-core per arm: FP 4292.2-4300.0 · pandas 4292.3-4298.8
+HARNESS   50d3c3ffad4dd14d, read from `git show HEAD:` into scratch BEFORE the runs
+          and hashed to confirm the match — the row is reproducible at the moment
+          it was taken, not conditionally on what I did next.
+```
+
+**THE TWO SERIES LANES ARE THE ROWS THAT ANSWER `8s4mb`.** `Series::skew` and
+`Series::kurtosis` are what the bead is about and what `3a13c31d6` changed: the mean was
+`data.iter().sum::<f64>()` and the moments an ordered `powi` loop, in both the Float64 and
+Int64 typed arms. Both certify on all three repeats, ~17x ahead of the incumbent, nulls
+inside 1.5% every time, best-vs-best agreeing in direction on all six.
+
+**WHAT THESE ROWS DO NOT ESTABLISH, stated plainly because the temptation runs the other
+way.** They are a vs-pandas comparison of the CURRENT kernel. They do NOT attribute the 17x
+to the blocking — there is no before/after arm here, and the typed fast path (`as_f64_slice`,
+fused single pass, no `vals` Vec) predates this change and is doing most of the work. A ratio
+against a different engine cannot separate "the blocking paid" from "the kernel was already
+this fast". The bead's own instruction was to profile the prize rather than infer it from
+`sum`/`mean`'s 2.2x/4.2x, and **that instruction still stands unsatisfied.** What these rows
+do establish is that the surface is measurable at all, which it was not before `116472398`,
+and that the change cost nothing.
+
+**MY PRE-REGISTERED PREDICTION ON `df_sem` WAS WRONG, and the pre-registration is worth more
+for having been wrong.** Before any row existed I recorded that `df_sem`'s A/A null looked
+likely to fail, on the strength of a 0.9765 reading from a casual unpaired exercise. The real
+result is **2 of 3 certified** — r0 undecidable at 1.0233, then r1 and r2 clean at 14.782x
+and 14.862x with nulls 0.9987 and 0.9947. Had I not written the prediction down first, the
+single failing row would have read as confirmation of a hypothesis I had never committed to
+testing. Recording it ahead of the number is what makes "I was wrong" a cheap sentence.
+
+**A NATURAL EXPERIMENT FELL OUT OF THE FOUR LANES — the variable was not chosen.** I measured
+four lanes because four lanes needed measuring; they happen to differ in exactly the right
+way, on one instrument inside one twenty-minute window:
+
+| lane | threads | FP p50 | certified |
+|---|---|---|---|
+| `series_skew` | 1 | ~490us | **3 of 3** |
+| `series_kurtosis` | 1 | ~496us | **3 of 3** |
+| `df_sem` | 10 | ~6.4ms | 2 of 3 |
+| `df_skew` | 10 | ~3.0ms | 1 of 3 |
+
+Nobody can suspect the design, because there was no design.
+
+**AND IT IS A GRADIENT, NOT A BINARY — I HAVE NOW HAD TO WEAKEN THIS CLAIM TWICE.** After
+`df_skew` 1-of-3 and `df_sem` r0 I told the other pane "both DataFrame lanes cannot hold a
+null". After `df_sem` r1 I weakened that to "both are unstable, `df_sem` less so". With r2
+in, even that is too strong: **`df_sem` certifies 2 of 3, which is not obviously unstable at
+all.** What the data supports is `df_skew` being the unstable one, `df_sem` marginal, and
+the 1-thread Series lanes clean — a gradient that tracks per-call overhead against work, not
+a clean thread-count binary. Twice I stated the sharper version and twice the next row
+softened it; the pattern in my own reporting is that I generalise from the first two points.
+
+**THE STRONGEST SINGLE LINE SURVIVES ALL OF THAT: the two null failures fall on OPPOSITE
+SIDES OF UNITY.** `df_skew` fails at 0.9461, `df_sem` at 1.0233. No directional effect —
+warm-up, drift, thermal ramp — produces both on one instrument in one window. Dispersion
+does. I also counted `df_skew`'s direction round by round from the artifacts rather than
+eyeballing medians: rounds where `arm_a < arm_b` were 4/9, 4/9, 2/9. Non-directional,
+confirmed.
+
+**Filed as `br-frankenpandas-g0apw`** with the other pane's invariant rather than my own. My
+first name — "operations too fast to certify while paying per-call thread setup" — excluded
+their `df_transpose_full_materialize` case twice over: at 2.1ms it is not fast, and at
+`operation_threads_used` 1 it pays no spawn at all, yet it shows the identical signature from
+~10k Column allocations per call. **PER-CALL FIXED OVERHEAD COMPARABLE TO THE WORK** is the
+invariant; thread spawn and allocator churn are two mechanisms under it. The naming is
+load-bearing: named my way, the next person to meet this signature reaches for the
+parallel-overhead lever, which does nothing on an allocator-bound instance, and a rejected
+lever gets recorded against a hypothesis that was never the cause.
+
+**PROVENANCE DISCIPLINE ACTUALLY APPLIED, rather than the discipline I would prefer to
+claim.** These rows were measured against `target/release-perf/fp-bench` at the SHARED path,
+not a pinned immutable copy in scratch. The other pane recommended pinning mid-batch; I
+declined to disturb runs already in flight to harden a risk that was not live — nobody was
+building, and the ELF self-hash is recorded on every row. Recording which discipline was
+applied is the point: provenance doing its job rather than provenance as ceremony. Rows taken
+after this batch use a pinned copy.
+
+**AND ONE INSTRUMENT TRAP CONFIRMED HERE, because it nearly cost me the batch:**
+`--measurement-mode balanced-square` REFUSES more than one `--workloads` entry. My first
+attempt passed four names and piped the output through `grep`, so the error went to the
+filtered stream, three "repeats" completed in three seconds, and nothing was written — the
+loop looked like it had run. Every run in this batch was re-driven through a script that
+captures the exit status directly, never through a pipe, and checks the output file exists
+before parsing it. This is another sighting of *the absence of work rendered as the success
+of work*, and the first where I caught it by noticing the elapsed time was implausible rather
+than by any check I had written.
