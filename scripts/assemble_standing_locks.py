@@ -135,6 +135,36 @@ def best_vs_best_contradicts(result: dict[str, Any]) -> bool:
     return (ratio > 1.0) != ((pd_best / fp_best) > 1.0)
 
 
+# Features beyond the x86-64 baseline that a DEFAULT build does not enable. If the
+# project ever widens its shipping baseline, this set must widen with it or the
+# assembler will refuse the very rows it is meant to bank.
+NON_SHIPPING_TARGET_FEATURES = frozenset({"avx", "avx2", "avx512f", "fma"})
+
+
+def is_non_shipping_build(result: dict[str, Any]) -> bool:
+    """Was this row measured on a binary compiled with non-default target features?
+
+    br-frankenpandas-oxv4u. Until 2026-08-18 this was UNANSWERABLE from an artifact:
+    a `+avx2` build and a default build recorded byte-identical
+    `runtime_detected_isa_features`, because that field asks the CPU what it
+    supports rather than what the compiler targeted. fp-bench now also emits
+    `compiled_target_features` (`cfg!(target_feature = ...)`, resolved at compile
+    time), measured as ["sse2"] for a default build against
+    ["sse2", "sse4.1", "avx", "avx2"] under `-C target-feature=+avx2`.
+
+    Returns False when the field is ABSENT. Every artifact banked before that
+    change lacks it, and treating missing provenance as a refusal would quarantine
+    the entire existing corpus on a technicality; treating it as "not proven
+    non-shipping" keeps this a guard against a demonstrated hazard rather than a
+    retroactive purge. The cost of that choice is stated plainly: for pre-change
+    artifacts the operator is still the only check.
+    """
+    features = (result.get("thread_provenance") or {}).get("compiled_target_features")
+    if not isinstance(features, list):
+        return False
+    return any(f in NON_SHIPPING_TARGET_FEATURES for f in features if isinstance(f, str))
+
+
 def is_thread_capped(result: dict[str, Any]) -> bool:
     """Did the subject see fewer logical CPUs than the host has? See rule 2."""
     provenance = result.get("thread_provenance") or {}
@@ -144,6 +174,59 @@ def is_thread_capped(result: dict[str, Any]) -> bool:
         return False
     subject = available.get("frankenpandas")
     return isinstance(subject, int) and 0 < subject < host_threads
+
+
+def _self_test() -> int:
+    """Exercise both refusal guards on synthetic rows.
+
+    Neither guard can be demonstrated against the corpus on disk: every existing
+    artifact predates `compiled_target_features`, so the non-shipping guard is
+    INERT there and "it refused nothing" is indistinguishable from "it works". A
+    guard whose behaviour cannot be shown is a guard nobody should trust.
+
+    Deletion condition: delete with the guards it covers.
+    """
+    def row(ratio, fp, pd_, compiled=None):
+        result = {
+            "workload": "synthetic", "size": "1k", "ratio": ratio,
+            "verdict": "FASTER",
+            "median_ci_gate": {"clauses": {"a": True, "b": True, "c": True}},
+            "frankenpandas": {"samples_us": fp, "p50_us": sorted(fp)[len(fp) // 2]},
+            "pandas": {"samples_us": pd_},
+        }
+        if compiled is not None:
+            result["thread_probe"] = {}
+            result["thread_provenance"] = {"compiled_target_features": compiled}
+        return result
+
+    failures = []
+
+    # best-vs-best: p50 says faster, best-of-each says slower. The real shape from
+    # br-frankenpandas-mti15 — a wide incumbent against a tight subject.
+    contradictory = row(1.299, [19.7, 20.5, 21.1, 21.8], [10.9, 27.7, 26.0, 28.1])
+    if not best_vs_best_contradicts(contradictory):
+        failures.append("best_vs_best_contradicts MISSED a sign disagreement")
+    agreeing = row(1.153, [137.5, 139.0, 140.1], [158.9, 160.2, 161.0])
+    if best_vs_best_contradicts(agreeing):
+        failures.append("best_vs_best_contradicts REFUSED a row where both agree")
+    if best_vs_best_contradicts({"ratio": 1.5, "frankenpandas": {}, "pandas": {}}):
+        failures.append("best_vs_best_contradicts refused a row with no samples")
+
+    # non-shipping: only fires when the field is PRESENT and wider than baseline.
+    if not is_non_shipping_build(row(2.0, [1.0], [2.0], ["sse2", "sse4.1", "avx", "avx2"])):
+        failures.append("is_non_shipping_build MISSED an avx2 build")
+    if is_non_shipping_build(row(2.0, [1.0], [2.0], ["sse2"])):
+        failures.append("is_non_shipping_build REFUSED a default build")
+    if is_non_shipping_build(row(2.0, [1.0], [2.0])):
+        failures.append("is_non_shipping_build refused a row predating the field")
+
+    for failure in failures:
+        print(f"  FAIL: {failure}")
+    print(
+        f"self-test: {6 - len(failures)}/6 checks passed"
+        + ("" if failures else " — both guards behave as documented")
+    )
+    return 1 if failures else 0
 
 
 def identity_slug(identity: dict[str, Any]) -> str:
@@ -174,6 +257,15 @@ def collect() -> dict[str, dict[str, Any]]:
             if not isinstance(result, dict) or not is_certified(result):
                 continue
             if is_thread_capped(result):
+                continue
+            if is_non_shipping_build(result):
+                print(
+                    f"    !! REFUSED {result.get('workload')} @{result.get('size')}: "
+                    f"compiled_target_features="
+                    f"{(result.get('thread_provenance') or {}).get('compiled_target_features')}"
+                    f" — not the shipping build, so a lock from it would assert a "
+                    f"defence the shipped binary does not provide"
+                )
                 continue
             if best_vs_best_contradicts(result):
                 print(
@@ -345,11 +437,19 @@ def main() -> int:
         help="only emit identities carrying at least this many certified workloads",
     )
     parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="exercise the refusal guards on synthetic rows, and exit",
+    )
+    parser.add_argument(
         "--orphans",
         action="store_true",
         help="list certified workloads locked against a superseded harness, and exit",
     )
     args = parser.parse_args()
+
+    if args.self_test:
+        return _self_test()
 
     groups = collect()
     if not groups:
