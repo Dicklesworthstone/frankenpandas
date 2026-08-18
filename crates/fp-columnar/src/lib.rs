@@ -24015,14 +24015,25 @@ impl Column {
         // BAILS to the generic Scalar path, which reproduces the exact
         // NaN-is-missing / raise-error behavior. All-valid non-NaN output ⇒
         // from_f64_values_owned MOVEs (no realloc). (br-frankenpandas utf8-f64-astype)
+        // VALIDATE THE BUFFER ONCE, not once per row (br-frankenpandas-uza04,
+        // same transform as `pivot_utf8_key_strs`). The per-row form called
+        // `from_utf8` n times over the same bytes, paying its setup each time;
+        // one call takes std's vectorized whole-buffer path and each row becomes
+        // an O(1) `str::get` boundary check.
+        //
+        // A whole-buffer failure simply does not enter the fast path and falls
+        // through to the generic Scalar tail below — the SAME outcome the old
+        // per-slice failure produced by setting `ok = false`, since that path
+        // discarded `out` and fell through too.
         if target == DType::Float64
             && let Some((bytes, offsets)) = self.as_utf8_contiguous()
+            && let Ok(all) = std::str::from_utf8(bytes)
         {
             let n = offsets.len() - 1;
             let mut out: Vec<f64> = Vec::with_capacity(n);
             let mut ok = true;
             for i in 0..n {
-                let Ok(s) = std::str::from_utf8(&bytes[offsets[i]..offsets[i + 1]]) else {
+                let Some(s) = all.get(offsets[i]..offsets[i + 1]) else {
                     ok = false;
                     break;
                 };
@@ -24047,14 +24058,25 @@ impl Column {
         // is all-valid ⇒ every cell present; any field that fails BOTH parses BAILS
         // to the generic Scalar path, which raises the identical InvalidCast. All
         // present ⇒ from_i64_values_owned MOVEs. Bit-identical. (br-frankenpandas utf8-i64-astype)
+        // VALIDATE THE BUFFER ONCE, not once per row (br-frankenpandas-uza04,
+        // same transform as `pivot_utf8_key_strs`). The per-row form called
+        // `from_utf8` n times over the same bytes, paying its setup each time;
+        // one call takes std's vectorized whole-buffer path and each row becomes
+        // an O(1) `str::get` boundary check.
+        //
+        // A whole-buffer failure simply does not enter the fast path and falls
+        // through to the generic Scalar tail below — the SAME outcome the old
+        // per-slice failure produced by setting `ok = false`, since that path
+        // discarded `out` and fell through too.
         if target == DType::Int64
             && let Some((bytes, offsets)) = self.as_utf8_contiguous()
+            && let Ok(all) = std::str::from_utf8(bytes)
         {
             let n = offsets.len() - 1;
             let mut out: Vec<i64> = Vec::with_capacity(n);
             let mut ok = true;
             for i in 0..n {
-                let Ok(s) = std::str::from_utf8(&bytes[offsets[i]..offsets[i + 1]]) else {
+                let Some(s) = all.get(offsets[i]..offsets[i + 1]) else {
                     ok = false;
                     break;
                 };
