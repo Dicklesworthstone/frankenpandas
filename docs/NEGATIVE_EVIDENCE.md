@@ -36043,3 +36043,120 @@ be decided at all.** That is a bounded change, not a corpus-wide one — the sam
 correction the `sort` probe made for `eay9h`, where "all eight fixtures" turned out to be
 one. Both times the unmeasured estimate was the pessimistic one, and both times it was
 mine.
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-4kig1) — I tested my own pre-registered prediction WITH THE WRONG INSTRUMENT: fp-bench's in-process null is not the harness's drift null, so 6 clean runs do not settle the claim. What they do show is that the parallel arm adds no per-call instability
+
+**NO INCUMBENT ARM, NOTHING CERTIFIED, NOTHING BANKED.** FP-only probes on the preserved ELF
+`bench_elf_sha256=a802073cf042d28d9807347acee416505a0af97e7e2c0e344877405ea1ef80c5 (82346192 bytes) /data/projects/.scratch/crimsonpine/fp-bench-MAIN-8b263954b`.
+No build and no artifact written — /data at 56G under a build hold, loadavg 4.60 (15-min 11.38),
+CPU MHz 2139.8.
+
+**Counted mechanism:** operation threads and peak process threads per op, `@1M`, plus fp-bench's own
+`null_control` median over its interleaved arm_a/arm_b samples, three runs each:
+
+| op @1M | in-process A/A null (3 runs) | verdict vs 2% band | op_threads | peak |
+|---|---|---|---|---|
+| sqrt | 0.99885 / 1.00248 / 1.00099 | PASS 3/3 | 1 | 2 |
+| log | 0.98959 / 1.01259 / 0.99701 | **PASS 3/3** | **8** | **10** |
+
+**MY PREDICTION WAS HALF WRONG.** I pre-registered that `sqrt @1M` would pass (serial) and
+`log @1M` would STILL FAIL because it runs 8 workers. sqrt passed as predicted; **log passed too,
+3 for 3, while provably on the parallel arm.**
+
+⚠️ **BUT I MEASURED THE WRONG STATISTIC, AND THAT MATTERS MORE THAN THE PREDICTION.** The A/A null
+this bead cites (`sqrt @1M` 0.913921 FAIL) comes from the HARNESS, whose
+`balanced_square.outer_aa_null` is defined as **"first two versus final two placements per arm"**
+across an ABBAABBA square of 9 rounds — a **DRIFT** statistic, early placements against late ones.
+fp-bench's `null_control` is an **in-process arm_a/arm_b interleave** — a **per-call variance**
+statistic. **They are not the same number and mine cannot refute the bead's.**
+
+**THIS IS THE SECOND TIME TODAY I HAVE MEASURED SOMETHING ADJACENT TO A CLAIM RATHER THAN THE
+CLAIM.** An entry above corrects me for offering `log @10k`/`@100k` nulls that were serial and so
+could not test a parallel-arm hypothesis; here I reached for the instrument that was AVAILABLE under
+a build hold rather than the one the question required, and only checked the definitions afterwards.
+**Availability is not relevance.** The check costs one command — read how the statistic is defined
+in the artifact's own `parameters` block — and I ran it only because I was about to publish.
+
+**WHAT THE RESULT DOES ESTABLISH, stated narrowly.** Within a single process at 1M, the parallel
+witness arm introduces **no detectable per-call A/A instability**: log on 8 workers is as clean as
+sqrt on 1, three runs each, in a quiet window. So if the harness drift-null genuinely fails for log,
+the mechanism is drift ACROSS placements — pool warmup, thermal, or contention accumulating over a
+9-round square — and NOT per-call `thread::scope` overhead. That is a different diagnosis from the
+one this bead records, and it narrows where to look.
+
+**THE TEST THAT WOULD SETTLE IT** remains a harness `log @1M` / `sqrt @1M` pair, which writes a
+per-row artifact and is barred this turn. It needs no build. Prediction stands unchanged and is now
+sharper: if the harness drift-null fails for log while its in-process null is clean, drift is the
+mechanism and the fix is not "move it off the scope" but "warm the pool or shorten the square".
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-hp2ko) — found by SOURCE READING under the build hold: `to_datetime` WITHOUT `utc` returns `Utf8` for tz-aware input, and my own `f2mlr` fix left the two arms of that function inconsistent
+
+Three turns of no-cargo work had produced censuses; this turn I went looking for a defect
+in the code I had actually changed, on the theory that a fix which corrects one arm of a
+branch is a good place to find an uncorrected one. It was.
+
+**Counted mechanism.** `crates/fp-frame/src/lib.rs`,
+`datetime64_scalar_from_parsed_datetime` — the `utc=false` arm of `to_datetime`:
+
+```rust
+match value {
+    Scalar::Utf8(rendered) if !has_tz_suffix(&rendered) => { /* parse to Datetime64 */ }
+    other => other,          // tz-suffixed strings pass straight through as Utf8
+}
+```
+
+A naive string becomes `Datetime64`; anything carrying an offset stays a `Utf8` string.
+
+**MEASURED, live pandas 2.2.3 — probed BEFORE filing, which is the `v3q4j` lesson:**
+
+| input to `to_datetime` (no `utc`) | pandas dtype |
+|---|---|
+| uniform offset `+05:30` | `datetime64[ns, UTC+05:30]` |
+| uniform offset `+00:00` | `datetime64[ns, UTC]` |
+| MIXED offsets | `object` holding tz-aware `Timestamp`s (+ FutureWarning) |
+| naive (control) | `datetime64[ns]` |
+
+FrankenPandas returns `Utf8` for every tz-suffixed case. For uniform offsets that is a
+clear divergence with the identical consequence `f2mlr` had: every downstream `.dt`
+accessor, comparison and resample sees a string.
+
+⚠ **AND I MADE THE FUNCTION INTERNALLY INCONSISTENT, which I did not note when landing
+`71971cda2`.** Before that fix BOTH arms returned `Utf8` for tz-aware input — wrong
+against pandas for `utc=True`, but at least uniform. After it:
+
+```
+to_datetime(utc=True)  on tz-aware  ->  Datetime64   (fixed)
+to_datetime()          on tz-aware  ->  Utf8         (unchanged)
+```
+
+Same function, two carriers, selected by a flag. **This is not a regression** — the
+`utc=false` path behaves exactly as it always did, and the conformance case that covers
+it still passes — **but the inconsistency is new and it is mine.** A fix that corrects
+one arm of a branch should say what it leaves the other arm doing; mine did not.
+
+**THIS IS `t2n6i`'s QUESTION FROM A THIRD ENTRY POINT.** `dt.tz_localize`, the oracle's
+contract split, and now `to_datetime` without `utc` all diverge the same way for the same
+reason: FrankenPandas has no tz-aware dtype, so for a uniform-offset input it cannot
+produce pandas' answer at all. The options are the same two everywhere — `Utf8`
+(preserves the zone, breaks every `.dt` op) or naive `Datetime64` of the UTC instant
+(preserves ops and pandas' underlying nanos, loses the zone). **Patching entry points one
+at a time is how a codebase ends up with three carriers**, which is now demonstrably the
+trajectory: it already has two.
+
+**A second, smaller divergence on the same path, recorded so it is not lost:** for MIXED
+offsets pandas returns `object` holding BOTH tz-aware Timestamps, while FrankenPandas'
+`to_datetime_with_options_utc_coerces_mixed_naive_offset_sequence` pins element `[1]` as
+MISSING. pandas keeps a value FrankenPandas discards.
+
+**A/A null control (same invocation):** not applicable — this entry reports dtypes from
+live-pandas probes and one source branch. No timing was taken and nothing was certified.
+
+```
+LOADAVG   4.58 / 5.55 / 11.49 ;  CPU IDLE 91.82%, iowait 0.01%, by mpstat
+DISK      /data 56G, flat, under the standing build hold; no cargo invoked
+```
+
+**The reusable part:** when a fix corrects one arm of a `match`, read the other arms
+before closing the bead. `f2mlr` was verified green by the conformance suite and by 3318
+unit tests, and none of that could see the inconsistency, because both behaviours are
+individually covered and nothing asserts they agree.
