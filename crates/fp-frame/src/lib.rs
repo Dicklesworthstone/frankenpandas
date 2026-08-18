@@ -3362,8 +3362,36 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
             "empty offset string".into(),
         ));
     }
-    let unit = offset.chars().last().unwrap_or('D');
-    let num_str = &offset[..offset.len() - 1];
+    // br-frankenpandas-offset-alias-2-2: pandas 2.2 RENAMED the offset aliases and
+    // deprecated the old spellings — M became ME, Q became QE, Y/A became YE, H
+    // became h, T became min, S became s. MEASURED, live pandas 2.2.3, resampling a
+    // daily series: D W M ME Q QE Y YE A H h T min S s B are all accepted, and M, Q,
+    // Y, A, H, T and S each emit a FutureWarning naming their replacement.
+    //
+    // This parser read the LAST CHARACTER as the unit, so a multi-character alias
+    // could never work: "ME" read unit 'E' with count "M" and failed as an invalid
+    // offset. The CANONICAL pandas 2.2 spellings were exactly the ones that broke,
+    // while only the deprecated single letters worked.
+    //
+    // ⚠️ SCOPE, stated rather than implied: this only lets the new spellings reach
+    // the SAME arms as before. `shift_date_string` implements 'D', 'M' and 'Y'/'A';
+    // 'W', 'Q', 'H', 'T' and 'S' still fall to its catch-all and still error, so
+    // aliasing "min" to 'T' would only change which message you get. QE is mapped
+    // because Q is what pandas calls it, not because quarterly shifting works yet.
+    // Those need real date arithmetic, which is separate work and not something to
+    // write without a compiler.
+    let (num_str, unit) = if let Some(head) = offset.strip_suffix("ME") {
+        (head, 'M')
+    } else if let Some(head) = offset.strip_suffix("YE") {
+        (head, 'Y')
+    } else if let Some(head) = offset.strip_suffix("QE") {
+        (head, 'Q')
+    } else {
+        (
+            &offset[..offset.len() - 1],
+            offset.chars().last().unwrap_or('D'),
+        )
+    };
     let count: i32 = if num_str.is_empty() {
         1
     } else {
