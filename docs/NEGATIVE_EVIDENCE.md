@@ -38867,3 +38867,68 @@ main lever, nor the per-group Series materialisation (~15%). vw0uu stays OPEN. T
 prediction for the full fused path is unchanged at 2.0x-2.6x, with below 1.5x refuting the
 per-group-rebuild mechanism.
 
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-vw0uu) — dense grouping pre-sizes its per-group index vectors: 1.137x on top of the index fix, 1.307x cumulative at 1M, and the bead's stated lever turns out to have landed months ago
+
+**FP-vs-FP SELF-SPEEDUP, NOT CAMPAIGN OUTPUT.** No incumbent arm ran. Second of two
+allocation-shaped fixes to the same path; the first is recorded in `020f318b2`.
+
+⚠️ **THE BEAD'S LEVER ALREADY EXISTS, WHICH CHANGES WHAT THIS ENTRY IS ABOUT.** vw0uu asks for
+"single bounded-Int64 key instead of `build_groups` SipHash". `SeriesGroupBy::build_groups` ALREADY
+OPENS with a hash-free dense direct-address gid path for an all-valid bounded-range Int64 key
+(`ScalarKey`/`IndexLabel` built straight from the i64, FxHashMap rather than SipHash), plus a second
+branch for the nullable case. The bench key is `i % 100`, so **that path was already firing on the
+very lane the bead is about**, and the 29.34% my profile attributed to `build_groups` is the cost of
+the DENSE path. Anyone following the bead as written would rewrite existing code and measure nothing.
+
+**WHAT THE DENSE PATH ACTUALLY SPENT IT ON.** `n` pushes into `ngroups` separately-growing
+`Vec<usize>`. At 1M rows over 100 groups that is ~8MB of index vectors reached by doubling growth —
+about one extra copy per element plus roughly `ngroups*log2(rows/ngroups)` reallocations. **The fix
+counts first and allocates each group exactly once.** First-seen group order, ascending row indices
+within each group, and the keys are all produced exactly as before; only WHEN memory is reserved
+changes.
+
+**THE MEASUREMENT.** Same lane, two binaries, ALTERNATING arms. BEFORE `764aaa36b75dbaab` (index fix
+only), AFTER `63c00297e2f4b61e` (index fix plus pre-size), both release-perf on `thinkstation1`,
+built via `RCH_CARGO_WRAPPER_BYPASS=1` into a non-shared target dir. 5 repeats:
+
+    BEFORE p50s (ms):  23.93  23.39  23.52  23.00  22.82
+    AFTER  p50s (ms):  20.06  20.16  20.67  21.03  20.57
+
+**The two distributions do not overlap** — every AFTER run beat every BEFORE run.
+
+| statistic | ratio |
+|---|---|
+| **p50 (primary, pre-declared)** | **1.137x** |
+| min-of-samples (robustness check) | 1.173x |
+
+Both agree in direction. Checksums identical between arms. 12 worker threads on both. loadavg
+11.87-12.34, busy-core MHz max 4092.5-4294.3.
+
+⚠️ **THE WINDOW WAS NOT QUIET AND I CHOSE THE STATISTIC BEFORE SEEING THE NUMBERS.** Idle measured
+78.28% against 88-89% for my earlier rows. I declared in advance that p50 would be primary (for
+comparability with every prior row) and min-of-samples a robustness check, precisely so I could not
+pick the flattering one afterwards — min is the more favourable statistic here (1.173x against
+1.137x) and it is NOT what I am reporting as the result. The non-overlapping distributions are why
+this is reportable at all under that load; a marginal effect would have been held.
+
+**CUMULATIVE, both fixes, measured in one window:** 26.11ms falling to 19.97ms, **1.307x**,
+checksums matching.
+
+**PREDICTION SCORED: TOO CONSERVATIVE, and in the opposite direction from last time.** I recorded
+1.03x-1.12x before implementing, reasoning that realloc copying is only a fraction of
+`build_groups`' 29.34%. Measured 1.137x — above my band. My stated refutation floor (below 1.02x
+means the churn is immaterial and I do not land it) was not triggered, and the 1.20x upper bound
+that would have made the CSR rewrite the obvious follow-on was not reached either. Worth noting
+against my own calibration: on `3ya6b` I OVERestimated (predicted 1.4x-1.9x, measured 1.165x) and
+here I UNDERestimated. The misses are not biased in one direction, so they are noise in my estimates
+rather than a correctable systematic offset.
+
+**CORRECTNESS.** `cargo test -p fp-frame --lib`: **3333 passed, 0 failed**, 32 ignored — identical
+to baseline, before and after.
+
+**WHAT REMAINS ON THIS BEAD.** The per-group Series materialisation (~15% of the profile) is
+untouched, and a CSR layout (counts, then offsets, then ONE flat `Vec<usize>` of length n) is the
+remaining allocation lever — it removes the Vec-of-Vecs entirely but changes `build_groups`' return
+shape, which many callers consume. vw0uu stays OPEN. **`apply_grouped_expanding` shares both fixed
+code paths but was NOT measured**; only the rolling lane was.
