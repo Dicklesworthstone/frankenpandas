@@ -159254,11 +159254,8 @@ mod tests {
     ///   min    flag [F, T, F, T]
     ///   max    flag [T, T, F, T]
     /// ```
-    /// ⚠️ THIS TEST COVERS THE BOOL HALF ONLY. The Datetime64 rows are measured and
-    /// recorded on `ResampleValueDomain` and the filter admits that dtype, but no
-    /// assertion here exercises it — building a Datetime64 column from `Scalar`s
-    /// needs the i64-nanos form, and an untested widening is exactly what the enum
-    /// doc warns against. A datetime case is owed.
+    /// Both dtypes are asserted: `flag` (Bool) and `when` (Datetime64, built from
+    /// epoch nanos). count/min/max are pinned for each against the rows above.
     /// Note `min`/`max` on bool are the logical and/or of the bucket, which is what
     /// `fp_types::nanmin`/`nanmax` compute for `Scalar::Bool` — no new kernel.
     #[test]
@@ -159287,6 +159284,19 @@ mod tests {
                         Scalar::Bool(true),
                     ],
                 ),
+                (
+                    // Epoch NANOS, UTC midnight — `Scalar::Datetime64(i64)`.
+                    // 2024-03-01, 03-05, 04-01, 03-02, 04-03, 04-09.
+                    "when",
+                    vec![
+                        Scalar::Datetime64(1709251200000000000),
+                        Scalar::Datetime64(1709596800000000000),
+                        Scalar::Datetime64(1711929600000000000),
+                        Scalar::Datetime64(1709337600000000000),
+                        Scalar::Datetime64(1712102400000000000),
+                        Scalar::Datetime64(1712620800000000000),
+                    ],
+                ),
             ],
             vec![
                 "2024-01-01".into(),
@@ -159303,8 +159313,8 @@ mod tests {
         let counted = gb.resample("M").count().unwrap();
         assert_eq!(
             counted.column_names(),
-            vec!["grp", "flag"],
-            "a bool column must survive count, not be dropped"
+            vec!["grp", "flag", "when"],
+            "bool AND datetime columns must survive count, not be dropped"
         );
         assert_eq!(
             counted.column("flag").unwrap().values(),
@@ -159333,6 +159343,26 @@ mod tests {
                 Scalar::Bool(true),
                 Scalar::Bool(false),
                 Scalar::Bool(true),
+            ]
+        );
+
+        // Datetime64: chronological order, per pandas' measured rows above.
+        assert_eq!(
+            gb.resample("M").min().unwrap().column("when").unwrap().values(),
+            &[
+                Scalar::Datetime64(1709251200000000000),
+                Scalar::Datetime64(1711929600000000000),
+                Scalar::Datetime64(1709337600000000000),
+                Scalar::Datetime64(1712102400000000000),
+            ]
+        );
+        assert_eq!(
+            gb.resample("M").max().unwrap().column("when").unwrap().values(),
+            &[
+                Scalar::Datetime64(1709596800000000000),
+                Scalar::Datetime64(1711929600000000000),
+                Scalar::Datetime64(1709337600000000000),
+                Scalar::Datetime64(1712620800000000000),
             ]
         );
     }
