@@ -75,6 +75,51 @@ fn self_identity() -> String {
     format!("{hex} ({} bytes) {}", bytes.len(), path.display())
 }
 
+/// The ISA features the COMPILER targeted, which is NOT what `runtime_isa_features`
+/// reports.
+///
+/// br-frankenpandas-oxv4u. MEASURED 2026-08-18: a `-C target-feature=+avx2` build
+/// and a default build emitted BYTE-IDENTICAL `runtime_detected_isa_features`
+/// (`[scalar, sse2, avx2, fma, bmi2, vaes]`) and identical
+/// `engine_identity.frankenpandas`, because `is_x86_feature_detected!` asks the
+/// CPU what it supports, never what this binary was compiled to use. The two rows
+/// differed only in an opaque ELF sha256 — so a row from a specially-flagged
+/// build was indistinguishable from a shipping row in every recorded field, and
+/// `scripts/assemble_standing_locks.py` would have banked one as a standing lock,
+/// asserting a defence the shipped binary does not provide.
+///
+/// `cfg!` is resolved at COMPILE time, so this reports the build's own target
+/// features and closes that hole. It costs nothing at runtime: every branch folds
+/// to a constant.
+fn compiled_target_features() -> Vec<&'static str> {
+    let mut features: Vec<&'static str> = Vec::new();
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if cfg!(target_feature = "sse2") {
+            features.push("sse2");
+        }
+        if cfg!(target_feature = "sse4.1") {
+            features.push("sse4.1");
+        }
+        if cfg!(target_feature = "avx") {
+            features.push("avx");
+        }
+        if cfg!(target_feature = "avx2") {
+            features.push("avx2");
+        }
+        if cfg!(target_feature = "fma") {
+            features.push("fma");
+        }
+        if cfg!(target_feature = "avx512f") {
+            features.push("avx512f");
+        }
+    }
+    if features.is_empty() {
+        features.push("baseline");
+    }
+    features
+}
+
 fn runtime_isa_features() -> Vec<&'static str> {
     let mut features = vec!["scalar"];
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -3978,6 +4023,11 @@ fn main() {
                 .map(|feature| format!("\"{feature}\""))
                 .collect::<Vec<_>>()
                 .join(",");
+            let compiled_target_features = compiled_target_features()
+                .into_iter()
+                .map(|feature| format!("\"{feature}\""))
+                .collect::<Vec<_>>()
+                .join(",");
             println!(
                 concat!(
                     "{{\"times_us\":[{}],",
@@ -3989,7 +4039,8 @@ fn main() {
                     "\"process_threads_before_probe\":{},",
                     "\"peak_process_threads\":{},",
                     "\"operation_threads_used\":{},",
-                    "\"runtime_detected_isa_features\":[{}]",
+                    "\"runtime_detected_isa_features\":[{}],",
+                    "\"compiled_target_features\":[{}]",
                     "}}}}"
                 ),
                 times.join(","),
@@ -4002,6 +4053,7 @@ fn main() {
                 samples.thread_probe.peak_process_threads,
                 samples.thread_probe.operation_threads_used,
                 runtime_isa_features,
+                compiled_target_features,
             );
         }
         None => {
@@ -4066,6 +4118,37 @@ mod harness_contract_tests {
             samples.thread_probe.peak_process_threads
                 >= samples.thread_probe.process_threads_before_probe
         );
+    }
+
+    #[test]
+    fn compiled_target_features_are_a_subset_of_what_the_cpu_offers_oxv4u() {
+        // The provenance bug this closes: `runtime_detected_isa_features` asks the
+        // CPU what it supports, so a +avx2 build and a default build emit the SAME
+        // list and a specially-flagged row is indistinguishable from a shipping one.
+        // MEASURED on this host: both builds report
+        // [scalar, sse2, avx2, fma, bmi2, vaes] at runtime, while compiled reports
+        // ["sse2"] for the default build and ["sse2", "sse4.1", "avx", "avx2"] under
+        // `-C target-feature=+avx2`.
+        let compiled = crate::compiled_target_features();
+        assert!(
+            !compiled.is_empty(),
+            "must never report an empty target set"
+        );
+
+        // Anything the COMPILER targeted must be present on the CPU, or this binary
+        // could not be running at all — an illegal instruction would have fired
+        // before reaching a test. This is the invariant that makes the field
+        // trustworthy as provenance rather than a free-text label.
+        let runtime = crate::runtime_isa_features();
+        for feature in &compiled {
+            if *feature == "baseline" || *feature == "sse4.1" {
+                continue; // "baseline" is the non-x86 sentinel; sse4.1 is not probed
+            }
+            assert!(
+                runtime.contains(feature),
+                "compiled for {feature} but the CPU does not report it"
+            );
+        }
     }
 
     #[test]
