@@ -51220,6 +51220,8 @@ mod tests {
         /// 2.2.3 `pd.Series([...], dtype='datetime64[ns]').astype(str)`.
         #[test]
         fn astype_datetime64_to_utf8_picks_one_width_for_the_whole_column() {
+            use fp_types::Timestamp;
+
             // 2024-03-15 00:00:00 and 2024-01-01 00:00:00.
             const MIDNIGHT: i64 = 1_710_460_800_000_000_000;
             const NEW_YEAR: i64 = 1_704_067_200_000_000_000;

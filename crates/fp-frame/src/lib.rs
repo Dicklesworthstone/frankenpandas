@@ -34034,12 +34034,26 @@ impl DataFrameResample<'_> {
                     "first" => resample.first()?,
                     "last" => resample.last()?,
                     // br-frankenpandas-groupby-idxmax-idxmin, sixth surface,
-                    // DataFrame side. Same names, and `ohlc` fits here too because
-                    // every arm in this dispatch yields a DataFrame.
+                    // DataFrame side.
+                    //
+                    // ⚠️ `ohlc` DOES NOT FIT HERE. I wrote that it did, on the
+                    // grounds that "every arm in this dispatch yields a
+                    // DataFrame" — the opposite is true: this loop aggregates
+                    // ONE COLUMN at a time through `series.resample`, so every
+                    // arm yields a Series and `Resample::ohlc` returns a
+                    // DataFrame. MEASURED, live pandas 2.2.3:
+                    //     s.resample('2h').agg('ohlc')  -> DataFrame
+                    //                                      [open, high, low, close]
+                    //     df.resample('2h').agg('ohlc') -> DataFrame with a
+                    //                                      two-level column index
+                    //                                      (a, open) .. (b, close)
+                    // i.e. it multiplies the column count by four and needs a
+                    // MultiIndex on the columns, which this per-column
+                    // accumulate-into-one-frame loop has no way to express.
+                    // Left refused rather than reshaped on a guess.
                     "asfreq" => resample.asfreq()?,
                     "nearest" => resample.nearest()?,
                     "quantile" => resample.quantile(0.5)?,
-                    "ohlc" => resample.ohlc()?,
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "resample agg: unsupported function '{func}'"
@@ -65441,29 +65455,25 @@ impl DataFrame {
                     "sem" => Scalar::Float64(Self::row_sem(&row_vals)),
                     "skew" => Scalar::Float64(Self::row_skew(&row_vals)),
                     "kurt" | "kurtosis" => Scalar::Float64(Self::row_kurtosis(&row_vals)),
-                    // br-frankenpandas-groupby-idxmax-idxmin, seventh surface.
-                    // pandas' df.apply(str) accepts 22 names; this accepted 14.
-                    // Every one added here is an existing Series method, reached
-                    // through the per-column Series this loop already builds.
+                    // ⚠️ THE SEVEN NAMES THE axis=0 ARM GAINED ARE NOT HERE, and
+                    // that is deliberate rather than an omission. They were
+                    // copied into this arm without a receiver — `s` is the
+                    // per-column Series the axis=0 loop builds and does not
+                    // exist row-wise — and they cannot simply be re-expressed
+                    // over `row_vals`, because that vector has already DROPPED
+                    // the missing entries.
                     //
-                    // MEASURED, live pandas 2.2.3: df.apply(name) works for all,
-                    // any, cumsum, idxmax, idxmin, nunique, quantile, rank and size
-                    // on a numeric frame. The seven below are the REDUCTION-shaped
-                    // ones — a scalar per column, which is what this match yields.
-                    // `cumsum` and `rank` return a DataFrame (one row per input row)
-                    // and cannot be expressed here, exactly as on the groupby
-                    // surfaces.
-                    //
-                    // `quantile` carries no q through the string form, so it is
-                    // pandas' default 0.5 — verified on the pivot surface in the
-                    // same commit that aggfunc='quantile' equals aggfunc='median'.
-                    "any" => Scalar::Bool(s.any()?),
-                    "all" => Scalar::Bool(s.all()?),
-                    "nunique" => Scalar::Int64(s.nunique() as i64),
-                    "size" => Scalar::Int64(s.len() as i64),
-                    "quantile" => s.quantile(0.5)?,
-                    "idxmax" => index_label_to_scalar(&s.idxmax()?),
-                    "idxmin" => index_label_to_scalar(&s.idxmin()?),
+                    // MEASURED, live pandas 2.2.3, on {a: [1.0, 2.0], b: [3.0, NaN]}:
+                    //     df.apply('size',   axis=1) -> [2, 2]     counts BOTH
+                    //                                              columns, NaN
+                    //                                              included
+                    //     df.apply('nunique',axis=1) -> [2, 1]     NaN excluded
+                    //     df.apply('idxmax', axis=1) -> ['b', 'a'] a COLUMN LABEL
+                    //     df.apply('idxmin', axis=1) -> ['a', 'a']
+                    // so `size` needs the unfiltered width and the two idx names
+                    // need the column labels that `row_vals` threw away.
+                    // Implementing them means walking the row WITH its labels,
+                    // which is a different loop, not another arm.
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported apply function: '{other}'"

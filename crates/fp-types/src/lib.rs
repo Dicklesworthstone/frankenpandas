@@ -13174,7 +13174,9 @@ mod tests {
         }
 
         fn freq_for(raw: u64) -> PeriodFreq {
-            match raw % 9 {
+            // All TWELVE frequencies. This stopped at nine, so no property
+            // test here ever generated a sub-second period.
+            match raw % 12 {
                 0 => PeriodFreq::Annual,
                 1 => PeriodFreq::Quarterly,
                 2 => PeriodFreq::Monthly,
@@ -13183,7 +13185,10 @@ mod tests {
                 5 => PeriodFreq::Business,
                 6 => PeriodFreq::Hourly,
                 7 => PeriodFreq::Minutely,
-                _ => PeriodFreq::Secondly,
+                8 => PeriodFreq::Secondly,
+                9 => PeriodFreq::Milliseconds,
+                10 => PeriodFreq::Microseconds,
+                _ => PeriodFreq::Nanoseconds,
             }
         }
 
@@ -13197,7 +13202,13 @@ mod tests {
                 PeriodFreq::Business => PeriodFreq::Hourly,
                 PeriodFreq::Hourly => PeriodFreq::Minutely,
                 PeriodFreq::Minutely => PeriodFreq::Secondly,
-                PeriodFreq::Secondly => PeriodFreq::Annual,
+                // The cycle closes through the sub-second units, so every
+                // frequency still maps to a DIFFERENT one — the only property
+                // this helper owes its callers.
+                PeriodFreq::Secondly => PeriodFreq::Milliseconds,
+                PeriodFreq::Milliseconds => PeriodFreq::Microseconds,
+                PeriodFreq::Microseconds => PeriodFreq::Nanoseconds,
+                PeriodFreq::Nanoseconds => PeriodFreq::Annual,
             }
         }
 
@@ -13546,7 +13557,9 @@ mod tests {
         }
 
         fn freq_for(raw: u64) -> PeriodFreq {
-            match raw % 9 {
+            // All TWELVE frequencies. This stopped at nine, so no property
+            // test here ever generated a sub-second period.
+            match raw % 12 {
                 0 => PeriodFreq::Annual,
                 1 => PeriodFreq::Quarterly,
                 2 => PeriodFreq::Monthly,
@@ -13555,7 +13568,10 @@ mod tests {
                 5 => PeriodFreq::Business,
                 6 => PeriodFreq::Hourly,
                 7 => PeriodFreq::Minutely,
-                _ => PeriodFreq::Secondly,
+                8 => PeriodFreq::Secondly,
+                9 => PeriodFreq::Milliseconds,
+                10 => PeriodFreq::Microseconds,
+                _ => PeriodFreq::Nanoseconds,
             }
         }
 
