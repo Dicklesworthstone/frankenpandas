@@ -2415,7 +2415,7 @@ fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
 fn nearest_label_value(label: &IndexLabel) -> Option<f64> {
     match label {
         IndexLabel::Int64(v) => Some(*v as f64),
-        IndexLabel::Float64(v) => Some(f64::from(*v)),
+        IndexLabel::Float64(v) => Some(v.0),
         _ => None,
     }
 }
@@ -4138,13 +4138,6 @@ fn anchored_asfreq_anchors(
                     asfreq_month_start(year, month)?
                 } else {
                     asfreq_month_end(year, month)?
-                };
-                        let rolled = boundary.and_then(|date| roll_off_weekend(date, forward));
-                        asfreq_midnight(rolled.ok_or_else(|| {
-                            FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
-                        })?)?
-                    }
-                    _ => asfreq_month_end(year, month)?,
                 };
                 if me > end && me.year() > end.year() {
                     break;
