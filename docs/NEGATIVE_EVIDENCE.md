@@ -37382,3 +37382,95 @@ still held the exact tree and chose to commit it unamended. The other two are no
 now say what they measured. **Six rows is a small loss; the process lesson is the asset, and the
 lesson is that "measure only against committed state" needs to be a precondition of running the
 harness, not a discipline applied afterwards by the person banking.**
+
+### 2026-08-18 SlateHeron (br-frankenpandas-live-oracle-passes-by-skip-l7r1p) — the system-pandas fallback ALREADY WORKS, so the bead's step 1 is decided; but turning it on would still leave 15 of 67 error expectations unattestable, and 4 of them are CONTRADICTED by live pandas
+
+`l7r1p` says the live-oracle differential surface passes by skip because the legacy pandas
+tree is absent, and asks first to "decide how the legacy oracle is obtained". I went to
+answer that and found the decision is already implemented in-tree and functional. Then I
+looked at what enabling it would actually verify, which is the part the bead could not
+know. No cargo was invoked for any of this — the oracle is a Python script and can be
+driven directly.
+
+**1. THE FALLBACK IS NOT HYPOTHETICAL.** `HarnessConfig` reads
+`FP_ALLOW_SYSTEM_PANDAS_FALLBACK` (lib.rs:179) and `allows_live_oracle_fallback()` also
+returns true under `FP_REQUIRE_LIVE_ORACLE` (lib.rs:216). Driving
+`oracle/pandas_oracle.py` by hand with `--allow-system-pandas-fallback` and the repo's
+own (absent) legacy root answers correctly against system pandas 2.2.3 today:
+
+```
+40 of 40 stratified packets (every 32nd of 1259) answered correctly:
+  39 well-formed value answers, 1 correct pandas raise (dataframe_insert duplicate column)
+```
+
+So step 1's menu — "vendored, submodule, fetched by a script, or replaced by the pinned
+system pandas" — already has a working fourth option. What is missing is not a mechanism;
+it is that **nothing sets the variable**, which is step 2's job and is a one-line CI change
+rather than a sourcing decision.
+
+**2. A CORRECTION I OWE ON MY OWN FIRST READING.** My first sweep reported "58 of 67 error
+packets fail". That was wrong and the mistake is worth recording: the oracle exits **1
+whenever the operation errored**, which for an error-expectation packet is the CORRECT
+outcome. I read an exit code as an infrastructure failure. Classifying by `error_origin`
+instead of by exit status gives the real distribution over the 67 error-shaped packets:
+
+| `error_origin` | count | meaning |
+|---|---|---|
+| `pandas` | 43 | pandas genuinely raised — attestable |
+| `oracle_adapter` | **15** | the ADAPTER refused; **pandas was never invoked** |
+| `null` (no error) | 9 | pandas returned a value; the packet expects FP to refuse |
+
+**3. THE 15 ARE THE FINDING.** `error_origin` exists precisely so an adapter refusal is
+not credited to pandas — `p6srr` built that machinery and its docstring names
+`unsupported constructor dtype 'boolean[pyarrow]'` as the live example. The machinery is
+correct. The consequence is what nobody had counted: **22% of the corpus's error
+expectations remain unverifiable against pandas even with the live oracle fully enabled**,
+because they bottom out in the adapter's own argument validation. Enabling the oracle
+closes less of `l7r1p` than the bead assumes.
+
+**4. AND FOUR OF THE 15 ARE NOT MERELY UNATTESTABLE — LIVE PANDAS CONTRADICTS THEM.** Each
+of these fixtures pins `expected_error_contains: "unsupported constructor dtype 'X'"`.
+Measured against live pandas 2.2.3, in plain Python, no FrankenPandas involved:
+
+| fixture dtype | pinned expectation | live pandas 2.2.3 |
+|---|---|---|
+| `object` | unsupported | **constructs**, `dtype('O')` |
+| `datetime64[ns]` | unsupported | **constructs**, `dtype('<M8[ns]')` |
+| `uint64` | unsupported | **constructs**, `dtype('uint64')` |
+| `boolean[pyarrow]` | unsupported | **constructs**, `bool[pyarrow]` |
+
+**Where the restriction actually lives: the CONFORMANCE HARNESS, not the product.**
+`parse_constructor_dtype_spec` (`crates/fp-conformance/src/lib.rs:14958`) accepts exactly
+five spellings — `bool`, `boolean`, `int64`/`int`/`i64`, `float64`/`float`/`f64`,
+`utf8`/`string`/`str` — and rejects everything else with that literal message. The Python
+adapter raises the same string from its own helper. So the fixture, the oracle and the
+Rust harness all agree, three copies of one limitation, and **not one of the three asked
+pandas.** This is the shadow-reimplementation hazard already recorded for
+`dataframe_constructor_list_like`, showing up as pinned truth rather than as a red test.
+
+**WHAT I AM NOT CLAIMING.** I have not verified what FrankenPandas' own DataFrame
+constructor does with `dtype='object'` or `'uint64'` — that needs a build, and this was
+written under a no-build hold. `expand_dtype_alias` (fp-frame:449) shows FP has a richer
+dtype vocabulary elsewhere (it knows `category`, `timedelta64`, `object`), but that helper
+serves `select_dtypes`-style expansion and is NOT the constructor path, so it proves
+nothing about the constructor. `0g9m9` separately records that the constructor rejects
+`dtype='category'` where pandas builds a `CategoricalDtype`, which suggests these four may
+be real parity gaps rather than harness-only ones — unproven either way here.
+
+**CONSEQUENCE FOR THE BEAD.** Step 1 is answered (system pandas, already wired, already
+working). Step 2 shrinks to setting the variable in CI. Step 3 — "triage what it finds" —
+gains a known first entry: 15 packets it will NOT find anything about, 4 of which are
+already known-wrong without running it at all.
+
+```
+NO VERDICT, NO RATIO, NO ROW BANKED. This entry measures a test corpus against live
+pandas, not FrankenPandas against an incumbent, so no A/A null control applies.
+LOADAVG   6.76 / 7.43 / 8.59 at the start of this work; no cargo invoked, no build
+          started — the other pane's floordiv/mod @10M pair was in flight and a build
+          from this pane would have landed inside its measurement window.
+DISK      /data 125G.
+METHOD    1259-packet corpus; 40-packet stratified sample (every 32nd) for the happy
+          path, all 67 error-shaped packets classified by `error_origin`. The four
+          dtype comparisons were run against live pandas directly, not against the
+          oracle — the oracle is the thing under test here.
+```
