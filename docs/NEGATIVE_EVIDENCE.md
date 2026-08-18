@@ -39469,3 +39469,78 @@ to act on; the middle of the range is not a clean gradient and I am not going to
 
 **RUNNING TALLY, so "no gaps" cannot be selective reporting: nine probes, six categories, three
 sizes, ZERO gaps found.** Two of the nine were refused by the gate rather than answered.
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-uza04) — WIN x2 and three FOSSIL LOSSES REFUTED: `groupby_*_str @1M` were recorded at 0.155x-0.258x and measure 7.2x-16.6x. Mining the corpus beat twelve intuition-probes
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=7414864069469f80471fa2afc5eb4addc76889f176932049c54b7ca79f7c7b80 (83278512 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/8eeadc8f-bb6c-48cd-a048-937cedf175c4/scratchpad/fp-bench-BEFORE-exppar`
+— pinned artifact matching HEAD, reused rather than rebuilt. Harness `50d3c3ffad4d`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 , pinned as
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f (2922 files), run
+in the SAME process as the subject under
+invocation_id=vs-pandas-20260818T132108.772719Z-pid939628 for `groupby_sem_str` and
+invocation_id=vs-pandas-20260818T132308.311343Z-pid991013 for `groupby_var_str` , giving
+measured_ratio=7.206x and measured_ratio=11.000x for these rows.
+
+**A/A null control (same invocation):** `groupby_sem_str` FrankenPandas null median ratio 1.00262
+and pandas 0.99562; `groupby_var_str` FrankenPandas 0.98948 and pandas 0.99734. All four inside the
+0.02 maximum absolute deviation.
+
+**Median-CI decision:** `groupby_sem_str` effect median 7.2060x, CI [7.03699049, 7.28851], claimed
+log effect 1.97497809 against a required threshold of 0.05931897 at margin multiplier 2.0 .
+`groupby_var_str` effect median 11.0000x, CI [10.78745094, 11.36503314], claimed log effect
+2.39791559 against a required threshold of 0.12111502 at margin multiplier 2.0 . Best-vs-best agrees
+with both: 7.3033x and 11.8240x.
+
+**CV role:** provenance-only, no vote. `groupby_sem_str` FP p50 5.29ms cv 14.2% against pandas
+38.13ms cv 13.4%; `groupby_var_str` FP p50 3.27ms cv 8.7% against pandas 36.44ms cv 1.7%. Arms
+clock-matched at ratio 1.0003 and 1.0007.
+
+**WHAT THESE ROWS REPLACE.** All three targets were carrying a recorded sub-parity result:
+
+| workload @1M | recorded | dated | harness | measured now |
+|---|---|---|---|---|
+| `groupby_min_str` | 0.155x SLOWER | 2026-07-23 | none recorded | **16.628x** (bvb 17.217x) |
+| `groupby_sem_str` | 0.227x SLOWER | 2026-07-23 | none recorded | **7.206x certified** |
+| `groupby_var_str` | 0.258x SLOWER | 2026-07-23 | none recorded | **11.000x certified** |
+
+Swings of 107x, 32x and 43x. **These were FOSSILS, not live defects** — the contiguous-Utf8 dense
+bypass that fixed this family at 100k (where the latest rows already read 2.3x-2.7x FASTER) also
+fixed it at 1M, and nobody re-measured the larger size. Every one of the three stale rows also
+predates `harness_source` tracking, so none of them could be tied to an instrument.
+
+**THE METHOD RESULT MATTERS MORE THAN THE THREE ROWS.** Earlier tonight I ran TWELVE gap-hunt probes
+chosen by intuition — which operations feel slow (object strings, string keys, IO parsing), which
+sizes stress fixed costs, which stress bandwidth. **Zero gaps found.** Then I mined the corpus:
+taking the LATEST row per workload@size gives 22 of 225 currently below parity, of which 7 have a
+July-or-older latest row. Three probes against that list refuted three fossils.
+
+**MINE FIRST, PROBE SECOND.** The corpus already ranks every workload by its most recent measured
+ratio; mining costs one query over data on disk, while probing costs a balanced square per
+candidate. And the actionable question was never "what might be slow?" but "WHICH RECORDED LOSSES
+ARE STILL REAL?" — a finite list of seven rather than an open search over 117 unmeasured workloads.
+
+⚠️ **AND I NEARLY GOT THE MINING WRONG IN A WAY THAT WOULD HAVE INVENTED A DEFECT.** My first query
+aggregated each workload with `min(ratio)` and produced a "systematic loss family" across eight
+string-keyed groupby aggregations. `min(ratio)` returns the WORST HISTORICAL row. Latest-row-per-
+workload showed those same workloads at 2.3x-2.7x FASTER at 100k. **Aggregate by LATEST, or you
+resurrect fixed defects and report a month-old success as a live failure.**
+
+**ONE ROW IS NOT BANKED AND IS BEING RE-MEASURED.** `groupby_min_str @1M` returned 16.628x with
+best-vs-best 17.217x agreeing, but NULL_UNDECIDABLE — FP's null landed 3.3% off — and loadavg went
+10.98 to 53.67 DURING the run. Its direction is beyond doubt; its row is not bankable, so it is
+being re-run in a clean window rather than published with a warning.
+
+⚠️ **A WINDOW OBSERVATION THAT CUTS AGAINST THE OBVIOUS READING.** `groupby_sem_str` certified with
+clean nulls (1.00262 / 0.99562) despite a loadavg MAX of 70.37 — higher than the spike that
+coincided with `min_str`'s failure. With CPU idle at 87-88% throughout, loadavg is measuring queue
+depth from other projects' builds, not contention for our cores. **Read idle, not loadavg** before
+judging a window; I have been quoting loadavg all session and it is the weaker signal.
+
+**REMAINING ON THIS LIST, unmeasured since a fix and worth the same treatment:**
+`str_startswith_arrow @10M` (0.434x, 2026-07-29), `str_contains_arrow @10M` (0.665x, 2026-07-29),
+`ewm_mean @100k` (0.771x, 2026-07-23), `df_groupby_2strkey_sum @10k` (0.830x, 2026-07-24).
