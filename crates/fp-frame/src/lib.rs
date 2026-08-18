@@ -27306,6 +27306,31 @@ impl Rolling<'_> {
                 "kurt" => self.kurt()?,
                 "kurtosis" => self.kurtosis()?,
                 "sem" => self.sem()?,
+                // br-frankenpandas-groupby-idxmax-idxmin, window side. corr, cov
+                // and rank all EXIST as methods on this type and were still refused
+                // by name — the same routing gap found on both groupby surfaces,
+                // now on the third.
+                //
+                // corr/cov take an `other` series, and pandas' string form pairs the
+                // window WITH ITSELF. MEASURED, live pandas 2.2.3 on [3,1,2,5,4]:
+                //     o.agg('corr').equals(o.corr(s))   True
+                //     o.agg('cov').equals(o.cov(s))     True
+                //     o.agg('rank').equals(o.rank())    True
+                // for BOTH rolling(3) and expanding(). corr-with-self settles at 1.0
+                // once min_periods is met — the shape of answer to expect, not an
+                // error.
+                //
+                // ⚠️ ALL THREE FIRST READ AS FALSE. `list(a) == list(b)` on a window
+                // result is always unequal when the leading min_periods-1 entries are
+                // NaN, because NaN != NaN. The equalities above use .equals(), which
+                // is NaN-aware. A list comparison would have "shown" a divergence
+                // that is not there and sent this to a bead instead of a routing.
+                //
+                // rank()'s defaults here are method='average', ascending=True,
+                // na_option='keep', matching the groupby routings in this file.
+                "corr" => self.corr(self.series)?,
+                "cov" => self.cov(self.series)?,
+                "rank" => self.rank("average", true, "keep")?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "rolling.agg: unsupported function '{func}'"
@@ -28801,6 +28826,31 @@ impl Expanding<'_> {
                 "kurt" => self.kurt()?,
                 "kurtosis" => self.kurtosis()?,
                 "sem" => self.sem()?,
+                // br-frankenpandas-groupby-idxmax-idxmin, window side. corr, cov
+                // and rank all EXIST as methods on this type and were still refused
+                // by name — the same routing gap found on both groupby surfaces,
+                // now on the third.
+                //
+                // corr/cov take an `other` series, and pandas' string form pairs the
+                // window WITH ITSELF. MEASURED, live pandas 2.2.3 on [3,1,2,5,4]:
+                //     o.agg('corr').equals(o.corr(s))   True
+                //     o.agg('cov').equals(o.cov(s))     True
+                //     o.agg('rank').equals(o.rank())    True
+                // for BOTH rolling(3) and expanding(). corr-with-self settles at 1.0
+                // once min_periods is met — the shape of answer to expect, not an
+                // error.
+                //
+                // ⚠️ ALL THREE FIRST READ AS FALSE. `list(a) == list(b)` on a window
+                // result is always unequal when the leading min_periods-1 entries are
+                // NaN, because NaN != NaN. The equalities above use .equals(), which
+                // is NaN-aware. A list comparison would have "shown" a divergence
+                // that is not there and sent this to a bead instead of a routing.
+                //
+                // rank()'s defaults here are method='average', ascending=True,
+                // na_option='keep', matching the groupby routings in this file.
+                "corr" => self.corr(self.series)?,
+                "cov" => self.cov(self.series)?,
+                "rank" => self.rank("average", true, "keep")?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "expanding.agg: unsupported function '{func}'"
