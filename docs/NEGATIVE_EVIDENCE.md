@@ -39959,3 +39959,55 @@ or the bead said something narrower than the headline I was about to argue with.
 subject rather than the tests — both `4kig1` lock tests still defined,
 `BINARY_BANDWIDTH_PARALLEL_MIN_LEN` unchanged at `1 << 20`. A lock I did not run is not
 a lock that passed, and this entry does not claim otherwise.
+
+---
+
+## VERIFIED DELIBERATE DIVERGENCE — FrankenPandas is MORE ACCURATE than pandas on datetime64 mean/median, and a fixture banked from the oracle would mark it WRONG for that (CrimsonPine, 2026-08-18)
+
+**Date:** 2026-08-18 · **Agent:** CrimsonPine · **Status:** parity verification, no
+defect. Build freeze (/data 34G at 99%): no cargo, no artifact writes; live pandas 2.2.3
+and source reading only. `uptime` 1-min 5.32 against 5-min 5.24. Locks defended BY
+INSPECTION — both `4kig1` tests still defined, `BINARY_BANDWIDTH_PARALLEL_MIN_LEN`
+unchanged at `1 << 20`. Subject intact, NOT a green run.
+
+**PANDAS LOSES NANOSECOND PRECISION ON datetime64 mean AND median — INCLUDING WHERE THE
+ANSWER IS UNAMBIGUOUS.** Measured, `B = 1_577_836_800_000_000_000` (2020-01-01):
+
+| input (ns offset from B) | exact answer | pandas `mean` | pandas `median` |
+|---|---|---|---|
+| `[B+1, B+1]` | +1 | **+0** | **+0** |
+| `[B+3, B+3, B+3]` | +3 | **+0** | **+0** |
+| `[B, B+129, B+258]` | +129 | **+0** | **+256** |
+
+The mechanism is arithmetic, not a bug in a corner: `B ~ 1.578e18` ns, and an `f64`
+mantissa represents integers exactly only to `2^53 ~ 9.007e15`. Any datetime64 reduction
+that routes through `f64` therefore cannot resolve nanoseconds at a modern epoch — three
+orders of magnitude short. A CONSTANT series loses its own value.
+
+**FRANKENPANDAS IS EXACT HERE, DELIBERATELY, AND ITS SOURCE COMMENT WAS RIGHT.**
+`fp-types` asserts that an odd-count median is a SELECTION whose result must be one of the
+inputs, with the comment "pandas returns B+256, which is not". Probed: pandas returns
+offset **256**, and `{0, 129, 258}` does not contain it. The comment is exactly correct,
+including the specific value. `nanmean`/`nanmedian` stay in `i64` nanoseconds and return
+`B+129` and `B+1`.
+
+**Also verified in the same pass, all accurate:** `pd.NaT.days` handling aside (see
+`br-frankenpandas-timedelta-nat-days-returns-zero-406ni`), 1-element datetime `std` with
+`ddof=1` is `NaT`, all-NaT `std` is `NaT`, datetime64 `std` equals timedelta64 `std` on the
+same offsets, `i64::MAX * 2` wraps to `-2` exactly as the comment claims, and
+`s.max() - s.min()` on datetimes is a `Timedelta`.
+
+⚠️ **THE TRAP THIS ENTRY EXISTS TO PREVENT.** The corpus has **ZERO** fixtures covering
+datetime64 mean or median — 6 mean/median fixtures exist and none carries datetime content
+(positive control run, so this is a real zero). So the divergence currently lives only in a
+unit-test comment. **If anyone banks a fixture for this surface by generating the expectation
+from the oracle, the oracle will emit pandas' LOSSY value and FrankenPandas will go RED for
+being CORRECT** — then the "fix" is to make FP match a precision loss. That is the exact
+shape of `br-frankenpandas-eay9h` (oracle expectation wrong, FP marked divergent for
+matching pandas' real default) and of `br-frankenpandas-v3q4j` (filed off the oracle, later
+refuted), reached here BEFORE the fixture exists rather than after.
+
+**HOW TO COVER IT SAFELY, if someone wants coverage:** pin FP's exact answer with an
+explicit note that pandas differs and why, or choose epoch-adjacent inputs (small ns values
+where `f64` is still exact) so the two engines agree and the fixture tests the operation
+rather than the float mantissa. Do NOT let the oracle arbitrate this one.
