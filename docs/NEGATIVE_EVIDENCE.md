@@ -38726,3 +38726,73 @@ METHOD    Fixture generated from the ORACLE rather than typed, then cross-checke
           been. Mutation applied and reverted inside one script with the restore in a
           finally block, and the CLI rebuilt from restored source afterwards.
 ```
+
+
+### 2026-08-18 CrimsonPine (br-frankenpandas-3ya6b, br-frankenpandas-l4vzc) — the positional column accessor is worth 1.165x-1.214x, and MY PRE-REGISTERED PREDICTION WAS WRONG IN BOTH MAGNITUDE AND SHAPE
+
+**THIS IS AN FP-vs-FP MEASUREMENT AND IT IS NOT CAMPAIGN OUTPUT.** No incumbent arm ran; pandas is
+not in this comparison at all. It is a mechanism check answering one question — how much of the
+l4vzc transpose gap is an addressable API constant rather than the representational gap — and it
+must not be banked, quoted as a vs-pandas ratio, or read as a win against anything.
+
+**THE MEASUREMENT.** Two fp-bench lanes, identical except how a column is addressed, alternating
+A,B,A,B so host drift hits both arms equally. Three repeats per size. Local ELF
+`34a4487b113f1d388c7ffb7a8646845c5680b8b4876cd001737d6f49e2f9c930` (83214768 bytes) on
+`thinkstation1`. loadavg 8.32-9.55 across all 18 invocations; busy-core MHz max 4217.4-4297.8.
+
+| size | label route p50 | positional p50 | ratio | tax per column |
+|---|---|---|---|---|
+| 10k | 2160.8us | 1779.6us | **1.214x** | 38.1 ns |
+| 100k | 29583.0us | 24837.0us | **1.191x** | 47.5 ns |
+| 1M | 294447.3us | 252805.1us | **1.165x** | 41.6 ns |
+
+Checksums identical between lanes at every size, so both arms did the same work — the guard that
+makes the most seductive failure (a lane that accidentally measures nothing) unreportable rather
+than merely detectable. Every in-process A/A null is clean: label 0.9904-1.0148, positional
+0.9970-1.0065.
+
+⚠️ **THE PREDICTION I RECORDED BEFORE THE BINARY EXISTED IS REFUTED ON BOTH COUNTS.**
+
+* **MAGNITUDE.** I predicted **1.4x-1.9x** at 100k and 1M from an estimated round-trip cost of
+  **100-150 ns per column**. Measured: **38-48 ns**, so I overestimated the constant by **2.5x-3x**
+  and every size fell below my band.
+* **SHAPE, and I had it backwards.** I predicted the ratio would be LOWER at 10k because fixed
+  per-invocation costs dilute it there. The ratio is **HIGHEST at 10k and falls monotonically with
+  size** (1.214 -> 1.191 -> 1.165). Whatever grows with size in this workload grows FASTER than the
+  per-column addressing tax does, so the tax is a shrinking share of the total.
+
+**ON MY OWN REFUTATION THRESHOLD, ANSWERED AS WRITTEN RATHER THAN RENEGOTIATED.** I stated in
+advance that a ratio **below 1.15x at 1M** would mean the round trip is not a material fraction of
+the work and that 3ya6b is "a micro-optimisation not worth its API surface", which I would say
+plainly. **1M measured 1.165x — above that line, but by 0.015x.** So the stated consequence is not
+triggered and I am not declaring it unworthy. **It is marginal and I am saying that instead of
+claiming the threshold vindicated the lever.** Had r0 alone decided it (1.148x) the verdict would
+have gone the other way; the median of three repeats is what I committed to and what I used.
+
+**WHAT THE LEVER ACTUALLY BUYS.** The round trip is real, removable, and costs ~40-48 ns per
+column: `i.to_string()` (allocation), `name.parse::<i64>()`, and `label.to_string() != name` (second
+allocation) to convert a position into the same position. Removing it is a **17-21% reduction on a
+whole-frame read** and it is bit-identical by construction — the accessor returns the same
+`&Column`. That is worth having on its own terms.
+
+**AND IT DOES NOT CLOSE THE GAP, WHICH WAS THE PREDICTION THAT HELD.** At 1M the positional route
+still takes **252.8ms against pandas' 44.6us** — about **5670x**, down from ~6600x. The
+representational cost dominates by three orders of magnitude, exactly as l4vzc's account says. The
+"NO sign change" half of my prediction survives by a margin so large it was never really at risk,
+which is worth admitting: it was the safe half of the prediction and it is not evidence I
+understood the mechanism.
+
+**A CONSISTENCY CHECK THAT COST NOTHING AND IS WORTH MORE THAN THE RATIO.** The label-route arm on
+this NEW binary reproduces the banked l4vzc rows measured hours earlier on a DIFFERENT ELF:
+
+| size | banked (ELF `2284f13d`) | this run (ELF `34a4487b`) | delta |
+|---|---|---|---|
+| 10k | 2135.9us | 2160.8us | 1.2% |
+| 100k | 29113.1us | 29583.0us | 1.6% |
+| 1M | 292369.7us | 294447.3us | **0.24%** |
+
+Two independently built binaries, hours apart, agreeing within 1.6% on a workload whose incumbent
+arm cannot hold an A/A null. **The instrument is sound on the FP side; the undecidability recorded
+in 778a7eeb2 is entirely the incumbent's 45us arm**, which this cross-check now independently
+supports.
+
