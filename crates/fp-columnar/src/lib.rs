@@ -1020,6 +1020,20 @@ struct PendingDot<'a> {
     len: usize,
 }
 
+/// One `df.dot` A panel already packed for the register-blocked kernel, plus
+/// the panel identity it was packed from.
+///
+/// br-frankenpandas-mti15. The identity travels WITH the buffer on purpose: the
+/// packed bytes carry no evidence of which product they came from, and applying
+/// one product's panel to another's columns would produce finite, plausible,
+/// wrong numbers. Carrying the `Arc` lets the worker re-check rather than trust
+/// the caller.
+#[derive(Clone, Copy)]
+struct PrepackedPanel<'a> {
+    a_cols: &'a Arc<[Float64DotInput]>,
+    packed: &'a [f64],
+}
+
 /// A shared left-hand (`A`) panel for `df.dot`: the `k` A-columns built once
 /// as `Float64DotInput`s and shared (`Arc`) across all `n` output columns of a
 /// single dot product, so construction is O(k) once + O(n) Arc bumps instead
@@ -4323,6 +4337,47 @@ impl ScalarValues {
         }
     }
 
+    /// Is the ISA-isolated blocked kernel safe to enter on THIS cpu?
+    ///
+    /// br-frankenpandas-mti15. fp-dot-kernel is compiled `+avx2,+fma` and emits
+    /// those instructions unconditionally, so entering it on a pre-AVX2 CPU is
+    /// SIGILL rather than a graceful error. One predicate rather than a `cfg`
+    /// block per call site, so the guard cannot drift between them.
+    fn dot_kernel_available() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    /// The one A panel every pending column shares, or `None` if they do not.
+    ///
+    /// br-frankenpandas-mti15. `None` is the ordinary case for a batch that mixes
+    /// two products, and it costs nothing — each worker then packs its own runs.
+    fn shared_dot_panel<'a>(pending: &[&'a Self]) -> Option<PendingDot<'a>> {
+        let head = pending.first()?.pending_dot_parts()?;
+        for value in pending.iter().skip(1) {
+            let next = value.pending_dot_parts()?;
+            if next.len != head.len || !Arc::ptr_eq(head.a_cols, next.a_cols) {
+                return None;
+            }
+        }
+        Some(head)
+    }
+
+    /// The A-column slices of a panel, at `len` rows.
+    fn dot_panel_slices(a_cols: &Arc<[Float64DotInput]>, len: usize) -> Vec<&[f64]> {
+        a_cols
+            .iter()
+            .map(|a_col| &a_col.data[a_col.start..a_col.start + len])
+            .collect()
+    }
+
     /// Materialize one worker's share of the pending dot columns, batching every
     /// run that shares an A panel into a single blocked pass.
     ///
@@ -4350,12 +4405,9 @@ impl ScalarValues {
     /// ⚠️ THE GUARD IS NOT OPTIONAL. fp-dot-kernel emits AVX2 unconditionally, so
     /// entering it on a pre-AVX2 CPU is SIGILL. The fallback below is the
     /// complete per-column path, never a stub.
-    fn materialize_dot_group(group: &[&Self]) {
-        #[cfg(target_arch = "x86_64")]
+    fn materialize_dot_group(group: &[&Self], prepacked: Option<PrepackedPanel<'_>>) {
         {
-            if std::arch::is_x86_feature_detected!("avx2")
-                && std::arch::is_x86_feature_detected!("fma")
-            {
+            if Self::dot_kernel_available() {
                 let mut start = 0;
                 while start < group.len() {
                     let Some(head) = group[start].pending_dot_parts() else {
@@ -4382,14 +4434,22 @@ impl ScalarValues {
                         .map(|pending| pending.b_col)
                         .collect();
                     if b_cols.len() == run.len() && run.len() >= 2 {
-                        let a_slices: Vec<&[f64]> = head
-                            .a_cols
-                            .iter()
-                            .map(|a_col| &a_col.data[a_col.start..a_col.start + head.len])
-                            .collect();
-                        let produced = fp_dot_kernel::materialize_float64_dot_block(
-                            &a_slices, &b_cols, head.len,
-                        );
+                        let a_slices = Self::dot_panel_slices(head.a_cols, head.len);
+                        // The shared pack is used only when its identity matches
+                        // this run's panel; otherwise the kernel packs locally.
+                        let produced = match prepacked {
+                            Some(panel) if Arc::ptr_eq(panel.a_cols, head.a_cols) => {
+                                fp_dot_kernel::materialize_float64_dot_block_prepacked(
+                                    panel.packed,
+                                    &a_slices,
+                                    &b_cols,
+                                    head.len,
+                                )
+                            }
+                            _ => fp_dot_kernel::materialize_float64_dot_block(
+                                &a_slices, &b_cols, head.len,
+                            ),
+                        };
                         for (value, column) in run.iter().zip(produced) {
                             value.publish_dot_data(column);
                         }
@@ -4602,9 +4662,30 @@ impl ScalarValues {
         }
 
         let chunk = pending.len().div_ceil(workers);
+        // br-frankenpandas-mti15. Pack the A panel ONCE for the whole scope when
+        // every pending column belongs to the same product. Each worker packing
+        // it privately is `m * k * 8` bytes of redundant copying PER WORKER —
+        // 8 MB x 64 on this host at `dim = 1000`, against a whole-op time of
+        // ~18 ms — and the panel is immutable, so one copy serves all of them.
+        let shared = if Self::dot_kernel_available() {
+            Self::shared_dot_panel(&pending)
+        } else {
+            None
+        };
+        let packed = shared.as_ref().map(|head| {
+            let a_slices = Self::dot_panel_slices(head.a_cols, head.len);
+            fp_dot_kernel::pack_a_panel(&a_slices, head.len)
+        });
+        let prepacked = match (shared.as_ref(), packed.as_deref()) {
+            (Some(head), Some(packed)) => Some(PrepackedPanel {
+                a_cols: head.a_cols,
+                packed,
+            }),
+            _ => None,
+        };
         std::thread::scope(|scope| {
             for group in pending.chunks(chunk) {
-                scope.spawn(move || Self::materialize_dot_group(group));
+                scope.spawn(move || Self::materialize_dot_group(group, prepacked));
             }
         });
     }

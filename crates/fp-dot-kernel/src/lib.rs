@@ -152,27 +152,79 @@ pub fn materialize_float64_dot_block(
     b_cols: &[&[f64]],
     len: usize,
 ) -> Vec<Vec<f64>> {
+    let packed = pack_a_panel(a_slices, len);
+    materialize_float64_dot_block_prepacked(&packed, a_slices, b_cols, len)
+}
+
+/// Pack the whole A panel into row-block-major order, ONCE, for reuse by every
+/// worker of one `df.dot`.
+///
+/// `packed[block * k * MR + p * MR + i]` is `A[block * MR + i][p]`.
+///
+/// br-frankenpandas-mti15. Packing is what makes the register tile pay (the
+/// unpacked tile measured 0.597x), but each worker packing the SAME A panel for
+/// itself is 64x redundant copying on this host — `m * k * 8` bytes per worker,
+/// 8 MB at `dim = 1000`, against a whole-op time of ~18 ms. The panel is
+/// immutable and shared, so it can be built once before the scope and read by
+/// every worker.
+#[must_use]
+pub fn pack_a_panel(a_slices: &[&[f64]], len: usize) -> Vec<f64> {
+    let k = a_slices.len();
+    let blocks = len / MR;
+    let mut packed = vec![0.0_f64; blocks * k * MR];
+    for block in 0..blocks {
+        let row = block * MR;
+        let base = block * k * MR;
+        for (p, a) in a_slices.iter().enumerate() {
+            packed[base + p * MR..base + p * MR + MR].copy_from_slice(&a[row..row + MR]);
+        }
+    }
+    packed
+}
+
+/// [`materialize_float64_dot_block`] over a panel already packed by
+/// [`pack_a_panel`].
+///
+/// `a_slices` is still required: the rows below the `MR` boundary are computed
+/// from the original columns, in the same order the per-column kernel walks
+/// them. Falls back to packing locally if `packed` is not the right length for
+/// this shape, so a caller that passes a stale panel gets the right ANSWER
+/// rather than a silent misread — the length check is cheap and the alternative
+/// is reading another product's matrix.
+#[inline(never)]
+#[must_use]
+pub fn materialize_float64_dot_block_prepacked(
+    packed: &[f64],
+    a_slices: &[&[f64]],
+    b_cols: &[&[f64]],
+    len: usize,
+) -> Vec<Vec<f64>> {
     let n = b_cols.len();
     let k = a_slices.len();
     let mut out: Vec<Vec<f64>> = (0..n).map(|_| vec![0.0_f64; len]).collect();
     if n == 0 || k == 0 {
         return out;
     }
-    let row_blocks = len / MR * MR;
-    let mut packed = vec![0.0_f64; k * MR];
+    let blocks = len / MR;
+    let row_blocks = blocks * MR;
+    let owned;
+    let packed = if packed.len() == blocks * k * MR {
+        packed
+    } else {
+        owned = pack_a_panel(a_slices, len);
+        &owned
+    };
 
-    let mut row = 0;
-    while row < row_blocks {
-        for (p, a) in a_slices.iter().enumerate() {
-            packed[p * MR..p * MR + MR].copy_from_slice(&a[row..row + MR]);
-        }
+    for block in 0..blocks {
+        let row = block * MR;
+        let base = block * k * MR;
+        let panel = &packed[base..base + k * MR];
         let mut j0 = 0;
         while j0 < n {
             let nr = DOT_BLOCK_COLUMNS.min(n - j0);
-            micro_kernel_packed(&packed, b_cols, k, row, &mut out, j0, nr);
+            micro_kernel_packed(panel, b_cols, k, row, &mut out, j0, nr);
             j0 += DOT_BLOCK_COLUMNS;
         }
-        row += MR;
     }
 
     // Rows below the MR boundary, in the SAME accumulation order: outer over the
