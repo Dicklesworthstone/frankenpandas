@@ -184300,6 +184300,13 @@ mod tests {
         );
     }
 
+    // Both `is_lazy_transpose_storage` and `ColumnStore::get_one_at` exist only
+    // under this feature, so without it the test cannot compile — and there is
+    // no lazy transpose for it to be about. The sibling test above
+    // (dataframe_transpose_canonical_nullable_f64_lazy_matches_eager_dustysummit)
+    // already carries the same attribute; these two br-frankenpandas-3ya6b tests
+    // were added next to it without it.
+    #[cfg(feature = "lazy-transpose-view")]
     #[test]
     fn dataframe_column_at_matches_the_label_route_on_a_lazy_transpose_3ya6b() {
         // br-frankenpandas-3ya6b. `column_at` exists to skip a label round
@@ -184346,6 +184353,7 @@ mod tests {
         assert_eq!(transposed.columns.get_one_at(usize::MAX), None);
     }
 
+    #[cfg(feature = "lazy-transpose-view")]
     #[test]
     fn dataframe_column_at_falls_back_where_there_is_no_positional_fast_path_3ya6b() {
         // br-frankenpandas-3ya6b. `get_one_at` returns `None` to mean "no
