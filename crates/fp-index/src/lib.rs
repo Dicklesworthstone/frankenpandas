@@ -4709,12 +4709,29 @@ impl Index {
 
     /// Nearest-preceding-or-equal label lookup.
     ///
-    /// Matches `pd.Index.asof(label)` for monotonic-increasing
-    /// indexes: returns the largest label `<= key`. Returns `None`
-    /// when no such label exists (key precedes every entry). The
-    /// index is assumed sorted; callers should `sort_values()` first
-    /// if needed (pandas emits a warning in the non-monotonic case
-    /// but still does a linear scan — we match that behavior).
+    /// Matches `pd.Index.asof(label)` for monotonic-increasing indexes: returns the
+    /// largest label `<= key`, or `None` when the key precedes every entry.
+    ///
+    /// ⚠️ THE NON-MONOTONIC CLAIM THAT USED TO BE HERE WAS WRONG IN BOTH HALVES. It
+    /// said pandas "emits a warning in the non-monotonic case but still does a linear
+    /// scan — we match that behavior". MEASURED, live pandas 2.2.3 (CrimsonPine
+    /// 2026-08-19), on `pd.Index([30, 10, 20])`:
+    /// ```text
+    ///   .asof(25) -> ValueError: index must be monotonic increasing or decreasing
+    ///   .asof(5)  -> ValueError (same)
+    ///   .asof(35) -> ValueError (same)
+    /// ```
+    /// pandas REFUSES; it does not warn and scan. And this function does not scan
+    /// either — the loop below BREAKS at the first label greater than the key, which
+    /// is correct only on sorted input. So on `[30, 10, 20]` it stops at 30 and
+    /// returns `None`, silently answering "nothing precedes 25" for an index that
+    /// contains 20.
+    ///
+    /// ⚠️ DOCUMENTED DIVERGENCE, not a fix: matching pandas means RAISING on a
+    /// non-monotonic index, and this returns `Option` rather than `Result`, so the
+    /// change is a signature decision rather than a repair. Callers must sort first;
+    /// `is_sorted()` answers the precondition. Pinned by
+    /// `asof_on_a_non_monotonic_index_is_a_documented_divergence`.
     #[must_use]
     pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
         if let (Some(range), IndexLabel::Int64(needle)) = (self.labels.int64_affine_range(), key) {
@@ -21336,6 +21353,37 @@ mod tests {
         assert_eq!(
             floats.get_loc_all(&IndexLabel::Float64(OrderedF64(f64::NAN))),
             vec![1, 3]
+        );
+    }
+
+    /// `asof` on a NON-MONOTONIC index: FrankenPandas answers, pandas refuses.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19), `pd.Index([30,10,20])`:
+    /// every `.asof(k)` raises `ValueError: index must be monotonic increasing or
+    /// decreasing`. FrankenPandas returns `None` instead, because the scan breaks at
+    /// the first label greater than the key — it stops at 30 and never reaches the 20
+    /// that actually precedes 25.
+    ///
+    /// ⚠️ THIS PINS FrankenPandas' ANSWER, NOT pandas'. It exists so the divergence is
+    /// visible and deliberate rather than discovered later: matching pandas means
+    /// raising, and `asof` returns `Option`, not `Result`. If that signature ever
+    /// changes, this test should change with it — do not read it as parity evidence.
+    #[test]
+    fn asof_on_a_non_monotonic_index_is_a_documented_divergence() {
+        let unsorted = Index::from_i64(vec![30, 10, 20]);
+        assert!(!unsorted.is_sorted(), "precondition: the index is non-monotonic");
+
+        // pandas: ValueError. Here: None, because the scan stops at 30.
+        assert_eq!(unsorted.asof(&IndexLabel::Int64(25)), None);
+        assert_eq!(unsorted.asof(&IndexLabel::Int64(5)), None);
+
+        // ⚠️ And the answer is not merely "conservative": 20 DOES precede 25 and is
+        // present in the index. Sorting first is what makes the lookup meaningful.
+        let sorted = unsorted.sort_values();
+        assert_eq!(
+            sorted.asof(&IndexLabel::Int64(25)),
+            Some(IndexLabel::Int64(20)),
+            "after sorting, the preceding label is found"
         );
     }
 
