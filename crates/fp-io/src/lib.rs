@@ -13931,12 +13931,24 @@ pub trait DataFrameIoExt {
     /// sets `include_index: false` — so its output corresponds to pandas'
     /// `to_csv(index=False)`, not to bare `to_csv()`.
     ///
-    /// The behaviour is deliberate and load-bearing, not an oversight: it is pinned
-    /// by a test asserting that the first emitted line IS the column names
-    /// (br-frankenpandas-g9rxa), and the conformance CSV path and fp-bench both
-    /// consume this shape. Only the parity claim is corrected here. Use
+    /// ⚠️ WHETHER THIS IS DELIBERATE IS GENUINELY UNCLEAR, and I first wrote that it
+    /// was. Evidence BOTH ways, so that a later reader does not inherit my first
+    /// reading:
+    ///   FOR deliberate — a test pins that the first emitted line IS the column
+    ///   names (br-frankenpandas-g9rxa), which an index would break by prepending an
+    ///   empty cell, and the conformance CSV path plus fp-bench consume this shape.
+    ///   AGAINST — the SERIES writers in this same file, `SeriesIoExt::to_csv_file`
+    ///   and `SeriesIoExt::to_csv_string`, both explicitly override the shared
+    ///   default with `include_index: true, ..CsvWriteOptions::default()` precisely
+    ///   to match pandas. Two sibling writers over the same options struct disagree
+    ///   about pandas' default, and only one of them had to reach for an override.
+    /// That asymmetry looks more like an oversight the test later cemented than a
+    /// design. Filed rather than changed: flipping the default is breaking for 39
+    /// call sites here plus conformance and fp-bench.
+    ///
+    /// Only the parity claim is corrected here. Use
     /// [`Self::to_csv_string_with_options`] with `include_index: true` for pandas'
-    /// default shape.
+    /// default shape — which is exactly what the Series side already does.
     fn to_csv_string(&self) -> Result<String, IoError>;
 
     /// Serialize this DataFrame to a CSV string with explicit write options.
