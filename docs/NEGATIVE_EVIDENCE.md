@@ -40144,3 +40144,24 @@ one of attribution.
 ⚠️ I ALSO NOTE 1.32% of total cycles running `materialize_float64_dot_block_prepacked` ON THE MAIN THREAD, which means some chunks are executing caller-side rather than on the pool. Not chased here; recorded so the next reader does not attribute it to the kernel.
 
 **Host state:** loadavg_1min 19.22 at the start of the partition probe, CPU governor powersave, AMD Ryzen Threadripper PRO 5975WX, 64 logical, both arms of the ratio in the SAME invocation and interleaved. These are FP-vs-FP figures; no vs-pandas claim is made in this row.
+
+### 2026-08-19 BlackThrush (br-frankenpandas-mti15, br-frankenpandas-633fb) — REJECT my own uncapped `df_dot @1M` medians: on an EQUAL 16-CPU budget the row is 0.21-0.26x, and the 1.33-1.69x I kept reading was the incumbent being starved
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.98768 and 0.97264 for pandas in the run below; the FrankenPandas arm is inside the 2% tolerance and the pandas arm sits 2.7% off unity, so the row is NULL_UNDECIDABLE and is offered as decision input, not as a certified verdict. The effect it reports is 4x, which is more than an order of magnitude larger than that 2.7% margin.
+
+**Counted mechanism:** logical CPUs, held equal. Uncapped, one `vs_pandas_harness` invocation asks for 127 threads on a 64-CPU host — FrankenPandas takes 62 and pandas' OpenBLAS takes 65 — and the orchestrator measured my own benchmark process at 3280% CPU during a host saturation event (runq 99, CPU idle 2%), the third such tick attributed to a frankenpandas python. Re-run under `taskset -c 0-15` with `OMP_NUM_THREADS=OPENBLAS_NUM_THREADS=16` and `--thread-count 16`, three invocations:
+
+| run | FP p50 | FP min | FP cv | pandas p50 | pandas min | pandas cv | ratio | best-vs-best |
+|-----|--------|--------|-------|------------|------------|-----------|-------|--------------|
+| r0  | 24053us | 21403us | 5.0% | 5556us | 4853us | 23.9% | 0.240x | 0.227x |
+| r1  | 23274us | 20963us | 5.3% | 6004us | 4706us | 32.5% | 0.262x | 0.225x |
+| r2  | 23584us | 22197us | 3.3% | 5737us | 4557us | 13.0% | 0.245x | 0.205x |
+
+**I WAS READING THE HOST, NOT THE ENGINES.** Five uncapped runs earlier the same afternoon reported medians of 1.33x, 1.49x, 1.55x, 1.61x and 1.69x FASTER, with best-vs-best swinging 0.79x-1.37x. Every one of those was measured while my own 127-thread invocation was saturating the machine, and the arm that suffered was the incumbent: pandas' cv ran 18-68% there against 13-32% here, and its p50 collapsed from ~5.6ms to ~27ms while its MINIMUM barely moved. This is precisely the failure this bead was opened to name — "the 1.187x crossing was incumbent dispersion" — and I reproduced it against myself five times before the orchestrator pointed at my CPU share.
+
+**THE HONEST NUMBER IS WORSE THAN THE BEAD'S.** It records 0.509-0.620x best-vs-best; on an equal thread budget it is 0.205-0.227x. The bead's own figures were taken at 64 threads where pandas was already contended, so they too were flattering.
+
+⚠️ **THIS ROW IS NOT BANKABLE AS A STANDING LOCK AND MUST NOT BE TABULATED BESIDE UNCONSTRAINED ROWS** — the harness says so itself in `like_for_like.reasons`, and `assemble_standing_locks.py` excludes thread-capped rows on purpose (`str_startswith_arrow @1M` certified 1.275x on one core and 4.824x on sixty-four, same host, same day, no source change). It is recorded because an equal-budget comparison is the only one this host let me take cleanly: FP's cv is 3.3-5.3% here against 7.8-29% uncapped.
+
+**WHERE THE 4x SITS, from the cycle profile in the row above.** Of FP's ~21.4ms, roughly 10ms is SERIAL `Vec<Scalar>` materialization of the result on the main thread; the remaining ~11ms of GEMM on 15 threads is 182 GFLOP/s where the same kernel measures 29 GFLOP/s on one thread. pandas does the whole product in 4.85ms = ~412 GFLOP/s on 16 threads. So the gap decomposes into ~2x of result boxing that pandas does not do at all, and ~2.3x of parallel-scaling-plus-FMA in the kernel. Neither is addressable by another tile shape.
+
+**Host state:** loadavg_1min 24.71-29.34 across the three capped runs, CPU governor powersave, 3109-3285 MHz observed, AMD Ryzen Threadripper PRO 5975WX. Both arms ran in the SAME invocation on the SAME 16 logical CPUs, which is the point of the row.
