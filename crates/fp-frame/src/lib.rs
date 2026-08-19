@@ -160554,23 +160554,30 @@ mod tests {
             &[utf8("q"), utf8("r"), utf8("s"), utf8("t"), utf8("v")]
         );
 
-        // ⚠️ sum and mean STILL drop it, ON PURPOSE (see ResampleValueDomain). This
-        // assertion is not describing an oversight — if someone widens those two
-        // without implementing string concatenation and mean's TypeError, this is
-        // the test that should stop them.
-        for agg in ["sum", "mean"] {
-            let out = match agg {
-                "sum" => gb.resample("M").sum().unwrap(),
-                _ => gb.resample("M").mean().unwrap(),
-            };
-            assert_eq!(
-                out.column_names(),
-                vec!["grp"],
-                "{agg}: utf8 stays dropped until its pandas semantics are implemented"
-            );
-            // The bucket rows still exist — that is the no-value-column branch.
-            assert_eq!(out.len(), 5, "{agg}: bucket rows are still emitted");
-        }
+        // ⚠️ SUM NOW CONCATENATES, and this assertion USED to say it dropped the
+        // column. That was true when this test was written and stopped being true two
+        // commits later, when `Resample::sum` learned pandas' string concatenation
+        // via `nansum_utf8` (a7faz item 1). The stale assertion survived only because
+        // the disk throttle meant nothing could be rebuilt in between — it is exactly
+        // the kind of drift a green suite would have caught the same hour.
+        // MEASURED, live pandas 2.2.3 on this frame: sum -> ['pq','r','s','t','uv'].
+        let summed = gb.resample("M").sum().unwrap();
+        assert_eq!(summed.column_names(), vec!["grp", "tag"]);
+        assert_eq!(
+            summed.column("tag").unwrap().values(),
+            &[utf8("pq"), utf8("r"), utf8("s"), utf8("t"), utf8("uv")]
+        );
+
+        // ⚠️ MEAN STILL DROPS IT, on purpose: pandas RAISES TypeError on a string
+        // column, so dropping it and answering are BOTH wrong, and matching pandas
+        // means raising — an error-parity decision this bead has not taken.
+        let meaned = gb.resample("M").mean().unwrap();
+        assert_eq!(
+            meaned.column_names(),
+            vec!["grp"],
+            "mean: utf8 stays dropped until pandas' TypeError is implemented"
+        );
+        assert_eq!(meaned.len(), 5, "mean: bucket rows are still emitted");
     }
 
     /// groupby().resample() on BOOL and DATETIME value columns.
@@ -180670,6 +180677,19 @@ mod tests {
     }
 
     #[test]
+    /// ⚠️ THIS GOLDEN IS AN FP RENDERING CONTRACT, NOT PARITY EVIDENCE. Its input
+    /// mixes a `+05:00` offset with a `Z`, and pandas 2.2.3 REFUSES that combination:
+    /// `to_datetime` returns OBJECT dtype (with a FutureWarning that a future version
+    /// will raise), so `.dt.timetz` then fails with "Can only use .dt accessor with
+    /// datetimelike values". With `utc=True` it succeeds but CONVERTS, giving
+    /// ['05:30:00+00:00', '14:45:30+00:00'] — note the first row shifts to 05:30.
+    /// FrankenPandas answers per element and keeps each original offset, which is
+    /// neither of those. MEASURED 2026-08-18 (CrimsonPine).
+    ///
+    /// The golden's second row moved from `14:45:30Z` to `14:45:30+00:00` with
+    /// br-frankenpandas-t2n6i: rendering the SOURCE spelling was wrong, and for a
+    /// uniform Zulu column pandas gives `+00:00`. That row is pandas-grounded even
+    /// though the mixed input as a whole is not.
     fn series_dt_timetz_golden_basic() {
         let s = Series::from_values(
             "ts",
