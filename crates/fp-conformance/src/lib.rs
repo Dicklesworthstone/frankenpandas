@@ -8148,50 +8148,57 @@ fn fuzz_python_mod_i64(lhs: i64, rhs: i64) -> i64 {
     value
 }
 
-fn fuzz_python_mod_f64(lhs: f64, rhs: f64) -> f64 {
-    if lhs.is_nan() || rhs.is_nan() {
-        return f64::NAN;
+/// numpy's `npy_divmod`, which is what pandas' float64 `//` and `%` dispatch to.
+///
+/// ⚠️ THIS WAS A CHARACTER-FOR-CHARACTER COPY OF THE fp-columnar KERNEL, and that
+/// is precisely why it was useless. Both sides carried the same wrong formula
+/// (`lhs - floor(lhs / rhs) * rhs`), so the differential fuzzer compared FP
+/// against FP and agreed on all 16 special-value cells where both differed from
+/// pandas -- signed zeros, quotient overflow at subnormal divisors, and quotient
+/// underflow. A fuzz oracle that mirrors the implementation cannot fail.
+///
+/// Rewriting it to the correct algorithm makes it CORRECT but does not make it
+/// INDEPENDENT: it is still a shadow reimplementation, and the real fix is for
+/// this path to call pandas. Until then, the bit-exact pandas-measured table in
+/// fp-columnar's `floordiv_mod_f64_pandas_special_value_lock` is the binding
+/// evidence for these two ops, not this function.
+fn fuzz_npy_divmod_f64(lhs: f64, rhs: f64) -> (f64, f64) {
+    let mut modulus = lhs % rhs; // fmod: exact, truncated toward zero
+
+    if rhs == 0.0 {
+        return (lhs / rhs, modulus);
     }
 
-    if rhs.is_infinite() {
-        if lhs.is_infinite() {
-            return f64::NAN;
-        }
-        if lhs == 0.0 {
-            return 0.0_f64.copysign(rhs);
-        }
-        if lhs.is_sign_positive() == rhs.is_sign_positive() {
-            lhs
-        } else {
-            rhs
+    let mut quotient = (lhs - modulus) / rhs;
+    if modulus != 0.0 {
+        if (rhs < 0.0) != (modulus < 0.0) {
+            modulus += rhs;
+            quotient -= 1.0;
         }
     } else {
-        lhs - fuzz_python_floor_div_f64(lhs, rhs) * rhs
+        modulus = 0.0_f64.copysign(rhs);
     }
+
+    let floordiv = if quotient != 0.0 {
+        let floored = quotient.floor();
+        if quotient - floored > 0.5 {
+            floored + 1.0
+        } else {
+            floored
+        }
+    } else {
+        0.0_f64.copysign(lhs / rhs)
+    };
+
+    (floordiv, modulus)
+}
+
+fn fuzz_python_mod_f64(lhs: f64, rhs: f64) -> f64 {
+    fuzz_npy_divmod_f64(lhs, rhs).1
 }
 
 fn fuzz_python_floor_div_f64(lhs: f64, rhs: f64) -> f64 {
-    if lhs.is_nan() || rhs.is_nan() {
-        return f64::NAN;
-    }
-
-    if rhs.is_infinite() {
-        if lhs.is_infinite() {
-            return f64::NAN;
-        }
-        if lhs == 0.0 {
-            return (lhs / rhs).floor();
-        }
-        if lhs.is_sign_positive() == rhs.is_sign_positive() {
-            0.0
-        } else {
-            -1.0
-        }
-    } else if lhs.is_infinite() && rhs != 0.0 {
-        f64::NAN
-    } else {
-        (lhs / rhs).floor()
-    }
+    fuzz_npy_divmod_f64(lhs, rhs).0
 }
 
 fn scalars_equivalent(actual: &Scalar, expected: &Scalar, preserves_nan_missing: bool) -> bool {
