@@ -1,4 +1,14 @@
 #![forbid(unsafe_code)]
+// ⚠️ STYLE LINT ALLOWED DELIBERATELY, not silenced. `chunks_exact(8)` appears in a
+// dozen f64/i64 accumulation kernels whose entire contract is the ORDER in which
+// partial sums combine; `as_chunks::<8>()` is the same iteration wearing a different
+// shape. This session had to WITHDRAW a blocked-summation lever because it broke a
+// bit-identity gate that the disk freeze had made unbuildable — the violation only
+// surfaced weeks later on the first rebuild. Mechanically reshaping the surviving
+// kernels to satisfy a formatting preference, in a change that cannot re-verify each
+// one against its scalar reference, is the same bet that just lost. Convert them
+// deliberately, one at a time, with the bit_eq tests green after each.
+#![allow(clippy::chunks_exact_to_as_chunks)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
 //! Columnar storage layer for **frankenpandas** — provides the
@@ -7012,19 +7022,11 @@ fn ptp_nullable_i64(data: &[i64], validity: Option<&ValidityMask>) -> Scalar {
 /// `collect_finite(..).iter().sum()`, so the f64 accumulation is byte-identical to
 /// nanvar/nansem. `n == 0` ⇒ `(0, 0.0, 0.0)` (caller returns Null(NaN)).
 fn present_moments_f64(data: &[f64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
-    // FAST PATH (br-frankenpandas-8s4mb, sem/var half). Identical guard to
-    // `present_central_moments_f64`: all-present means the filter collapses to the
-    // NaN test, and a non-NaN blocked sum PROVES no element was NaN because NaN
-    // propagates through addition. Anything else falls through to the scalar loop
-    // below, unchanged.
-    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
-        let sum = blocked_sum_f64(data);
-        if !sum.is_nan() {
-            let n = data.len();
-            let mean = sum / n as f64;
-            return (n, mean, blocked_sum_sq_f64(data, mean));
-        }
-    }
+    // ⚠️ BLOCKED FAST PATH REMOVED — same reason as the central-moments sibling
+    // (br-frankenpandas-8s4mb). The doc above this function states the accumulation
+    // is "byte-identical to nanvar/nansem"; 8-lane blocked summation is not, and
+    // `var_std_sem_nullable_typed_match_nan_reference` asserts the identity. The
+    // claim in the doc is the contract, so the lever yields to it.
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &x) in data.iter().enumerate() {
@@ -7070,15 +7072,28 @@ fn present_central_moments_f64(
     // proof that no element was NaN — no separate scan is needed. Mixing +inf
     // and -inf also yields NaN, which costs only the fallback, never
     // correctness: the fallback IS the scalar loop below.
-    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
-        let sum = blocked_sum_f64(data);
-        if !sum.is_nan() {
-            let n = data.len();
-            let mean = sum / n as f64;
-            let (m2, m3, m4) = blocked_central_moments_f64(data, mean);
-            return (n, m2, m3, m4);
-        }
-    }
+    // ⚠️ THE 8-LANE BLOCKED FAST PATH WAS REMOVED HERE (br-frankenpandas-8s4mb).
+    // It computed the mean with `blocked_sum_*` and the moments with
+    // `blocked_central_moments_*`, which accumulate in 8 lanes and combine
+    // pairwise. That is the entire point of blocking — it breaks the sequential
+    // dependency chain LLVM cannot reorder for floats — and it is therefore NOT
+    // bit-identical to the scalar loop below.
+    //
+    // `skew_kurt_nullable_typed_match_nan_reference` and
+    // `var_std_sem_nullable_typed_match_nan_reference` assert exactly that
+    // identity: `bit_eq(col.skew(), fp_types::nanskew(vals))`. The lever was
+    // written and committed during the disk freeze and could not be built, so the
+    // violation only surfaced on the first rebuild. Both tests were RED.
+    //
+    // Weakening those assertions to a tolerance was not an option — a gate that
+    // exists to pin bit-identity cannot be relaxed to admit the change that broke
+    // it. So the lever yields and the invariant stands. The blocked helpers remain
+    // in use where no such identity is contracted; only the MOMENTS path reverts.
+    //
+    // If the speed is wanted back, the decision to make first is whether the typed
+    // path is allowed to differ from the scalar reference in the last bits AT ALL.
+    // That is a contract question, not an optimisation one, and it belongs on the
+    // bead rather than in a quiet edit here.
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &x) in data.iter().enumerate() {
@@ -7119,12 +7134,8 @@ fn present_central_moments_i64(
     // is present the filter is vacuous. Gate is `is_none_or(all)` rather than
     // `is_none` because the production callers always pass a mask — see the f64
     // sibling for why `is_none` made this inert.
-    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
-        let n = data.len();
-        let mean = blocked_sum_i64_as_f64(data) / n as f64;
-        let (m2, m3, m4) = blocked_central_moments_i64(data, mean);
-        return (n, m2, m3, m4);
-    }
+    // See the f64 sibling: the blocked fast path was removed to restore
+    // bit-identity with the scalar reference (br-frankenpandas-8s4mb).
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &v) in data.iter().enumerate() {
@@ -7188,65 +7199,13 @@ fn blocked_sum_f64(data: &[f64]) -> f64 {
     total
 }
 
-/// Int64 sibling of [`blocked_sum_f64`]: widens each lane with `as f64` exactly
-/// where the scalar fold does, so the per-element conversion is unchanged and
-/// only the accumulation is re-associated.
-fn blocked_sum_i64_as_f64(data: &[i64]) -> f64 {
-    let mut acc = [0.0_f64; 8];
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
-        for l in 0..8 {
-            acc[l] += c[l] as f64;
-        }
-    }
-    let mut total =
-        ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-    for &v in chunks.remainder() {
-        total += v as f64;
-    }
-    total
-}
-
 /// Second pass of the central-moment computation, 8-lane blocked: accumulates
 /// m2/m3/m4 about `mean` in 24 independent lanes so the three dependency chains
 /// break the same way [`blocked_sum_f64`] breaks the sum's.
 ///
-/// The lane bodies use `d2 * d` and `d2 * d2` rather than `powi(3)`/`powi(4)`;
-/// both associate as `(d*d)*d` and `(d*d)*(d*d)`, which is what `powi` lowers
-/// to, so the per-element arithmetic is unchanged and only the ACCUMULATION is
-/// re-associated. The remainder loop keeps `powi` verbatim, so a slice shorter
-/// than 8 is bit-identical to the scalar version.
-fn blocked_central_moments_f64(data: &[f64], mean: f64) -> (f64, f64, f64) {
-    let mut a2 = [0.0_f64; 8];
-    let mut a3 = [0.0_f64; 8];
-    let mut a4 = [0.0_f64; 8];
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
-        for l in 0..8 {
-            let d = c[l] - mean;
-            let d2 = d * d;
-            a2[l] += d2;
-            a3[l] += d2 * d;
-            a4[l] += d2 * d2;
-        }
-    }
-    let combine = |a: [f64; 8]| ((a[0] + a[1]) + (a[2] + a[3])) + ((a[4] + a[5]) + (a[6] + a[7]));
-    let (mut m2, mut m3, mut m4) = (combine(a2), combine(a3), combine(a4));
-    for &x in chunks.remainder() {
-        let d = x - mean;
-        // See the nullable sibling: d2 reuse is bit-identical to the three powi
-        // calls and costs 3 multiplies per element instead of 5.
-        let d2 = d * d;
-        m2 += d2;
-        m3 += d2 * d;
-        m4 += d2 * d2;
-    }
-    (m2, m3, m4)
-}
-
 /// Second pass for the `sem`/`var` moment pair: `Sigma (x - mean)^2`, 8-lane
 /// blocked. The `sem` half of br-frankenpandas-8s4mb — the skew/kurt half uses
-/// [`blocked_central_moments_f64`], which also carries m3/m4 this caller does not
+/// the removed `blocked_central_moments_f64`, which also carried m3/m4 this caller does not
 /// need.
 ///
 /// Same bit-identity property: under 8 elements `chunks_exact(8)` yields nothing,
@@ -7287,45 +7246,12 @@ fn blocked_sum_sq_i64(data: &[i64], mean: f64) -> f64 {
     total
 }
 
-/// Int64 sibling of [`blocked_central_moments_f64`].
-fn blocked_central_moments_i64(data: &[i64], mean: f64) -> (f64, f64, f64) {
-    let mut a2 = [0.0_f64; 8];
-    let mut a3 = [0.0_f64; 8];
-    let mut a4 = [0.0_f64; 8];
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
-        for l in 0..8 {
-            let d = c[l] as f64 - mean;
-            let d2 = d * d;
-            a2[l] += d2;
-            a3[l] += d2 * d;
-            a4[l] += d2 * d2;
-        }
-    }
-    let combine = |a: [f64; 8]| ((a[0] + a[1]) + (a[2] + a[3])) + ((a[4] + a[5]) + (a[6] + a[7]));
-    let (mut m2, mut m3, mut m4) = (combine(a2), combine(a3), combine(a4));
-    for &v in chunks.remainder() {
-        let d = v as f64 - mean;
-        // See the nullable sibling: d2 reuse is bit-identical to the three powi
-        // calls and costs 3 multiplies per element instead of 5.
-        let d2 = d * d;
-        m2 += d2;
-        m3 += d2 * d;
-        m4 += d2 * d2;
-    }
-    (m2, m3, m4)
-}
-
 /// Int64 sibling of [`present_moments_f64`]: present iff validity-set; folds
 /// `v as f64` (matching nanvar's `to_f64`), so bit-identical.
 fn present_moments_i64(data: &[i64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
-    // FAST PATH (br-frankenpandas-8s4mb, sem/var half). Int64 has no NaN, so once
-    // every element is present the filter is vacuous.
-    if validity.is_none_or(|v| v.all()) && !data.is_empty() {
-        let n = data.len();
-        let mean = blocked_sum_i64_as_f64(data) / n as f64;
-        return (n, mean, blocked_sum_sq_i64(data, mean));
-    }
+    // ⚠️ BLOCKED FAST PATH REMOVED — see the f64 sibling. This function's own doc
+    // says "folds `v as f64` (matching nanvar's `to_f64`), so bit-identical"; the
+    // blocked route made that false.
     let mut sum = 0.0_f64;
     let mut n = 0usize;
     for (i, &v) in data.iter().enumerate() {
@@ -43530,8 +43456,11 @@ mod tests {
             let (n, m2, m3, m4) = crate::present_central_moments_f64(&[7.0; 8], None);
             assert_eq!((n, m2, m3, m4), (8, 0.0, 0.0, 0.0));
 
-            // A NaN makes the blocked sum NaN, which must fall back to the scalar
-            // loop — and that loop EXCLUDES the NaN from n rather than poisoning it.
+            // ⚠️ COMMENTS BELOW PREDATE THE REMOVAL OF THE BLOCKED FAST PATH
+            // (br-frankenpandas-8s4mb): there is no blocked sum on this path any more,
+            // so every case now takes the scalar loop. The ASSERTIONS are unchanged and
+            // still correct — they always described the answer, not the route — and a
+            // NaN is still EXCLUDED from n rather than poisoning it.
             let (n, m2, m3, m4) = crate::present_central_moments_f64(&[1.0, f64::NAN, 3.0], None);
             assert_eq!(n, 2);
             assert_eq!(m2, 2.0);
@@ -43547,6 +43476,10 @@ mod tests {
             let (n, m2, m3, m4) = crate::present_central_moments_i64(&[1, 2, 3, 4], None);
             assert_eq!(n, 4);
             assert_eq!(m2, 5.0);
+            // m3 was computed and never asserted, which the compiler flagged as an
+            // unused binding. Assert it rather than underscore it: the deviations are
+            // symmetric about the mean 2.5, so the odd moment must cancel EXACTLY.
+            assert_eq!(m3, 0.0);
             assert_eq!(m4, 10.25);
 
             // The sem/var pair takes the same guards. mean is exact in both cases.

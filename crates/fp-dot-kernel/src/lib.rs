@@ -17,6 +17,7 @@
 //!     `forbid` cannot be relaxed locally.
 //!   * `std::simd` portable SIMD on a baseline build → compiles, but emits
 //!     0 ymm / 6 mulpd / 24 addpd: 4-wide vectors lower to 2×SSE2. No ISA gain.
+//!
 //! Per-crate rustflags is the only one that produced ymm registers, and it does
 //! so with NO `unsafe` keyword anywhere — this crate keeps `forbid(unsafe_code)`.
 //!
