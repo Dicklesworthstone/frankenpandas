@@ -34,7 +34,7 @@ instead. Direct dependency makes sense when:
 
 ## Status
 
-Stable. Pinned to asupersync `0.3.1` (verified in UPGRADE_LOG.md).
+Stable. Pinned to asupersync `0.3.1` (verified in docs/planning/UPGRADE_LOG.md).
 
 ## Links
 

@@ -1,8 +1,8 @@
 # FrankenPandas Conformance Coverage
 
 > Coverage accounting for pandas API parity testing.
-> **Deprecated: use the auto-generated [`COVERAGE_MATRIX.md`](../../COVERAGE_MATRIX.md)
-> at the repo root instead (br-frankenpandas-zk1j).**
+> **Deprecated: use the auto-generated [`COVERAGE_MATRIX.md`](../../docs/planning/COVERAGE_MATRIX.md)
+> at `docs/planning/` instead (br-frankenpandas-zk1j).**
 >
 > The matrix generator re-runs via `scripts/gen_pandas_api_listing.py`
 > then `scripts/gen_coverage_matrix.py`, producing a per-pandas-class

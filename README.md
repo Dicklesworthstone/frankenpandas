@@ -1831,12 +1831,12 @@ A: At the time of this writing, **only 2 of 1,988 tracked beads remain open** (`
 | `AGENTS.md` | Guidelines for AI coding agents |
 | `CHANGELOG.md` | Three-phase change history; Phase 1 capability foundation, Phase 2 parity completion (sub-phases 2a/2b/2c) |
 | `docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENPANDAS_V1.md` | Full V1 specification |
-| `FEATURE_PARITY.md` | Detailed parity matrix with status per feature family |
-| `COVERAGE_MATRIX.md` | Test/conformance coverage matrix |
-| `CATEGORICAL_COVERAGE.md` | Categorical accessor coverage report |
-| `PANIC_CONTRACT_COVERAGE.md` | Per-API `# Panics` contract enforcement |
-| `ERROR_CONFORMANCE.md` | Pandas error catalog and FrankenPandas error parity status |
-| `DIFFERENTIAL_FUZZ_DESIGN.md` | Differential fuzz design notes |
+| `docs/planning/FEATURE_PARITY.md` | Detailed parity matrix with status per feature family |
+| `docs/planning/COVERAGE_MATRIX.md` | Test/conformance coverage matrix |
+| `docs/planning/CATEGORICAL_COVERAGE.md` | Categorical accessor coverage report |
+| `docs/planning/PANIC_CONTRACT_COVERAGE.md` | Per-API `# Panics` contract enforcement |
+| `docs/planning/ERROR_CONFORMANCE.md` | Pandas error catalog and FrankenPandas error parity status |
+| `docs/planning/DIFFERENTIAL_FUZZ_DESIGN.md` | Differential fuzz design notes |
 | `crates/fp-conformance/DISCREPANCIES.md` | 14 documented divergences from pandas (DISC-005 + DISC-013 fully RESOLVED; 12 ACCEPTED / INVESTIGATING / WILL-FIX) |
 | `artifacts/perf/` | Optimization round baselines, opportunity matrices, proofs |
 | `artifacts/phase2c/` | Conformance packet artifacts, drift history, compat-closure attestation packs |

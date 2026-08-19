@@ -856,8 +856,8 @@ Long-running umbrellas tracked but not blocking:
 
 ## Session metadata (chronicled)
 
-- **2026-04-22** cc-pandas review-mode session (19 passes, 58 beads filed honest-rated). Handoff at [`REVIEW_SESSION_HANDOFF.md`](REVIEW_SESSION_HANDOFF.md).
-- **2026-04-22** PANDAS COMPLETE declaration recorded in [`UPGRADE_LOG.md`](UPGRADE_LOG.md).
+- **2026-04-22** cc-pandas review-mode session (19 passes, 58 beads filed honest-rated). Handoff at [`REVIEW_SESSION_HANDOFF.md`](docs/planning/REVIEW_SESSION_HANDOFF.md).
+- **2026-04-22** PANDAS COMPLETE declaration recorded in [`UPGRADE_LOG.md`](docs/planning/UPGRADE_LOG.md).
 - **2026-04-23** cc-pandas solo implementation session — supply-chain, release-day metadata, CI polish, community infrastructure, monolith-split cohesive-slice extraction.
 - **2026-05-02 → 2026-05-13** distributed agent-swarm sessions (cc-pandas + ntm-orchestrated worker panes) shipped the index-name preservation sweep, typed Index variants, format expansion, and Timedelta64 fast paths.
 

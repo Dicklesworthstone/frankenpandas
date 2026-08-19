@@ -165,8 +165,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--out",
-        default="COVERAGE_MATRIX.md",
-        help="Output Markdown path (default: COVERAGE_MATRIX.md)",
+        default="docs/planning/COVERAGE_MATRIX.md",
+        help="Output Markdown path (default: docs/planning/COVERAGE_MATRIX.md)",
     )
     args = parser.parse_args()
 

@@ -31,7 +31,7 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PHASE2C_DIR = REPO_ROOT / "artifacts" / "phase2c"
-TARGET_FILE = REPO_ROOT / "FEATURE_PARITY.md"
+TARGET_FILE = REPO_ROOT / "docs" / "planning" / "FEATURE_PARITY.md"
 
 BEGIN_MARKER = "<!-- BEGIN AUTO-PACKET-TABLE -->"
 END_MARKER = "<!-- END AUTO-PACKET-TABLE -->"
@@ -179,7 +179,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "--out",
         type=Path,
         default=TARGET_FILE,
-        help="Output path (default: FEATURE_PARITY.md)",
+        help="Output path (default: docs/planning/FEATURE_PARITY.md)",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 

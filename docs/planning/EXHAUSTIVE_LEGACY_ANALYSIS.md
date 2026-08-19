@@ -20,10 +20,10 @@ Legacy corpus:
 
 Project contracts:
 - `/data/projects/frankenpandas/docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENPANDAS_V1.md` (sections 14-21 are operationally binding)
-- `/data/projects/frankenpandas/EXISTING_PANDAS_STRUCTURE.md`
+- `/data/projects/frankenpandas/docs/planning/EXISTING_PANDAS_STRUCTURE.md`
 - `/data/projects/frankenpandas/docs/planning/PLAN_TO_PORT_PANDAS_TO_RUST.md`
 - `/data/projects/frankenpandas/docs/planning/PROPOSED_ARCHITECTURE.md`
-- `/data/projects/frankenpandas/FEATURE_PARITY.md`
+- `/data/projects/frankenpandas/docs/planning/FEATURE_PARITY.md`
 
 ## 2. Quantitative Legacy Inventory (Measured)
 
