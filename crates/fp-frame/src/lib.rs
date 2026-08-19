@@ -159691,17 +159691,22 @@ mod tests {
 
         let mins = gb.rolling(2).min().unwrap();
         assert_eq!(mins.column_names(), vec!["grp", "val"]);
-        assert_int64_index_labels(mins.index(), &[0, 1, 2, 3, 4, 5, 6]);
+        // ⚠️ GROUP ORDER (br-frankenpandas-nyjxf): group a is source rows
+        // 0,2,4,6 and group b is 1,3,5, so the labels follow the rows.
+        assert_int64_index_labels(mins.index(), &[0, 2, 4, 6, 1, 3, 5]);
         assert_eq!(
             mins.column("grp").unwrap().values(),
+            // The key column is gathered through the SAME permutation as the
+            // values, so it reads a,a,a,a,b,b,b — pairing group-ordered values
+            // with source-ordered keys would be worse than either order alone.
             &[
                 Scalar::Utf8("a".to_string()),
-                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
                 Scalar::Utf8("a".to_string()),
                 Scalar::Utf8("b".to_string()),
-                Scalar::Utf8("a".to_string()),
                 Scalar::Utf8("b".to_string()),
-                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
             ]
         );
         let min_vals = mins.column("val").unwrap().values();
@@ -159786,35 +159791,41 @@ mod tests {
 
         let mins = gb.rolling(2).min().unwrap();
         assert_eq!(mins.column_names(), vec!["grp", "v"]);
-        assert_int64_index_labels(mins.index(), &[0, 1, 2, 3, 4, 5]);
+        // ⚠️ GROUP ORDER: group a is source rows 0,2,4 and group b is 1,3,5.
+        assert_int64_index_labels(mins.index(), &[0, 2, 4, 1, 3, 5]);
         let min_vals = mins.column("v").unwrap().values();
         assert_eq!(mins.column("v").unwrap().dtype(), DType::Float64);
+        // MEASURED, live pandas 2.2.3, groupby('grp').rolling(2) on this frame:
+        //     min  a0 NaN  a2 4.0  a4 4.0   b1 NaN  b3 2.0  b5 2.0
+        //     max  a0 NaN  a2 10.0 a4 8.0   b1 NaN  b3 7.0  b5 5.0
         assert!(min_vals[0].is_missing());
-        assert!(min_vals[1].is_missing());
+        assert_eq!(min_vals[1], Scalar::Float64(4.0));
         assert_eq!(min_vals[2], Scalar::Float64(4.0));
-        assert_eq!(min_vals[3], Scalar::Float64(2.0));
-        assert_eq!(min_vals[4], Scalar::Float64(4.0));
+        assert!(min_vals[3].is_missing());
+        assert_eq!(min_vals[4], Scalar::Float64(2.0));
         assert_eq!(min_vals[5], Scalar::Float64(2.0));
 
         let maxs = gb.rolling(2).max().unwrap();
         let max_vals = maxs.column("v").unwrap().values();
         assert_eq!(maxs.column("v").unwrap().dtype(), DType::Float64);
         assert!(max_vals[0].is_missing());
-        assert!(max_vals[1].is_missing());
-        assert_eq!(max_vals[2], Scalar::Float64(10.0));
-        assert_eq!(max_vals[3], Scalar::Float64(7.0));
-        assert_eq!(max_vals[4], Scalar::Float64(8.0));
+        assert_eq!(max_vals[1], Scalar::Float64(10.0));
+        assert_eq!(max_vals[2], Scalar::Float64(8.0));
+        assert!(max_vals[3].is_missing());
+        assert_eq!(max_vals[4], Scalar::Float64(7.0));
         assert_eq!(max_vals[5], Scalar::Float64(5.0));
 
         let counts = gb.rolling(2).count().unwrap();
         assert_eq!(counts.column("v").unwrap().dtype(), DType::Float64);
         assert_eq!(
             counts.column("v").unwrap().values(),
+            // pandas: count is NaN for the FIRST row of each group (incomplete
+            // window) and 2.0 thereafter -> [NaN, 2, 2, NaN, 2, 2] in group order.
             &[
                 Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
                 Scalar::Null(NullKind::NaN),
-                Scalar::Float64(2.0),
-                Scalar::Float64(2.0),
                 Scalar::Float64(2.0),
                 Scalar::Float64(2.0),
             ]
