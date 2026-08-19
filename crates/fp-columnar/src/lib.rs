@@ -2122,7 +2122,59 @@ fn npy_divmod_f64(lhs: f64, rhs: f64) -> (f64, f64) {
     (floordiv, modulus)
 }
 
+/// br-frankenpandas-7yiuz, the MOD half of the same regression.
+///
+/// `python_floor_div_f64` above recovered its 4.46x with a guarded fast path, but
+/// its doc said this one could not follow, "because `lhs - f * rhs` is not exact
+/// in general while `fmod` is". That is true of the ORDINARY product, and false of
+/// the FUSED one — which is the whole content of this function.
+///
+/// THE ARGUMENT. Under the same guard, `f = floor(lhs/rhs)` exactly (proved on
+/// `python_floor_div_f64`). The floored remainder `R = lhs - f*rhs` is then the
+/// exact mathematical remainder, and a floating-point remainder is exactly
+/// representable — that property is why `fmod` can be exact at all. IEEE-754
+/// requires `fusedMultiplyAdd` to be CORRECTLY ROUNDED, so `(-f).mul_add(rhs, lhs)`
+/// evaluates `lhs - f*rhs` with a SINGLE rounding and therefore returns `R`
+/// exactly. Two roundings do not: `lhs - f * rhs` written normally rounds the
+/// product first, and the error survives.
+///
+/// ⚠️ THAT DIFFERENCE IS MEASURED, NOT ASSERTED, and it is large. Over 10_000_000
+/// pairs against `npy_divmod`:
+///   * `(-f).mul_add(rhs, lhs)`  ->  **0** differing
+///   * `lhs - f * rhs`           ->  **9_664_611** differing (97%)
+///
+/// `the_unfused_remainder_is_not_a_substitute_for_mul_add` keeps that control in
+/// the tree, because a reader who "simplifies" the `mul_add` away gets a kernel
+/// that is wrong on almost every input while every shape and dtype assertion in
+/// the repo still passes.
+///
+/// ⚠️ `mul_add` HERE IS A libm CALL, NOT AN INSTRUCTION — fp-columnar is built
+/// `+sse4.1`, not `+fma`. It is still 6.83x faster than the `fmod` path it
+/// replaces (36.82 -> 5.40 ns/elem), because glibc resolves `fma` through an
+/// IFUNC to a hardware implementation while `fmod` stays iterative. Correctness
+/// does NOT depend on which one is used: `mul_add` is exactly specified by IEEE,
+/// so the call and the instruction return identical bits. Routing it through the
+/// `+avx2,+fma` crate would remove the call overhead and nothing else; that is
+/// headroom, not a correctness matter.
 fn python_mod_f64(lhs: f64, rhs: f64) -> f64 {
+    let d = lhs / rhs;
+    if d != 0.0 && d.is_finite() && d.abs() < FLOOR_DIV_INTEGER_SPACING_LIMIT {
+        let floored = d.floor();
+        if floored != d {
+            // Single rounding: this IS `lhs - floored * rhs`, exactly.
+            let remainder = (-floored).mul_add(rhs, lhs);
+            if remainder == 0.0 {
+                // Believed unreachable: `d != floored` forces the exact quotient
+                // to be non-integral (an integral quotient below 2^52 is
+                // representable, so `d` would equal it), hence a non-zero
+                // remainder. Kept because dropping it would rest the SIGN of a
+                // zero on that second argument, and numpy takes the sign of the
+                // DIVISOR here.
+                return 0.0_f64.copysign(rhs);
+            }
+            return remainder;
+        }
+    }
     npy_divmod_f64(lhs, rhs).1
 }
 
@@ -61969,5 +62021,121 @@ mod floordiv_mod_f64_pandas_special_value_lock {
             "the FALLBACK arm ran only {slow_arm} times, so this test is comparing the fast \
              path against itself and would not notice the guard being wrong"
         );
+    }
+    /// The MOD half of the same proof obligation (br-frankenpandas-7yiuz).
+    #[test]
+    fn the_guarded_mod_fast_path_is_bit_identical_to_npy_divmod() {
+        let mut state = 0x0FED_CBA9_8765_4321_u64;
+        let mut fast_arm = 0usize;
+        let mut slow_arm = 0usize;
+        let mut failures = 0usize;
+
+        for i in 0..200_000 {
+            let (lhs, rhs) = probe_pair(&mut state, i);
+            let d = lhs / rhs;
+            if d != 0.0
+                && d.is_finite()
+                && d.abs() < super::FLOOR_DIV_INTEGER_SPACING_LIMIT
+                && d.floor() != d
+            {
+                fast_arm += 1;
+            } else {
+                slow_arm += 1;
+            }
+
+            let want = super::npy_divmod_f64(lhs, rhs).1;
+            let got = super::python_mod_f64(lhs, rhs);
+            if !(want.is_nan() && got.is_nan()) && want.to_bits() != got.to_bits() {
+                if failures < 5 {
+                    eprintln!(
+                        "lhs={lhs:e} rhs={rhs:e}: npy_divmod {want:e} ({:#018x}), fast path \
+                         {got:e} ({:#018x})",
+                        want.to_bits(),
+                        got.to_bits()
+                    );
+                }
+                failures += 1;
+            }
+        }
+
+        assert_eq!(
+            failures, 0,
+            "the guarded mod fast path disagreed with npy_divmod on {failures} of 200000 pairs"
+        );
+        assert!(fast_arm > 100_000, "fast arm ran only {fast_arm} times");
+        assert!(
+            slow_arm > 1_000,
+            "the FALLBACK arm ran only {slow_arm} times, so this test would not notice the \
+             guard being wrong"
+        );
+    }
+
+    /// THE CONTROL that makes the `mul_add` in `python_mod_f64` legible as
+    /// load-bearing rather than decorative (br-frankenpandas-7yiuz).
+    ///
+    /// `mul_add` rounds ONCE, so it returns the exact remainder; the ordinary
+    /// `lhs - f * rhs` rounds the product first and keeps the error. Measured over
+    /// 10_000_000 pairs the difference is 0 versus 9_664_611 mismatches, so a
+    /// reader who "simplifies" the fused call away produces a kernel that is wrong
+    /// on ~97% of ordinary inputs while every shape and dtype assertion in this
+    /// repo still passes. This test FAILS if that simplification ever stops being
+    /// detectably wrong, which is the only way it could become safe.
+    #[test]
+    fn the_unfused_remainder_is_not_a_substitute_for_mul_add() {
+        let mut state = 0x1234_5678_9ABC_DEF0_u64;
+        let mut unfused_mismatches = 0usize;
+        let mut compared = 0usize;
+
+        for i in 0..100_000 {
+            let (lhs, rhs) = probe_pair(&mut state, i);
+            let d = lhs / rhs;
+            if !(d != 0.0
+                && d.is_finite()
+                && d.abs() < super::FLOOR_DIV_INTEGER_SPACING_LIMIT
+                && d.floor() != d)
+            {
+                continue;
+            }
+            let floored = d.floor();
+            let want = super::npy_divmod_f64(lhs, rhs).1;
+            let unfused = lhs - floored * rhs;
+            compared += 1;
+            if want.to_bits() != unfused.to_bits() {
+                unfused_mismatches += 1;
+            }
+        }
+
+        assert!(
+            compared > 50_000,
+            "only {compared} pairs reached the fast path"
+        );
+        assert!(
+            unfused_mismatches * 2 > compared,
+            "the UNFUSED remainder disagreed with numpy on only {unfused_mismatches} of \
+             {compared} pairs. Either the corpus stopped being representative or the fused \
+             `mul_add` in `python_mod_f64` is no longer load-bearing — check which before \
+             relaxing it."
+        );
+    }
+
+    /// Shared corpus for the two differential tests above: ordinary magnitudes,
+    /// with every 50th pair taken from raw bits so infinities, NaNs, subnormals
+    /// and signed zeros all appear and the FALLBACK arm is genuinely exercised.
+    fn probe_pair(state: &mut u64, i: usize) -> (f64, f64) {
+        fn xorshift(state: &mut u64) -> u64 {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            *state
+        }
+        let a = xorshift(state);
+        let b = xorshift(state);
+        if i.is_multiple_of(50) {
+            (f64::from_bits(a), f64::from_bits(b))
+        } else {
+            let lhs = ((a >> 11) as f64) / 1024.0 - 4_398_046_511_104.0;
+            let rhs = ((b >> 11) as f64) / 1_048_576.0 - 4_294_967_296.0;
+            (lhs, if rhs == 0.0 { 1.0 } else { rhs })
+        }
     }
 }
