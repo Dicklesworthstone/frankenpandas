@@ -159950,27 +159950,45 @@ mod tests {
 
         let gb = df.groupby(&["grp"]).unwrap();
 
+        // GROUP ORDER, not source order — br-frankenpandas-nyjxf (0daee4272) made
+        // grouped rolling visit groups in sorted key order to match pandas, and
+        // 7db195ce6 / d9f142ce0 / 84ef98d98 re-pinned the neighbouring assertions.
+        // This test was missed by that sweep and has been red since.
+        //
+        // MEASURED, live pandas 2.2.3, on exactly these inputs:
+        //   df.groupby("grp").rolling(3).std()
+        //     index [('a',0), ('a',2), ('a',4), ('a',6), ('b',1), ('b',3), ('b',5)]
+        //     val   [nan, nan, 2.0, nan, nan, nan, 1.0]
+        //   df.groupby("grp").rolling(3).var()
+        //     val   [nan, nan, 4.0, nan, nan, nan, 1.0]
+        //
+        // The VALUES never disagreed — 2.0 still lands on source row 4 and 1.0 on
+        // source row 5. Only their positions move, because the rows are now
+        // emitted grouped. (pandas carries the key as an index LEVEL and returns
+        // `val` alone; FP keeps `grp` as a column, a divergence documented
+        // separately in 732803e70, so column_names is asserted unchanged.)
         let stds = gb.rolling(3).std().unwrap();
         assert_eq!(stds.column_names(), vec!["grp", "val"]);
-        assert_int64_index_labels(stds.index(), &[0, 1, 2, 3, 4, 5, 6]);
+        assert_int64_index_labels(stds.index(), &[0, 2, 4, 6, 1, 3, 5]);
         let std_vals = stds.column("val").unwrap().values();
         assert!(std_vals[0].is_missing());
         assert!(std_vals[1].is_missing());
-        assert!(std_vals[2].is_missing());
+        assert!((expect_float64(&std_vals[2]) - 2.0).abs() < 1e-10);
         assert!(std_vals[3].is_missing());
-        assert!((expect_float64(&std_vals[4]) - 2.0).abs() < 1e-10);
-        assert!((expect_float64(&std_vals[5]) - 1.0).abs() < 1e-10);
-        assert!(std_vals[6].is_missing());
+        assert!(std_vals[4].is_missing());
+        assert!(std_vals[5].is_missing());
+        assert!((expect_float64(&std_vals[6]) - 1.0).abs() < 1e-10);
 
         let vars = gb.rolling(3).var().unwrap();
+        assert_int64_index_labels(vars.index(), &[0, 2, 4, 6, 1, 3, 5]);
         let var_vals = vars.column("val").unwrap().values();
         assert!(var_vals[0].is_missing());
         assert!(var_vals[1].is_missing());
-        assert!(var_vals[2].is_missing());
+        assert!((expect_float64(&var_vals[2]) - 4.0).abs() < 1e-10);
         assert!(var_vals[3].is_missing());
-        assert!((expect_float64(&var_vals[4]) - 4.0).abs() < 1e-10);
-        assert!((expect_float64(&var_vals[5]) - 1.0).abs() < 1e-10);
-        assert!(var_vals[6].is_missing());
+        assert!(var_vals[4].is_missing());
+        assert!(var_vals[5].is_missing());
+        assert!((expect_float64(&var_vals[6]) - 1.0).abs() < 1e-10);
     }
 
     #[test]
