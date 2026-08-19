@@ -12,6 +12,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+# br-frankenpandas-oxv4u: ISA-isolated dot kernel, built +avx2,+fma by a
+# per-package profile entry. Entered only behind a runtime CPU guard.
+fp-dot-kernel = { path = "../fp-dot-kernel" }
 fp-types = { path = "../fp-types", version = "0.2.0" }
 rustc-hash = "2"
 serde = { workspace = true }

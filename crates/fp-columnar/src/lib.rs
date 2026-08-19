@@ -4197,6 +4197,29 @@ impl ScalarValues {
         // SIMD FMA with unit-stride reads/writes. Bit-identical: the per-output
         // summation order is unchanged (each `out[row]` still accumulates
         // `j = 0..k` in order).
+        // br-frankenpandas-oxv4u: hand the work to the ISA-isolated crate when the
+        // CPU actually has the features it was compiled for. fp-dot-kernel is built
+        // with +avx2,+fma by a per-package profile entry; THIS crate stays baseline,
+        // which is what keeps sqrt/log out of the blast radius of the blanket
+        // x86-64-v3 policy that was measured and rejected (CyanLynx 2026-07-31:
+        // sqrt 0.361x, log regressed).
+        //
+        // ⚠️ THE GUARD IS NOT OPTIONAL AND NOT TYPE-ENFORCED. fp-dot-kernel emits
+        // AVX2 unconditionally, so entering it on a pre-AVX2 CPU is SIGILL, not a
+        // graceful fallback. The `else` arm below is the original kernel and must
+        // stay a complete implementation, never a stub.
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                let slices: Vec<&[f64]> = a_cols
+                    .iter()
+                    .map(|a_col| &a_col.data[a_col.start..a_col.start + len])
+                    .collect();
+                return fp_dot_kernel::materialize_float64_dot(&slices, b_col, len);
+            }
+        }
         let mut out = vec![0.0_f64; len];
         for (a_col, &b) in a_cols.iter().zip(b_col.iter()) {
             let a_slice = &a_col.data[a_col.start..a_col.start + len];

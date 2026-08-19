@@ -1,8 +1,16 @@
+# br-frankenpandas-oxv4u: `profile-rustflags` lets ONE crate carry
+# `-Ctarget-feature=+avx2,+fma` while the rest of the workspace stays at the
+# baseline target. It is cargo-UNSTABLE, so this pins the workspace to nightly
+# cargo — already the case via rust-toolchain.toml, but now load-bearing rather
+# than incidental. Adopted with the maintainer's explicit go-ahead.
+cargo-features = ["profile-rustflags"]
+
 [workspace]
 resolver = "2"
 members = [
   "crates/fp-types",
   "crates/fp-columnar",
+  "crates/fp-dot-kernel",
   "crates/fp-frame",
   "crates/fp-index",
   "crates/fp-expr",
@@ -73,6 +81,19 @@ ucd = "0.1.1"
 unicode-casefold = "0.2.0"
 unicode-normalization = "0.1.25"
 
+# br-frankenpandas-oxv4u: the ONLY ISA-elevated crate in the workspace.
+#
+# A blanket x86-64-v3 policy was MEASURED and REJECTED (2026-07-31 CyanLynx:
+# sqrt 0.361x, log regressed), so the flag is scoped to the one kernel that
+# benefits. sqrt/log live in fp-columnar and are deliberately NOT covered here —
+# that isolation is the entire reason fp-dot-kernel is a separate crate.
+#
+# Applied to BOTH release profiles on purpose: benchmarks build `release-perf`,
+# so flagging only `release` would leave every measured row at baseline ISA and
+# the lever would read as inert.
+[profile.release.package.fp-dot-kernel]
+rustflags = ["-Ctarget-feature=+avx2,+fma"]
+
 [profile.release-perf]
 inherits = "release"
 lto = "thin"
@@ -80,3 +101,10 @@ codegen-units = 1
 debug = "line-tables-only"
 strip = false
 opt-level = 3
+
+# Package rustflags are NOT inherited through `inherits = "release"`, so
+# release-perf needs its OWN entry. Without this, every benchmark row would build
+# the kernel at baseline ISA while the release profile carried the flag — the
+# lever would read as inert in exactly the measurements meant to certify it.
+[profile.release-perf.package.fp-dot-kernel]
+rustflags = ["-Ctarget-feature=+avx2,+fma"]
