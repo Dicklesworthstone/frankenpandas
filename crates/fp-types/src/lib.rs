@@ -313,9 +313,25 @@ impl DType {
         matches!(self, Self::Int64 | Self::Int64Nullable)
     }
 
-    /// Returns true if this is a string/object dtype.
+    /// Returns true for the Utf8 dtype.
     ///
-    /// Matches `pd.api.types.is_string_dtype()`.
+    /// ⚠️ NARROWER THAN `pd.api.types.is_string_dtype()`, which the old wording
+    /// ("string/object dtype") papered over. MEASURED, live pandas 2.2.3
+    /// (CrimsonPine 2026-08-19):
+    /// ```text
+    ///   Series(['a','b'])                        object    is_string_dtype TRUE
+    ///   Series([1,2], dtype=object)              object    is_string_dtype FALSE
+    ///   Series(Categorical(['a','b']))           category  is_string_dtype TRUE
+    ///   Series(['a','b'], dtype='string')        string    is_string_dtype TRUE
+    ///   Series([1,2])                            int64     is_string_dtype FALSE
+    /// ```
+    /// So pandas is NOT testing "object dtype": an object column holding ints is
+    /// FALSE, and a CATEGORICAL column is TRUE. This returns true only for `Utf8`,
+    /// which means it disagrees with pandas on a categorical-of-strings.
+    ///
+    /// Left as-is rather than widened: making this true for `Categorical`
+    /// unconditionally would be wrong for a categorical of non-strings, and this
+    /// enum carries no element type for its categories to test.
     #[must_use]
     pub const fn is_string_dtype(&self) -> bool {
         matches!(self, Self::Utf8)
@@ -2746,7 +2762,19 @@ impl Timestamp {
 
     /// Returns the current UTC timestamp.
     ///
-    /// Matches `pd.Timestamp.now()` / `pd.Timestamp.utcnow()`.
+    /// ⚠️ THIS MATCHES `pd.Timestamp.utcnow()`, NOT `pd.Timestamp.now()`, and the
+    /// old doc claimed both. They are different functions: pandas' `now()` returns
+    /// LOCAL time with no timezone attached, while `utcnow()` returns UTC.
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19) on a UTC-4 host:
+    /// ```text
+    ///   pd.Timestamp.now()    2026-08-19 07:17:07.266940        tz None
+    ///   pd.Timestamp.utcnow() 2026-08-19 11:17:07.267100+00:00  tz UTC
+    ///   difference: 14400 s
+    /// ```
+    /// A caller who trusted the old claim and ran on a non-UTC host would be off by
+    /// their whole UTC offset — four hours here — with no error and no NaT to notice.
+    /// This crate has no local-timezone concept, so the UTC answer is the only one it
+    /// can give; only the false half of the claim is removed.
     #[must_use]
     pub fn now() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
