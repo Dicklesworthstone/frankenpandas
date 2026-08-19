@@ -402,6 +402,77 @@ def extract_top_level_pub_functions(path: Path) -> set[str]:
     return methods
 
 
+ERROR_ONLY_STUB_RE = re.compile(
+    r"pub fn (\w+)\s*(?:<[^>]*>)?\s*\([^{}]*?\)\s*->\s*[^{;]+\{\s*Err\([^;{}]*\)\s*\}",
+    re.S,
+)
+
+
+def error_only_stub_names(path: Path, type_name: str | None = None) -> set[str]:
+    """Names of `pub fn`s whose entire body is a single `Err(...)` expression.
+
+    ⚠️ SCOPED TO ONE `impl` BLOCK when `type_name` is given, and it MUST be. The
+    same method name is frequently a real implementation on one type and a refusal
+    on another: `all`, `isna`, `round`, `shift` and `diff` are genuine on `Index`
+    and `Err(...)` one-liners on `MultiIndex` (their error constructors say so —
+    `multi_index_isna_error`, `round_unsupported_error`). A file-wide scan reports
+    all ten against BOTH surfaces, which is a false stub report for IndexVariants —
+    the same name-without-scope mistake the extractors above make, just pointing
+    the other way.
+
+    A FUNCTION THAT CAN ONLY FAIL IS NOT AN IMPLEMENTATION, and every extractor
+    above is name-based — none of them reads a body. Measured 2026-08-19 on fp-io:
+    `read_orc`, `read_gbq`, `read_sas`, `read_spss` are `Err(...)` one-liners (ORC
+    because the workspace bans Tokio), while `read_stata`, `read_html` and
+    `read_excel` beside them are real. All seven counted identically as
+    `implemented`, so anyone updating the tracked listing off
+    `implemented_but_listed_missing` would assert four capabilities that cannot
+    succeed.
+
+    Reported as a SUB-CLASSIFICATION, deliberately not subtracted from
+    `implemented`: changing that count would move every coverage percentage in the
+    report and break comparison against earlier runs. The caller decides.
+    """
+    if not path.exists():
+        return set()
+    text = path.read_text(encoding="utf-8")
+    if type_name is None:
+        return {
+            normalize_rust_identifier(m.group(1))
+            for m in ERROR_ONLY_STUB_RE.finditer(text)
+        }
+    # ⚠️ RUN THE REGEX ON THE BLOCK'S TEXT, not on the whole file intersected with
+    # the type's method names. Intersecting is not enough: `isna` is a REAL method
+    # on PeriodIndex and an `Err(...)` stub on MultiIndex, so a file-wide match
+    # ANDed with PeriodIndex's method set still yields `isna` and reports a real
+    # implementation as a stub. Only the block's own body can answer this.
+    start_re = impl_start_re(type_name)
+    stubs: set[str] = set()
+    block: list[str] = []
+    in_impl = False
+    for line in text.splitlines():
+        if not in_impl:
+            if start_re.search(line):
+                in_impl = True
+                block = [line]
+            continue
+        if line == "}":
+            in_impl = False
+            for match in ERROR_ONLY_STUB_RE.finditer("\n".join(block)):
+                stubs.add(normalize_rust_identifier(match.group(1)))
+            block = []
+            continue
+        block.append(line)
+    return stubs
+
+
+def collect_error_only_stubs(targets: set[tuple[Path, str | None]]) -> set[str]:
+    stubs: set[str] = set()
+    for path, type_name in targets:
+        stubs |= error_only_stub_names(path, type_name)
+    return stubs
+
+
 def collect_rust_methods(spec: SurfaceSpec) -> tuple[set[str], dict[str, list[str]]]:
     all_methods: set[str] = set()
     by_impl: dict[str, list[str]] = {}
@@ -554,6 +625,9 @@ def build_surface_report(
     }
     target = sorted(set().union(*(set(items) for items in target_by_class.values())))
     rust_methods, rust_by_impl = collect_rust_methods(spec)
+    stub_names = collect_error_only_stubs(
+        {(REPO_ROOT / impl.path, impl.type_name) for impl in spec.rust_impls}
+    )
     implemented = sorted(set(target) & rust_methods)
     missing = sorted(set(target) - rust_methods)
     parent_missing = parent_missing_methods(spec, issues)
@@ -576,6 +650,7 @@ def build_surface_report(
         "parent_missing_methods": parent_missing,
         "drift": {
             "implemented_but_listed_missing": implemented_but_listed_missing,
+            "implemented_but_error_only_stub": sorted(set(implemented) & stub_names),
             "missing_without_open_child": missing_without_open_child,
         },
     }
@@ -593,6 +668,14 @@ def build_io_report(
     read_targets = sorted(pandas_reader_source[0])
     target = sorted(set(dataframe_targets) | set(read_targets))
     rust_methods, rust_by_impl = collect_io_rust_methods()
+    # fp-io's readers are free functions, so there is no impl block to scope to;
+    # fp-frame's IO methods hang off DataFrame and are scoped to it.
+    stub_names = collect_error_only_stubs(
+        {
+            (REPO_ROOT / "crates/fp-io/src/lib.rs", None),
+            (REPO_ROOT / "crates/fp-frame/src/lib.rs", "DataFrame"),
+        }
+    )
     implemented = sorted(set(target) & rust_methods)
     missing = sorted(set(target) - rust_methods)
     spec = SurfaceSpec(
@@ -626,6 +709,7 @@ def build_io_report(
         "parent_missing_methods": parent_missing,
         "drift": {
             "implemented_but_listed_missing": implemented_but_listed_missing,
+            "implemented_but_error_only_stub": sorted(set(implemented) & stub_names),
             "missing_without_open_child": missing_without_open_child,
         },
     }
