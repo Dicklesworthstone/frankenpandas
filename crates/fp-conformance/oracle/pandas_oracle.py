@@ -373,16 +373,43 @@ def label_to_json(value: Any) -> dict[str, Any]:
     # ACCEPTED kind="bool" -- so the oracle could read a boolean label it could
     # never write.
     #
-    # The FLOAT sibling is deliberately NOT fixed here: `label_from_json`
-    # accepts kind="float64" while this function has no float branch and falls
-    # through to `str(value)`, the identical asymmetry -- but changing it moves
-    # every float-labelled fixture rather than the single bool one, and it has
-    # to answer for NaN/inf labels, which are not representable in JSON. It is
-    # its own bead and its own lever.
+    # br-frankenpandas-oracle-float-label-asymmetry-ab1gd: the FLOAT sibling of
+    # that bool asymmetry, now closed. This function had no float branch, so a
+    # float label fell through to `str(value)` and came back as kind="utf8" --
+    # while `label_from_json` above has accepted kind="float64" all along, and
+    # `IndexLabel::Float64(OrderedF64)` has existed since br-frankenpandas-i10en.
+    # The oracle could READ a float label it could never WRITE.
+    #
+    # ⚠️ THE BLAST RADIUS THAT BLOCKED THIS WAS MEASURED AND IS ZERO. The bead
+    # feared "changing it moves every float-labelled fixture rather than the
+    # single bool one". Counted across all 1336 packet fixtures: label kinds in
+    # index positions are int64 x6362, utf8 x1851, bool x2 -- and NO fixture
+    # carries a stringified float in an index position. Nothing moves, so the
+    # ordering constraint (change the emitter only together with a regeneration)
+    # has nothing to protect here. The read side was equally unexercised.
+    #
+    # The encoding is `scalar_to_json`'s, fifteen lines above, not a new choice:
+    # NaN routes to the typed-null label with the established "na_n" marker, and
+    # +/-inf REFUSES rather than inventing a spelling, because Rust's `NullKind`
+    # is Null/NaN/NaT with no Inf and routing an infinite label to a null kind
+    # would claim it is MISSING, which is false. Deciding a real +/-inf spelling
+    # still needs a matching Rust-side change.
     if isinstance(value, bool):
         return {"kind": "bool", "value": value}
     if isinstance(value, int):
         return {"kind": "int64", "value": value}
+    if isinstance(value, float):
+        if math.isnan(value):
+            return {"kind": "null", "value": "na_n"}
+        if math.isinf(value):
+            raise OracleError(
+                "cannot encode a non-finite float LABEL "
+                f"({value!r}): JSON has no representation for it and serde_json "
+                "rejects the bare `Infinity` token. The +/-inf spelling is "
+                "undecided and needs a Rust-side NullKind change — see "
+                "br-frankenpandas-oracle-float-label-asymmetry-ab1gd"
+            )
+        return {"kind": "float64", "value": value}
     return {"kind": "utf8", "value": str(value)}
 
 

@@ -79,11 +79,26 @@ def _pivot(oracle, **over) -> list:
     return [str(entry.get("value")) for entry in result["expected_frame"]["index"]]
 
 
+def _pivot_kinds(oracle, **over) -> list:
+    """The `kind` of each index label, which `_pivot` above discards."""
+    payload = {
+        "operation": "dataframe_pivot_table",
+        "pivot_index": "row",
+        "pivot_columns": "col",
+        "pivot_values": ["val"],
+        "pivot_aggfunc": "sum",
+        "frame": _frame_with_a_nan_group_key(),
+    }
+    payload.update(over)
+    result = oracle.dispatch(__import__("pandas"), payload)
+    return [entry.get("kind") for entry in result["expected_frame"]["index"]]
+
+
 def test_absent_pivot_dropna_now_means_pandas_default_eay9h(oracle):
-    """The flip itself. `['r1', 'r2', 'nan']` here means the override came back."""
+    """The flip itself. A THIRD label here means the override came back."""
     assert _pivot(oracle) == ["r1", "r2"], (
         "with no pivot_dropna key the oracle must use pandas' dropna=True and drop "
-        "the NaN group key. An 'nan' entry means the historical dropna=False "
+        "the NaN group key. A third entry means the historical dropna=False "
         "override is back and the oracle is again rewriting the argument under test"
     )
 
@@ -95,9 +110,20 @@ def test_pivot_dropna_false_is_still_reachable_and_still_differs_eay9h(oracle):
     stopped working entirely and everything returned pandas' answer — the default
     would be untested and the deliberate-override case would be silently dead.
     """
-    assert _pivot(oracle, pivot_dropna=False) == ["r1", "r2", "nan"]
+    # ⚠️ The NaN group key is now a TYPED NULL label, not the string "nan".
+    # br-frankenpandas-oracle-float-label-asymmetry-ab1gd gave `label_to_json` the
+    # float branch it was missing, so a NaN label routes to
+    # {"kind": "null", "value": "na_n"} — `scalar_to_json`'s established spelling —
+    # instead of falling through to str(nan). This assertion read "nan" only
+    # because the label used to be stringified.
+    assert _pivot(oracle, pivot_dropna=False) == ["r1", "r2", "na_n"]
     assert _pivot(oracle, pivot_dropna=True) == ["r1", "r2"]
     assert _pivot(oracle, pivot_dropna=False) != _pivot(oracle)
+
+    # Pin the KIND too. The check above passes on the `value` string alone, so it
+    # would survive a regression that re-stringified the label to "na_n"; only the
+    # kind distinguishes a typed null from a string that looks like one.
+    assert _pivot_kinds(oracle, pivot_dropna=False) == ["utf8", "utf8", "null"]
 
 
 def test_pivot_sort_default_is_deliberately_not_pandas_yet_eay9h(oracle):
