@@ -7390,9 +7390,12 @@ impl DatetimeIndex {
         Some(var.sqrt() as i64)
     }
 
-    /// Median non-NAT label, matching `pd.DatetimeIndex.median()`. Empty
-    /// returns None. For an even-length non-NAT subset, returns the
-    /// average of the two middle values.
+    /// Median non-NAT label. Empty returns None. For an even-length non-NAT
+    /// subset, returns the average of the two middle values.
+    ///
+    /// ⚠️ `pd.DatetimeIndex.median()` does NOT exist (measured 2.2.3:
+    /// `AttributeError`). Its sibling `mean()` DOES -- do not infer one from
+    /// the other. FP superset; the pandas spelling is `idx.to_series().median()`.
     #[must_use]
     pub fn median(&self) -> Option<i64> {
         let mut nanos: Vec<i64> = self
@@ -9169,8 +9172,15 @@ impl TimedeltaIndex {
         "ns"
     }
 
-    /// Resolution string, matching `pd.TimedeltaIndex.resolution`.
-    /// Always `"nanosecond"`.
+    /// Resolution string. Always `"nanosecond"`.
+    ///
+    /// ⚠️ TWO ways this is not parity. (a) `pd.TimedeltaIndex.resolution` does
+    /// NOT exist (measured 2.2.3: `AttributeError`) even though
+    /// `pd.DatetimeIndex.resolution` DOES. (b) Where pandas has a `resolution`,
+    /// it describes the DATA, not the storage unit: `resolution` on a
+    /// `DatetimeIndex` of day-aligned labels returns `'day'`. The fixed
+    /// `"nanosecond"` here answers a different question, and the class-level
+    /// `pd.Timedelta.resolution` is a `Timedelta` of 1ns, not a string.
     #[must_use]
     pub fn resolution(&self) -> &'static str {
         "nanosecond"
@@ -10804,7 +10814,10 @@ impl PeriodIndex {
         Ok(Some(Period::new(avg, freq)))
     }
 
-    /// Period with the median ordinal, matching `pd.PeriodIndex.median()`.
+    /// Period with the median ordinal.
+    ///
+    /// ⚠️ `pd.PeriodIndex.median()` does NOT exist (measured 2.2.3:
+    /// `AttributeError`). FP superset, not parity.
     /// For an even-length subset, returns the period at floor(median) of
     /// the two middle ordinals.
     pub fn median(&self) -> Result<Option<Period>, IndexError> {
@@ -11112,8 +11125,14 @@ impl PeriodIndex {
         self.freq().map(|f| f.to_string())
     }
 
-    /// Inferred frequency, matching `pd.PeriodIndex.inferred_freq`. Pandas
-    /// returns the freq when all periods share it, otherwise `None`. Mixed
+    /// Inferred frequency.
+    ///
+    /// ⚠️ `pd.PeriodIndex.inferred_freq` does NOT exist (measured 2.2.3:
+    /// `AttributeError`), so the behaviour once described here as pandas' was
+    /// never observed from pandas. `DatetimeIndex`/`TimedeltaIndex` DO have
+    /// `inferred_freq`; on a PeriodIndex the freq is carried by `.freq`, which
+    /// is mandatory, so there is nothing to infer. FP returns the freq when all
+    /// periods share it, otherwise `None`. Mixed
     /// frequency is detected via `ensure_homogeneous_freq` (the same guard
     /// used by min/max).
     #[must_use]
@@ -12258,9 +12277,13 @@ impl RangeIndex {
         Some(first.max(last))
     }
 
-    /// Median value, matching `pd.RangeIndex.median()`. Returns `None`
-    /// for an empty range; for an even-length range, returns the average
-    /// of the two middle values as f64.
+    /// Median value. Returns `None` for an empty range; for an even-length
+    /// range, returns the average of the two middle values as f64.
+    ///
+    /// ⚠️ NOT A PARITY SURFACE: pandas `Index` exposes no numeric reductions
+    /// (measured 2.2.3: `sum`/`prod`/`mean`/`median`/`std`/`var` all raise
+    /// `AttributeError`; only `min`/`max`/`argmin`/`argmax` exist). See
+    /// [`sum`](Self::sum).
     #[must_use]
     pub fn median(&self) -> Option<f64> {
         let len = self.len();
@@ -12275,8 +12298,12 @@ impl RangeIndex {
         }
     }
 
-    /// Sample variance (ddof=1), matching `pd.RangeIndex.var()`. Returns
-    /// `None` for fewer than two values.
+    /// Sample variance (ddof=1). Returns `None` for fewer than two values.
+    ///
+    /// ⚠️ NOT A PARITY SURFACE: pandas `Index` exposes no numeric reductions
+    /// (measured 2.2.3: `sum`/`prod`/`mean`/`median`/`std`/`var` all raise
+    /// `AttributeError`; only `min`/`max`/`argmin`/`argmax` exist). See
+    /// [`sum`](Self::sum).
     #[must_use]
     pub fn var(&self) -> Option<f64> {
         let len = self.len();
@@ -12288,14 +12315,23 @@ impl RangeIndex {
         Some(step * step * n * (n + 1.0) / 12.0)
     }
 
-    /// Sample standard deviation (ddof=1), matching `pd.RangeIndex.std()`.
+    /// Sample standard deviation (ddof=1).
+    ///
+    /// ⚠️ NOT A PARITY SURFACE: pandas `Index` exposes no numeric reductions
+    /// (measured 2.2.3: `sum`/`prod`/`mean`/`median`/`std`/`var` all raise
+    /// `AttributeError`; only `min`/`max`/`argmin`/`argmax` exist). See
+    /// [`sum`](Self::sum).
     #[must_use]
     pub fn std(&self) -> Option<f64> {
         self.var().map(f64::sqrt)
     }
 
-    /// Product of all values, matching `pd.RangeIndex.prod()`. Empty
-    /// returns 1; saturating to i64 on overflow.
+    /// Product of all values. Empty returns 1; saturating to i64 on overflow.
+    ///
+    /// ⚠️ NOT A PARITY SURFACE: pandas `Index` exposes no numeric reductions
+    /// (measured 2.2.3: `sum`/`prod`/`mean`/`median`/`std`/`var` all raise
+    /// `AttributeError`; only `min`/`max`/`argmin`/`argmax` exist). See
+    /// [`sum`](Self::sum).
     #[must_use]
     pub fn prod(&self) -> i64 {
         if self
@@ -12320,9 +12356,15 @@ impl RangeIndex {
         i64::try_from(total).unwrap_or(if total > 0 { i64::MAX } else { i64::MIN })
     }
 
-    /// Sum of all values, matching `pd.RangeIndex.sum()`. Closed form via
-    /// arithmetic-progression: `n * (first + last) / 2` when `n*(first+last)`
-    /// is even; falls back to a precise i128 path otherwise.
+    /// Sum of all values. Closed form via arithmetic-progression:
+    /// `n * (first + last) / 2` when `n*(first+last)` is even; falls back to a
+    /// precise i128 path otherwise.
+    ///
+    /// ⚠️ NOT A PARITY SURFACE: pandas `Index` has NO numeric reductions.
+    /// Measured on 2.2.3, `pd.RangeIndex(5).sum()` raises `AttributeError`, as
+    /// do `prod`/`mean`/`median`/`std`/`var`; only `min`/`max`/`argmin`/`argmax`
+    /// exist on an Index. The pandas spelling is `idx.to_series().sum()`. These
+    /// six methods are an FP SUPERSET -- do not cite them as parity evidence.
     #[must_use]
     pub fn sum(&self) -> i64 {
         let len = self.len();
@@ -12337,8 +12379,12 @@ impl RangeIndex {
         i64::try_from(total).unwrap_or(if total > 0 { i64::MAX } else { i64::MIN })
     }
 
-    /// Mean of all values, matching `pd.RangeIndex.mean()`. Returns `None`
-    /// for an empty range.
+    /// Mean of all values. Returns `None` for an empty range.
+    ///
+    /// ⚠️ NOT A PARITY SURFACE: pandas `Index` exposes no numeric reductions
+    /// (measured 2.2.3: `sum`/`prod`/`mean`/`median`/`std`/`var` all raise
+    /// `AttributeError`; only `min`/`max`/`argmin`/`argmax` exist). See
+    /// [`sum`](Self::sum).
     #[must_use]
     pub fn mean(&self) -> Option<f64> {
         let len = self.len();
@@ -16860,9 +16906,11 @@ impl MultiIndex {
         (0..self.len() - 1).all(|i| self.row_cmp(i, i + 1) != std::cmp::Ordering::Less)
     }
 
-    /// Alias for `is_monotonic_increasing` matching `pd.MultiIndex.is_lexsorted`
-    /// semantics (pandas deprecated the `is_lexsorted` name in 1.x; we keep
-    /// it as a convenience alias for migrated code).
+    /// Alias for `is_monotonic_increasing`.
+    ///
+    /// ⚠️ REMOVED, not deprecated: `pd.MultiIndex.is_lexsorted` raises
+    /// `AttributeError` on 2.2.3 (deprecated in 1.x, dropped in 2.0). Kept as a
+    /// convenience alias for migrated code -- an FP superset, not parity.
     #[must_use]
     pub fn is_lexsorted(&self) -> bool {
         self.is_monotonic_increasing()
@@ -16976,7 +17024,12 @@ impl MultiIndex {
         )
     }
 
-    /// Unsupported string accessor, matching `pd.MultiIndex.str`.
+    /// Unsupported string accessor.
+    ///
+    /// Refusing IS the parity behaviour: `pd.MultiIndex.str` raises
+    /// `AttributeError` on 2.2.3 (a plain string-valued `pd.Index` DOES carry
+    /// `.str`; a MultiIndex does not). The wording before cited the attribute as
+    /// though it existed.
     pub fn r#str(&self) -> Result<(), IndexError> {
         Err(Self::string_accessor_error())
     }
