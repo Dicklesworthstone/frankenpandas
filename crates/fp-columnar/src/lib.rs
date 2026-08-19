@@ -21204,7 +21204,9 @@ impl Column {
 
     /// Whether any non-missing value repeats.
     ///
-    /// Matches `pd.Series.has_duplicates`.
+    /// ⚠️ `pd.Series.has_duplicates` does NOT exist (measured 2.2.3:
+    /// `AttributeError`) -- it is an `Index` property. The pandas spelling for
+    /// values is `s.duplicated().any()`. FP superset, not parity.
     #[must_use]
     pub fn has_duplicates(&self) -> bool {
         // All-valid typed Int64 columns can hash their borrowed primitive

@@ -9035,8 +9035,12 @@ impl Series {
 
     /// Append another Series to this one.
     ///
-    /// Matches `pd.Series.append(other)` (deprecated but common).
     /// Concatenates values and index labels.
+    ///
+    /// ⚠️ REMOVED, not deprecated: `pd.Series.append` raises `AttributeError`
+    /// on 2.2.3 (deprecated in 1.4, dropped in 2.0) -- it does not warn. The
+    /// pandas spelling is `pd.concat([a, b])`. Kept as an FP superset for
+    /// migrated callers, not as parity.
     pub fn append(&self, other: &Self) -> Result<Self, FrameError> {
         let mut labels = self.index.labels().to_vec();
         labels.extend_from_slice(other.index.labels());
@@ -11936,9 +11940,13 @@ impl Series {
 
     /// Return whether the Series contains any duplicated values.
     ///
-    /// Matches `pd.Series.has_duplicates`. Semantically the complement of
-    /// `is_unique`: multiple null entries count as duplicates, consistent
-    /// with `is_unique`'s `null_count <= 1` rule.
+    /// Semantically the complement of `is_unique`: multiple null entries count
+    /// as duplicates, consistent with `is_unique`'s `null_count <= 1` rule.
+    ///
+    /// ⚠️ `pd.Series.has_duplicates` does NOT exist (measured 2.2.3:
+    /// `AttributeError`) -- `has_duplicates` is an `Index` property, and
+    /// `s.index.has_duplicates` asks about the LABELS, not the values. The
+    /// pandas spelling for values is `s.duplicated().any()`.
     #[must_use]
     pub fn has_duplicates(&self) -> bool {
         !self.is_unique()
@@ -22791,9 +22799,13 @@ impl Series {
         Ok(self.to_frame(None)?.to_latex(include_index))
     }
 
-    /// Render the Series as an HTML `<table>` block. Matches
-    /// `pd.Series.to_html()` (Phase A). Delegates to the DataFrame
-    /// counterpart with a single-column frame.
+    /// Render the Series as an HTML `<table>` block. Delegates to the
+    /// DataFrame counterpart with a single-column frame.
+    ///
+    /// ⚠️ `pd.Series.to_html()` does NOT exist (measured 2.2.3:
+    /// `AttributeError`); `to_html` is DataFrame-only. The pandas spelling is
+    /// `s.to_frame().to_html()` -- which is exactly what this delegates to, so
+    /// the OUTPUT was never in question, only the cited name.
     pub fn to_html(&self, include_index: bool) -> Result<String, FrameError> {
         Ok(self.to_frame(None)?.to_html(include_index))
     }
@@ -30799,8 +30811,14 @@ impl Ewm<'_> {
 
     /// Frozenset-style label set of columns excluded from this window.
     ///
-    /// Matches `pd.api.indexers.BaseIndexer.exclusions` / `EWM.exclusions`.
-    /// EWM on a Series has no excluded columns; returns an empty Vec.
+    /// Matches `EWM.exclusions`, which on 2.2.3 is a `frozenset`, empty for a
+    /// Series window. EWM on a Series has no excluded columns; returns an
+    /// empty Vec.
+    ///
+    /// ⚠️ Half the earlier citation was false: `pd.api.indexers.BaseIndexer`
+    /// has NO `exclusions` (measured 2.2.3 -- its only public member is
+    /// `get_window_bounds`). The attribute belongs to the window/groupby
+    /// object, not to the indexer.
     /// Per br-frankenpandas-mvynk.
     #[must_use]
     pub fn exclusions(&self) -> Vec<String> {
@@ -42957,7 +42975,10 @@ impl CategoricalAccessor<'_> {
 
     /// Map category values through a given function.
     ///
-    /// Matches `pd.Series.cat.map(mapper)`.
+    /// ⚠️ `pd.Series.cat.map` does NOT exist (measured 2.2.3: `AttributeError`
+    /// on `CategoricalAccessor`). The mapping surfaces pandas does have are
+    /// `Series.map`, the array-level `pd.Categorical.map`, and
+    /// `.cat.rename_categories`. FP superset, not parity.
     pub fn map<F>(&self, mapper: F) -> Result<Series, FrameError>
     where
         F: Fn(&Scalar) -> Scalar,
@@ -43040,7 +43061,12 @@ pub struct SparseAccessor<'a> {
 impl SparseAccessor<'_> {
     /// Return the logical sparse value dtype.
     ///
-    /// Matches `pd.Series.sparse.dtype.subtype`.
+    /// Matches `pd.Series.dtype.subtype` (measured 2.2.3: `float64` for a
+    /// `Sparse[float64]` Series).
+    ///
+    /// ⚠️ The path cited before, `pd.Series.sparse.dtype`, does not exist. The
+    /// `.sparse` accessor carries `density`/`fill_value`/`sp_values`/`to_dense`;
+    /// the dtype, and its `subtype`, hangs off the Series itself.
     #[must_use]
     pub fn value_dtype(&self) -> DType {
         self.dtype.value_dtype
@@ -46392,7 +46418,11 @@ impl StringAccessor<'_> {
 
     /// Check if each string is composed of ASCII characters only.
     ///
-    /// Matches `pd.Series.str.isascii()`.
+    /// ⚠️ NO pandas COUNTERPART: `pd.Series.str.isascii` does not exist on
+    /// 2.2.3 (`AttributeError` on `StringMethods`). `str.isascii` is a PYTHON
+    /// string method, and `.str` does not mirror every one of them -- that
+    /// assumption is what put this claim and `expandtabs` in the docs. The
+    /// pandas spelling is `s.map(str.isascii)`. FP superset, not parity.
     pub fn isascii(&self) -> Result<Series, FrameError> {
         self.apply_str_bool(|s| s.is_ascii(), self.series.name())
     }
@@ -46835,7 +46865,10 @@ impl StringAccessor<'_> {
 
     /// Replace tab characters with spaces.
     ///
-    /// Matches `pd.Series.str.expandtabs(tabsize)`.
+    /// ⚠️ NO pandas COUNTERPART: `pd.Series.str.expandtabs` does not exist on
+    /// 2.2.3 (`AttributeError` on `StringMethods`); it is a PYTHON string
+    /// method that `.str` does not expose. The pandas spelling is
+    /// `s.map(str.expandtabs)`. FP superset, not parity.
     pub fn expandtabs(&self, tabsize: usize) -> Result<Series, FrameError> {
         self.apply_str(
             |s| {
@@ -82130,8 +82163,11 @@ impl DataFrame {
 
     /// Append rows from another DataFrame.
     ///
-    /// Matches `pd.DataFrame.append(other)` (deprecated but common).
     /// Uses outer join on columns, filling missing with NaN.
+    ///
+    /// ⚠️ REMOVED, not deprecated: `pd.DataFrame.append` raises
+    /// `AttributeError` on 2.2.3 (deprecated in 1.4, dropped in 2.0). The
+    /// pandas spelling is `pd.concat([a, b])`. FP superset, not parity.
     pub fn append(&self, other: &Self) -> Result<Self, FrameError> {
         // Per br-frankenpandas-db6ec: union via HashSet membership; was
         // O(M × N) Vec::contains scan inside the loop. Insertion-ordered
