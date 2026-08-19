@@ -1755,7 +1755,9 @@ pub struct CsvWriteOptions {
     pub na_rep: String,
     /// If false, the header row is omitted. Matches pandas `header=False`.
     pub header: bool,
-    /// If true, include the index as the first column. Matches pandas `index`.
+    /// If true, include the index as the first column. Corresponds to pandas
+    /// `index`, but ⚠️ THE DEFAULT IS INVERTED: pandas defaults `index=True`, this
+    /// defaults to `false`. See `to_csv_string` for the measurement and the reason.
     pub include_index: bool,
     /// Optional label for the index column header. Matches pandas `index_label`.
     /// When omitted, a named index uses its name and an unnamed index writes an
@@ -13916,7 +13918,25 @@ pub trait DataFrameIoExt {
 
     /// Serialize this DataFrame to a CSV string.
     ///
-    /// Matches `pd.DataFrame.to_csv()` with no path.
+    /// ⚠️ THIS DOES NOT MATCH `pd.DataFrame.to_csv()` ON THE INDEX, and the claim
+    /// that it did was wrong. pandas writes the index by DEFAULT; this does not.
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19), on a frame with index
+    /// [10, 11] and one column `a`:
+    /// ```text
+    ///   df.to_csv()             -> ",a\n10,1\n11,2\n"   index INCLUDED, leading
+    ///                                                     empty header cell
+    ///   df.to_csv(index=False)  -> "a\n1\n2\n"
+    /// ```
+    /// This method routes to `write_csv_string`, whose `CsvWriteOptions::default()`
+    /// sets `include_index: false` — so its output corresponds to pandas'
+    /// `to_csv(index=False)`, not to bare `to_csv()`.
+    ///
+    /// The behaviour is deliberate and load-bearing, not an oversight: it is pinned
+    /// by a test asserting that the first emitted line IS the column names
+    /// (br-frankenpandas-g9rxa), and the conformance CSV path and fp-bench both
+    /// consume this shape. Only the parity claim is corrected here. Use
+    /// [`Self::to_csv_string_with_options`] with `include_index: true` for pandas'
+    /// default shape.
     fn to_csv_string(&self) -> Result<String, IoError>;
 
     /// Serialize this DataFrame to a CSV string with explicit write options.
