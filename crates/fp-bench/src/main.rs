@@ -959,7 +959,19 @@ where
     paired_time_us(op, repeat, true)
 }
 
-#[cfg(feature = "lazy-transpose-view")]
+// ⚠️ DELIBERATELY UNGATED. This was `#[cfg(feature = "lazy-transpose-view")]`
+// back when `df_transpose` -- which IS gated on that feature, correctly -- was
+// its only caller. br-frankenpandas-d4cs8 then added `cumsum_batched`, which has
+// nothing to do with transposes and carries no cfg, so under
+// `--no-default-features` the caller survived and the callee vanished:
+// E0425 "cannot find function", with rustc's own "found an item that was
+// configured out" note. It went unseen because lazy-transpose-view is a DEFAULT
+// feature (fp-bench/Cargo.toml:32), so every ordinary build compiled both.
+//
+// Gating the cumsum_batched arm instead would silently drop a benchmark workload
+// from the no-default-features build, which is the wrong repair for a generic
+// timing wrapper: the body is a one-line delegation to `paired_time_us`, which
+// is itself ungated.
 fn time_us_repeated_total<F, T>(repeat: usize, op: F) -> PairedSamples
 where
     F: FnMut() -> T,
