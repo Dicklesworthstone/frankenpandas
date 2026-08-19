@@ -159705,33 +159705,44 @@ mod tests {
             ]
         );
         let min_vals = mins.column("val").unwrap().values();
+        // ⚠️ GROUP ORDER, NOT SOURCE ORDER (br-frankenpandas-nyjxf): the rows are
+        // group a (source 0,2,4,6) then group b (source 1,3,5). MEASURED, live
+        // pandas 2.2.3, `df.groupby('grp').rolling(2)` on this frame:
+        //
+        //     index   a0    a2   a4   a6      b1    b3   b5
+        //     min    NaN   1.0  NaN  NaN     NaN   2.0  6.0
+        //     max    NaN   5.0  NaN  NaN     NaN   7.0  7.0
+        //     count  NaN   2.0  1.0  1.0     NaN   2.0  2.0
+        //
+        // A NaN inside a full window makes min/max NaN at the default
+        // min_periods, and the FIRST row of each group has an incomplete window.
         assert!(min_vals[0].is_missing());
-        assert!(min_vals[1].is_missing());
-        assert_eq!(min_vals[2], Scalar::Float64(1.0));
-        assert_eq!(min_vals[3], Scalar::Float64(2.0));
+        assert_eq!(min_vals[1], Scalar::Float64(1.0));
+        assert!(min_vals[2].is_missing());
+        assert!(min_vals[3].is_missing());
         assert!(min_vals[4].is_missing());
-        assert_eq!(min_vals[5], Scalar::Float64(6.0));
-        assert!(min_vals[6].is_missing());
+        assert_eq!(min_vals[5], Scalar::Float64(2.0));
+        assert_eq!(min_vals[6], Scalar::Float64(6.0));
 
         let maxs = gb.rolling(2).max().unwrap();
         let max_vals = maxs.column("val").unwrap().values();
         assert!(max_vals[0].is_missing());
-        assert!(max_vals[1].is_missing());
-        assert_eq!(max_vals[2], Scalar::Float64(5.0));
-        assert_eq!(max_vals[3], Scalar::Float64(7.0));
+        assert_eq!(max_vals[1], Scalar::Float64(5.0));
+        assert!(max_vals[2].is_missing());
+        assert!(max_vals[3].is_missing());
         assert!(max_vals[4].is_missing());
         assert_eq!(max_vals[5], Scalar::Float64(7.0));
-        assert!(max_vals[6].is_missing());
+        assert_eq!(max_vals[6], Scalar::Float64(7.0));
 
         let counts = gb.rolling(2).count().unwrap();
         let count_vals = counts.column("val").unwrap().values();
         assert!(count_vals[0].is_missing());
-        assert!(count_vals[1].is_missing());
-        assert_eq!(count_vals[2], Scalar::Float64(2.0));
-        assert_eq!(count_vals[3], Scalar::Float64(2.0));
-        assert_eq!(count_vals[4], Scalar::Float64(1.0));
+        assert_eq!(count_vals[1], Scalar::Float64(2.0));
+        assert_eq!(count_vals[2], Scalar::Float64(1.0));
+        assert_eq!(count_vals[3], Scalar::Float64(1.0));
+        assert!(count_vals[4].is_missing());
         assert_eq!(count_vals[5], Scalar::Float64(2.0));
-        assert_eq!(count_vals[6], Scalar::Float64(1.0));
+        assert_eq!(count_vals[6], Scalar::Float64(2.0));
     }
 
     #[test]
@@ -160043,20 +160054,26 @@ mod tests {
 
         let stds = gb.rolling(2).std().unwrap();
         let std_vals = stds.column("v").unwrap().values();
+        // ⚠️ GROUP ORDER (br-frankenpandas-nyjxf): rows are group a (source 0,2,4)
+        // then group b (source 1,3,5). MEASURED, live pandas 2.2.3:
+        //     std  a0 NaN   a2 0.707107   a4 0.707107   b1 NaN   b3 NaN   b5 NaN
+        //     var  a0 NaN   a2 0.5        a4 0.5        b1 NaN   b3 NaN   b5 NaN
+        // Group b is all-NaN, so every one of its windows is NaN; group a's two
+        // full windows each have sample variance 0.5.
         assert!(std_vals[0].is_missing());
-        assert!(std_vals[1].is_missing());
+        assert!((expect_float64(&std_vals[1]) - (1.0_f64 / 2.0).sqrt()).abs() < 1e-10);
         assert!((expect_float64(&std_vals[2]) - (1.0_f64 / 2.0).sqrt()).abs() < 1e-10);
         assert!(std_vals[3].is_missing());
-        assert!((expect_float64(&std_vals[4]) - (1.0_f64 / 2.0).sqrt()).abs() < 1e-10);
+        assert!(std_vals[4].is_missing());
         assert!(std_vals[5].is_missing());
 
         let vars = gb.rolling(2).var().unwrap();
         let var_vals = vars.column("v").unwrap().values();
         assert!(var_vals[0].is_missing());
-        assert!(var_vals[1].is_missing());
+        assert!((expect_float64(&var_vals[1]) - 0.5).abs() < 1e-10);
         assert!((expect_float64(&var_vals[2]) - 0.5).abs() < 1e-10);
         assert!(var_vals[3].is_missing());
-        assert!((expect_float64(&var_vals[4]) - 0.5).abs() < 1e-10);
+        assert!(var_vals[4].is_missing());
         assert!(var_vals[5].is_missing());
     }
 
