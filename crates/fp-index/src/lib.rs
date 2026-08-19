@@ -2130,10 +2130,59 @@ impl Index {
 
     /// Get the position (integer location) of a label.
     ///
-    /// Matches `pd.Index.get_loc(label)`.
+    /// ⚠️ ONE position. `pd.Index.get_loc` returns THREE different types depending
+    /// on the index, and this collapses all of them to the first-or-some match.
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18):
+    /// ```text
+    ///   Index([10,20,30]).get_loc(20)     -> 1                        int
+    ///   Index([10,20,20,30]).get_loc(20)  -> slice(1, 3)              the whole run
+    ///   Index([20,10,20]).get_loc(20)     -> array([True,False,True]) a mask
+    ///   Index([10,20]).get_loc(99)        -> KeyError
+    /// ```
+    /// So on a duplicate-bearing index this answers a strictly weaker question than
+    /// pandas does. Use [`Self::get_loc_all`] when the index may hold duplicates;
+    /// it returns the position SET, which is what all three pandas shapes encode.
+    ///
+    /// ⚠️ And on a SORTED duplicate run this is not even guaranteed to be the FIRST
+    /// match: `position` reaches `binary_search`, which may land on any element of
+    /// the run.
     #[must_use]
     pub fn get_loc(&self, label: &IndexLabel) -> Option<usize> {
         self.position(label)
+    }
+
+    /// Every position at which `label` occurs, in index order.
+    ///
+    /// The duplicate-safe counterpart to [`Self::get_loc`]. pandas expresses this
+    /// answer in three different return types — an int, a slice over the run, or a
+    /// boolean mask — and all three encode the same position SET, which is what this
+    /// returns. MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18):
+    /// ```text
+    ///   [10,20,30]      key 20  -> [1]        (pandas: 1)
+    ///   [10,20,20,30]   key 20  -> [1, 2]     (pandas: slice(1, 3))
+    ///   [20,10,20]      key 20  -> [0, 2]     (pandas: [True, False, True])
+    ///   [10,20]         key 99  -> []         (pandas: KeyError)
+    ///   [1.0,NaN,2.0,NaN] key NaN -> [1, 3]   (pandas: [False,True,False,True])
+    /// ```
+    /// A MISSING key is an empty Vec rather than an error, matching this crate's
+    /// `Option`-returning `get_loc` rather than pandas' `KeyError`.
+    ///
+    /// NaN matches NaN because `OrderedF64` compares on a canonical bit pattern, so
+    /// a NaN label is findable — as it is in pandas — even though `f64::NAN != f64::NAN`.
+    ///
+    /// ⚠️ O(n) BY CONSTRUCTION, and deliberately not routed through `position`'s
+    /// optimized lookups: the affine-range, binary-search and cached-hash paths all
+    /// answer with a SINGLE position and cannot enumerate a duplicate run. A faster
+    /// implementation would need a label -> positions multimap, which nothing here
+    /// builds today.
+    #[must_use]
+    pub fn get_loc_all(&self, label: &IndexLabel) -> Vec<usize> {
+        self.labels()
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| *candidate == label)
+            .map(|(position, _)| position)
+            .collect()
     }
 
     /// AG-13: Lazily detect and cache the sort order of this index.
@@ -21201,6 +21250,58 @@ mod tests {
     fn argsort_returns_sorting_indices() {
         let index = Index::from_i64(vec![30, 10, 20]);
         assert_eq!(index.argsort(), vec![1, 2, 0]);
+    }
+
+    /// `get_loc_all` returns the position SET that pandas encodes three ways.
+    ///
+    /// br-frankenpandas-lerb2. `pd.Index.get_loc` returns an int, a slice, or a
+    /// boolean mask depending on whether the index is unique and monotonic; all
+    /// three describe the same set of positions, and `get_loc` here can only ever
+    /// answer with one of them.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18):
+    /// ```text
+    ///   [10,20,30]        get_loc(20)  -> 1                           => [1]
+    ///   [10,20,20,30]     get_loc(20)  -> slice(1, 3)                 => [1, 2]
+    ///   [20,10,20]        get_loc(20)  -> array([True,False,True])    => [0, 2]
+    ///   [10,20]           get_loc(99)  -> KeyError                    => []
+    ///   [1.0,NaN,2.0,NaN] get_loc(NaN) -> array([F,True,F,True])      => [1, 3]
+    /// ```
+    #[test]
+    fn get_loc_all_returns_every_position_lerb2() {
+        assert_eq!(
+            Index::from_i64(vec![10, 20, 30]).get_loc_all(&IndexLabel::Int64(20)),
+            vec![1]
+        );
+        // ⚠️ The duplicate rows are the point: `get_loc` collapses each of these to a
+        // single position, which is why they need their own accessor.
+        assert_eq!(
+            Index::from_i64(vec![10, 20, 20, 30]).get_loc_all(&IndexLabel::Int64(20)),
+            vec![1, 2]
+        );
+        assert_eq!(
+            Index::from_i64(vec![20, 10, 20]).get_loc_all(&IndexLabel::Int64(20)),
+            vec![0, 2]
+        );
+        // Missing is EMPTY, not an error — this crate's get_loc returns Option, so
+        // an absent key is not exceptional here the way pandas' KeyError is.
+        assert!(
+            Index::from_i64(vec![10, 20])
+                .get_loc_all(&IndexLabel::Int64(99))
+                .is_empty()
+        );
+        // ⚠️ NaN is findable, because OrderedF64 compares on a canonical bit pattern.
+        // A derived PartialEq over raw f64 would make this row return [] instead.
+        let floats = Index::new(vec![
+            IndexLabel::Float64(OrderedF64(1.0)),
+            IndexLabel::Float64(OrderedF64(f64::NAN)),
+            IndexLabel::Float64(OrderedF64(2.0)),
+            IndexLabel::Float64(OrderedF64(f64::NAN)),
+        ]);
+        assert_eq!(
+            floats.get_loc_all(&IndexLabel::Float64(OrderedF64(f64::NAN))),
+            vec![1, 3]
+        );
     }
 
     #[test]
