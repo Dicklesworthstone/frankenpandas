@@ -41872,26 +41872,70 @@ impl SeriesGroupByExpanding<'_, '_> {
                 unreachable!("SeriesGroupByExpanding agg output is nullable-f64");
             }
         }
-        // br-frankenpandas-vw0uu. Grouped rolling/expanding SCATTERS results back
-        // into source-row order, so the output index IS the source index —
-        // same labels, same order, same name (the old `rename_index` target was
-        // this very index's own `name()`, i.e. a no-op).
+        // br-frankenpandas-nyjxf. pandas EMITS GROUPED ROLLING AND EXPANDING IN
+        // GROUP ORDER, not in source-row order. MEASURED, live pandas 2.2.3,
+        // values [1..6] keyed ['b','a','b','a','b','a']:
         //
-        // Rebuilding it via `labels().to_vec()` was an O(n) deep copy that
-        // reproduced its own input, and it defeated TWO separate optimisations
-        // at once: `Index` keeps its labels behind an `Arc` precisely so a clone
-        // is an O(1) refcount bump (br-frankenpandas-idxclone), and a lazily
-        // labelled index (`int64_unit_range`) MATERIALISES every `IndexLabel`
-        // the moment `.labels()` is called.
+        //     s.groupby(k).rolling(2).sum()     s.groupby(k).expanding().sum()
+        //       a  1   NaN                        a  1   2.0
+        //          3   6.0                           3   6.0
+        //          5  10.0                           5  12.0
+        //       b  0   NaN                        b  0   1.0
+        //          2   4.0                           2   4.0
+        //          4   8.0                           4   9.0
         //
-        // MEASURED, `perf record` over groupby_rolling_mean_w10 @1M: 5.41% in
-        // `IndexLabel::to_vec` and 9.73% in `Arc<Vec<IndexLabel>>::drop_slow`
-        // — together more than the 10.10% spent in the actual rolling kernel.
-        let index = self.groupby.series.index().clone();
+        // Every 'a' row first, original order WITHIN the group. The loop above
+        // deliberately still scatters into source positions: it is the hot path,
+        // it has a parallel arm that chunks by key range, and every bit-identity
+        // claim in it is about that scatter. Reordering happens HERE instead, as
+        // one gather through the group-visit permutation, so the kernel and its
+        // chunking are untouched. That is also why this is a gather rather than a
+        // port of the DataFrameGroupBy twin, whose group-ordered emit is woven
+        // into its per-group write and would need a prefix sum of group sizes to
+        // survive this impl's chunking.
+        //
+        // ⚠️ THE OUTPUT LENGTH IS order.len(), NOT n. They differ when
+        // `build_groups` drops rows (a null group key is not a group): such rows
+        // are in no group, so the permutation never names them, and they stop
+        // appearing as the all-null rolled rows pandas does not emit at all. Same
+        // side effect the twin records for itself.
+        //
+        // ⚠️ THE INDEX IS FLAT, where pandas nests (group key, original label).
+        // That matches what the twin produces today and is a separate gap.
+        //
+        // br-frankenpandas-vw0uu is superseded for this path: the output index is
+        // no longer the source index, so the O(1) `Arc` clone it protected cannot
+        // apply. The gather still never calls `.labels()`, so the
+        // `IndexLabel::to_vec` / `drop_slow` cost that bead measured (5.41% +
+        // 9.73% at groupby_rolling_mean_w10 @1M, together more than the 10.10%
+        // spent in the rolling kernel itself) is still avoided.
+        let order: Vec<usize> = {
+            let mut order = Vec::with_capacity(n);
+            for key in &order_keys {
+                if let Some(rows) = groups.get(key) {
+                    order.extend_from_slice(rows);
+                }
+            }
+            order
+        };
+        let mut ordered_f64 = Vec::with_capacity(order.len());
+        let mut ordered_valid = fp_columnar::ValidityMask::all_invalid(order.len());
+        for (out_pos, &src_pos) in order.iter().enumerate() {
+            ordered_f64.push(out_f64[src_pos]);
+            if out_valid.get(src_pos) {
+                ordered_valid.set(out_pos, true);
+            }
+        }
+        let index = self
+            .groupby
+            .series
+            .index()
+            .take(&order)
+            .rename_index(self.groupby.series.index().name());
         Series::new(
             self.groupby.series.name(),
             index,
-            Column::from_f64_values_with_validity(out_f64, out_valid),
+            Column::from_f64_values_with_validity(ordered_f64, ordered_valid),
         )
     }
 
@@ -42332,26 +42376,70 @@ impl SeriesGroupByRolling<'_, '_> {
                 unreachable!("SeriesGroupByRolling agg output is nullable-f64");
             }
         }
-        // br-frankenpandas-vw0uu. Grouped rolling/expanding SCATTERS results back
-        // into source-row order, so the output index IS the source index —
-        // same labels, same order, same name (the old `rename_index` target was
-        // this very index's own `name()`, i.e. a no-op).
+        // br-frankenpandas-nyjxf. pandas EMITS GROUPED ROLLING AND EXPANDING IN
+        // GROUP ORDER, not in source-row order. MEASURED, live pandas 2.2.3,
+        // values [1..6] keyed ['b','a','b','a','b','a']:
         //
-        // Rebuilding it via `labels().to_vec()` was an O(n) deep copy that
-        // reproduced its own input, and it defeated TWO separate optimisations
-        // at once: `Index` keeps its labels behind an `Arc` precisely so a clone
-        // is an O(1) refcount bump (br-frankenpandas-idxclone), and a lazily
-        // labelled index (`int64_unit_range`) MATERIALISES every `IndexLabel`
-        // the moment `.labels()` is called.
+        //     s.groupby(k).rolling(2).sum()     s.groupby(k).expanding().sum()
+        //       a  1   NaN                        a  1   2.0
+        //          3   6.0                           3   6.0
+        //          5  10.0                           5  12.0
+        //       b  0   NaN                        b  0   1.0
+        //          2   4.0                           2   4.0
+        //          4   8.0                           4   9.0
         //
-        // MEASURED, `perf record` over groupby_rolling_mean_w10 @1M: 5.41% in
-        // `IndexLabel::to_vec` and 9.73% in `Arc<Vec<IndexLabel>>::drop_slow`
-        // — together more than the 10.10% spent in the actual rolling kernel.
-        let index = self.groupby.series.index().clone();
+        // Every 'a' row first, original order WITHIN the group. The loop above
+        // deliberately still scatters into source positions: it is the hot path,
+        // it has a parallel arm that chunks by key range, and every bit-identity
+        // claim in it is about that scatter. Reordering happens HERE instead, as
+        // one gather through the group-visit permutation, so the kernel and its
+        // chunking are untouched. That is also why this is a gather rather than a
+        // port of the DataFrameGroupBy twin, whose group-ordered emit is woven
+        // into its per-group write and would need a prefix sum of group sizes to
+        // survive this impl's chunking.
+        //
+        // ⚠️ THE OUTPUT LENGTH IS order.len(), NOT n. They differ when
+        // `build_groups` drops rows (a null group key is not a group): such rows
+        // are in no group, so the permutation never names them, and they stop
+        // appearing as the all-null rolled rows pandas does not emit at all. Same
+        // side effect the twin records for itself.
+        //
+        // ⚠️ THE INDEX IS FLAT, where pandas nests (group key, original label).
+        // That matches what the twin produces today and is a separate gap.
+        //
+        // br-frankenpandas-vw0uu is superseded for this path: the output index is
+        // no longer the source index, so the O(1) `Arc` clone it protected cannot
+        // apply. The gather still never calls `.labels()`, so the
+        // `IndexLabel::to_vec` / `drop_slow` cost that bead measured (5.41% +
+        // 9.73% at groupby_rolling_mean_w10 @1M, together more than the 10.10%
+        // spent in the rolling kernel itself) is still avoided.
+        let order: Vec<usize> = {
+            let mut order = Vec::with_capacity(n);
+            for key in &order_keys {
+                if let Some(rows) = groups.get(key) {
+                    order.extend_from_slice(rows);
+                }
+            }
+            order
+        };
+        let mut ordered_f64 = Vec::with_capacity(order.len());
+        let mut ordered_valid = fp_columnar::ValidityMask::all_invalid(order.len());
+        for (out_pos, &src_pos) in order.iter().enumerate() {
+            ordered_f64.push(out_f64[src_pos]);
+            if out_valid.get(src_pos) {
+                ordered_valid.set(out_pos, true);
+            }
+        }
+        let index = self
+            .groupby
+            .series
+            .index()
+            .take(&order)
+            .rename_index(self.groupby.series.index().name());
         Series::new(
             self.groupby.series.name(),
             index,
-            Column::from_f64_values_with_validity(out_f64, out_valid),
+            Column::from_f64_values_with_validity(ordered_f64, ordered_valid),
         )
     }
 
@@ -43690,6 +43778,35 @@ fn str_swapcase(s: &str) -> String {
 /// Pad `s` to `width` chars with `fillchar` on the given side — the Scalar-fallback
 /// transform behind `Series.str.pad` (the contiguous path writes bytes directly).
 /// `both` mirrors CPython str.center (extra fill goes LEFT when width is odd).
+/// Write `value`'s decimal digits into `buf` and borrow them back as `&str`.
+///
+/// br-frankenpandas-3ya6b: the point is that this ALLOCATES NOTHING, so a lazily
+/// labelled column axis can be addressed by position without building a `String`
+/// per access. 24 bytes covers `i64::MIN` (20 chars including the sign).
+///
+/// Uses `unsigned_abs` rather than negating: `-i64::MIN` overflows, and that is the
+/// one input a hand-rolled integer formatter reliably gets wrong.
+fn format_i64_into(value: i64, buf: &mut [u8; 24]) -> &str {
+    let negative = value < 0;
+    let mut magnitude = value.unsigned_abs();
+    let mut idx = buf.len();
+    loop {
+        idx -= 1;
+        buf[idx] = b'0' + u8::try_from(magnitude % 10).unwrap_or(0);
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        idx -= 1;
+        buf[idx] = b'-';
+    }
+    // Every byte written is ASCII, so this cannot fail; the fallback keeps the
+    // function total rather than panicking on an impossible branch.
+    core::str::from_utf8(&buf[idx..]).unwrap_or("")
+}
+
 fn str_pad(s: &str, width: usize, side: &str, fillchar: char) -> String {
     let char_len = s.chars().count();
     if char_len >= width {
@@ -61924,6 +62041,61 @@ impl DataFrame {
         #[cfg(not(feature = "lazy-transpose-view"))]
         {
             self.column_order.get(position).cloned()
+        }
+    }
+
+    /// Borrow the column at `position` without materializing its NAME.
+    ///
+    /// br-frankenpandas-3ya6b. The only public route to a column by position was
+    /// `column_name_at(pos)` followed by `column(&name)`: an owned `String` per
+    /// access, then a keyed lookup. On a lazily labelled column axis — exactly what
+    /// `transpose` produces for a homogeneous frame — the name does not exist yet,
+    /// so each access also pays an i64 format and a heap allocation.
+    ///
+    /// That per-column constant is invisible almost everywhere, because column
+    /// COUNT is normally small and fixed. A transposed 1M-row frame is 10 rows by
+    /// 1,000,000 COLUMNS: it is the one shape in the corpus where column count
+    /// scales with the data, so the constant becomes the dominant term.
+    ///
+    /// Non-breaking: the name route is untouched and still works.
+    ///
+    /// ⚠️ NOT A PERFORMANCE CLAIM. Nothing here has been built or measured — the
+    /// bead pre-registers the prediction that this removes a CONSTANT and does NOT
+    /// change the verdict against pandas, which answers `.T` from a 2D BlockManager
+    /// while FrankenPandas still builds one Column per output column however it is
+    /// addressed. Whoever measures it should expect a large absolute saving at 1M
+    /// and NO sign change; a reported sign flip means the structural story in
+    /// br-frankenpandas-l4vzc is wrong.
+    #[must_use]
+    pub fn column_at(&self, position: usize) -> Option<&Column> {
+        #[cfg(feature = "lazy-transpose-view")]
+        {
+            match &self.column_order {
+                LazyDataFrameColumnOrder::Eager(names) => self.columns.get(names.get(position)?),
+                LazyDataFrameColumnOrder::Int64UnitRange {
+                    start,
+                    len,
+                    materialized,
+                } => {
+                    if position >= *len {
+                        return None;
+                    }
+                    // Already materialized: borrow, do not clone.
+                    if let Some(names) = materialized.get() {
+                        return self.columns.get(names.get(position)?);
+                    }
+                    // Not materialized: format the label into a STACK buffer and
+                    // look up with a borrowed &str, so the lazy axis costs no
+                    // allocation at all.
+                    let value = start.checked_add(i64::try_from(position).ok()?)?;
+                    let mut buf = [0_u8; 24];
+                    self.columns.get(format_i64_into(value, &mut buf))
+                }
+            }
+        }
+        #[cfg(not(feature = "lazy-transpose-view"))]
+        {
+            self.columns.get(self.column_order.get(position)?)
         }
     }
 
@@ -157461,6 +157633,85 @@ mod tests {
         // ⚠️ The load-bearing inequality: if these ever agree on bucket 0, one of the
         // two has been redefined as the other.
         assert_ne!(size.values()[0], count.values()[0]);
+    }
+
+    /// `format_i64_into` must survive the input that breaks hand-rolled formatters.
+    ///
+    /// br-frankenpandas-3ya6b. `-i64::MIN` overflows, so a formatter that negates
+    /// before extracting digits panics in debug and wraps in release on exactly one
+    /// input out of 2^64. `unsigned_abs` is why this one does not.
+    #[test]
+    fn format_i64_into_matches_to_string_including_min_3ya6b() {
+        for value in [
+            0_i64,
+            7,
+            -7,
+            10,
+            -10,
+            99,
+            -99,
+            1_000_000,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            let mut buf = [0_u8; 24];
+            assert_eq!(
+                format_i64_into(value, &mut buf),
+                value.to_string(),
+                "formatter disagrees with to_string for {value}"
+            );
+        }
+    }
+
+    /// `column_at` addresses a column by position and agrees with the name route.
+    ///
+    /// br-frankenpandas-3ya6b. The assertion that matters is AGREEMENT: a positional
+    /// accessor that returned the wrong column, or that silently reordered, would
+    /// still be Some and would still have the right length.
+    #[test]
+    fn column_at_agrees_with_the_name_route_3ya6b() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("c", vec![Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+            ],
+        )
+        .unwrap();
+
+        for position in 0..3 {
+            let name = df.column_name_at(position).expect("name at position");
+            let by_name = df.column(&name).expect("column by name");
+            let by_position = df.column_at(position).expect("column at position");
+            assert_eq!(
+                by_position.values(),
+                by_name.values(),
+                "position {position} resolved to a different column than {name}"
+            );
+        }
+        // Out of range is None, not a panic and not a wrap to position 0.
+        assert!(df.column_at(3).is_none());
+
+        // ⚠️ The lazily labelled axis is the case this accessor exists for, and it
+        // only exists when the transpose view is compiled in.
+        #[cfg(feature = "lazy-transpose-view")]
+        {
+            let transposed = df.transpose().expect("transpose");
+            for position in 0..transposed.column_names().len() {
+                let name = transposed
+                    .column_name_at(position)
+                    .expect("lazy name at position");
+                assert_eq!(
+                    transposed
+                        .column_at(position)
+                        .expect("lazy column at position")
+                        .values(),
+                    transposed.column(&name).expect("lazy column by name").values(),
+                    "lazy axis: position {position} disagrees with name {name}"
+                );
+            }
+        }
     }
 
     #[test]
