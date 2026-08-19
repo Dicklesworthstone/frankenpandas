@@ -49406,7 +49406,16 @@ impl DatetimeAccessor<'_> {
         )
     }
 
-    /// Alias for `weekofyear()`. Matches `pd.Series.dt.week`.
+    /// Alias for `weekofyear()`.
+    ///
+    /// ⚠️ NOT A PARITY SURFACE: `Series.dt.week` was REMOVED in pandas 2.0.
+    /// Measured on 2.2.3, `.dt.week` AND `.dt.weekofyear` both raise
+    /// `AttributeError`; the replacement is `.dt.isocalendar().week`, which
+    /// `weekofyear()` implements. FP keeps this alias as a SUPERSET for callers
+    /// written against pandas 1.x -- do not cite it as parity evidence.
+    ///
+    /// The removal was scoped to the Series accessor: the scalar
+    /// `pd.Timestamp.week` and `pd.PeriodIndex.week` BOTH still exist on 2.2.3.
     pub fn week(&self) -> Result<Series, FrameError> {
         self.weekofyear()
     }

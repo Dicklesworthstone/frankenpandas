@@ -8301,8 +8301,16 @@ impl DatetimeIndex {
             .collect())
     }
 
-    /// ISO 8601 week-of-year (1..=53), matching `pd.DatetimeIndex.week`
-    /// (a deprecated pandas alias preserved for parity).
+    /// ISO 8601 week-of-year (1..=53).
+    ///
+    /// ⚠️ NOT DEPRECATED -- REMOVED. `pd.DatetimeIndex.week` raises
+    /// `AttributeError` on pandas 2.2.3 (measured), as does `.weekofyear`; both
+    /// went in pandas 2.0. The pandas replacement is [`isocalendar`](Self::isocalendar),
+    /// below. FP keeps this as a SUPERSET for pandas 1.x callers, not as parity.
+    ///
+    /// ⚠️ Do NOT generalize the removal to PeriodIndex: `pd.PeriodIndex.week`
+    /// and `.weekofyear` both SURVIVE on 2.2.3, so the PeriodIndex docs in this
+    /// file are correct as written.
     #[must_use]
     pub fn week(&self) -> Vec<Option<u32>> {
         use chrono::Datelike;
@@ -8321,7 +8329,10 @@ impl DatetimeIndex {
         })
     }
 
-    /// Alias for [`week`](Self::week), matching `pd.DatetimeIndex.weekofyear`.
+    /// Alias for [`week`](Self::week).
+    ///
+    /// ⚠️ `pd.DatetimeIndex.weekofyear` was REMOVED in pandas 2.0 (measured:
+    /// `AttributeError` on 2.2.3). Superset, not parity -- see [`week`](Self::week).
     #[must_use]
     pub fn weekofyear(&self) -> Vec<Option<u32>> {
         self.week()
