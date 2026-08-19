@@ -43816,6 +43816,35 @@ fn str_swapcase(s: &str) -> String {
 /// Pad `s` to `width` chars with `fillchar` on the given side — the Scalar-fallback
 /// transform behind `Series.str.pad` (the contiguous path writes bytes directly).
 /// `both` mirrors CPython str.center (extra fill goes LEFT when width is odd).
+/// Write `value`'s decimal digits into `buf` and borrow them back as `&str`.
+///
+/// br-frankenpandas-3ya6b: the point is that this ALLOCATES NOTHING, so a lazily
+/// labelled column axis can be addressed by position without building a `String`
+/// per access. 24 bytes covers `i64::MIN` (20 chars including the sign).
+///
+/// Uses `unsigned_abs` rather than negating: `-i64::MIN` overflows, and that is the
+/// one input a hand-rolled integer formatter reliably gets wrong.
+fn format_i64_into(value: i64, buf: &mut [u8; 24]) -> &str {
+    let negative = value < 0;
+    let mut magnitude = value.unsigned_abs();
+    let mut idx = buf.len();
+    loop {
+        idx -= 1;
+        buf[idx] = b'0' + u8::try_from(magnitude % 10).unwrap_or(0);
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        idx -= 1;
+        buf[idx] = b'-';
+    }
+    // Every byte written is ASCII, so this cannot fail; the fallback keeps the
+    // function total rather than panicking on an impossible branch.
+    core::str::from_utf8(&buf[idx..]).unwrap_or("")
+}
+
 fn str_pad(s: &str, width: usize, side: &str, fillchar: char) -> String {
     let char_len = s.chars().count();
     if char_len >= width {
@@ -62050,6 +62079,61 @@ impl DataFrame {
         #[cfg(not(feature = "lazy-transpose-view"))]
         {
             self.column_order.get(position).cloned()
+        }
+    }
+
+    /// Borrow the column at `position` without materializing its NAME.
+    ///
+    /// br-frankenpandas-3ya6b. The only public route to a column by position was
+    /// `column_name_at(pos)` followed by `column(&name)`: an owned `String` per
+    /// access, then a keyed lookup. On a lazily labelled column axis — exactly what
+    /// `transpose` produces for a homogeneous frame — the name does not exist yet,
+    /// so each access also pays an i64 format and a heap allocation.
+    ///
+    /// That per-column constant is invisible almost everywhere, because column
+    /// COUNT is normally small and fixed. A transposed 1M-row frame is 10 rows by
+    /// 1,000,000 COLUMNS: it is the one shape in the corpus where column count
+    /// scales with the data, so the constant becomes the dominant term.
+    ///
+    /// Non-breaking: the name route is untouched and still works.
+    ///
+    /// ⚠️ NOT A PERFORMANCE CLAIM. Nothing here has been built or measured — the
+    /// bead pre-registers the prediction that this removes a CONSTANT and does NOT
+    /// change the verdict against pandas, which answers `.T` from a 2D BlockManager
+    /// while FrankenPandas still builds one Column per output column however it is
+    /// addressed. Whoever measures it should expect a large absolute saving at 1M
+    /// and NO sign change; a reported sign flip means the structural story in
+    /// br-frankenpandas-l4vzc is wrong.
+    #[must_use]
+    pub fn column_at(&self, position: usize) -> Option<&Column> {
+        #[cfg(feature = "lazy-transpose-view")]
+        {
+            match &self.column_order {
+                LazyDataFrameColumnOrder::Eager(names) => self.columns.get(names.get(position)?),
+                LazyDataFrameColumnOrder::Int64UnitRange {
+                    start,
+                    len,
+                    materialized,
+                } => {
+                    if position >= *len {
+                        return None;
+                    }
+                    // Already materialized: borrow, do not clone.
+                    if let Some(names) = materialized.get() {
+                        return self.columns.get(names.get(position)?);
+                    }
+                    // Not materialized: format the label into a STACK buffer and
+                    // look up with a borrowed &str, so the lazy axis costs no
+                    // allocation at all.
+                    let value = start.checked_add(i64::try_from(position).ok()?)?;
+                    let mut buf = [0_u8; 24];
+                    self.columns.get(format_i64_into(value, &mut buf))
+                }
+            }
+        }
+        #[cfg(not(feature = "lazy-transpose-view"))]
+        {
+            self.columns.get(self.column_order.get(position)?)
         }
     }
 
@@ -157587,6 +157671,34 @@ mod tests {
         // ⚠️ The load-bearing inequality: if these ever agree on bucket 0, one of the
         // two has been redefined as the other.
         assert_ne!(size.values()[0], count.values()[0]);
+    }
+
+    /// `format_i64_into` must survive the input that breaks hand-rolled formatters.
+    ///
+    /// br-frankenpandas-3ya6b. `-i64::MIN` overflows, so a formatter that negates
+    /// before extracting digits panics in debug and wraps in release on exactly one
+    /// input out of 2^64. `unsigned_abs` is why this one does not.
+    #[test]
+    fn format_i64_into_matches_to_string_including_min_3ya6b() {
+        for value in [
+            0_i64,
+            7,
+            -7,
+            10,
+            -10,
+            99,
+            -99,
+            1_000_000,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            let mut buf = [0_u8; 24];
+            assert_eq!(
+                format_i64_into(value, &mut buf),
+                value.to_string(),
+                "formatter disagrees with to_string for {value}"
+            );
+        }
     }
 
     /// `column_at` addresses a column by position and agrees with the name route.
