@@ -5925,7 +5925,13 @@ fn clipboard_tsv(frame: &DataFrame) -> Result<String, IoError> {
     write_csv_string_with_options(frame, &options)
 }
 
-/// Reject-closed BigQuery reader, matching `pd.read_gbq(query, project_id)`.
+/// Reject-closed BigQuery reader.
+///
+/// Refusing matches stock pandas AND the surface is on its way out: measured on
+/// 2.2.3, `pd.read_gbq` raises `ImportError: Missing optional dependency
+/// 'pandas-gbq'` and emits a FutureWarning. Implementing it would mean adopting
+/// a deprecated pandas surface plus network and Google auth.
+/// br-frankenpandas-9jvao.
 pub fn read_gbq(_query: &str, _project_id: Option<&str>) -> Result<DataFrame, IoError> {
     Err(deferred_reader_error(
         "read_gbq",
@@ -5933,7 +5939,13 @@ pub fn read_gbq(_query: &str, _project_id: Option<&str>) -> Result<DataFrame, Io
     ))
 }
 
-/// Reject-closed SAS reader, matching `pd.read_sas(path)`.
+/// Reject-closed SAS reader.
+///
+/// ⚠️ NOT PARITY — pandas SUPPORTS this. Measured on 2.2.3,
+/// `pd.read_sas("/nonexistent")` raises `ValueError: unable to infer format of
+/// SAS file from filename`, i.e. it reached format inference and would have read
+/// a real XPORT/SAS7BDAT file. Refusing here is a capability GAP, not a matched
+/// refusal. br-frankenpandas-9jvao.
 pub fn read_sas(_path: &Path) -> Result<DataFrame, IoError> {
     Err(deferred_reader_error(
         "read_sas",
@@ -5941,7 +5953,12 @@ pub fn read_sas(_path: &Path) -> Result<DataFrame, IoError> {
     ))
 }
 
-/// Reject-closed SPSS reader, matching `pd.read_spss(path)`.
+/// Reject-closed SPSS reader.
+///
+/// Refusing MATCHES pandas' out-of-the-box behaviour, for a different reason:
+/// measured on 2.2.3, `pd.read_spss` raises `ImportError: Missing optional
+/// dependency 'pyreadstat'`, so a stock pandas install refuses too. The ERROR
+/// TYPE still differs from ours. br-frankenpandas-9jvao.
 pub fn read_spss(_path: &Path) -> Result<DataFrame, IoError> {
     Err(deferred_reader_error(
         "read_spss",
