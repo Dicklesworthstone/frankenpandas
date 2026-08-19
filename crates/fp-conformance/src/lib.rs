@@ -875,10 +875,7 @@ pub enum FixtureOperation {
     SeriesDtTimetz,
     #[serde(rename = "series_dt_floor", alias = "series_dt_floor_default")]
     SeriesDtFloor,
-    #[serde(
-        rename = "series_dt_to_period",
-        alias = "series_dt_to_period_default"
-    )]
+    #[serde(rename = "series_dt_to_period", alias = "series_dt_to_period_default")]
     SeriesDtToPeriod,
     #[serde(rename = "series_dt_ceil", alias = "series_dt_ceil_default")]
     SeriesDtCeil,
@@ -896,15 +893,9 @@ pub enum FixtureOperation {
         alias = "series_dt_total_seconds_default"
     )]
     SeriesDtTotalSeconds,
-    #[serde(
-        rename = "series_dt_days",
-        alias = "series_dt_days_default"
-    )]
+    #[serde(rename = "series_dt_days", alias = "series_dt_days_default")]
     SeriesDtDays,
-    #[serde(
-        rename = "series_dt_seconds",
-        alias = "series_dt_seconds_default"
-    )]
+    #[serde(rename = "series_dt_seconds", alias = "series_dt_seconds_default")]
     SeriesDtSeconds,
     #[serde(
         rename = "series_dt_microseconds",
@@ -17500,12 +17491,8 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesDtTotalSeconds => {
             series.dt().total_seconds().map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesDtDays => {
-            series.dt().days().map_err(|err| err.to_string())
-        }
-        FixtureOperation::SeriesDtSeconds => {
-            series.dt().seconds().map_err(|err| err.to_string())
-        }
+        FixtureOperation::SeriesDtDays => series.dt().days().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesDtSeconds => series.dt().seconds().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMicroseconds => {
             series.dt().microseconds().map_err(|err| err.to_string())
         }

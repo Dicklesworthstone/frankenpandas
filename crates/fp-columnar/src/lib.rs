@@ -69,10 +69,9 @@ use std::sync::{Arc, OnceLock};
 use fp_types::{
     DType, DatetimeStringResolution, Interval, IntervalClosed, NullKind, Period, PeriodFreq,
     Scalar, SparseDType, Timedelta, TimedeltaStringResolution, Timestamp, TypeError, cast_scalar,
-    cast_scalar_owned, common_dtype, infer_dtype, nanall,
-    nanany, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nankurt, nanmax,
-    nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd,
-    nansum, nanvar,
+    cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax,
+    nancummin, nancumprod, nancumsum, nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique,
+    nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum, nanvar,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -87,11 +86,11 @@ const STRIDED_FLOAT64_MIN_LEN: usize = 1024;
 /// then subtracting it forces a round-to-nearest-even through the FPU using only
 /// SSE2 arithmetic, and it doubles as the cutoff above which those kernels return
 /// their input untouched.
-    // ⚠️ ONLY EXISTS WITHOUT +sse4.1 (br-frankenpandas-3qpj4). Under the flag,
-    // floor/ceil/trunc take the `f64::floor` intrinsic arm and these bit-trick
-    // helpers become genuinely dead — the compiler says so. Gating them on the
-    // same cfg keeps the unflagged build complete and the flagged build clean,
-    // instead of silencing a warning that is telling the truth.
+// ⚠️ ONLY EXISTS WITHOUT +sse4.1 (br-frankenpandas-3qpj4). Under the flag,
+// floor/ceil/trunc take the `f64::floor` intrinsic arm and these bit-trick
+// helpers become genuinely dead — the compiler says so. Gating them on the
+// same cfg keeps the unflagged build complete and the flagged build clean,
+// instead of silencing a warning that is telling the truth.
 // Used by the bit-trick rounding helpers, which only exist without +sse4.1 — but
 // ALSO by other callers, so this cannot be cfg'd out the way they are. Under the
 // flag it may end up unreferenced in a lib-only build; allow that case rather than
@@ -6853,7 +6852,11 @@ fn cum_accum_nullable_i64(
 /// no lane and the function returns `None`.
 fn blocked_argextreme_f64(data: &[f64], want_max: bool) -> Option<usize> {
     const EMPTY: usize = usize::MAX;
-    let init = if want_max { f64::NEG_INFINITY } else { f64::INFINITY };
+    let init = if want_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
     let mut bv = [init; 8];
     let mut bi = [EMPTY; 8];
 
@@ -6919,7 +6922,11 @@ fn blocked_argextreme_f64(data: &[f64], want_max: bool) -> Option<usize> {
 /// Int64 has no NaN, so no lane can be skipped for that reason.
 fn blocked_argextreme_i64(data: &[i64], want_max: bool) -> Option<usize> {
     const EMPTY: usize = usize::MAX;
-    let init = if want_max { f64::NEG_INFINITY } else { f64::INFINITY };
+    let init = if want_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
     let mut bv = [init; 8];
     let mut bi = [EMPTY; 8];
 
@@ -7077,10 +7084,10 @@ fn blocked_min_max_f64(data: &[f64]) -> (f64, f64) {
             hi[l] = c[l].max(hi[l]);
         }
     }
-    let mut min = (lo[0].min(lo[1]).min(lo[2].min(lo[3])))
-        .min(lo[4].min(lo[5]).min(lo[6].min(lo[7])));
-    let mut max = (hi[0].max(hi[1]).max(hi[2].max(hi[3])))
-        .max(hi[4].max(hi[5]).max(hi[6].max(hi[7])));
+    let mut min =
+        (lo[0].min(lo[1]).min(lo[2].min(lo[3]))).min(lo[4].min(lo[5]).min(lo[6].min(lo[7])));
+    let mut max =
+        (hi[0].max(hi[1]).max(hi[2].max(hi[3]))).max(hi[4].max(hi[5]).max(hi[6].max(hi[7])));
     for &x in chunks.remainder() {
         min = x.min(min);
         max = x.max(max);
@@ -7178,10 +7185,10 @@ fn blocked_min_max_i64_as_f64(data: &[i64]) -> (f64, f64) {
             hi[l] = x.max(hi[l]);
         }
     }
-    let mut min = (lo[0].min(lo[1]).min(lo[2].min(lo[3])))
-        .min(lo[4].min(lo[5]).min(lo[6].min(lo[7])));
-    let mut max = (hi[0].max(hi[1]).max(hi[2].max(hi[3])))
-        .max(hi[4].max(hi[5]).max(hi[6].max(hi[7])));
+    let mut min =
+        (lo[0].min(lo[1]).min(lo[2].min(lo[3]))).min(lo[4].min(lo[5]).min(lo[6].min(lo[7])));
+    let mut max =
+        (hi[0].max(hi[1]).max(hi[2].max(hi[3]))).max(hi[4].max(hi[5]).max(hi[6].max(hi[7])));
     for &v in chunks.remainder() {
         let x = v as f64;
         min = x.min(min);
@@ -24512,14 +24519,16 @@ impl Column {
             // Bound once so the resolution scan and the format pass read the
             // same slice.
             let values = self.values();
-            let resolution = values.iter().fold(DatetimeStringResolution::Date, |acc, v| {
-                match v {
-                    // `string_resolution` reports Date for NaT, the identity of
-                    // this fold, so the exclusion needs no arm of its own.
-                    Scalar::Datetime64(nanos) => acc.max(Timestamp::string_resolution(*nanos)),
-                    _ => acc,
-                }
-            });
+            let resolution = values
+                .iter()
+                .fold(DatetimeStringResolution::Date, |acc, v| {
+                    match v {
+                        // `string_resolution` reports Date for NaT, the identity of
+                        // this fold, so the exclusion needs no arm of its own.
+                        Scalar::Datetime64(nanos) => acc.max(Timestamp::string_resolution(*nanos)),
+                        _ => acc,
+                    }
+                });
             let mut bytes: Vec<u8> = Vec::with_capacity(values.len() * 20);
             let mut offsets: Vec<usize> = Vec::with_capacity(values.len() + 1);
             offsets.push(0);
@@ -24554,12 +24563,13 @@ impl Column {
         // datetime formatter would have widened both to nine.
         if target == DType::Utf8 && self.dtype == DType::Timedelta64 {
             let values = self.values();
-            let resolution = values
-                .iter()
-                .fold(TimedeltaStringResolution::Days, |acc, v| match v {
-                    Scalar::Timedelta64(nanos) => acc.max(Timedelta::string_resolution(*nanos)),
-                    _ => acc,
-                });
+            let resolution =
+                values
+                    .iter()
+                    .fold(TimedeltaStringResolution::Days, |acc, v| match v {
+                        Scalar::Timedelta64(nanos) => acc.max(Timedelta::string_resolution(*nanos)),
+                        _ => acc,
+                    });
             let mut bytes: Vec<u8> = Vec::with_capacity(values.len() * 12);
             let mut offsets: Vec<usize> = Vec::with_capacity(values.len() + 1);
             offsets.push(0);
@@ -43856,7 +43866,14 @@ mod tests {
 
             // NON-VACUITY: an all-set mask must reach the same blocked path.
             let full = ValidityMask::all_valid(8);
-            assert_eq!(f(&[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0], Some(&full), false), Some(7));
+            assert_eq!(
+                f(
+                    &[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+                    Some(&full),
+                    false
+                ),
+                Some(7)
+            );
             // A hole must fall back and be skipped.
             let mut holed = ValidityMask::all_valid(4);
             holed.set(1, false);
@@ -43876,14 +43893,20 @@ mod tests {
         fn blocked_ptp_matches_scalar_fold() {
             let f = |d: &[f64], v: Option<&ValidityMask>| crate::ptp_nullable_f64(d, v);
             assert_eq!(f(&[3.0, -1.0, 7.5], None), Scalar::Float64(8.5));
-            assert_eq!(f(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], None), Scalar::Float64(7.0));
+            assert_eq!(
+                f(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], None),
+                Scalar::Float64(7.0)
+            );
 
             // A NaN must be skipped, not propagated: min/max already ignore it.
             assert_eq!(f(&[1.0, f64::NAN, -4.0], None), Scalar::Float64(5.0));
             // EVERY element NaN leaves both sentinels untouched -> missing.
             assert!(f(&[f64::NAN; 9], None).is_missing());
             // A genuine infinity must NOT be mistaken for the sentinel.
-            assert_eq!(f(&[f64::INFINITY, 0.0], None), Scalar::Float64(f64::INFINITY));
+            assert_eq!(
+                f(&[f64::INFINITY, 0.0], None),
+                Scalar::Float64(f64::INFINITY)
+            );
 
             // ⚠️ NON-VACUITY: two of the four call sites pass Some(validity). An
             // all-set mask must reach the SAME blocked path, and a holed one must
@@ -43933,7 +43956,10 @@ mod tests {
             assert_eq!(m4, 2.0);
 
             // Empty stays on the scalar path via the !is_empty() guard.
-            assert_eq!(crate::present_central_moments_f64(&[], None), (0, 0.0, 0.0, 0.0));
+            assert_eq!(
+                crate::present_central_moments_f64(&[], None),
+                (0, 0.0, 0.0, 0.0)
+            );
 
             // Int64 sibling: same two regimes.
             let (n, m2, m3, m4) = crate::present_central_moments_i64(&[5_i64; 8], None);
@@ -43973,8 +43999,7 @@ mod tests {
                 crate::present_central_moments_i64(&[5_i64; 8], Some(&full8)),
                 (8, 0.0, 0.0, 0.0)
             );
-            let (n, mean, sum_sq) =
-                crate::present_moments_f64(&[1.0, 2.0, 3.0, 4.0], Some(&full4));
+            let (n, mean, sum_sq) = crate::present_moments_f64(&[1.0, 2.0, 3.0, 4.0], Some(&full4));
             assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
             let (n, mean, sum_sq) = crate::present_moments_i64(&[1, 2, 3, 4], Some(&full4));
             assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
@@ -43982,7 +44007,8 @@ mod tests {
             // A mask with a HOLE must still take the scalar path and exclude it.
             let mut holed = ValidityMask::all_valid(4);
             holed.set(1, false);
-            let (n, mean, sum_sq) = crate::present_moments_f64(&[1.0, 99.0, 2.0, 3.0], Some(&holed));
+            let (n, mean, sum_sq) =
+                crate::present_moments_f64(&[1.0, 99.0, 2.0, 3.0], Some(&holed));
             assert_eq!((n, mean), (3, 2.0));
             assert_eq!(sum_sq, 2.0);
         }
@@ -61103,110 +61129,621 @@ mod floordiv_mod_f64_pandas_special_value_lock {
 
     /// (lhs, rhs, expected floordiv, expected mod), all as raw f64 bits.
     const CELLS: [(u64, u64, u64, u64); 100] = [
-        (0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , NAN
-        (0x7ff8000000000000, 0x7ff0000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , INF
-        (0x7ff8000000000000, 0xfff0000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , NEG_INF
-        (0x7ff8000000000000, 0x0000000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , POS_ZERO
-        (0x7ff8000000000000, 0x8000000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , NEG_ZERO
-        (0x7ff8000000000000, 0x401c000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , 7
-        (0x7ff8000000000000, 0xc01c000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , -7
-        (0x7ff8000000000000, 0x4004000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , 2.5
-        (0x7ff8000000000000, 0xc004000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , -2.5
-        (0x7ff8000000000000, 0x0000000000000001, 0x7ff8000000000000, 0x7ff8000000000000), // NAN , MIN_SUBNORMAL
-        (0x7ff0000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // INF , NAN
-        (0x7ff0000000000000, 0x7ff0000000000000, 0xfff8000000000000, 0xfff8000000000000), // INF , INF
-        (0x7ff0000000000000, 0xfff0000000000000, 0xfff8000000000000, 0xfff8000000000000), // INF , NEG_INF
-        (0x7ff0000000000000, 0x0000000000000000, 0x7ff0000000000000, 0xfff8000000000000), // INF , POS_ZERO
-        (0x7ff0000000000000, 0x8000000000000000, 0xfff0000000000000, 0xfff8000000000000), // INF , NEG_ZERO
-        (0x7ff0000000000000, 0x401c000000000000, 0xfff8000000000000, 0xfff8000000000000), // INF , 7
-        (0x7ff0000000000000, 0xc01c000000000000, 0xfff8000000000000, 0xfff8000000000000), // INF , -7
-        (0x7ff0000000000000, 0x4004000000000000, 0xfff8000000000000, 0xfff8000000000000), // INF , 2.5
-        (0x7ff0000000000000, 0xc004000000000000, 0xfff8000000000000, 0xfff8000000000000), // INF , -2.5
-        (0x7ff0000000000000, 0x0000000000000001, 0xfff8000000000000, 0xfff8000000000000), // INF , MIN_SUBNORMAL
-        (0xfff0000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NEG_INF , NAN
-        (0xfff0000000000000, 0x7ff0000000000000, 0xfff8000000000000, 0xfff8000000000000), // NEG_INF , INF
-        (0xfff0000000000000, 0xfff0000000000000, 0xfff8000000000000, 0xfff8000000000000), // NEG_INF , NEG_INF
-        (0xfff0000000000000, 0x0000000000000000, 0xfff0000000000000, 0xfff8000000000000), // NEG_INF , POS_ZERO
-        (0xfff0000000000000, 0x8000000000000000, 0x7ff0000000000000, 0xfff8000000000000), // NEG_INF , NEG_ZERO
-        (0xfff0000000000000, 0x401c000000000000, 0xfff8000000000000, 0xfff8000000000000), // NEG_INF , 7
-        (0xfff0000000000000, 0xc01c000000000000, 0xfff8000000000000, 0xfff8000000000000), // NEG_INF , -7
-        (0xfff0000000000000, 0x4004000000000000, 0xfff8000000000000, 0xfff8000000000000), // NEG_INF , 2.5
-        (0xfff0000000000000, 0xc004000000000000, 0xfff8000000000000, 0xfff8000000000000), // NEG_INF , -2.5
-        (0xfff0000000000000, 0x0000000000000001, 0xfff8000000000000, 0xfff8000000000000), // NEG_INF , MIN_SUBNORMAL
-        (0x0000000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // POS_ZERO , NAN
-        (0x0000000000000000, 0x7ff0000000000000, 0x0000000000000000, 0x0000000000000000), // POS_ZERO , INF
-        (0x0000000000000000, 0xfff0000000000000, 0x8000000000000000, 0x8000000000000000), // POS_ZERO , NEG_INF
-        (0x0000000000000000, 0x0000000000000000, 0x7ff8000000000000, 0xfff8000000000000), // POS_ZERO , POS_ZERO
-        (0x0000000000000000, 0x8000000000000000, 0x7ff8000000000000, 0xfff8000000000000), // POS_ZERO , NEG_ZERO
-        (0x0000000000000000, 0x401c000000000000, 0x0000000000000000, 0x0000000000000000), // POS_ZERO , 7
-        (0x0000000000000000, 0xc01c000000000000, 0x8000000000000000, 0x8000000000000000), // POS_ZERO , -7
-        (0x0000000000000000, 0x4004000000000000, 0x0000000000000000, 0x0000000000000000), // POS_ZERO , 2.5
-        (0x0000000000000000, 0xc004000000000000, 0x8000000000000000, 0x8000000000000000), // POS_ZERO , -2.5
-        (0x0000000000000000, 0x0000000000000001, 0x0000000000000000, 0x0000000000000000), // POS_ZERO , MIN_SUBNORMAL
-        (0x8000000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // NEG_ZERO , NAN
-        (0x8000000000000000, 0x7ff0000000000000, 0x8000000000000000, 0x0000000000000000), // NEG_ZERO , INF
-        (0x8000000000000000, 0xfff0000000000000, 0x0000000000000000, 0x8000000000000000), // NEG_ZERO , NEG_INF
-        (0x8000000000000000, 0x0000000000000000, 0x7ff8000000000000, 0xfff8000000000000), // NEG_ZERO , POS_ZERO
-        (0x8000000000000000, 0x8000000000000000, 0x7ff8000000000000, 0xfff8000000000000), // NEG_ZERO , NEG_ZERO
-        (0x8000000000000000, 0x401c000000000000, 0x8000000000000000, 0x0000000000000000), // NEG_ZERO , 7
-        (0x8000000000000000, 0xc01c000000000000, 0x0000000000000000, 0x8000000000000000), // NEG_ZERO , -7
-        (0x8000000000000000, 0x4004000000000000, 0x8000000000000000, 0x0000000000000000), // NEG_ZERO , 2.5
-        (0x8000000000000000, 0xc004000000000000, 0x0000000000000000, 0x8000000000000000), // NEG_ZERO , -2.5
-        (0x8000000000000000, 0x0000000000000001, 0x8000000000000000, 0x0000000000000000), // NEG_ZERO , MIN_SUBNORMAL
-        (0x401c000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // 7 , NAN
-        (0x401c000000000000, 0x7ff0000000000000, 0x0000000000000000, 0x401c000000000000), // 7 , INF
-        (0x401c000000000000, 0xfff0000000000000, 0xbff0000000000000, 0xfff0000000000000), // 7 , NEG_INF
-        (0x401c000000000000, 0x0000000000000000, 0x7ff0000000000000, 0xfff8000000000000), // 7 , POS_ZERO
-        (0x401c000000000000, 0x8000000000000000, 0xfff0000000000000, 0xfff8000000000000), // 7 , NEG_ZERO
-        (0x401c000000000000, 0x401c000000000000, 0x3ff0000000000000, 0x0000000000000000), // 7 , 7
-        (0x401c000000000000, 0xc01c000000000000, 0xbff0000000000000, 0x8000000000000000), // 7 , -7
-        (0x401c000000000000, 0x4004000000000000, 0x4000000000000000, 0x4000000000000000), // 7 , 2.5
-        (0x401c000000000000, 0xc004000000000000, 0xc008000000000000, 0xbfe0000000000000), // 7 , -2.5
-        (0x401c000000000000, 0x0000000000000001, 0x7ff0000000000000, 0x0000000000000000), // 7 , MIN_SUBNORMAL
-        (0xc01c000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // -7 , NAN
-        (0xc01c000000000000, 0x7ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000), // -7 , INF
-        (0xc01c000000000000, 0xfff0000000000000, 0x0000000000000000, 0xc01c000000000000), // -7 , NEG_INF
-        (0xc01c000000000000, 0x0000000000000000, 0xfff0000000000000, 0xfff8000000000000), // -7 , POS_ZERO
-        (0xc01c000000000000, 0x8000000000000000, 0x7ff0000000000000, 0xfff8000000000000), // -7 , NEG_ZERO
-        (0xc01c000000000000, 0x401c000000000000, 0xbff0000000000000, 0x0000000000000000), // -7 , 7
-        (0xc01c000000000000, 0xc01c000000000000, 0x3ff0000000000000, 0x8000000000000000), // -7 , -7
-        (0xc01c000000000000, 0x4004000000000000, 0xc008000000000000, 0x3fe0000000000000), // -7 , 2.5
-        (0xc01c000000000000, 0xc004000000000000, 0x4000000000000000, 0xc000000000000000), // -7 , -2.5
-        (0xc01c000000000000, 0x0000000000000001, 0xfff0000000000000, 0x0000000000000000), // -7 , MIN_SUBNORMAL
-        (0x4004000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // 2.5 , NAN
-        (0x4004000000000000, 0x7ff0000000000000, 0x0000000000000000, 0x4004000000000000), // 2.5 , INF
-        (0x4004000000000000, 0xfff0000000000000, 0xbff0000000000000, 0xfff0000000000000), // 2.5 , NEG_INF
-        (0x4004000000000000, 0x0000000000000000, 0x7ff0000000000000, 0xfff8000000000000), // 2.5 , POS_ZERO
-        (0x4004000000000000, 0x8000000000000000, 0xfff0000000000000, 0xfff8000000000000), // 2.5 , NEG_ZERO
-        (0x4004000000000000, 0x401c000000000000, 0x0000000000000000, 0x4004000000000000), // 2.5 , 7
-        (0x4004000000000000, 0xc01c000000000000, 0xbff0000000000000, 0xc012000000000000), // 2.5 , -7
-        (0x4004000000000000, 0x4004000000000000, 0x3ff0000000000000, 0x0000000000000000), // 2.5 , 2.5
-        (0x4004000000000000, 0xc004000000000000, 0xbff0000000000000, 0x8000000000000000), // 2.5 , -2.5
-        (0x4004000000000000, 0x0000000000000001, 0x7ff0000000000000, 0x0000000000000000), // 2.5 , MIN_SUBNORMAL
-        (0xc004000000000000, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // -2.5 , NAN
-        (0xc004000000000000, 0x7ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000), // -2.5 , INF
-        (0xc004000000000000, 0xfff0000000000000, 0x0000000000000000, 0xc004000000000000), // -2.5 , NEG_INF
-        (0xc004000000000000, 0x0000000000000000, 0xfff0000000000000, 0xfff8000000000000), // -2.5 , POS_ZERO
-        (0xc004000000000000, 0x8000000000000000, 0x7ff0000000000000, 0xfff8000000000000), // -2.5 , NEG_ZERO
-        (0xc004000000000000, 0x401c000000000000, 0xbff0000000000000, 0x4012000000000000), // -2.5 , 7
-        (0xc004000000000000, 0xc01c000000000000, 0x0000000000000000, 0xc004000000000000), // -2.5 , -7
-        (0xc004000000000000, 0x4004000000000000, 0xbff0000000000000, 0x0000000000000000), // -2.5 , 2.5
-        (0xc004000000000000, 0xc004000000000000, 0x3ff0000000000000, 0x8000000000000000), // -2.5 , -2.5
-        (0xc004000000000000, 0x0000000000000001, 0xfff0000000000000, 0x0000000000000000), // -2.5 , MIN_SUBNORMAL
-        (0x0000000000000001, 0x7ff8000000000000, 0x7ff8000000000000, 0x7ff8000000000000), // MIN_SUBNORMAL , NAN
-        (0x0000000000000001, 0x7ff0000000000000, 0x0000000000000000, 0x0000000000000001), // MIN_SUBNORMAL , INF
-        (0x0000000000000001, 0xfff0000000000000, 0xbff0000000000000, 0xfff0000000000000), // MIN_SUBNORMAL , NEG_INF
-        (0x0000000000000001, 0x0000000000000000, 0x7ff0000000000000, 0xfff8000000000000), // MIN_SUBNORMAL , POS_ZERO
-        (0x0000000000000001, 0x8000000000000000, 0xfff0000000000000, 0xfff8000000000000), // MIN_SUBNORMAL , NEG_ZERO
-        (0x0000000000000001, 0x401c000000000000, 0x0000000000000000, 0x0000000000000001), // MIN_SUBNORMAL , 7
-        (0x0000000000000001, 0xc01c000000000000, 0xbff0000000000000, 0xc01c000000000000), // MIN_SUBNORMAL , -7
-        (0x0000000000000001, 0x4004000000000000, 0x0000000000000000, 0x0000000000000001), // MIN_SUBNORMAL , 2.5
-        (0x0000000000000001, 0xc004000000000000, 0xbff0000000000000, 0xc004000000000000), // MIN_SUBNORMAL , -2.5
-        (0x0000000000000001, 0x0000000000000001, 0x3ff0000000000000, 0x0000000000000000), // MIN_SUBNORMAL , MIN_SUBNORMAL
+        (
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , NAN
+        (
+            0x7ff8000000000000,
+            0x7ff0000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , INF
+        (
+            0x7ff8000000000000,
+            0xfff0000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , NEG_INF
+        (
+            0x7ff8000000000000,
+            0x0000000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , POS_ZERO
+        (
+            0x7ff8000000000000,
+            0x8000000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , NEG_ZERO
+        (
+            0x7ff8000000000000,
+            0x401c000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , 7
+        (
+            0x7ff8000000000000,
+            0xc01c000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , -7
+        (
+            0x7ff8000000000000,
+            0x4004000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , 2.5
+        (
+            0x7ff8000000000000,
+            0xc004000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , -2.5
+        (
+            0x7ff8000000000000,
+            0x0000000000000001,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NAN , MIN_SUBNORMAL
+        (
+            0x7ff0000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // INF , NAN
+        (
+            0x7ff0000000000000,
+            0x7ff0000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // INF , INF
+        (
+            0x7ff0000000000000,
+            0xfff0000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // INF , NEG_INF
+        (
+            0x7ff0000000000000,
+            0x0000000000000000,
+            0x7ff0000000000000,
+            0xfff8000000000000,
+        ), // INF , POS_ZERO
+        (
+            0x7ff0000000000000,
+            0x8000000000000000,
+            0xfff0000000000000,
+            0xfff8000000000000,
+        ), // INF , NEG_ZERO
+        (
+            0x7ff0000000000000,
+            0x401c000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // INF , 7
+        (
+            0x7ff0000000000000,
+            0xc01c000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // INF , -7
+        (
+            0x7ff0000000000000,
+            0x4004000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // INF , 2.5
+        (
+            0x7ff0000000000000,
+            0xc004000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // INF , -2.5
+        (
+            0x7ff0000000000000,
+            0x0000000000000001,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // INF , MIN_SUBNORMAL
+        (
+            0xfff0000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NEG_INF , NAN
+        (
+            0xfff0000000000000,
+            0x7ff0000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // NEG_INF , INF
+        (
+            0xfff0000000000000,
+            0xfff0000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // NEG_INF , NEG_INF
+        (
+            0xfff0000000000000,
+            0x0000000000000000,
+            0xfff0000000000000,
+            0xfff8000000000000,
+        ), // NEG_INF , POS_ZERO
+        (
+            0xfff0000000000000,
+            0x8000000000000000,
+            0x7ff0000000000000,
+            0xfff8000000000000,
+        ), // NEG_INF , NEG_ZERO
+        (
+            0xfff0000000000000,
+            0x401c000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // NEG_INF , 7
+        (
+            0xfff0000000000000,
+            0xc01c000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // NEG_INF , -7
+        (
+            0xfff0000000000000,
+            0x4004000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // NEG_INF , 2.5
+        (
+            0xfff0000000000000,
+            0xc004000000000000,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // NEG_INF , -2.5
+        (
+            0xfff0000000000000,
+            0x0000000000000001,
+            0xfff8000000000000,
+            0xfff8000000000000,
+        ), // NEG_INF , MIN_SUBNORMAL
+        (
+            0x0000000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // POS_ZERO , NAN
+        (
+            0x0000000000000000,
+            0x7ff0000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+        ), // POS_ZERO , INF
+        (
+            0x0000000000000000,
+            0xfff0000000000000,
+            0x8000000000000000,
+            0x8000000000000000,
+        ), // POS_ZERO , NEG_INF
+        (
+            0x0000000000000000,
+            0x0000000000000000,
+            0x7ff8000000000000,
+            0xfff8000000000000,
+        ), // POS_ZERO , POS_ZERO
+        (
+            0x0000000000000000,
+            0x8000000000000000,
+            0x7ff8000000000000,
+            0xfff8000000000000,
+        ), // POS_ZERO , NEG_ZERO
+        (
+            0x0000000000000000,
+            0x401c000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+        ), // POS_ZERO , 7
+        (
+            0x0000000000000000,
+            0xc01c000000000000,
+            0x8000000000000000,
+            0x8000000000000000,
+        ), // POS_ZERO , -7
+        (
+            0x0000000000000000,
+            0x4004000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+        ), // POS_ZERO , 2.5
+        (
+            0x0000000000000000,
+            0xc004000000000000,
+            0x8000000000000000,
+            0x8000000000000000,
+        ), // POS_ZERO , -2.5
+        (
+            0x0000000000000000,
+            0x0000000000000001,
+            0x0000000000000000,
+            0x0000000000000000,
+        ), // POS_ZERO , MIN_SUBNORMAL
+        (
+            0x8000000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // NEG_ZERO , NAN
+        (
+            0x8000000000000000,
+            0x7ff0000000000000,
+            0x8000000000000000,
+            0x0000000000000000,
+        ), // NEG_ZERO , INF
+        (
+            0x8000000000000000,
+            0xfff0000000000000,
+            0x0000000000000000,
+            0x8000000000000000,
+        ), // NEG_ZERO , NEG_INF
+        (
+            0x8000000000000000,
+            0x0000000000000000,
+            0x7ff8000000000000,
+            0xfff8000000000000,
+        ), // NEG_ZERO , POS_ZERO
+        (
+            0x8000000000000000,
+            0x8000000000000000,
+            0x7ff8000000000000,
+            0xfff8000000000000,
+        ), // NEG_ZERO , NEG_ZERO
+        (
+            0x8000000000000000,
+            0x401c000000000000,
+            0x8000000000000000,
+            0x0000000000000000,
+        ), // NEG_ZERO , 7
+        (
+            0x8000000000000000,
+            0xc01c000000000000,
+            0x0000000000000000,
+            0x8000000000000000,
+        ), // NEG_ZERO , -7
+        (
+            0x8000000000000000,
+            0x4004000000000000,
+            0x8000000000000000,
+            0x0000000000000000,
+        ), // NEG_ZERO , 2.5
+        (
+            0x8000000000000000,
+            0xc004000000000000,
+            0x0000000000000000,
+            0x8000000000000000,
+        ), // NEG_ZERO , -2.5
+        (
+            0x8000000000000000,
+            0x0000000000000001,
+            0x8000000000000000,
+            0x0000000000000000,
+        ), // NEG_ZERO , MIN_SUBNORMAL
+        (
+            0x401c000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // 7 , NAN
+        (
+            0x401c000000000000,
+            0x7ff0000000000000,
+            0x0000000000000000,
+            0x401c000000000000,
+        ), // 7 , INF
+        (
+            0x401c000000000000,
+            0xfff0000000000000,
+            0xbff0000000000000,
+            0xfff0000000000000,
+        ), // 7 , NEG_INF
+        (
+            0x401c000000000000,
+            0x0000000000000000,
+            0x7ff0000000000000,
+            0xfff8000000000000,
+        ), // 7 , POS_ZERO
+        (
+            0x401c000000000000,
+            0x8000000000000000,
+            0xfff0000000000000,
+            0xfff8000000000000,
+        ), // 7 , NEG_ZERO
+        (
+            0x401c000000000000,
+            0x401c000000000000,
+            0x3ff0000000000000,
+            0x0000000000000000,
+        ), // 7 , 7
+        (
+            0x401c000000000000,
+            0xc01c000000000000,
+            0xbff0000000000000,
+            0x8000000000000000,
+        ), // 7 , -7
+        (
+            0x401c000000000000,
+            0x4004000000000000,
+            0x4000000000000000,
+            0x4000000000000000,
+        ), // 7 , 2.5
+        (
+            0x401c000000000000,
+            0xc004000000000000,
+            0xc008000000000000,
+            0xbfe0000000000000,
+        ), // 7 , -2.5
+        (
+            0x401c000000000000,
+            0x0000000000000001,
+            0x7ff0000000000000,
+            0x0000000000000000,
+        ), // 7 , MIN_SUBNORMAL
+        (
+            0xc01c000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // -7 , NAN
+        (
+            0xc01c000000000000,
+            0x7ff0000000000000,
+            0xbff0000000000000,
+            0x7ff0000000000000,
+        ), // -7 , INF
+        (
+            0xc01c000000000000,
+            0xfff0000000000000,
+            0x0000000000000000,
+            0xc01c000000000000,
+        ), // -7 , NEG_INF
+        (
+            0xc01c000000000000,
+            0x0000000000000000,
+            0xfff0000000000000,
+            0xfff8000000000000,
+        ), // -7 , POS_ZERO
+        (
+            0xc01c000000000000,
+            0x8000000000000000,
+            0x7ff0000000000000,
+            0xfff8000000000000,
+        ), // -7 , NEG_ZERO
+        (
+            0xc01c000000000000,
+            0x401c000000000000,
+            0xbff0000000000000,
+            0x0000000000000000,
+        ), // -7 , 7
+        (
+            0xc01c000000000000,
+            0xc01c000000000000,
+            0x3ff0000000000000,
+            0x8000000000000000,
+        ), // -7 , -7
+        (
+            0xc01c000000000000,
+            0x4004000000000000,
+            0xc008000000000000,
+            0x3fe0000000000000,
+        ), // -7 , 2.5
+        (
+            0xc01c000000000000,
+            0xc004000000000000,
+            0x4000000000000000,
+            0xc000000000000000,
+        ), // -7 , -2.5
+        (
+            0xc01c000000000000,
+            0x0000000000000001,
+            0xfff0000000000000,
+            0x0000000000000000,
+        ), // -7 , MIN_SUBNORMAL
+        (
+            0x4004000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // 2.5 , NAN
+        (
+            0x4004000000000000,
+            0x7ff0000000000000,
+            0x0000000000000000,
+            0x4004000000000000,
+        ), // 2.5 , INF
+        (
+            0x4004000000000000,
+            0xfff0000000000000,
+            0xbff0000000000000,
+            0xfff0000000000000,
+        ), // 2.5 , NEG_INF
+        (
+            0x4004000000000000,
+            0x0000000000000000,
+            0x7ff0000000000000,
+            0xfff8000000000000,
+        ), // 2.5 , POS_ZERO
+        (
+            0x4004000000000000,
+            0x8000000000000000,
+            0xfff0000000000000,
+            0xfff8000000000000,
+        ), // 2.5 , NEG_ZERO
+        (
+            0x4004000000000000,
+            0x401c000000000000,
+            0x0000000000000000,
+            0x4004000000000000,
+        ), // 2.5 , 7
+        (
+            0x4004000000000000,
+            0xc01c000000000000,
+            0xbff0000000000000,
+            0xc012000000000000,
+        ), // 2.5 , -7
+        (
+            0x4004000000000000,
+            0x4004000000000000,
+            0x3ff0000000000000,
+            0x0000000000000000,
+        ), // 2.5 , 2.5
+        (
+            0x4004000000000000,
+            0xc004000000000000,
+            0xbff0000000000000,
+            0x8000000000000000,
+        ), // 2.5 , -2.5
+        (
+            0x4004000000000000,
+            0x0000000000000001,
+            0x7ff0000000000000,
+            0x0000000000000000,
+        ), // 2.5 , MIN_SUBNORMAL
+        (
+            0xc004000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // -2.5 , NAN
+        (
+            0xc004000000000000,
+            0x7ff0000000000000,
+            0xbff0000000000000,
+            0x7ff0000000000000,
+        ), // -2.5 , INF
+        (
+            0xc004000000000000,
+            0xfff0000000000000,
+            0x0000000000000000,
+            0xc004000000000000,
+        ), // -2.5 , NEG_INF
+        (
+            0xc004000000000000,
+            0x0000000000000000,
+            0xfff0000000000000,
+            0xfff8000000000000,
+        ), // -2.5 , POS_ZERO
+        (
+            0xc004000000000000,
+            0x8000000000000000,
+            0x7ff0000000000000,
+            0xfff8000000000000,
+        ), // -2.5 , NEG_ZERO
+        (
+            0xc004000000000000,
+            0x401c000000000000,
+            0xbff0000000000000,
+            0x4012000000000000,
+        ), // -2.5 , 7
+        (
+            0xc004000000000000,
+            0xc01c000000000000,
+            0x0000000000000000,
+            0xc004000000000000,
+        ), // -2.5 , -7
+        (
+            0xc004000000000000,
+            0x4004000000000000,
+            0xbff0000000000000,
+            0x0000000000000000,
+        ), // -2.5 , 2.5
+        (
+            0xc004000000000000,
+            0xc004000000000000,
+            0x3ff0000000000000,
+            0x8000000000000000,
+        ), // -2.5 , -2.5
+        (
+            0xc004000000000000,
+            0x0000000000000001,
+            0xfff0000000000000,
+            0x0000000000000000,
+        ), // -2.5 , MIN_SUBNORMAL
+        (
+            0x0000000000000001,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+            0x7ff8000000000000,
+        ), // MIN_SUBNORMAL , NAN
+        (
+            0x0000000000000001,
+            0x7ff0000000000000,
+            0x0000000000000000,
+            0x0000000000000001,
+        ), // MIN_SUBNORMAL , INF
+        (
+            0x0000000000000001,
+            0xfff0000000000000,
+            0xbff0000000000000,
+            0xfff0000000000000,
+        ), // MIN_SUBNORMAL , NEG_INF
+        (
+            0x0000000000000001,
+            0x0000000000000000,
+            0x7ff0000000000000,
+            0xfff8000000000000,
+        ), // MIN_SUBNORMAL , POS_ZERO
+        (
+            0x0000000000000001,
+            0x8000000000000000,
+            0xfff0000000000000,
+            0xfff8000000000000,
+        ), // MIN_SUBNORMAL , NEG_ZERO
+        (
+            0x0000000000000001,
+            0x401c000000000000,
+            0x0000000000000000,
+            0x0000000000000001,
+        ), // MIN_SUBNORMAL , 7
+        (
+            0x0000000000000001,
+            0xc01c000000000000,
+            0xbff0000000000000,
+            0xc01c000000000000,
+        ), // MIN_SUBNORMAL , -7
+        (
+            0x0000000000000001,
+            0x4004000000000000,
+            0x0000000000000000,
+            0x0000000000000001,
+        ), // MIN_SUBNORMAL , 2.5
+        (
+            0x0000000000000001,
+            0xc004000000000000,
+            0xbff0000000000000,
+            0xc004000000000000,
+        ), // MIN_SUBNORMAL , -2.5
+        (
+            0x0000000000000001,
+            0x0000000000000001,
+            0x3ff0000000000000,
+            0x0000000000000000,
+        ), // MIN_SUBNORMAL , MIN_SUBNORMAL
     ];
 
     /// Names in CELLS order, for a failure message that says which cell broke.
-    const LABELS: [&str; 10] = ["NAN", "INF", "NEG_INF", "POS_ZERO", "NEG_ZERO", "7", "-7", "2.5", "-2.5", "MIN_SUBNORMAL"];
+    const LABELS: [&str; 10] = [
+        "NAN",
+        "INF",
+        "NEG_INF",
+        "POS_ZERO",
+        "NEG_ZERO",
+        "7",
+        "-7",
+        "2.5",
+        "-2.5",
+        "MIN_SUBNORMAL",
+    ];
 
     fn same_bits(actual: f64, expected: u64) -> bool {
         let want = f64::from_bits(expected);
@@ -61280,7 +61817,10 @@ mod floordiv_mod_f64_pandas_special_value_lock {
             signed_zero_results >= 8,
             "expected pandas to produce negative zero in several cells, saw {signed_zero_results}"
         );
-        assert!(infinite_results >= 8, "expected infinite results, saw {infinite_results}");
+        assert!(
+            infinite_results >= 8,
+            "expected infinite results, saw {infinite_results}"
+        );
         assert!(nan_results >= 20, "expected NaN results, saw {nan_results}");
     }
 }
