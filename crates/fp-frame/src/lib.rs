@@ -62137,60 +62137,6 @@ impl DataFrame {
         }
     }
 
-    /// Borrow the column at `position` without materializing its NAME.
-    ///
-    /// br-frankenpandas-3ya6b. The only public route to a column by position was
-    /// `column_name_at(pos)` followed by `column(&name)`: an owned `String` per
-    /// access, then a keyed lookup. On a lazily labelled column axis — exactly what
-    /// `transpose` produces for a homogeneous frame — the name does not exist yet,
-    /// so each access also pays an i64 format and a heap allocation.
-    ///
-    /// That per-column constant is invisible almost everywhere, because column
-    /// COUNT is normally small and fixed. A transposed 1M-row frame is 10 rows by
-    /// 1,000,000 COLUMNS: it is the one shape in the corpus where column count
-    /// scales with the data, so the constant becomes the dominant term.
-    ///
-    /// Non-breaking: the name route is untouched and still works.
-    ///
-    /// ⚠️ NOT A PERFORMANCE CLAIM. Nothing here has been built or measured — the
-    /// bead pre-registers the prediction that this removes a CONSTANT and does NOT
-    /// change the verdict against pandas, which answers `.T` from a 2D BlockManager
-    /// while FrankenPandas still builds one Column per output column however it is
-    /// addressed. Whoever measures it should expect a large absolute saving at 1M
-    /// and NO sign change; a reported sign flip means the structural story in
-    /// br-frankenpandas-l4vzc is wrong.
-    #[must_use]
-    pub fn column_at(&self, position: usize) -> Option<&Column> {
-        #[cfg(feature = "lazy-transpose-view")]
-        {
-            match &self.column_order {
-                LazyDataFrameColumnOrder::Eager(names) => self.columns.get(names.get(position)?),
-                LazyDataFrameColumnOrder::Int64UnitRange {
-                    start,
-                    len,
-                    materialized,
-                } => {
-                    if position >= *len {
-                        return None;
-                    }
-                    // Already materialized: borrow, do not clone.
-                    if let Some(names) = materialized.get() {
-                        return self.columns.get(names.get(position)?);
-                    }
-                    // Not materialized: format the label into a STACK buffer and
-                    // look up with a borrowed &str, so the lazy axis costs no
-                    // allocation at all.
-                    let value = start.checked_add(i64::try_from(position).ok()?)?;
-                    let mut buf = [0_u8; 24];
-                    self.columns.get(format_i64_into(value, &mut buf))
-                }
-            }
-        }
-        #[cfg(not(feature = "lazy-transpose-view"))]
-        {
-            self.columns.get(self.column_order.get(position)?)
-        }
-    }
 
     /// Filter rows where `mask` is `True`.
     ///
@@ -95800,8 +95746,9 @@ mod tests {
         SORTED_UNIQUE_UNION_FINGERPRINT_CACHE, SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX, Series,
         SortedUniqueUnionFingerprintKey, ToNumericErrors, ToNumericOptions, TzAmbiguousPolicy,
         TzLocalizeOptions, TzNonexistentPolicy, align_union, align_union_duplicate_aware,
-        align_union_sorted_unique, cut, datetime64_label_from_naive, format_period_label,
-        index_to_frame, index_to_series, int64_unit_range_alignment, parse_datetime64_nanos,
+        align_union_sorted_unique, cut, datetime64_label_from_naive, format_i64_into,
+        format_period_label, index_to_frame, index_to_series, int64_unit_range_alignment,
+        parse_datetime64_nanos,
         parse_naive_datetime_value, qcut, record_alignment_semantic_witness,
         semantic_index_identity, semantic_int64_unit_range_labels_fingerprint,
         semantic_integer_index_labels_fingerprint, semantic_sorted_unique_union_output_fingerprint,
