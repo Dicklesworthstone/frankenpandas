@@ -50,10 +50,16 @@
 //!
 //! ## Missing-value helpers
 //!
-//! Free fns matching `pd.isna` / `pd.notna` / `pd.fillna` / `pd.dropna`
-//! plus the `nan*` aggregations ([`nansum`], [`nanmean`], [`nancount`],
+//! Free fns matching `pd.isna` / `pd.notna`, plus fill/drop helpers, plus
+//! the `nan*` aggregations ([`nansum`], [`nanmean`], [`nancount`],
 //! [`nanmin`], [`nanmax`], [`nanmedian`], [`nanvar`], [`nanstd`])
 //! that mirror pandas' missing-aware reductions.
+//!
+//! ⚠️ Only HALF that list is a module-level pandas surface. `pd.isna` and
+//! `pd.notna` are free functions; `pd.fillna` and `pd.dropna` do NOT exist
+//! (measured 2.2.3: `AttributeError` on the module) -- pandas exposes fill
+//! and drop only as METHODS, `Series.fillna` / `DataFrame.dropna`. The free
+//! fns here are an FP convenience, not a pandas mirror.
 //!
 //! ## Error reporting
 //!
