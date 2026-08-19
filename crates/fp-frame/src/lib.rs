@@ -3478,9 +3478,11 @@ fn sub_offset_from_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel,
 ///     2024-01-31 - 1ME -> 2023-12-31   period end, on-anchor or not
 /// so forward discounts a partial period and backward does not.
 fn anchored_offset_steps(count: i32, on_anchor: bool) -> i32 {
-    if count < 0 {
-        count
-    } else if on_anchor {
+    // Backward and on-anchor forward both cost the FULL period, for different
+    // reasons (see the measurements above); only off-anchor forward discounts the
+    // partial period. Stated as one condition because clippy is right that the two
+    // arms were identical, and the doc above is where the asymmetry is explained.
+    if count < 0 || on_anchor {
         count
     } else {
         count - 1
@@ -41377,9 +41379,9 @@ impl SeriesGroupBy<'_> {
                 // `sum` and `cnt` stay unconditional: sum, mean, std and var all read
                 // them, so no reachable func list leaves them unused.
                 let need_var = funcs.iter().any(|f| *f == "std" || *f == "var");
-                let need_min = funcs.iter().any(|f| *f == "min");
-                let need_max = funcs.iter().any(|f| *f == "max");
-                let need_prod = funcs.iter().any(|f| *f == "prod");
+                let need_min = funcs.contains(&"min");
+                let need_max = funcs.contains(&"max");
+                let need_prod = funcs.contains(&"prod");
                 let mut order: Vec<IndexLabel> = Vec::with_capacity(ngroups);
                 let mut sum = vec![0.0_f64; ngroups];
                 let mut cnt = vec![0_usize; ngroups];
@@ -50663,7 +50665,11 @@ impl DatetimeAccessor<'_> {
                     .collect()
             };
 
-        let mut parts: Vec<Vec<Option<i64>>> = vec![Vec::with_capacity(nanos.len()); 7];
+        // `vec![Vec::with_capacity(n); 7]` CLONES the first vector, and a clone of an
+        // empty Vec has no capacity — so six of the seven were allocating from zero.
+        let mut parts: Vec<Vec<Option<i64>>> = (0..7)
+            .map(|_| Vec::with_capacity(nanos.len()))
+            .collect();
         for slot in &nanos {
             match slot {
                 None => {
@@ -94751,9 +94757,8 @@ impl GroupByRolling<'_> {
                     (0..group_vals.len() as i64).map(IndexLabel::from).collect();
                 let gs = Series::from_values(col_name, group_idx, group_vals)?;
                 let rolled = agg(&gs, window, min_periods)?;
-                for gi in 0..indices.len() {
-                    out[base + gi] = rolled.values()[gi].clone();
-                }
+                out[base..base + indices.len()]
+                    .clone_from_slice(&rolled.values()[..indices.len()]);
                 base += indices.len();
             }
             Ok((col_name.to_string(), Column::from_values(out)?))
@@ -95334,6 +95339,7 @@ impl GroupByEwm<'_> {
 ///   * `mean` raises TypeError on strings, so dropping the column and emitting a
 ///     value are BOTH wrong; matching pandas means raising, which is a separate
 ///     error-parity decision.
+///
 /// Bool/Datetime64/category widening is likewise left out: `nanmin`/`nanmax` already
 /// order Bool, but pandas' bool `sum`/`mean` promote to int/float and its category
 /// rules differ per agg, so each needs its own row of the table above honoured.
