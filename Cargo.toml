@@ -91,6 +91,29 @@ unicode-normalization = "0.1.25"
 # Applied to BOTH release profiles on purpose: benchmarks build `release-perf`,
 # so flagging only `release` would leave every measured row at baseline ISA and
 # the lever would read as inert.
+# USER-DIRECTED 2026-08-19, after this project became the volume's dominant writer
+# twice in one session: `target/` reached 100 GB against under 110 GB for the other
+# EIGHT projects combined, `/data` fell 227G -> 143G in three ticks, and the host hit
+# iowait 76% at loadavg 238.
+#
+# THE CAUSE WAS FULL DWARF IN THE DEV PROFILE, not the number of builds. Cargo's dev
+# default is `debug = true`, and this workspace carries 622 examples (fp-frame 385,
+# fp-columnar 151, fp-index 45, fp-join 41) plus per-crate test binaries. Every
+# `cargo clippy/test --all-targets` links each one at ~170 MB, so
+# `target/debug/examples` alone measured 57 GB across 5883 files. Reclaiming it with
+# `cargo clean -p` took `target/` from 100 GB to 13 GB, which is the size of the
+# problem.
+#
+# Line tables keep what is actually used here: panic backtraces still carry file and
+# line, and `perf` still resolves symbols and source lines. What is given up is
+# variable inspection in a debugger, which no gate in this repo performs.
+#
+# ⚠️ IF YOU NEED FULL DEBUG INFO, do it in your own invocation
+# (`RUSTFLAGS=-Cdebuginfo=2 cargo test -p <crate>`) rather than by raising this — a
+# workspace-wide flip re-links every example on the volume.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release.package.fp-dot-kernel]
 rustflags = ["-Ctarget-feature=+avx2,+fma"]
 
