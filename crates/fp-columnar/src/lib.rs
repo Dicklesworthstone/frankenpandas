@@ -87,6 +87,16 @@ const STRIDED_FLOAT64_MIN_LEN: usize = 1024;
 /// then subtracting it forces a round-to-nearest-even through the FPU using only
 /// SSE2 arithmetic, and it doubles as the cutoff above which those kernels return
 /// their input untouched.
+    // ⚠️ ONLY EXISTS WITHOUT +sse4.1 (br-frankenpandas-3qpj4). Under the flag,
+    // floor/ceil/trunc take the `f64::floor` intrinsic arm and these bit-trick
+    // helpers become genuinely dead — the compiler says so. Gating them on the
+    // same cfg keeps the unflagged build complete and the flagged build clean,
+    // instead of silencing a warning that is telling the truth.
+// Used by the bit-trick rounding helpers, which only exist without +sse4.1 — but
+// ALSO by other callers, so this cannot be cfg'd out the way they are. Under the
+// flag it may end up unreferenced in a lib-only build; allow that case rather than
+// deleting a constant the unflagged build needs. (br-frankenpandas-3qpj4)
+#[cfg_attr(target_feature = "sse4.1", allow(dead_code))]
 const TWO_POW_52: f64 = 4_503_599_627_370_496.0;
 
 #[doc(hidden)]
@@ -27160,6 +27170,7 @@ impl Column {
     }
 
     #[inline]
+    #[cfg_attr(target_feature = "sse4.1", allow(dead_code))]
     fn round_ties_even_fast(value: f64) -> f64 {
         // Magic-number ties-to-even: `(|x|+2^52)-2^52` uses only SSE2
         // add/sub/abs/compare, so it stays cheap on the BASELINE x86-64 target
@@ -27194,6 +27205,7 @@ impl Column {
     /// direction. See [`Self::round_ties_even_fast`] for why the magic number and
     /// not the intrinsic.
     #[inline]
+    #[cfg_attr(target_feature = "sse4.1", allow(dead_code))]
     fn nearest_even_magnitude(abs: f64) -> f64 {
         (abs + TWO_POW_52) - TWO_POW_52
     }
@@ -27217,6 +27229,7 @@ impl Column {
     /// so do not reach for it as a general `copysign` replacement. Each caller
     /// below states why its `result` cannot have that shape.
     #[inline]
+    #[cfg_attr(target_feature = "sse4.1", allow(dead_code))]
     fn or_sign(result: f64, value: f64) -> f64 {
         const SIGN_BIT: u64 = 0x8000_0000_0000_0000;
         f64::from_bits(result.to_bits() | (value.to_bits() & SIGN_BIT))

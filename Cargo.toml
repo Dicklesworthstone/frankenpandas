@@ -108,3 +108,22 @@ opt-level = 3
 # lever would read as inert in exactly the measurements meant to certify it.
 [profile.release-perf.package.fp-dot-kernel]
 rustflags = ["-Ctarget-feature=+avx2,+fma"]
+
+# br-frankenpandas-3qpj4: THE LEVER IS A PAIR — the cfg(target_feature = "sse4.1")
+# arm in floor_fast/ceil_fast/trunc_fast is DEAD without this flag, and the flag
+# buys those ops almost nothing without the arm. Verified inert before adding this:
+# the baseline fp-columnar rlib contains ZERO rounding instructions, so `f64::floor`
+# never lowered to `roundsd` anywhere in the crate.
+#
+# ⚠️ +sse4.1 ONLY, deliberately NOT x86-64-v3. The v3 experiment was measured and
+# REJECTED (CyanLynx 2026-07-31: sqrt 0.361x, log regressed) — but that policy turns
+# on AVX/AVX2 width, which is what changed those kernels. sse4.1 adds rounding and
+# blend instructions; `sqrt` lowers to SSE2 `sqrtpd` either way and `log` is a libm
+# call in both. The narrower flag is chosen so the rejected collateral cannot recur,
+# and the claim is checkable in object code rather than argued.
+[profile.release.package.fp-columnar]
+rustflags = ["-Ctarget-feature=+sse4.1"]
+
+[profile.release-perf.package.fp-columnar]
+rustflags = ["-Ctarget-feature=+sse4.1"]
+
