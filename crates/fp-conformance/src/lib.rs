@@ -147,6 +147,33 @@ pub struct HarnessConfig {
     pub fixture_root: PathBuf,
     pub strict_mode: bool,
     pub python_bin: String,
+    /// ⚠️ ONE FLAG, TWO MEANINGS — and they are not separable today
+    /// (br-frankenpandas-mlnu3). Read both before setting it:
+    ///
+    /// 1. Via [`allows_live_oracle_fallback`](Self::allows_live_oracle_fallback),
+    ///    it lets [`capture_live_oracle_expected`] proceed when the vendored
+    ///    legacy oracle root is absent, i.e. "use system pandas".
+    /// 2. On its own it ALSO permits a silent degrade to the fixture's stored
+    ///    expectation when the oracle is unavailable (the `OracleUnavailable`
+    ///    arm near lib.rs:12973), which makes a differential test compare FP
+    ///    against a banked answer rather than against pandas — vacuous.
+    ///
+    /// The `live_oracle_*` test modules therefore set this to FALSE explicitly
+    /// (773 occurrences across 11 of the 12 modules) to block meaning 2, and
+    /// lose meaning 1 as collateral. That is why
+    /// `FP_ALLOW_SYSTEM_PANDAS_FALLBACK=1` ALONE still skips them, while
+    /// `FP_REQUIRE_LIVE_ORACLE=1` runs them: REQUIRE reaches meaning 1 through
+    /// the `||` in `allows_live_oracle_fallback` WITHOUT enabling meaning 2,
+    /// which reads this raw field.
+    ///
+    /// So the behaviour is coherent; the NAME is not. Splitting it into
+    /// `allow_system_pandas` and `allow_fixture_fallback` would let a caller ask
+    /// for one without the other — that is a corpus-wide sweep and belongs to
+    /// mlnu3, not to a drive-by.
+    ///
+    /// Practical rule until then: to run the differential suite for real, pass
+    /// BOTH vars, and check the CLOCK — a module that finishes in 0.00s skipped,
+    /// whatever its pass count says.
     pub allow_system_pandas_fallback: bool,
     pub require_live_oracle: bool,
 }
