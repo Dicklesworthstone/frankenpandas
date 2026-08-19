@@ -1008,6 +1008,18 @@ impl Float64DotInput {
     }
 }
 
+/// The operands a still-pending `df.dot` output column would compute from.
+///
+/// br-frankenpandas-mti15. A named struct rather than a tuple because the batch
+/// grouping reads two of its three fields for DIFFERENT reasons — `a_cols` by
+/// pointer identity (batching across panels would read the wrong matrix) and
+/// `len` by value — and a positional tuple makes that easy to get backwards.
+struct PendingDot<'a> {
+    a_cols: &'a Arc<[Float64DotInput]>,
+    b_col: &'a [f64],
+    len: usize,
+}
+
 /// A shared left-hand (`A`) panel for `df.dot`: the `k` A-columns built once
 /// as `Float64DotInput`s and shared (`Arc`) across all `n` output columns of a
 /// single dot product, so construction is O(k) once + O(n) Arc bumps instead
@@ -4276,6 +4288,126 @@ impl ScalarValues {
         matches!(self, Self::LazyAllValidFloat64Dot { data, .. } if data.get().is_none())
     }
 
+    /// The `(A panel, b column, len)` of a dot column that is still pending.
+    ///
+    /// br-frankenpandas-mti15. Exposed so a worker can batch several pending
+    /// columns of the SAME product into one pass of the blocked kernel. `None`
+    /// once the column is materialized, so a racing worker simply drops out of
+    /// the batch instead of recomputing it.
+    fn pending_dot_parts(&self) -> Option<PendingDot<'_>> {
+        match self {
+            Self::LazyAllValidFloat64Dot {
+                a_cols,
+                b_col,
+                len,
+                data,
+                ..
+            } if data.get().is_none() => Some(PendingDot {
+                a_cols,
+                b_col,
+                len: *len,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Publish a dot column computed elsewhere (by the blocked kernel).
+    ///
+    /// br-frankenpandas-mti15. A losing race is not an error and must not be
+    /// treated as one: `OnceLock::set` returns `Err` when another worker got
+    /// there first, and that worker's bytes are the SAME bytes — every path
+    /// accumulates `p = 0..k` in the same order — so discarding ours is correct.
+    fn publish_dot_data(&self, computed: Vec<f64>) {
+        if let Self::LazyAllValidFloat64Dot { data, .. } = self {
+            let _ = data.set(computed);
+        }
+    }
+
+    /// Materialize one worker's share of the pending dot columns, batching every
+    /// run that shares an A panel into a single blocked pass.
+    ///
+    /// br-frankenpandas-mti15. THE SHAPE OF THE REMAINING GAP, from that bead:
+    /// `df_dot @1M` is a 0.51-0.62x LOSS on best-vs-best against a 64-thread
+    /// OpenBLAS GEMM, and the ledger had already ruled out every scheduling
+    /// lever — output-column fusion (0.99x), N-blocking (~4.5%, sub-gate),
+    /// output-row parallelism (1.40x SLOWER), worker-cap tuning (non-reproducible
+    /// across hosts). Its 2026-07-23 close recorded the one retry that was left:
+    /// "re-open df_dot only for a hand-written GEMM microkernel (register-blocked,
+    /// packed panels)", blocked at the time on the SSE2 build ISA. fp-dot-kernel
+    /// is that opening.
+    ///
+    /// WHAT CHANGES IS MEMORY TRAFFIC, NOT ARITHMETIC. The per-column kernel
+    /// re-streams the whole A panel once per output column; the blocked one holds
+    /// an 8x6 output tile in vector registers across the entire `k` loop, so A is
+    /// streamed `n / 6` times and the tile itself costs nothing inside the loop.
+    ///
+    /// ⚠️ BATCHING IS ONLY LEGAL WITHIN ONE A PANEL. Columns are grouped by
+    /// `Arc::ptr_eq` on `a_cols` plus an equal `len`; a run of one falls back to
+    /// the per-column kernel. Bit-identity does not depend on that grouping — it
+    /// holds per output element — but reading a slice of the wrong panel would be
+    /// a correctness bug, so the check is on identity rather than on shape.
+    ///
+    /// ⚠️ THE GUARD IS NOT OPTIONAL. fp-dot-kernel emits AVX2 unconditionally, so
+    /// entering it on a pre-AVX2 CPU is SIGILL. The fallback below is the
+    /// complete per-column path, never a stub.
+    fn materialize_dot_group(group: &[&Self]) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                let mut start = 0;
+                while start < group.len() {
+                    let Some(head) = group[start].pending_dot_parts() else {
+                        // Already materialized by a racing worker.
+                        start += 1;
+                        continue;
+                    };
+                    let mut end = start + 1;
+                    while end < group.len() {
+                        match group[end].pending_dot_parts() {
+                            Some(next)
+                                if next.len == head.len
+                                    && Arc::ptr_eq(head.a_cols, next.a_cols) =>
+                            {
+                                end += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    let run = &group[start..end];
+                    let b_cols: Vec<&[f64]> = run
+                        .iter()
+                        .filter_map(|value| value.pending_dot_parts())
+                        .map(|pending| pending.b_col)
+                        .collect();
+                    if b_cols.len() == run.len() && run.len() >= 2 {
+                        let a_slices: Vec<&[f64]> = head
+                            .a_cols
+                            .iter()
+                            .map(|a_col| &a_col.data[a_col.start..a_col.start + head.len])
+                            .collect();
+                        let produced = fp_dot_kernel::materialize_float64_dot_block(
+                            &a_slices, &b_cols, head.len,
+                        );
+                        for (value, column) in run.iter().zip(produced) {
+                            value.publish_dot_data(column);
+                        }
+                    } else {
+                        for value in run {
+                            let _ = value.dot_float64_data();
+                        }
+                    }
+                    start = end;
+                }
+                return;
+            }
+        }
+        for value in group {
+            let _ = value.dot_float64_data();
+        }
+    }
+
     /// The multiply-adds a pending dot column still owes: `k * len`.
     ///
     /// br-frankenpandas-oarkz. `pending.len()` alone cannot size a thread pool —
@@ -4472,11 +4604,7 @@ impl ScalarValues {
         let chunk = pending.len().div_ceil(workers);
         std::thread::scope(|scope| {
             for group in pending.chunks(chunk) {
-                scope.spawn(move || {
-                    for value in group {
-                        let _ = value.dot_float64_data();
-                    }
-                });
+                scope.spawn(move || Self::materialize_dot_group(group));
             }
         });
     }
@@ -50001,6 +50129,134 @@ mod tests {
                     serial.to_vec(),
                     parallel.to_vec(),
                     "output column {c} differs between the serial and parallel arms"
+                );
+            }
+        }
+
+        /// Build `n` pending dot columns over a shared panel, with operands that
+        /// vary per column so a kernel reading the WRONG b column cannot pass.
+        ///
+        /// br-frankenpandas-mti15. `seed` shifts every operand, so two panels
+        /// built with different seeds share no values at all — which is what makes
+        /// `dot_batch_never_batches_across_two_a_panels_mti15` able to detect a
+        /// batch that crossed a panel boundary.
+        fn pending_dot_columns_seeded(rows: usize, k: usize, n: usize, seed: f64) -> Vec<Column> {
+            let a_views: Vec<(std::sync::Arc<[f64]>, usize)> = (0..k)
+                .map(|j| {
+                    let data: std::sync::Arc<[f64]> = (0..rows)
+                        .map(|i| seed + 0.1 + (i as f64) * 0.7 + (j as f64) * 0.3)
+                        .collect();
+                    (data, 0)
+                })
+                .collect();
+            let panel = crate::Float64DotAPanel::new(a_views, rows);
+            (0..n)
+                .map(|c| {
+                    let b: std::sync::Arc<[f64]> = (0..k)
+                        .map(|l| seed + 0.9 - (l as f64) * 0.11 + (c as f64) * 0.037)
+                        .collect();
+                    Column::from_f64_all_valid_dot_product_shared(&panel, b, rows)
+                })
+                .collect()
+        }
+
+        /// THE BOUNDARY TEST for the register-blocked batch kernel
+        /// (br-frankenpandas-mti15).
+        ///
+        /// The parallel arm now materializes a run of columns through an 8-row x
+        /// 6-column register tile instead of one column at a time, so the shapes
+        /// that matter are the ones where a tile does NOT divide the problem:
+        /// rows below / on / above the 8-row boundary, and a column count that
+        /// leaves a partial 6-wide block. The scalar row tail and the partial
+        /// column block are separate code paths from the tile, and each has its
+        /// own chance to drop or double-count a term.
+        ///
+        /// Bit-for-bit against the serial per-column arm, in ONE process, because
+        /// the whole claim of the blocked kernel is that it changes the memory
+        /// schedule and not the arithmetic.
+        #[test]
+        fn dot_batch_blocked_arm_matches_per_column_across_tile_boundaries_mti15() {
+            for &(rows, k, n) in &[
+                (1_usize, 1_usize, 2_usize),
+                (7, 3, 5),
+                (8, 4, 6),
+                (9, 5, 7),
+                (16, 16, 12),
+                (37, 11, 13),
+                (40, 9, 12),
+            ] {
+                let serial_cols = pending_dot_columns(rows, k, n);
+                let parallel_cols = pending_dot_columns(rows, k, n);
+                let serial_refs: Vec<&Column> = serial_cols.iter().collect();
+                let parallel_refs: Vec<&Column> = parallel_cols.iter().collect();
+                // work_per_worker = 1 for the reason the sibling test documents:
+                // under the shipped 2e6 these fixtures size to ONE worker and the
+                // "parallel" arm is silently the serial one.
+                Column::materialize_dot_columns_with_policy(&serial_refs, true, 0, 1);
+                Column::materialize_dot_columns_with_policy(&parallel_refs, false, 0, 1);
+
+                for (c, (serial, parallel)) in
+                    serial_cols.iter().zip(parallel_cols.iter()).enumerate()
+                {
+                    let serial = serial.as_f64_slice().expect("serial arm materialized");
+                    let parallel = parallel.as_f64_slice().expect("parallel arm materialized");
+                    for (row, (want, got)) in serial.iter().zip(parallel.iter()).enumerate() {
+                        assert_eq!(
+                            want.to_bits(),
+                            got.to_bits(),
+                            "rows={rows} k={k} n={n} column {c} row {row}: \
+                             blocked {got:e} vs per-column {want:e}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// THE NEGATIVE CASE the batching predicate exists for
+        /// (br-frankenpandas-mti15).
+        ///
+        /// A worker's chunk is an arbitrary slice of the pending columns and
+        /// nothing stops two INDEPENDENT dot products' columns from landing in
+        /// one chunk. The blocked kernel takes a single A panel for the whole
+        /// batch, so a grouping that ignored panel identity would compute half the
+        /// columns against the wrong matrix — silently, with plausible finite
+        /// values, which no shape or dtype assertion would catch. The run split is
+        /// on `Arc::ptr_eq`, and this interleaves two panels so a missing split is
+        /// a wrong VALUE rather than a wrong length.
+        #[test]
+        fn dot_batch_never_batches_across_two_a_panels_mti15() {
+            let first = pending_dot_columns_seeded(24, 7, 6, 0.0);
+            let second = pending_dot_columns_seeded(24, 7, 6, 11.5);
+            let reference_first = pending_dot_columns_seeded(24, 7, 6, 0.0);
+            let reference_second = pending_dot_columns_seeded(24, 7, 6, 11.5);
+
+            // Interleaved, so no contiguous run is longer than one column and the
+            // grouping is forced to split on every boundary.
+            let mut interleaved: Vec<&Column> = Vec::new();
+            for (a, b) in first.iter().zip(second.iter()) {
+                interleaved.push(a);
+                interleaved.push(b);
+            }
+            Column::materialize_dot_columns_with_policy(&interleaved, false, 0, 1);
+
+            let reference_refs: Vec<&Column> = reference_first
+                .iter()
+                .chain(reference_second.iter())
+                .collect();
+            Column::materialize_dot_columns_with_policy(&reference_refs, true, 0, 1);
+
+            for (c, (got, want)) in first.iter().zip(reference_first.iter()).enumerate() {
+                assert_eq!(
+                    got.as_f64_slice().expect("panel A column"),
+                    want.as_f64_slice().expect("panel A reference"),
+                    "panel A column {c} was computed against the wrong matrix"
+                );
+            }
+            for (c, (got, want)) in second.iter().zip(reference_second.iter()).enumerate() {
+                assert_eq!(
+                    got.as_f64_slice().expect("panel B column"),
+                    want.as_f64_slice().expect("panel B reference"),
+                    "panel B column {c} was computed against the wrong matrix"
                 );
             }
         }
