@@ -42019,8 +42019,34 @@ pub fn set_sgb_rolling_max_workers(workers: Option<usize>) {
 /// Grouped rolling window over a `SeriesGroupBy`.
 ///
 /// Created by `SeriesGroupBy::rolling()`. Applies existing Series rolling
-/// operations within each group independently, then maps the results back to
-/// the original flat Series index.
+/// operations within each group independently, then SCATTERS the results back
+/// to the original flat Series index.
+///
+/// ⚠️ THAT LAST STEP IS A KNOWN DIVERGENCE, NOT THE CONTRACT
+/// (br-frankenpandas-nyjxf). pandas REORDERS BY GROUP and returns a two-level
+/// index of (group key, original label). MEASURED, live pandas 2.2.3, on values
+/// [1..6] keyed ['b','a','b','a','b','a']:
+///
+/// ```text
+/// s.groupby(k).rolling(2).sum()
+///   a  1   NaN     <- every 'a' row first, in original order within the group
+///      3   6.0
+///      5  10.0
+///   b  0   NaN
+///      2   4.0
+///      4   8.0
+/// ```
+///
+/// FrankenPandas returns those six values at rows 0..5 instead. The
+/// DataFrameGroupBy twin (`GroupByRolling::apply_grouped_rolling`) was already
+/// changed to emit in group-visit order; this one was not, so the two grouped
+/// rolling surfaces currently disagree with each other as well as with pandas.
+///
+/// Porting the twin here is mechanical but NOT free: this impl has a parallel
+/// arm that chunks by key range, so the per-group output base has to be derived
+/// from a prefix sum of group sizes rather than from a running offset, and the
+/// twin's own comment records its row-count change as UNVERIFIED. It wants a
+/// compiler, not another unbuilt edit.
 pub struct SeriesGroupByRolling<'grouped, 'data> {
     groupby: &'grouped SeriesGroupBy<'data>,
     window: usize,
