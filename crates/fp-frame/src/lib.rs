@@ -9971,7 +9971,8 @@ impl Series {
         } else {
             Index::new(out_labels).rename_index(self.index.name())
         };
-        Self::new(self.name.clone(), index, column)
+        // Label selection is a row subset — see `with_row_subset`.
+        self.with_row_subset(index, column)
     }
 
     /// Position-based selection for a list of integer positions.
@@ -10032,7 +10033,11 @@ impl Series {
             .collect();
         let index = self.index.take(&positions).rename_index(self.index.name());
         let column = self.column.take_positions(&positions);
-        Self::new(self.name.clone(), index, column)
+        // Selecting rows keeps the surviving codes valid against the same
+        // categories, so the dtype survives — see `with_row_subset`. MEASURED,
+        // live pandas 2.2.3 on a category Series: a boolean mask, `.loc[labels]`,
+        // `.drop(labels)` and `.dropna()` all report `category`.
+        self.with_row_subset(index, column)
     }
 
     /// Position-based boolean mask selection.
@@ -11176,7 +11181,11 @@ impl Series {
         // even when the result is empty.
         let index = self.index.take(&positions).rename_index(self.index.name());
         let column = self.column.take_positions(&positions);
-        Self::new(self.name.clone(), index, column)
+        // Selecting rows keeps the surviving codes valid against the same
+        // categories, so the dtype survives — see `with_row_subset`. MEASURED,
+        // live pandas 2.2.3 on a category Series: a boolean mask, `.loc[labels]`,
+        // `.drop(labels)` and `.dropna()` all report `category`.
+        self.with_row_subset(index, column)
     }
 
     /// Drop entries by index label.
@@ -11214,7 +11223,11 @@ impl Series {
         // Series.drop.
         let index = self.index.take(&positions).rename_index(self.index.name());
         let column = self.column.take_positions(&positions);
-        Self::new(self.name.clone(), index, column)
+        // Selecting rows keeps the surviving codes valid against the same
+        // categories, so the dtype survives — see `with_row_subset`. MEASURED,
+        // live pandas 2.2.3 on a category Series: a boolean mask, `.loc[labels]`,
+        // `.drop(labels)` and `.dropna()` all report `category`.
+        self.with_row_subset(index, column)
     }
 
     /// Find the last non-NaN value at or before the given label.
@@ -14533,11 +14546,16 @@ impl Series {
     ///
     /// Matches `series[::-1]` / `np.flip(series)`.
     pub fn reverse(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.reverse()?,
-        )
+        // A permutation of the same rows, so the codes stay valid against the
+        // same categories — see `with_row_subset`.
+        //
+        // ⚠️ SEPARATE, NOT FIXED HERE: the doc above says this matches
+        // `series[::-1]`, but that reverses the INDEX too and this clones it
+        // unchanged, so reversed values are paired with the original labels.
+        // `np.flip` is the semantics actually implemented. Changing which one
+        // this is would be a behaviour change, and folding it into a metadata
+        // commit would hide it.
+        self.with_row_subset(self.index.clone(), self.column.reverse()?)
     }
 
     /// Alias for reverse(). Matches `np.flip(series)`.
