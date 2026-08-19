@@ -1219,6 +1219,7 @@ dependencies = [
 name = "fp-columnar"
 version = "0.2.0"
 dependencies = [
+ "fp-dot-kernel",
  "fp-types",
  "rustc-hash",
  "serde",
@@ -1252,6 +1253,10 @@ dependencies = [
  "tempfile",
  "thiserror",
 ]
+
+[[package]]
+name = "fp-dot-kernel"
+version = "0.2.0"
 
 [[package]]
 name = "fp-expr"
