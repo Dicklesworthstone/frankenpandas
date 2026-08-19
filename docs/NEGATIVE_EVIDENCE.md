@@ -40165,3 +40165,25 @@ one of attribution.
 **WHERE THE 4x SITS, from the cycle profile in the row above.** Of FP's ~21.4ms, roughly 10ms is SERIAL `Vec<Scalar>` materialization of the result on the main thread; the remaining ~11ms of GEMM on 15 threads is 182 GFLOP/s where the same kernel measures 29 GFLOP/s on one thread. pandas does the whole product in 4.85ms = ~412 GFLOP/s on 16 threads. So the gap decomposes into ~2x of result boxing that pandas does not do at all, and ~2.3x of parallel-scaling-plus-FMA in the kernel. Neither is addressable by another tile shape.
 
 **Host state:** loadavg_1min 24.71-29.34 across the three capped runs, CPU governor powersave, 3109-3285 MHz observed, AMD Ryzen Threadripper PRO 5975WX. Both arms ran in the SAME invocation on the SAME 16 logical CPUs, which is the point of the row.
+
+### 2026-08-19 BlackThrush (br-frankenpandas-7yiuz, br-frankenpandas-85clb) — REJECT the standing `floordiv @10M` 8.787x row: the npy_divmod correctness fix costs 4.46x and the claim is now 2.003x
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.99412 and pandas 0.99612; BOTH inside the 2% tolerance, verdict FASTER, effect median ratio 2.003x with best-vs-best 2.038x agreeing in direction. This is the only fully clean three-clause gate I obtained all session, and it says the row has fallen.
+
+**Counted mechanism:** one `call` through the GOT per element, counted in the object code of `target/release-perf/fp-bench` (ELF sha256 `406ca3f5502d515a1291f76a36233cca4aa4ab33f78ac3632ce12ab82d922ed9`). `a5696e32b` reimplemented `python_floor_div_f64` as `npy_divmod_f64(lhs, rhs).0`, whose first statement is `lhs % rhs` — and Rust lowers `%` on `f64` to a libm `fmod` call. `objdump` shows exactly that inside `fp_columnar::python_floor_div_f64`: `call *0x9a707a(%rip)`, immediately before the surviving `roundsd $0x9`. The formula it replaced was branch-and-arithmetic only, with no call at all. A 10M-row column now pays 10 million PLT calls.
+
+| | FP p50 | FP threads | pandas p50 | ratio |
+|---|---|---|---|---|
+| standing row, harness `60ed3c58fdd5` | 15815.6us | 8 | 138782.5us | **8.787x** |
+| this measurement | 70526us | 8 | 141297us | **2.003x** |
+
+**THE CONTROLS ARE WHAT MAKE THIS DECIDABLE, on a host where almost nothing else was.** FrankenPandas ran **8 threads in BOTH** rows, and the pandas arm is within **2%** of the standing row's (141297us against 138782.5us) — so the incumbent has not moved and the FP arm has, by 4.46x. A direct `fp-bench` run outside the harness agrees: `floordiv @10M` p50 93027us and `mod @10M` p50 98585us against the standing 15815.6 and 16073.0.
+
+**I AM NOT ASKING FOR A REVERT AND THE FIX IS RIGHT.** `a5696e32b` found 16 genuinely wrong cells out of 200 — signed-zero remainders, quotient overflow to -inf, quotient underflow — because the old IEEE-identity formula is not what numpy computes, and its own differential fuzz oracle was a character-for-character copy of the kernel and therefore agreed with the bug. That is excellent work. What is missing is that the commit carries no perf figure for a change on the hot path of a STANDING row, and this is that figure.
+
+**THE SHAPE OF A FIX, offered rather than claimed:** keep `npy_divmod` as the specification and keep the libm call off the common path. All 16 divergent cells are special values, so a finite-and-in-range fast arm plus a fallback to `npy_divmod` should be bit-identical on all 200 fixture cells while restoring the call-free inner loop. That needs 7yiuz's own 100-cell bit fixture to prove, which is why it is left to its owner.
+
+⚠️ **NOT BANKABLE AS A STANDING LOCK** — the row is thread-capped (`taskset -c 0-15`, `--thread-count 16`) because uncapped runs on this host saturate it, and `assemble_standing_locks.py` excludes capped rows on purpose. The FP-vs-FP regression comparison is nonetheless like-for-like: same 8 FrankenPandas threads, same workload, incumbent within 2%.
+
+⚠️ **THE `+sse4.1` BUILD-IDENTITY LOCK (`5cafc2a41`) DID NOT CATCH THIS, AND COULD NOT.** It defends the compile flag, and the flag is still there — `roundsd` is still emitted, 1 in `python_floor_div_f64` and 1 in `apply_f64_slices_nan_tracked_into`. What changed is the ALGORITHM, which no build-identity check can see. A standing row needs both kinds of lock, and it now has one of each.
+
+**Host state:** loadavg_1min 15.37-27.54 across the measurement, CPU governor powersave, AMD Ryzen Threadripper PRO 5975WX. Measured BEFORE the loadavg-238 window the orchestrator flagged; nothing timed was run inside it.
