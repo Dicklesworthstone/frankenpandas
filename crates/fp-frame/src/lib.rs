@@ -70782,16 +70782,38 @@ impl DataFrame {
                 )
                 .max(1);
                 let chunk = b_values_by_column.len().div_ceil(workers).max(1);
+                // br-frankenpandas-mti15. ONE PASS OVER A PER CHUNK, not one per
+                // column. `dot_column_data` re-streams the whole A panel for
+                // EVERY column it is handed, so a chunk of 16 columns read
+                // `m * k * 8` bytes 16 times; the blocked kernel holds an 8x6
+                // output tile in vector registers across the whole `k` loop and
+                // reads it `n / 6` times instead. Bit-identical — each output
+                // still accumulates `j = 0..k` in the same order — and the
+                // per-column entry remains the fallback inside
+                // `dot_columns_data_blocked` for a chunk of one or a pre-AVX2
+                // CPU.
+                //
+                // The panel is packed ONCE here, outside the jobs, and shared by
+                // `Arc`: packing inside each job would repeat `m * k` copies per
+                // worker, which is the redundancy this hoist exists to remove.
+                // Only worth packing when some job actually gets a batch: with
+                // `chunk == 1` every job takes the per-column fallback and the
+                // pack would be `m * k * 8` bytes of pure waste.
+                let packed_panel: Arc<[f64]> = if chunk >= 2 {
+                    Arc::from(Column::pack_dot_panel(&a_panel, m))
+                } else {
+                    Arc::from(Vec::new())
+                };
                 let jobs: Vec<_> = b_values_by_column
                     .chunks(chunk)
                     .map(|group| {
                         let panel = a_panel.clone();
+                        let packed = Arc::clone(&packed_panel);
                         let group: Vec<Arc<[f64]>> = group.to_vec();
                         move || {
-                            group
-                                .iter()
-                                .map(|b_values| Column::dot_column_data(&panel, b_values, m))
-                                .collect::<Vec<Vec<f64>>>()
+                            let b_cols: Vec<&[f64]> =
+                                group.iter().map(|b_values| &b_values[..]).collect();
+                            Column::dot_columns_data_blocked(&panel, &packed, &b_cols, m)
                         }
                     })
                     .collect();

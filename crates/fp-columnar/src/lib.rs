@@ -4372,6 +4372,11 @@ impl ScalarValues {
 
     /// The A-column slices of a panel, at `len` rows.
     fn dot_panel_slices(a_cols: &Arc<[Float64DotInput]>, len: usize) -> Vec<&[f64]> {
+        Self::dot_panel_slices_from(a_cols, len)
+    }
+
+    /// As [`Self::dot_panel_slices`], over the panel's columns directly.
+    fn dot_panel_slices_from(a_cols: &[Float64DotInput], len: usize) -> Vec<&[f64]> {
         a_cols
             .iter()
             .map(|a_col| &a_col.data[a_col.start..a_col.start + len])
@@ -11904,6 +11909,60 @@ impl Column {
     #[must_use]
     pub fn dot_column_data(a_panel: &Float64DotAPanel, b_col: &[f64], len: usize) -> Vec<f64> {
         ScalarValues::materialize_float64_dot(&a_panel.0, b_col, len)
+    }
+
+    /// Pack a dot A panel once, for reuse by every worker of one product.
+    ///
+    /// br-frankenpandas-mti15. Returns an EMPTY vec when the blocked kernel is
+    /// not available on this CPU, so a caller can prepack unconditionally and
+    /// `dot_columns_data_blocked` will simply take its per-column arm. See
+    /// [`fp_dot_kernel::pack_a_panel`] for the layout.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pack_dot_panel(a_panel: &Float64DotAPanel, len: usize) -> Vec<f64> {
+        if !ScalarValues::dot_kernel_available() {
+            return Vec::new();
+        }
+        let a_slices = ScalarValues::dot_panel_slices_from(&a_panel.0, len);
+        fp_dot_kernel::pack_a_panel(&a_slices, len)
+    }
+
+    /// SEVERAL output columns of one dot product, in a single pass over the A
+    /// panel.
+    ///
+    /// br-frankenpandas-mti15. This is the batched sibling of
+    /// [`Self::dot_column_data`], and it exists because the per-column entry
+    /// re-streams the whole A panel for EVERY column it is called with — which is
+    /// what the pooled orchestrator in `DataFrame::dot` was doing, once per
+    /// column, on every worker. The blocked kernel holds an 8x6 output tile in
+    /// vector registers across the whole `k` loop instead, so A is streamed
+    /// `n / 6` times per worker.
+    ///
+    /// BIT-IDENTICAL to calling [`Self::dot_column_data`] once per column: every
+    /// output element still accumulates `j = 0..k` in the same order with a
+    /// separate multiply and add. `packed` may be empty or the wrong length, in
+    /// which case the kernel packs for itself.
+    ///
+    /// ⚠️ `packed` MUST come from [`Self::pack_dot_panel`] called on THIS panel.
+    /// The packed bytes carry no evidence of which product they came from, so a
+    /// mismatched buffer of the right length would produce finite, plausible,
+    /// wrong numbers. The caller owns that pairing; it cannot be checked here.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn dot_columns_data_blocked(
+        a_panel: &Float64DotAPanel,
+        packed: &[f64],
+        b_cols: &[&[f64]],
+        len: usize,
+    ) -> Vec<Vec<f64>> {
+        if b_cols.len() < 2 || !ScalarValues::dot_kernel_available() {
+            return b_cols
+                .iter()
+                .map(|b_col| ScalarValues::materialize_float64_dot(&a_panel.0, b_col, len))
+                .collect();
+        }
+        let a_slices = ScalarValues::dot_panel_slices_from(&a_panel.0, len);
+        fp_dot_kernel::materialize_float64_dot_block_prepacked(packed, &a_slices, b_cols, len)
     }
 
     pub fn from_f64_all_valid_dot_product_shared(
