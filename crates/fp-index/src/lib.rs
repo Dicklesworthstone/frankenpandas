@@ -5534,9 +5534,44 @@ impl Index {
         (codes, self.propagate_name(Self::new(uniques)))
     }
 
-    /// Alias for `get_indexer`, matching `pd.Index.get_indexer_for`.
+    /// Positional indexer that EXPANDS duplicate matches, matching
+    /// `pd.Index.get_indexer_for`.
+    ///
+    /// ⚠️ This was an alias for [`Self::get_indexer`], and pandas defines the two as
+    /// DIFFERENT precisely when the source has duplicates — that is the whole reason
+    /// `get_indexer_for` exists. pandas' rule is: `get_indexer` when the index is
+    /// unique, otherwise `get_indexer_non_unique(target)[0]`, so the result can be
+    /// LONGER than `target`.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), index [10,20,20,30]:
+    /// ```text
+    ///   target [20, 99, 10]
+    ///   get_indexer_for -> [1, 2, -1, 0]     FOUR entries for a THREE-entry target
+    ///   get_indexer     -> InvalidIndexError: Reindexing only valid with uniquely
+    ///                      valued Index objects
+    /// ```
+    /// The duplicate 20 contributes both of its positions. A `-1` (missing) becomes
+    /// `None` here, keeping this crate's `Option` spelling.
+    ///
+    /// The sibling [`MultiIndex::get_indexer`] already models this correctly — it
+    /// REFUSES a duplicate-bearing source and documents that callers wanting
+    /// expansion should use `get_indexer_for` or `get_indexer_non_unique`. The flat
+    /// index simply had not been given the same treatment.
+    ///
+    /// ⚠️ [`Self::get_indexer`] still does NOT refuse a duplicate source the way
+    /// pandas does; it answers with the first match per target. Changing that is a
+    /// signature question (it returns a `Vec`, not a `Result`) and is left alone
+    /// here so this stays a behaviour fix on one method.
     #[must_use]
     pub fn get_indexer_for(&self, target: &Self) -> Vec<Option<usize>> {
+        if self.has_duplicates() {
+            return self
+                .get_indexer_non_unique(target)
+                .0
+                .into_iter()
+                .map(|position| usize::try_from(position).ok())
+                .collect();
+        }
         self.get_indexer(target)
     }
 
@@ -25624,7 +25659,18 @@ mod tests {
             IndexLabel::Utf8("z".into()),
             IndexLabel::Utf8("b".into()),
         ]);
-        assert_eq!(idx.get_indexer_for(&target), vec![Some(0), None, Some(1)]);
+        // ⚠️ RE-PINNED (br-frankenpandas-lerb2): this asserted [Some(0), None,
+        // Some(1)] — one entry per target, first match only — which is
+        // `get_indexer`'s answer, not `get_indexer_for`'s. `idx` HAS duplicates, and
+        // the very next assertion shows both positions of "a" at 0 and 2.
+        // pandas' rule is get_indexer when unique, else get_indexer_non_unique()[0],
+        // so the result may be LONGER than the target. MEASURED, live pandas 2.2.3,
+        // index [10,20,20,30] with target [20,99,10]: get_indexer_for -> [1,2,-1,0],
+        // four entries for a three-entry target.
+        assert_eq!(
+            idx.get_indexer_for(&target),
+            vec![Some(0), Some(2), None, Some(1)]
+        );
         assert_eq!(
             idx.get_indexer_non_unique(&target),
             (vec![0, 2, -1, 1], vec![1])
