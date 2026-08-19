@@ -2,12 +2,29 @@
 all-features = true
 
 [advisories]
+# ⚠️ EVERY ENTRY HERE NEEDS A LINE ON br-frankenpandas-v7ymy, which exists to make
+# these removable. Both are UNMAINTAINED notices rather than vulnerabilities, both
+# arrive transitively, and cargo deny reports no safe upgrade for either today.
 ignore = [
   # paste 1.0.15 is flagged as unmaintained (RUSTSEC-2024-0436). It only
   # enters the tree as a transitive dep of `parquet` 58.x via its arrow
-  # cast helpers; no direct usage from frankenpandas crates. Track via
-  # br-frankenpandas — drop this ignore once parquet replaces paste.
+  # cast helpers; no direct usage from frankenpandas crates. Drop this
+  # ignore once parquet replaces paste.
+  #
+  # (This comment previously read "Track via br-frankenpandas —" with the id
+  # never filled in, so the ignore had no tracking issue behind it and nothing
+  # would have prompted its removal. Now br-frankenpandas-v7ymy.)
   "RUSTSEC-2024-0436",
+  # proc-macro-error2 2.0.1 is unmaintained (RUSTSEC-2026-0173); the author has
+  # confirmed it and recommends migrating away, and its own parent
+  # proc-macro-error is unmaintained too (RUSTSEC-2024-0370), so both ends of
+  # that lineage are dead. It reaches fp-io twice and only ever transitively:
+  #   hdf5-metno-derive -> hdf5-metno -> fp-io
+  #   mysql-common-derive -> mysql_common -> mysql -> fp-io
+  # cargo deny says "No safe upgrade is available!" — clearing it means those
+  # parents moving off it, or fp-io dropping the hdf5/mysql surfaces, which is a
+  # capability decision rather than a bump. br-frankenpandas-v7ymy.
+  "RUSTSEC-2026-0173",
 ]
 
 [licenses]
@@ -35,6 +52,79 @@ confidence-threshold = 0.8
 # allow-list rather than flagging it as `unlicensed`.
 [[licenses.clarify]]
 crate = "asupersync"
+expression = "MIT"
+license-files = []
+
+# THE WORKSPACE'S OWN CRATES, same situation as asupersync above and for the same
+# reason: this repo's LICENSE is "MIT License (with OpenAI/Anthropic Rider)", so
+# [workspace.package] deliberately sets `license-file = "LICENSE"` and no SPDX
+# `license` field (the rider is not expressible as an SPDX expression, and the
+# Cargo.toml comment records that choice). cargo-deny cannot derive an expression
+# from a non-standard license FILE, so it reported all 15 first-party crates as
+# `unlicensed` and failed the licenses check -- while the third-party dependency
+# licensing it exists to police was entirely clean (bans ok, sources ok).
+#
+# These clarifications state the BASE license for the gate's benefit only. The
+# LICENSE file remains the license of record, exactly as it does for asupersync,
+# whose entry above already set this precedent for the identical license text.
+[[licenses.clarify]]
+crate = "frankenpandas"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-bench"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-columnar"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-conformance"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-dot-kernel"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-expr"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-frame"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-frankentui"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-groupby"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-index"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-io"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-join"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-python"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-runtime"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+crate = "fp-types"
 expression = "MIT"
 license-files = []
 
