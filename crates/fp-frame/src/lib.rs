@@ -157110,6 +157110,54 @@ mod tests {
         assert!(result.columns.contains_key("profit_B"));
     }
 
+    /// Pins the COLUMN ORDER of a multi-value pivot, which the test above leaves
+    /// unspecified — it only checks membership. br-frankenpandas-eay9h.
+    ///
+    /// ⚠️ FP ORDERS BY THE `values` ARGUMENT. pandas orders by neither rule that
+    /// argument implies. MEASURED, live pandas 2.2.3, same frame, both spellings:
+    ///
+    ///   values=["sales","profit"]  sort=True  -> profit_A profit_B sales_A sales_B
+    ///   values=["sales","profit"]  sort=False -> sales_A sales_B profit_A profit_B
+    ///   values=["profit","sales"]  sort=True  -> profit_A profit_B sales_A sales_B
+    ///   values=["profit","sales"]  sort=False -> sales_A sales_B profit_A profit_B
+    ///
+    /// So pandas' default (sort=True) is ALPHABETICAL by value name, and its
+    /// sort=False preserves the FRAME's column order — and NEITHER depends on the
+    /// order the caller passes `values` in. FP follows the argument, so it agrees
+    /// with pandas only when the argument happens to match one of those, which is
+    /// why the corpus has never caught it: the single multi-value fixture
+    /// (fp_p2d_127) lists values in frame order.
+    ///
+    /// This pins today's behaviour so a change is deliberate; it is NOT an
+    /// endorsement. The target depends on eay9h's open `sort` decision.
+    #[test]
+    fn pivot_table_multi_values_orders_columns_by_the_values_argument_eay9h() {
+        fn frame() -> DataFrame {
+            DataFrame::from_dict(
+                &["region", "product", "sales", "profit"],
+                vec![
+                    ("region", vec![Scalar::Utf8("east".into()), Scalar::Utf8("west".into())]),
+                    ("product", vec![Scalar::Utf8("A".into()), Scalar::Utf8("A".into())]),
+                    ("sales", vec![Scalar::Float64(10.0), Scalar::Float64(7.0)]),
+                    ("profit", vec![Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+                ],
+            )
+            .unwrap()
+        }
+
+        let listed_sales_first = frame()
+            .pivot_table_multi_values(&["sales", "profit"], "region", "product", "sum")
+            .unwrap();
+        assert_eq!(listed_sales_first.column_names(), vec!["sales_A", "profit_A"]);
+
+        // Reversing the argument reverses FP's output. pandas does not move at
+        // all between these two calls, under either `sort`.
+        let listed_profit_first = frame()
+            .pivot_table_multi_values(&["profit", "sales"], "region", "product", "sum")
+            .unwrap();
+        assert_eq!(listed_profit_first.column_names(), vec!["profit_A", "sales_A"]);
+    }
+
     #[test]
     fn test_dataframe_truncate() {
         let df = DataFrame::from_dict(
