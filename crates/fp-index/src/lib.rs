@@ -4662,10 +4662,32 @@ impl Index {
     /// Shift the labels by `periods` positions, filling vacated slots
     /// with `fill`.
     ///
-    /// Matches `pd.Index.shift(periods, fill_value=...)` for the
-    /// positional form (pandas also supports a `freq`-aware shift for
-    /// datetime indexes; that path is out of scope here). Positive
-    /// periods shift right; negative shift left.
+    /// ⚠️ THIS IS NOT `pd.Index.shift`, and the claim that used to be here cited a
+    /// signature pandas does not have. It said "Matches `pd.Index.shift(periods,
+    /// fill_value=...)` for the positional form". MEASURED, live pandas 2.2.3
+    /// (CrimsonPine 2026-08-19):
+    /// ```text
+    ///   inspect.signature(pd.Index.shift) -> (self, periods=1, freq=None)
+    ///       there is NO fill_value parameter, and no positional form at all
+    ///   pd.Index([10,20,30]).shift(1)
+    ///       -> NotImplementedError: This method is only implemented for
+    ///          DatetimeIndex, PeriodIndex and TimedeltaIndex
+    ///   pd.date_range('2024-01-01', periods=3, freq='D').shift(1)
+    ///       -> ['2024-01-02','2024-01-03','2024-01-04']
+    ///          labels move FORWARD IN TIME by one freq unit; length preserved;
+    ///          nothing is filled and nothing falls off the end
+    ///   pd.DatetimeIndex([...]).shift(1)   with no inferable freq
+    ///       -> NullFrequencyError: Cannot shift with no freq
+    /// ```
+    /// So pandas' `Index.shift` is a TEMPORAL relabel available only on datetime-like
+    /// indexes, whereas this is a POSITIONAL shift that vacates slots and fills them —
+    /// the semantics of `pd.Series.shift`, applied to labels. The two share a name and
+    /// nothing else.
+    ///
+    /// Kept as a FrankenPandas operation (its behaviour is pinned by
+    /// `index_shift_positive_pads_left` / `_negative_pads_right` / `_zero_is_clone`);
+    /// only the false parity claim is removed. Positive periods shift right, negative
+    /// shift left.
     #[must_use]
     pub fn shift(&self, periods: i64, fill: IndexLabel) -> Self {
         let len = self.labels.len();
