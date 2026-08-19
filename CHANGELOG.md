@@ -3,17 +3,37 @@
 All notable changes to FrankenPandas are documented in this file, organized by capability area.
 
 FrankenPandas is a clean-room Rust reimplementation of the full pandas API surface:
-**12 workspace crates, ~270,000 lines of Rust, 5,173 in-source tests, 1,252 conformance
-packet files across 1,265 fixtures, zero `unsafe` code** (`#![forbid(unsafe_code)]` workspace-wide).
+**12+ workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.2.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
 
-**No tagged releases or GitHub releases exist yet.** Development spans **2,796 commits** from
-**2026-02-13 to 2026-05-16** on a single `main` branch. (A legacy compatibility branch
-diverges at [`a9889ca`](https://github.com/Dicklesworthstone/frankenpandas/commit/a9889cafc70ec04293d907d06f0d80868263e4e8)
+Scope window: project inception on 2026-02-13 through HEAD on 2026-08-19.
+This 2026-08-19 refresh covers the previously undocumented window **2026-05-17 through 2026-08-19**
+(Phase 3 plus published GitHub Releases). Phase 1 (thematic sections) and Phase 2 are unchanged.
+The 2026-05-16 commit-statistics / open-workstreams block is a **snapshot**, not current state.
+Representative commits in each wave are live-linked to GitHub.
+
+## Version Timeline
+
+`Kind` distinguishes a published GitHub Release from a plain git tag. Crate-level tags
+(`fp-types-v0.2.0`, …) exist alongside the workspace tags below; they are not listed row-by-row.
+
+| Version | Kind | Date | Summary |
+|---------|------|------|---------|
+| `[Unreleased]` / Phase 3 | dev head | 2026-05-17 → 2026-08-19 | 5,077 non-merge commits after the 2026-05-16 snapshot: `fp-python` bindings, measured vs-pandas kernels, radix sorts, groupby rolling scatter, oracle/parity tail, repo-janitor docs move. |
+| [`frankenpandas-v0.2.0`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/frankenpandas-v0.2.0) | GitHub Release | 2026-07-28 | Workspace 0.2.0 crate release (with matching `fp-*-v0.2.0` crate Releases). |
+| [`v0.1.2`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/v0.1.2) | GitHub Release | 2026-06-22 | Workspace v0.1.2 (also [`frankenpandas-v0.1.2`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/frankenpandas-v0.1.2)). |
+| [`v0.1.1`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/v0.1.1) | GitHub Release | 2026-06-21 | Workspace v0.1.1 (also [`frankenpandas-v0.1.1`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/frankenpandas-v0.1.1)). |
+| [`fp-bench-v0.1.0`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/fp-bench-v0.1.0) | GitHub Release | 2026-06-15 | First `fp-bench` crate Release. |
+| [`fp-python-v0.1.0`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/fp-python-v0.1.0) | GitHub Release | 2026-05-25 | First `fp-python` crate Release. |
+| [`frankenpandas-v0.1.0`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/frankenpandas-v0.1.0) | GitHub Release | 2026-04-23 | First facade-crate Release (crate tags `fp-types-v0.1.0` … `fp-frankentui-v0.1.0` the same day). |
+
+Tags `backup/local-main-pre-rebase-80a36bf9` and `coda-fpindex-autostash-backup` are **not Releases**.
+
+(A legacy compatibility branch diverges at [`a9889ca`](https://github.com/Dicklesworthstone/frankenpandas/commit/a9889cafc70ec04293d907d06f0d80868263e4e8)
 — MIT licensing, 2026-02-18 — and stays in sync with `main` after every push.)
 
-This changelog is organized in three layers:
+This changelog is organized in four layers:
 
 1. **Phase 1 (capability-foundation era, 2026-02-13 → 2026-03-17)** — the original
    per-subsystem thematic sections below: Core Data Engine, DataFrame API, Series API,
@@ -21,9 +41,10 @@ This changelog is organized in three layers:
    MultiIndex, I/O, Datetime / Timezone, Conformance Testing, Runtime / Governance,
    FrankenTUI, Performance, Licensing.
 2. **Phase 2 (pandas-parity completion era, 2026-03-18 → 2026-05-16)** — three
-   sub-phases at the end of this file (Phase 2a, Phase 2b, Phase 2c).
-3. **Commit Statistics + Open Workstreams** — current state of the tracker, the
-   conformance gate, and the small set of remaining divergences.
+   sub-phases (Phase 2a, Phase 2b, Phase 2c).
+3. **Phase 3 (measured-kernel + Python-bindings era, 2026-05-17 → 2026-08-19)** — dated
+   capability waves plus the 2026-08-18/19 repo-janitor docs reorganization.
+4. **Commit Statistics + Open Workstreams** — 2026-05-16 snapshot (not re-audited here).
 
 ---
 
@@ -44,6 +65,8 @@ This changelog is organized in three layers:
 - [FrankenTUI (Experimental)](#frankentui-experimental)
 - [Performance Optimization](#performance-optimization)
 - [Licensing and Project Metadata](#licensing-and-project-metadata)
+- [Phase 2: Pandas-Parity Completion Era](#phase-2-pandas-parity-completion-era-2026-03-18--2026-05-16)
+- [Phase 3: Measured kernels, Python bindings, published releases](#phase-3-measured-kernels-python-bindings-published-releases-2026-05-17--2026-08-19)
 
 ---
 
@@ -811,13 +834,104 @@ Enforce recovery deadlines ([`c42920b1`](https://github.com/Dicklesworthstone/fr
 
 ---
 
-## Commit Statistics (regenerated 2026-05-16)
+## Phase 3: Measured kernels, Python bindings, published releases (2026-05-17 → 2026-08-19)
+
+5,077 non-merge commits after the 2026-05-16 snapshot; 1,910 beads closed in the window. This is
+the era that **actually published GitHub Releases** (`fp-python-v0.1.0` 2026-05-25, workspace
+`v0.1.1` 2026-06-21, `v0.1.2` 2026-06-22, `frankenpandas-v0.2.0` 2026-07-28) and replaced the
+"Rust-only facade" story with a real `fp-python` surface plus a measured-vs-pandas kernel campaign.
+
+### Repo-janitor docs reorganization (2026-08-18 .. 2026-08-19)
+
+Root planning/parity docs (`FEATURE_PARITY.md`, `EXHAUSTIVE_LEGACY_ANALYSIS.md`,
+`PLAN_TO_PORT_PANDAS_TO_RUST.md`, and siblings) now live under [`docs/planning/`](docs/planning/).
+Skill-loop scratch and already-gitignored beads recovery snapshots were untracked.
+
+- Untrack skill-loop scratch; move root planning docs into `docs/planning/`
+  ([87c6892](https://github.com/Dicklesworthstone/frankenpandas/commit/87c6892f35b3579c71fd8df91a1218961fbad67b))
+- Untrack beads recovery snapshots already gitignored
+  ([42b85ea](https://github.com/Dicklesworthstone/frankenpandas/commit/42b85ea06bedc3491857f0b1f9f9188c061b0222))
+- Move remaining root planning/parity docs into `docs/planning/`
+  ([5420971](https://github.com/Dicklesworthstone/frankenpandas/commit/5420971c9ec00c11b09e351b000476fcaa457eab))
+
+### Phase 3d: Oracle/parity tail and domain-fused math (2026-08-01 → 2026-08-19)
+
+August (~1,275 non-merge commits; 464 beads closed) is a correctness month on the live pandas
+oracle — constructor null/bool/utf8 coercion, datetime `unit=` / `.dt` timezone drop,
+`groupby().rolling()` row order — plus measured f64 `mod`/`floordiv` kernels that recover
+6.83× / 10.41× bit-identical to `npy_divmod` (`br-frankenpandas-7yiuz`).
+
+- `mod` f64 remainder recovers 6.83× with a fused multiply-add, bit-identical to `npy_divmod`
+  ([e8897b1](https://github.com/Dicklesworthstone/frankenpandas/commit/e8897b18246d03162fa3d043274b08357767881f))
+- Guarded fast path restores `floordiv` f64 — 10.41× over the `fmod` path
+  ([e3ba5d4](https://github.com/Dicklesworthstone/frankenpandas/commit/e3ba5d4721ef942ebf946701d659171462a62411))
+
+### Phase 3c: Radix sorts, affine searchsorted, groupby rolling scatter, 0.2.0 (2026-07-01 → 2026-07-28)
+
+July (~794 non-merge commits; 182 beads closed) ships nullable radix sorts (Int64 / Float64 /
+Datetime64 / Timedelta64 / Utf8, na-last), affine `searchsorted` at 33.18×, chunked-parallel
+`to_csv` at 5.13×, and typed-output scatter for DataFrameGroupBy rolling. Workspace version
+bumps 0.1.2 → 0.2.0 on 2026-07-26; GitHub Release [`frankenpandas-v0.2.0`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/frankenpandas-v0.2.0) publishes 2026-07-28.
+
+- Chunked-parallel `to_csv` typed serialization (5.13×)
+  ([fb13f22](https://github.com/Dicklesworthstone/frankenpandas/commit/fb13f224c03d69019ff1dc011d3a201ad9374408))
+- Close affine `searchsorted` (33.18×)
+  ([a1c7c03](https://github.com/Dicklesworthstone/frankenpandas/commit/a1c7c03bb1d2bc278633ceb02a735a33e0eeec0c))
+- Nullable Datetime64/Timedelta64 sort/argsort — na-last radix (4.29× dt64 / 3.99× td64)
+  ([c04108f](https://github.com/Dicklesworthstone/frankenpandas/commit/c04108fd865975e358917edfd1782d1702f9edb7))
+- Nullable/NaN Float64 sort/argsort — na-last radix (3.85× null / 3.77× NaN)
+  ([f3ad443](https://github.com/Dicklesworthstone/frankenpandas/commit/f3ad443170ec60492e08cc13cc94bc48d9c59d06))
+- Nullable Int64 sort/argsort — na-last radix (2.796× asc / 2.463× desc)
+  ([5ad52e0](https://github.com/Dicklesworthstone/frankenpandas/commit/5ad52e0c6056185dae5f3a107b2884166d441ecb))
+- Typed nullable-Utf8 `sort_values` (na-last radix) — 3.3×
+  ([730fe54](https://github.com/Dicklesworthstone/frankenpandas/commit/730fe54a05febab4077cef247f91e0c54adf203f))
+- DataFrameGroupBy rolling typed-output f64+validity scatter (1.63×) (`br-frankenpandas-u5900`)
+  ([8cc5158](https://github.com/Dicklesworthstone/frankenpandas/commit/8cc51582f501e1c9621d70f3ee23793c00a44c6d))
+- Workspace 0.1.2 → 0.2.0
+  ([07ec72b](https://github.com/Dicklesworthstone/frankenpandas/commit/07ec72b34a1623d44be110d46f30bb8b9703f2e0))
+
+### Phase 3b: `fp-python` surface, join/frame kernels that beat pandas, v0.1.1 / v0.1.2 (2026-06-01 → 2026-06-30)
+
+June is the largest month (~2,382 non-merge commits; 830 beads closed). `fp-python` grows a real
+DataFrame/Series surface (`map`/`replace`/`astype`, `merge`, `isna`/`clip`, `to_csv`,
+`read_json`/`parquet`). String-key inner join stops cloning `String`s (1.30×). Expanding
+skew/kurt fuse + `sqrt` instead of `powf` flips a 0.43× loss to 1.19× @1M so fp **beats pandas**
+on that row. Workspace GitHub Releases: [`v0.1.1`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/v0.1.1) (2026-06-21), [`v0.1.2`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/v0.1.2) (2026-06-22).
+
+- Byte-span build+probe for string-key inner join — 1.30×, zero `String` clones (`br-frankenpandas-i388q`)
+  ([9cb0fa2](https://github.com/Dicklesworthstone/frankenpandas/commit/9cb0fa233d1b807a8a0b300d310236b4c070cdb6))
+- `fp-python`: `map`/`replace`/`astype`
+  ([76a1249](https://github.com/Dicklesworthstone/frankenpandas/commit/76a1249dced5bbf217c86d68bc47ec2cbc234c67))
+- `fp-python`: `DataFrame.merge` (joins via `fp-join`)
+  ([a6a2770](https://github.com/Dicklesworthstone/frankenpandas/commit/a6a2770c369a547db04975adc687dce34d221dce))
+- `fp-python`: expose `read_json`/`read_jsonl`/`read_parquet`
+  ([694b5db](https://github.com/Dicklesworthstone/frankenpandas/commit/694b5db47ae45806aa8b54b781d3f2be46cb0722))
+- Expanding skew `s2^1.5` via `sqrt` not `powf` — 0.43×→1.19× @1M (fp now beats pandas)
+  ([cee21d4](https://github.com/Dicklesworthstone/frankenpandas/commit/cee21d4d66fdc2969a5c4e70f84442cd26a11cf2))
+- Expanding skew/kurt fuse — drop O(n log n) `BTreeMap` + typed output (5.9× fp-side, bit-identical)
+  ([8483fe3](https://github.com/Dicklesworthstone/frankenpandas/commit/8483fe39ffc68da0383c4ecae96d77a3ec63e09b))
+
+### Phase 3a: Datetime/rolling/resample parity and first `fp-python` Release (2026-05-17 → 2026-05-31)
+
+Late May (~750 non-merge commits after 2026-05-16; 434 beads closed in the month) closes
+datetime/rolling/ewm/`dt.total_seconds` parity bugs and publishes the first
+[`fp-python-v0.1.0`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/fp-python-v0.1.0)
+GitHub Release on 2026-05-25.
+
+- Resolve P1 filter regression + rolling/ewm `min_periods` bugs
+  ([cd78282](https://github.com/Dicklesworthstone/frankenpandas/commit/cd78282de8c985b7d906f910f8c081e2fbe7d00b))
+- `dt.round`, rolling count, Excel round-trip, `dt.total_seconds` parity
+  ([4e44c60](https://github.com/Dicklesworthstone/frankenpandas/commit/4e44c6090ca2792d90594906942a56016e7f5f4a))
+
+---
+
+## Commit Statistics (snapshot 2026-05-16; not re-audited on 2026-08-19)
 
 | Metric | Value |
 |--------|-------|
 | Total commits | **2,796** |
 | Date range | 2026-02-13 → 2026-05-16 |
-| Tags / releases | None (pre-release; 0.1.0 publish tracked by `br-frankenpandas-4clx`) |
+| Tags / releases | None *as of this 2026-05-16 snapshot* (0.1.0 publish was still tracked by `br-frankenpandas-4clx`). Subsequent GitHub Releases: see the Version timeline at the top of this file. |
 | Workspace crates | **12** |
 | Rust lines (all `.rs` in `crates/`, incl. test dirs) | **269,398** |
 | Rust lines under `src/` (all `.rs` incl. inline `#[cfg(test)]`) | **250,330** |
@@ -834,9 +948,12 @@ Enforce recovery deadlines ([`c42920b1`](https://github.com/Dicklesworthstone/fr
 
 ---
 
-## Open Workstreams (as of 2026-05-16)
+## Open Workstreams (snapshot as of 2026-05-16)
 
-Only **2 open beads** remain in the tracker:
+This block is the 2026-05-16 audit. It is **not** the 2026-08-19 tracker state
+(3,901 closed / 63 open / 7 in_progress as of the Phase 3 refresh).
+
+Only **2 open beads** remain in the tracker *as of 2026-05-16*:
 
 - **`br-frankenpandas-ctmet`** — 25 conformance packets expect Float64 where code returns Int64/Bool (`cumsum`/`cumprod`/`describe`/`round` dtype drift).
 - **`br-frankenpandas-qrn2w`** — `fp-groupby::groupby_sum` silently drops Timedelta64 values.
@@ -867,13 +984,16 @@ Long-running umbrellas tracked but not blocking:
 
 - `git log --reverse --format="%h|%ad|%s" --date=short` for chronological history
 - `git log --since="..." --until="..." --format="%h %s"` for chunked window research
-- `git for-each-ref refs/tags` — confirmed no tags exist yet
-- `gh release list` — confirmed no releases yet
-- `.beads/issues.jsonl` — 1,988 issues, 1,986 closed at audit time
+- `git for-each-ref refs/tags` — 2026-05-16 audit recorded no tags; as of 2026-08-19 the workspace has GitHub Releases `frankenpandas-v0.1.0`, `v0.1.1`, `v0.1.2`, `frankenpandas-v0.2.0` plus crate-level Releases (see Version timeline)
+- `gh release list -R Dicklesworthstone/frankenpandas` — Releases exist; do not treat tags `backup/local-main-pre-rebase-80a36bf9` or `coda-fpindex-autostash-backup` as Releases
+- `.beads/issues.jsonl` — 1,988 issues, 1,986 closed at the 2026-05-16 audit; 1,910 additional closures in 2026-05-17 → 2026-08-19
 - `crates/fp-conformance/DISCREPANCIES.md` — 14 documented divergences (DISC-001 through DISC-014)
 - `crates/fp-conformance/fixtures/packets/` — 1,252 packet JSON files
 - `find crates -name "*.rs" -type f | xargs wc -l` — line counts
 - `grep -rE '^pub (fn|async fn)' crates/*/src/ | wc -l` — public free-fn count
 - `grep -rE '#\[(test|tokio::test)\]' crates/*/src/ | wc -l` — test attribute count
 
-CHANGELOG last refreshed **2026-05-16** by a combined research pass (one main agent + four parallel sub-agents covering three commit windows: 2026-03-18 → 2026-04-15 / 2026-04-16 → 2026-05-01 / 2026-05-02 → 2026-05-16; plus a state-audit agent). Source-of-truth links use full SHA hashes that resolve via GitHub redirects.
+CHANGELOG last refreshed **2026-08-19** as a current-window update covering 2026-05-17 → 2026-08-19
+(Phase 3 + GitHub Releases + repo-janitor docs move). The 2026-05-16 research pass that built
+Phases 1–2 is preserved below that cut. Source-of-truth links use full SHA hashes that resolve
+via GitHub redirects. Planning docs live under `docs/planning/` after the 2026-08-19 janitor commits.
