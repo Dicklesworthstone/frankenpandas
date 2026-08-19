@@ -101132,9 +101132,24 @@ mod tests {
     #[test]
     fn series_reindex_with_method_invalid_rejected() {
         let s = Series::from_values("x", vec![1_i64.into()], vec![Scalar::Float64(1.0)]).unwrap();
+
+        // ⚠️ "nearest" USED TO BE THE INVALID CASE HERE, and it is not one:
+        // pandas accepts it, and FrankenPandas implements it now. MEASURED, live
+        // pandas 2.2.3, on Series([1.0, 2.0], index=[0, 2]):
+        //     reindex([1], method='nearest')  -> [2.0]   (ties go to the HIGHER label)
+        //     reindex([1], method='pad')      -> [1.0]
+        //     reindex([1], method='backfill') -> [2.0]
+        //     reindex([1], method='bogus')    -> ValueError
+        // So the refusal this test is for needs a method pandas ALSO refuses.
         assert!(
             s.reindex_with_method(vec![1_i64.into()], "nearest")
-                .is_err()
+                .is_ok(),
+            "nearest is a supported method"
+        );
+        assert!(
+            s.reindex_with_method(vec![1_i64.into()], "bogus")
+                .is_err(),
+            "an unknown method is still refused"
         );
     }
 
@@ -159837,16 +159852,28 @@ mod tests {
 
         assert_eq!(min_vals[0], Scalar::Float64(3.0));
         assert_eq!(max_vals[0], Scalar::Float64(3.0));
-        assert!(min_vals[1].is_missing());
-        assert!(max_vals[1].is_missing());
-        assert_eq!(min_vals[2], Scalar::Float64(7.0));
-        assert_eq!(max_vals[2], Scalar::Float64(7.0));
+        // ⚠️ ROWS ARE IN GROUP ORDER, NOT SOURCE ORDER (br-frankenpandas-nyjxf).
+        // This test previously read the source-ordered scatter, so index 1 was
+        // b's NaN. MEASURED, live pandas 2.2.3, on the same frame:
+        //
+        //     df.groupby('grp').rolling(1).min()
+        //       a  0  3.0        max: same        count: 1.0
+        //          2  7.0                                1.0
+        //       b  1  NaN                                0.0
+        //          3  9.0                                1.0
+        //
+        // so index 1 is now a's second row (7.0) and the NaN has moved to
+        // index 2. The VALUES are unchanged; only their order is.
+        assert_eq!(min_vals[1], Scalar::Float64(7.0));
+        assert_eq!(max_vals[1], Scalar::Float64(7.0));
+        assert!(min_vals[2].is_missing());
+        assert!(max_vals[2].is_missing());
         assert_eq!(min_vals[3], Scalar::Float64(9.0));
         assert_eq!(max_vals[3], Scalar::Float64(9.0));
 
         assert_eq!(count_vals[0], Scalar::Float64(1.0));
-        assert_eq!(count_vals[1], Scalar::Float64(0.0));
-        assert_eq!(count_vals[2], Scalar::Float64(1.0));
+        assert_eq!(count_vals[1], Scalar::Float64(1.0));
+        assert_eq!(count_vals[2], Scalar::Float64(0.0));
         assert_eq!(count_vals[3], Scalar::Float64(1.0));
     }
 
