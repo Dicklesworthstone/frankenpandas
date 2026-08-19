@@ -17003,19 +17003,29 @@ impl MultiIndex {
         Err(Self::diff_unsupported_error())
     }
 
-    fn round_unsupported_error() -> IndexError {
-        IndexError::InvalidArgument(
-            "loop of ufunc does not support argument 0 of type tuple which has no callable rint method"
-                .to_owned(),
-        )
-    }
-
-    /// Unsupported numeric rounding, matching `pd.MultiIndex.round(...)`.
+    /// Numeric rounding, matching `pd.MultiIndex.round(...)`, which is a NO-OP
+    /// returning an equal copy.
     ///
-    /// Pandas applies `np.around` to the underlying values; tuple-valued
-    /// MultiIndex labels do not support `rint`, so this surface always rejects.
+    /// ⚠️ THIS USED TO REFUSE, on the reasoning that "pandas applies `np.around`
+    /// to the underlying values; tuple-valued MultiIndex labels do not support
+    /// `rint`". That conflates two different calls. MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// mi = pd.MultiIndex.from_tuples([(1.567, "a"), (2.345, "b")])
+    /// mi.round(0) / round(2) / round(-1)  -> [(1.567, 'a'), (2.345, 'b')]  unchanged
+    /// mi.round(2).equals(mi)              -> True   (a copy, not the same object)
+    /// np.around(mi, 2)                    -> TypeError: can't multiply sequence
+    ///                                        by non-int of type 'float'
+    /// ```
+    ///
+    /// So `np.around(index)` does raise — but `Index.round()` never reaches it for
+    /// a MultiIndex, and the float level value is NOT rounded either. The old
+    /// error text was numpy's `rint` message, which is not even what numpy emits
+    /// on this input.
+    ///
+    /// `decimals` is accepted and ignored, exactly as pandas does.
     pub fn round(&self, _decimals: i32) -> Result<Self, IndexError> {
-        Err(Self::round_unsupported_error())
+        Ok(self.clone())
     }
 
     fn string_accessor_error() -> IndexError {
@@ -28099,21 +28109,56 @@ mod tests {
         Ok(())
     }
 
+    /// `MultiIndex.round` is a NO-OP in pandas, not a refusal.
+    ///
+    /// ⚠️ THIS TEST USED TO ASSERT THE OPPOSITE, pinning the numpy `rint` error
+    /// text. The refusal and this assertion both rested on the reasoning that
+    /// pandas applies `np.around` to tuple labels. It does not. MEASURED, live
+    /// pandas 2.2.3:
+    ///
+    /// ```text
+    /// mi = pd.MultiIndex.from_tuples([(1.567, "a"), (2.345, "b")])
+    /// mi.round(0) / round(2) / round(-1) -> [(1.567, 'a'), (2.345, 'b')]
+    /// mi.round(2).equals(mi)             -> True
+    /// np.around(mi, 2)                   -> TypeError (a DIFFERENT call, and a
+    ///                                       different message from the one that
+    ///                                       was pinned here)
+    /// ```
+    ///
+    /// Found by the error-only-stub classifier added to
+    /// scripts/validate_api_coverage_drift.py: it flagged ten MultiIndex methods
+    /// whose whole body is `Err(...)`, and probing all ten against pandas showed
+    /// NINE are correct refusals (pandas raises too, and for `all`/`any` with the
+    /// same wording) while `round` alone was wrong.
     #[test]
-    fn multi_index_round_rejects_tuple_rint_c2x17() -> Result<(), super::IndexError> {
+    fn multi_index_round_is_a_no_op_matching_pandas_c2x17() -> Result<(), super::IndexError> {
         let mi = MultiIndex::from_tuples(vec![
             vec!["a".into(), 1_i64.into()],
             vec!["b".into(), 2_i64.into()],
         ])?;
-        let expected = "loop of ufunc does not support argument 0 of type tuple which has no callable rint method";
 
         for decimals in [-1_i32, 0, 1, 4] {
-            let err = mi.round(decimals).unwrap_err();
-            assert!(matches!(
-                err,
-                super::IndexError::InvalidArgument(message) if message == expected
-            ));
+            let rounded = mi.round(decimals)?;
+            assert_eq!(
+                rounded.values(),
+                mi.values(),
+                "round({decimals}) must leave a MultiIndex unchanged"
+            );
         }
+
+        // Float levels are NOT rounded either — the no-op is total, which is the
+        // half a "rounding is unsupported here" reading would still get wrong.
+        let floats = MultiIndex::from_tuples(vec![
+            vec![
+                super::IndexLabel::Float64(super::OrderedF64(1.567)),
+                "a".into(),
+            ],
+            vec![
+                super::IndexLabel::Float64(super::OrderedF64(2.345)),
+                "b".into(),
+            ],
+        ])?;
+        assert_eq!(floats.round(2)?.values(), floats.values());
 
         Ok(())
     }
