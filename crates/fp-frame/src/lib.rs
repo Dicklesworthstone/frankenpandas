@@ -7263,6 +7263,35 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
+    /// Build a Series from a ROW SUBSET of this one, keeping the categorical
+    /// metadata.
+    ///
+    /// ⚠️ `Series::new` DROPS `categorical`, so any row-subset method that goes
+    /// through it silently changes the dtype from `category` to the codes'
+    /// `int64`. pandas keeps the dtype through every such method. MEASURED, live
+    /// pandas 2.2.3, on `Categorical(['x','y','x','z'])`:
+    ///
+    /// ```text
+    /// s.head().dtype        category
+    /// s.tail().dtype        category
+    /// s.sort_values().dtype category
+    /// s.iloc[[0,2]].dtype   category
+    /// ```
+    ///
+    /// A subset is safe to re-attach to because the surviving codes still index
+    /// the SAME category list — the same reasoning `drop_duplicates` uses
+    /// (86789ce43). It is NOT safe for a method that transforms values, which is
+    /// why this is deliberately not folded into `Series::new`.
+    ///
+    /// `sparse` is left dropped: a `SparseDType` is paired with positional
+    /// non-fill data elsewhere, and whether that survives a slice is a question
+    /// this helper has no business answering.
+    fn with_row_subset(&self, index: Index, column: Column) -> Result<Self, FrameError> {
+        let mut out = Self::new(self.name.clone(), index, column)?;
+        out.categorical = self.categorical.clone();
+        Ok(out)
+    }
+
     /// Construct a Series from key-value pairs (dict-style).
     ///
     /// Keys become the index labels, values become the column.
@@ -10260,7 +10289,9 @@ impl Series {
         // taking a prefix. Bit-identical contiguous head; index name preserved (43269).
         let index = self.index.slice(0, take).rename_index(self.index.name());
         let column = self.column.slice(0, take)?;
-        Self::new(self.name.clone(), index, column)
+        // A prefix keeps the codes valid against the same categories, so the
+        // dtype survives — see `with_row_subset`.
+        self.with_row_subset(index, column)
     }
 
     /// Return the last `n` rows.
@@ -10277,7 +10308,9 @@ impl Series {
             .slice(start, take)
             .rename_index(self.index.name());
         let column = self.column.slice(start, take)?;
-        Self::new(self.name.clone(), index, column)
+        // A row window keeps the codes valid against the same categories, so the
+        // dtype survives — see `with_row_subset`.
+        self.with_row_subset(index, column)
     }
 
     // --- Missing Data Operations ---
@@ -23844,7 +23877,9 @@ impl Series {
             .slice(start, take)
             .rename_index(self.index.name());
         let column = self.column.slice(start, take)?;
-        Self::new(self.name.clone(), index, column)
+        // A row window keeps the codes valid against the same categories, so the
+        // dtype survives — see `with_row_subset`.
+        self.with_row_subset(index, column)
     }
 
     /// Select rows where the time component exactly matches the given time.
@@ -23966,7 +24001,9 @@ impl Series {
             .slice(start, take)
             .rename_index(self.index.name());
         let column = self.column.slice(start, take)?;
-        Self::new(self.name.clone(), index, column)
+        // A row window keeps the codes valid against the same categories, so the
+        // dtype survives — see `with_row_subset`.
+        self.with_row_subset(index, column)
     }
 
     /// Combine two Series element-wise using a function.
@@ -162817,6 +162854,47 @@ mod tests {
         assert_eq!(
             last.to_list(),
             vec![Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(30)]
+        );
+    }
+
+    /// Row-subset methods must keep `dtype: category`. `Series::new` drops the
+    /// metadata, so every one of them silently returned the codes' int64.
+    /// MEASURED, live pandas 2.2.3, on `Categorical(['x','y','x','z'])`: head,
+    /// tail, sort_values, iloc and a row window all report `category`.
+    #[test]
+    fn row_subset_methods_keep_the_categorical_dtype() {
+        let source = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("z".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(source.dtype(), DType::Categorical);
+
+        let first_two = source.head(2).unwrap();
+        assert_eq!(first_two.dtype(), DType::Categorical, "head");
+        assert_eq!(
+            first_two.to_list(),
+            vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())]
+        );
+
+        let last_two = source.tail(2).unwrap();
+        assert_eq!(last_two.dtype(), DType::Categorical, "tail");
+        assert_eq!(
+            last_two.to_list(),
+            vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("z".to_owned())]
+        );
+
+        // The subset keeps the FULL category list, exactly as pandas does — a
+        // category that no surviving row uses is still a category.
+        assert_eq!(
+            last_two.cat().expect("still categorical").categories().len(),
+            3
         );
     }
 
