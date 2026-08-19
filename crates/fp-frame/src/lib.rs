@@ -43871,35 +43871,6 @@ fn str_swapcase(s: &str) -> String {
 /// Pad `s` to `width` chars with `fillchar` on the given side — the Scalar-fallback
 /// transform behind `Series.str.pad` (the contiguous path writes bytes directly).
 /// `both` mirrors CPython str.center (extra fill goes LEFT when width is odd).
-/// Write `value`'s decimal digits into `buf` and borrow them back as `&str`.
-///
-/// br-frankenpandas-3ya6b: the point is that this ALLOCATES NOTHING, so a lazily
-/// labelled column axis can be addressed by position without building a `String`
-/// per access. 24 bytes covers `i64::MIN` (20 chars including the sign).
-///
-/// Uses `unsigned_abs` rather than negating: `-i64::MIN` overflows, and that is the
-/// one input a hand-rolled integer formatter reliably gets wrong.
-fn format_i64_into(value: i64, buf: &mut [u8; 24]) -> &str {
-    let negative = value < 0;
-    let mut magnitude = value.unsigned_abs();
-    let mut idx = buf.len();
-    loop {
-        idx -= 1;
-        buf[idx] = b'0' + u8::try_from(magnitude % 10).unwrap_or(0);
-        magnitude /= 10;
-        if magnitude == 0 {
-            break;
-        }
-    }
-    if negative {
-        idx -= 1;
-        buf[idx] = b'-';
-    }
-    // Every byte written is ASCII, so this cannot fail; the fallback keeps the
-    // function total rather than panicking on an impossible branch.
-    core::str::from_utf8(&buf[idx..]).unwrap_or("")
-}
-
 fn str_pad(s: &str, width: usize, side: &str, fillchar: char) -> String {
     let char_len = s.chars().count();
     if char_len >= width {
@@ -95746,7 +95717,7 @@ mod tests {
         SORTED_UNIQUE_UNION_FINGERPRINT_CACHE, SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX, Series,
         SortedUniqueUnionFingerprintKey, ToNumericErrors, ToNumericOptions, TzAmbiguousPolicy,
         TzLocalizeOptions, TzNonexistentPolicy, align_union, align_union_duplicate_aware,
-        align_union_sorted_unique, cut, datetime64_label_from_naive, format_i64_into,
+        align_union_sorted_unique, cut, datetime64_label_from_naive,
         format_period_label, index_to_frame, index_to_series, int64_unit_range_alignment,
         parse_datetime64_nanos,
         parse_naive_datetime_value, qcut, record_alignment_semantic_witness,
@@ -157688,34 +157659,6 @@ mod tests {
         // ⚠️ The load-bearing inequality: if these ever agree on bucket 0, one of the
         // two has been redefined as the other.
         assert_ne!(size.values()[0], count.values()[0]);
-    }
-
-    /// `format_i64_into` must survive the input that breaks hand-rolled formatters.
-    ///
-    /// br-frankenpandas-3ya6b. `-i64::MIN` overflows, so a formatter that negates
-    /// before extracting digits panics in debug and wraps in release on exactly one
-    /// input out of 2^64. `unsigned_abs` is why this one does not.
-    #[test]
-    fn format_i64_into_matches_to_string_including_min_3ya6b() {
-        for value in [
-            0_i64,
-            7,
-            -7,
-            10,
-            -10,
-            99,
-            -99,
-            1_000_000,
-            i64::MAX,
-            i64::MIN,
-        ] {
-            let mut buf = [0_u8; 24];
-            assert_eq!(
-                format_i64_into(value, &mut buf),
-                value.to_string(),
-                "formatter disagrees with to_string for {value}"
-            );
-        }
     }
 
     /// `column_at` addresses a column by position and agrees with the name route.
