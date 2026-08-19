@@ -1,3 +1,0 @@
-repo_path=.
-timestamp=20260425T062056Z
-issue_id=frankenpandas-zadn

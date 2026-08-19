@@ -1,3 +1,0 @@
-repo_path=/data/projects/frankenpandas
-timestamp=20260424T221652Z
-issue_id=frankenpandas-lxhr
