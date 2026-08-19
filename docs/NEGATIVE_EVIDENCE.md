@@ -40209,3 +40209,29 @@ one of attribution.
 ⚠️ **THREE EARLIER ATTEMPTS AT THIS ROW WERE NULL_UNDECIDABLE AND I DID NOT BANK THEM.** FP's A/A null read 1.0403, 1.0206 and 0.96857 — failing in BOTH directions, so dispersion rather than bias, on an 8-thread kernel with cv ~10%. Raising to 24 balanced-square rounds (96 samples per arm) took it to 0.99887 while the effect moved 6.571x -> 6.649x, inside its own CI: the instrument stabilised and the measurement did not. That is the same remedy CrimsonPine recorded on the floor/ceil/trunc rows.
 
 **Host state:** loadavg_1min 14.45 at launch and 13.64 at finish, 5-minute 18.38 -> 13.23; CPU idle 89.5% before and 69.3% after, iowait 0.05% before and 2.54% after by mpstat; observed core 2392.9 MHz before and 3428.7 MHz after; governor powersave, AMD Ryzen Threadripper PRO 5975WX, 64 logical. UNCAPPED and like-for-like: this workload takes 8 FrankenPandas threads and 2 pandas threads, so unlike `df_dot` it does not saturate the host and needs no thread cap.
+
+### 2026-08-19 BlackThrush (br-frankenpandas-7yiuz) — WIN `mod @10M` 5.696x: a FUSED multiply-add recovers the remainder without `fmod`, and the unfused form is wrong on 97% of inputs
+**Campaign result class:** `incumbent-win`.
+**Executing ELF SHA-256 (self-reported by process):** `bench_elf_sha256=efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e (6894448 bytes) /usr/bin/python3.13`; subject binary `target/release-perf/fp-bench` sha256 `792b240c3e4fc4a64cf290335841fa352038691eb398442cf5d02579abc67ee8` (85667248 bytes), profile `release-perf`.
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f invocation_id=vs-pandas-20260819T171022.155557Z-pid3868509 measured_ratio=5.696x — pandas p50 122347.8us against FrankenPandas p50 21441.0us in the same invocation.
+**A/A null control (same invocation):** FrankenPandas null median ratio 1.01170 and pandas null median ratio 1.00050; both inside the 2% tolerance.
+**Median-CI decision:** effect median 5.696x, CI [5.55098275, 5.79782008], excluding unity; claimed log effect 1.73971286 against the required 0.06130965. All three gate clauses TRUE, `like_for_like.ok` true, best-vs-best 6.9549x agreeing in direction with the median.
+**CV role:** provenance-only, no vote. FP p50 21441.0us cv 8.7% against pandas p50 122347.8us cv 1.8%, 96 samples per arm over 24 balanced-square rounds with `--adaptive-rounds`.
+
+**I HAD RECORDED THIS AS NOT RECOVERABLE, AND THAT WAS WRONG IN A SPECIFIC WAY.** The floordiv row earlier today said mod could not follow "because `lhs - f*rhs` is not exact in general while `fmod` is". True of the ORDINARY product; false of the FUSED one. Under the guard already proved for floordiv, `f = floor(lhs/rhs)` exactly, the floored remainder `R = lhs - f*rhs` is the exact mathematical remainder, and a floating-point remainder is exactly representable — which is why `fmod` can be exact at all. IEEE-754 requires fusedMultiplyAdd to be CORRECTLY ROUNDED, so `(-f).mul_add(rhs, lhs)` evaluates `lhs - f*rhs` with a SINGLE rounding and returns `R` exactly.
+
+**THE CONTROL IS THE INTERESTING NUMBER, not the win.** Over 10_000_000 pairs against `npy_divmod`, single thread, interleaved:
+
+| arm | ns/elem | differing |
+|---|---|---|
+| `npy_divmod` (the reference) | 36.82 | — |
+| `(-f).mul_add(rhs, lhs)` | 5.40 | **0** |
+| `lhs - f * rhs` | 4.31 | **9_664_611 (97%)** |
+
+The unfused form is FASTER than the fused one and wrong on almost every ordinary input, while every shape, dtype and special-value assertion in this repo still passes on it. That is why `the_unfused_remainder_is_not_a_substitute_for_mul_add` is now a test: it asserts the unfused form still disagrees with numpy on a majority of fast-path pairs, and fails if that ever stops being true — the only circumstance under which the "simplification" would be safe. `a5696e32b`'s 100-cell live-pandas bit lock stays green, and `the_guarded_mod_fast_path_is_bit_identical_to_npy_divmod` runs 200_000 pairs while ASSERTING ITS OWN NON-VACUITY (the fallback arm must fire >1_000 times).
+
+⚠️ **`mul_add` IS A libm CALL HERE, NOT AN INSTRUCTION.** fp-columnar is built `+sse4.1`, not `+fma`, and widening it was deliberately declined: `+fma` pulls in AVX width, the collateral CyanLynx measured and rejected (sqrt 0.361x, log regressed) and that br-frankenpandas-3qpj4 scoped this crate's flag to avoid. It is still 6.83x faster than the `fmod` it replaces because glibc resolves `fma` through an IFUNC to a hardware implementation while `fmod` stays iterative. Correctness is independent of which runs — `mul_add` is exactly specified by IEEE — so routing it through the existing `+avx2,+fma` crate is headroom, not a correctness matter.
+
+⚠️ **THE STANDING ROW IS NOT FULLY RESTORED: 5.696x against 7.509x**, and FP's min of 16902.1us sits within 5% of the standing row's p50 of 16073.0us while the pandas arm is within 1.2% of the standing row's. The residual is the guard plus the call, and re-locking 7.509x would be re-locking the answer numpy says is wrong on 16 of 200 special-value cells.
+
+**Host state:** loadavg_1min 11.50 at launch and 11.12 at finish, 5-minute 11.00 -> 17.14; CPU idle 88.99% before and 85.44% after, iowait 0.02% before and 0.27% after by mpstat; observed core 2511.3 MHz before and 3112.4 MHz after; governor powersave, AMD Ryzen Threadripper PRO 5975WX, 64 logical. UNCAPPED and like-for-like: 8 FrankenPandas threads against 2 pandas threads, so this lane needs no cap.
