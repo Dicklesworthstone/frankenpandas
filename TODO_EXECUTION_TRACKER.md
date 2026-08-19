@@ -106,7 +106,7 @@ Status legend:
 ### F2. Project docs
 - [x] F2.1. Update `FEATURE_PARITY.md` statuses/notes based on completed work.
 - [x] F2.2. Update `README.md` with oracle and sidecar capabilities now implemented.
-- [x] F2.3. Update `PROPOSED_ARCHITECTURE.md` for packet/gate/oracle/sidecar flows.
+- [x] F2.3. Update `docs/planning/PROPOSED_ARCHITECTURE.md` for packet/gate/oracle/sidecar flows.
 
 ## G. Full Validation + Completion
 

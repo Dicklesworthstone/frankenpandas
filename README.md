@@ -1830,7 +1830,7 @@ A: At the time of this writing, **only 2 of 1,988 tracked beads remain open** (`
 |----------|---------|
 | `AGENTS.md` | Guidelines for AI coding agents |
 | `CHANGELOG.md` | Three-phase change history; Phase 1 capability foundation, Phase 2 parity completion (sub-phases 2a/2b/2c) |
-| `COMPREHENSIVE_SPEC_FOR_FRANKENPANDAS_V1.md` | Full V1 specification |
+| `docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENPANDAS_V1.md` | Full V1 specification |
 | `FEATURE_PARITY.md` | Detailed parity matrix with status per feature family |
 | `COVERAGE_MATRIX.md` | Test/conformance coverage matrix |
 | `CATEGORICAL_COVERAGE.md` | Categorical accessor coverage report |

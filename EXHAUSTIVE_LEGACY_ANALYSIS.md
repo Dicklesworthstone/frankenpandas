@@ -19,10 +19,10 @@ Legacy corpus:
 - Upstream oracle: `pandas-dev/pandas`
 
 Project contracts:
-- `/data/projects/frankenpandas/COMPREHENSIVE_SPEC_FOR_FRANKENPANDAS_V1.md` (sections 14-21 are operationally binding)
+- `/data/projects/frankenpandas/docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENPANDAS_V1.md` (sections 14-21 are operationally binding)
 - `/data/projects/frankenpandas/EXISTING_PANDAS_STRUCTURE.md`
-- `/data/projects/frankenpandas/PLAN_TO_PORT_PANDAS_TO_RUST.md`
-- `/data/projects/frankenpandas/PROPOSED_ARCHITECTURE.md`
+- `/data/projects/frankenpandas/docs/planning/PLAN_TO_PORT_PANDAS_TO_RUST.md`
+- `/data/projects/frankenpandas/docs/planning/PROPOSED_ARCHITECTURE.md`
 - `/data/projects/frankenpandas/FEATURE_PARITY.md`
 
 ## 2. Quantitative Legacy Inventory (Measured)
@@ -171,7 +171,7 @@ Definition of done for Phase-2:
 
 ## 11. Residual Gaps and Risks
 
-- `PROPOSED_ARCHITECTURE.md` currently embeds literal `\n` in crate-map bullets; normalize to proper markdown before relying on it for automation.
+- `docs/planning/PROPOSED_ARCHITECTURE.md` currently embeds literal `\n` in crate-map bullets; normalize to proper markdown before relying on it for automation.
 - IO surface is the largest test-density area; extraction must avoid overfitting to a tiny subset.
 - Cython boundary areas remain the highest semantic regression risk until differential corpus is broad.
 
