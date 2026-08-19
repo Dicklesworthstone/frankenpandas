@@ -14948,6 +14948,54 @@ mod tests {
         assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
     }
 
+    /// The Series and DataFrame CSV writers DISAGREE about pandas index default.
+    ///
+    /// br-frankenpandas-sseeh. This pins an asymmetry that is currently undocumented
+    /// and easy to "tidy" in either direction by accident:
+    ///   `DataFrameIoExt::to_csv_string` takes `CsvWriteOptions::default()`, whose
+    ///   `include_index` is FALSE, so it emits the pandas `to_csv(index=False)` shape.
+    ///   `SeriesIoExt::to_csv_string` overrides that default with
+    ///   `include_index: true`, so it emits the bare `to_csv()` shape.
+    ///
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19), frame with index
+    /// [10, 11] and one column `a`: `df.to_csv()` yields `",a\n10,1\n11,2\n"` with
+    /// the index INCLUDED behind a leading empty header cell, while
+    /// `df.to_csv(index=False)` yields `"a\n1\n2\n"`. pandas writes the index by
+    /// default for BOTH Series and DataFrame, so the Series side matches the
+    /// incumbent here and the DataFrame side does not.
+    ///
+    /// ⚠️ THIS TEST DOES NOT ENDORSE EITHER SHAPE. It exists so that a change to
+    /// `CsvWriteOptions::default()`, or an "obvious" cleanup deleting the Series
+    /// override, fails here loudly instead of silently altering one surface. The
+    /// behaviour decision belongs on the bead, not in this file.
+    ///
+    /// Asserted structurally — a leading comma means the index column is present —
+    /// rather than on exact header text, because the index label spelling is a
+    /// separate concern this test should not also pin.
+    #[test]
+    fn csv_index_default_differs_between_series_and_dataframe_sseeh() {
+        use super::{DataFrameIoExt, SeriesIoExt};
+
+        let idx = vec![10_i64.into(), 11_i64.into()];
+        let series = Series::from_values("a", idx, vec![Scalar::Int64(1), Scalar::Int64(2)])
+            .expect("series");
+        let frame = DataFrame::from_series(vec![series.clone()]).expect("frame");
+
+        let frame_csv = frame.to_csv_string().expect("dataframe csv");
+        let frame_header = frame_csv.lines().next().expect("header");
+        assert!(
+            !frame_header.starts_with(','),
+            "DataFrame writer omits the index, so the header must NOT lead with an empty cell; csv={frame_csv:?}"
+        );
+
+        let series_csv = series.to_csv_string().expect("series csv");
+        let series_header = series_csv.lines().next().expect("header");
+        assert!(
+            series_header.starts_with(','),
+            "Series writer includes the index, so the header MUST lead with an empty cell as pandas to_csv() does; csv={series_csv:?}"
+        );
+    }
+
     // Deterministic n-row frame whose row `i` depends ONLY on `i`, using the typed
     // constructors so try_write_csv_typed's fast path applies. Exercises every
     // FastCol arm: an AFFINE Float64 (quarter_plan), a non-affine Float64 (ryu),
