@@ -30319,6 +30319,26 @@ impl CrackIndex {
     }
 }
 
+// The same claim as `fp_columnar_stays_sse41_flagged_in_both_release_profiles_85clb`
+// below, asserted against the COMPILED crate instead of the manifest text — the
+// manifest is only one of the ways the flag can go away. A `.cargo/config.toml` edit
+// or a `RUSTFLAGS` override in a bench script removes it without touching a line that
+// test reads, and this sits OUTSIDE `cfg(test)` so it also guards a plain
+// `cargo build --release`, which no test can reach at all.
+//
+// Both operands are `cfg!`, so this is a COMPILE-time guard rather than a runtime
+// one, which is stronger for a lock and is what clippy's `assertions_on_constants`
+// asks for. Disarmed in debug because the stanza is scoped to the two release
+// profiles and does not apply there. Verified before relying on it, rather than
+// assumed: package rustflags DO reach an optimized test target (throwaway two-crate
+// probe, 2026-08-19).
+const _: () = assert!(
+    cfg!(debug_assertions) || cfg!(target_feature = "sse4.1"),
+    "this crate was optimized WITHOUT `+sse4.1`, so `(lhs / rhs).floor()` in \
+     `python_floor_div_f64` is a libm call again and the standing `floordiv @10M` / \
+     `mod @10M` rows (br-frankenpandas-85clb) do not describe this binary"
+);
+
 /// REGRESSION LOCK for the two standing `@10M` claims — `floordiv` ≥ 6.504x and
 /// `mod` ≥ 5.651x vs live pandas. br-frankenpandas-4kig1.
 ///
@@ -30404,6 +30424,148 @@ mod standing_claim_locks {
                  distinction, not an oversight"
             );
         }
+    }
+
+    /// The `rustflags = ...` line of a `[section]` in `manifest`, if it has one.
+    ///
+    /// A line scan rather than a toml dependency: this runs in the ordinary
+    /// `cargo test` gate, and taking on a parser to read two lines would cost more
+    /// than the lock is worth.
+    fn section_rustflags(manifest: &str, header: &str) -> Option<String> {
+        let mut inside = false;
+        let mut collecting = false;
+        let mut value = String::new();
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.starts_with('[') && !collecting {
+                inside = line == header;
+            } else if inside && line.starts_with("rustflags") {
+                collecting = true;
+            }
+            if collecting {
+                value.push_str(line);
+                // rustfmt may wrap the array; keep taking lines until it closes, or a
+                // multi-line stanza would read as an EMPTY flag list and the lock would
+                // fire on a manifest that is perfectly correct.
+                if line.contains(']') {
+                    return Some(value);
+                }
+            }
+        }
+        None
+    }
+
+    /// The check itself, over manifest TEXT rather than over the file, so the two
+    /// negative cases below can drive it without mutating a manifest that a dozen
+    /// agents share.
+    fn assert_sse41_policy(manifest: &str) {
+        // BOTH profiles, and the second is the one that is easy to forget: package
+        // rustflags are NOT inherited through `inherits = "release"`, and benchmarks
+        // build `release-perf`. Flagging only `release` would leave every measured row
+        // at baseline ISA while the shipped library carried the flag.
+        for profile in ["release", "release-perf"] {
+            let header = format!("[profile.{profile}.package.fp-columnar]");
+            let flags = section_rustflags(manifest, &header).unwrap_or_else(|| {
+                panic!(
+                    "`{header}` is missing, or carries no `rustflags`. The standing \
+                     `floordiv @10M` (8.787x) and `mod @10M` (7.509x) rows were \
+                     certified on a build where `(lhs / rhs).floor()` is one `roundsd`; \
+                     without this stanza it is a libm call again — and not one value \
+                     changes, so nothing else in this repo would tell you."
+                )
+            });
+            assert!(
+                flags.contains("+sse4.1"),
+                "`{header}` must keep `+sse4.1`; found `{flags}`"
+            );
+            for rejected in ["x86-64-v3", "+avx"] {
+                assert!(
+                    !flags.contains(rejected),
+                    "`{header}` must NOT enable `{rejected}`. AVX WIDTH in this crate is \
+                     the policy measured and rejected on 2026-07-31 (sqrt 0.361x, log \
+                     regressed), and sqrt/log live here. Found `{flags}`."
+                );
+            }
+        }
+    }
+
+    /// BUILD-IDENTITY half of the same two claims — `floordiv @10M` 8.787x and
+    /// `mod @10M` 7.509x. br-frankenpandas-85clb, on the flag from -3qpj4.
+    ///
+    /// The two locks above defend WHICH ARM runs. Since `d470a8512` those rows rest on
+    /// a second, independent premise — WHAT THAT ARM COMPILES TO — and nothing defended
+    /// it. `mod` is `lhs - floordiv(lhs, rhs) * rhs`, so both ops funnel through
+    /// `python_floor_div_f64`, whose hot tail is `(lhs / rhs).floor()`.
+    ///
+    /// MEASURED IN OBJECT CODE, not argued (2026-08-19). Identical source, two builds:
+    ///
+    /// ```text
+    ///   baseline:  divsd %xmm1,%xmm0 ; jmp *GOT   <- a libm CALL per element
+    ///   +sse4.1:   divsd %xmm1,%xmm0 ; roundsd $0x9,%xmm0,%xmm0 ; ret
+    /// ```
+    ///
+    /// and the `release` rlib built from this manifest carries that `roundsd` inside
+    /// `fp_columnar::python_floor_div_f64` and inside the parallel sweep worker
+    /// `apply_f64_slices_nan_tracked::{closure#0}::{closure#0}` that runs at 10M.
+    ///
+    /// THE NEGATIVE CASE, and why nothing else here can catch it: dropping the stanza
+    /// changes NO VALUE. `roundsd $0x9` and libm `floor` agree bit-for-bit, so every
+    /// correctness test, every golden sha256, and `floor_ceil_trunc_fast_are_bit_
+    /// identical_o57rj` all stay green while the two standing rows quietly lose the
+    /// build they were certified on. The perf ratchet cannot see it either:
+    /// `scripts/assemble_standing_locks.py` states in its own header that it CANNOT
+    /// tell which compiler flags produced a row, because a flagged build and a
+    /// shipping build record identical `runtime_detected_isa_features` and identical
+    /// `engine_identity` — they differ only in an opaque ELF sha.
+    ///
+    /// THE OTHER DIRECTION IS LOCKED TOO, because widening the flag is the cheap way
+    /// to "fix" a future ISA complaint: `x86-64-v3` was measured and REJECTED
+    /// (CyanLynx 2026-07-31, sqrt 0.361x and log regressed), and `sqrt`/`log` live in
+    /// THIS crate, so fp-columnar is precisely where that regression would land.
+    ///
+    /// DELETE THIS when fp-bench records compile-time `cfg!(target_feature = ...)`
+    /// beside the runtime-detected ones and `perf_ratchet.comparability_identity`
+    /// includes them; the ratchet then defends this itself.
+    #[test]
+    fn fp_columnar_stays_sse41_flagged_in_both_release_profiles_85clb() {
+        let manifest_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+            panic!("cannot read the workspace manifest {manifest_path:?}: {e}")
+        });
+        assert_sse41_policy(&manifest);
+    }
+
+    /// A manifest that has lost the `release-perf` half — the exact half that decides
+    /// what every BENCHMARK measures, and the half a reader is most likely to think is
+    /// inherited from `[profile.release]`. It is not.
+    const STANZA_DELETED: &str = "\
+[profile.release.package.fp-columnar]\n\
+rustflags = [\"-Ctarget-feature=+sse4.1\"]\n\
+[profile.release-perf]\n\
+inherits = \"release\"\n";
+
+    /// The widening: someone answers a future ISA complaint with the blanket policy
+    /// that was already measured and rejected.
+    const FLAG_WIDENED_TO_V3: &str = "\
+[profile.release.package.fp-columnar]\n\
+rustflags = [\"-Ctarget-feature=+sse4.1\", \"-Ctarget-cpu=x86-64-v3\"]\n\
+[profile.release-perf.package.fp-columnar]\n\
+rustflags = [\"-Ctarget-feature=+sse4.1\", \"-Ctarget-cpu=x86-64-v3\"]\n";
+
+    /// NON-VACUITY, both directions. A lock nobody has watched fail is a lock nobody
+    /// knows is wired up; these two run the real checker over the two manifests that
+    /// would silently orphan the rows.
+    #[test]
+    #[should_panic(expected = "is missing, or carries no `rustflags`")]
+    fn the_lock_fires_when_the_release_perf_stanza_is_deleted_85clb() {
+        assert_sse41_policy(STANZA_DELETED);
+    }
+
+    #[test]
+    #[should_panic(expected = "must NOT enable `x86-64-v3`")]
+    fn the_lock_fires_when_the_flag_is_widened_to_v3_85clb() {
+        assert_sse41_policy(FLAG_WIDENED_TO_V3);
     }
 }
 
