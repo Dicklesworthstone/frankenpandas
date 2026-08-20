@@ -2064,6 +2064,22 @@ fn unit_range_len(start: i64, end: i64) -> Option<usize> {
     usize::try_from(end.checked_sub(start)?.checked_add(1)?).ok()
 }
 
+// br-frankenpandas-7yiuz. Counts entries into the SLOW arm, in test builds only.
+//
+// OBSERVED DEFECT CLASS, not a hypothetical one: `a5696e32b` made `npy_divmod_f64`
+// below the whole of `python_floor_div_f64`, which was CORRECT -- every bit, shape,
+// dtype and special-value assertion in the repo stayed green -- and cost
+// `floordiv @10M` **4.46x**, taking a standing 8.787x row to 2.003x. Nothing in
+// the tree noticed, because the defect is one libm `fmod` CALL per element and
+// the fast and slow arms return identical values by construction (that identity
+// is the guard's proof obligation). Value assertions therefore cannot see it and
+// never will; only ROUTING can. `the_guarded_fast_paths_still_route_around_fmod`
+// reads this counter.
+#[cfg(test)]
+thread_local! {
+    static NPY_DIVMOD_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Floor-division and modulo together, following numpy's `npy_divmod` exactly.
 ///
 /// pandas' `//` and `%` on float64 dispatch to numpy, so numpy's algorithm --
@@ -2086,6 +2102,9 @@ fn unit_range_len(start: i64, end: i64) -> Option<usize> {
 /// the reconstruction sound where the direct quotient is not.
 #[inline]
 fn npy_divmod_f64(lhs: f64, rhs: f64) -> (f64, f64) {
+    #[cfg(test)]
+    NPY_DIVMOD_ENTRIES.with(|entries| entries.set(entries.get() + 1));
+
     let mut modulus = lhs % rhs; // fmod: exact, truncated toward zero
 
     // Division by zero is delegated to IEEE: the quotient is +/-inf or NaN, and
@@ -62116,6 +62135,140 @@ mod floordiv_mod_f64_pandas_special_value_lock {
              `mul_add` in `python_mod_f64` is no longer load-bearing — check which before \
              relaxing it."
         );
+    }
+
+    /// br-frankenpandas-7yiuz REGRESSION LOCK for the two standing rows
+    /// `.bench-history/standing_math_binary_10m.json` banks: `floordiv @10M`
+    /// **6.649x** and `mod @10M` **6.064x** vs pandas 2.2.3.
+    ///
+    /// WHAT IT DEFENDS AND WHY NOTHING ELSE CAN. Both rows rest entirely on the
+    /// guarded fast path in `python_floor_div_f64` / `python_mod_f64` skipping
+    /// `npy_divmod_f64`, whose first statement is `lhs % rhs` -- and Rust lowers
+    /// `%` on `f64` to a libm `fmod` CALL, one per element. When `a5696e32b`
+    /// routed every element through it, `floordiv @10M` lost **4.46x** (FP p50
+    /// 15815.6us -> 70526us against a pandas arm that moved 2%) and the standing
+    /// 8.787x row became 2.003x. THE ENTIRE TEST SUITE STAYED GREEN, and had to:
+    /// the guard's proof obligation is that the two arms return identical bits,
+    /// which `the_guarded_floordiv_fast_path_is_bit_identical_to_npy_divmod`
+    /// verifies on 200_000 pairs. A value assertion cannot distinguish an arm
+    /// that is 10.41x faster from one that is not. Only ROUTING can, so this
+    /// counts it.
+    ///
+    /// NOT A TIMING TEST, deliberately. This host runs the powersave governor
+    /// with a measured 2.879x cross-core clock spread, so a wall-clock threshold
+    /// would be a frequency ratio in a costume and would flake under fleet load.
+    /// The routed-call count is exact, profile-independent and load-independent.
+    ///
+    /// DELETION CONDITION: delete this when the guarded fast path is deliberately
+    /// removed, which means those two standing rows are being retired with it.
+    #[test]
+    fn the_guarded_fast_paths_still_route_around_fmod() {
+        // The fast path was measured taking 99.9% of a corpus that deliberately
+        // included raw bit patterns; this corpus has none, so 2% is loose.
+        const MAX_FALLBACK_PERCENT: usize = 2;
+        const PAIRS: usize = 200_000;
+
+        fn ordinary_pair(state: &mut u64) -> (f64, f64) {
+            fn xorshift(state: &mut u64) -> u64 {
+                *state ^= *state << 13;
+                *state ^= *state >> 7;
+                *state ^= *state << 17;
+                *state
+            }
+            let a = xorshift(state);
+            let b = xorshift(state);
+            let lhs = ((a >> 11) as f64) / 1024.0 - 4_398_046_511_104.0;
+            let rhs = ((b >> 11) as f64) / 1_048_576.0 - 4_294_967_296.0;
+            (lhs, if rhs == 0.0 { 1.0 } else { rhs })
+        }
+
+        fn entries() -> u64 {
+            super::NPY_DIVMOD_ENTRIES.with(std::cell::Cell::get)
+        }
+        fn reset() {
+            super::NPY_DIVMOD_ENTRIES.with(|counted| counted.set(0));
+        }
+
+        // NON-VACUITY FIRST. A counter that stopped incrementing -- an increment
+        // dropped by a refactor, a `#[cfg(test)]` that stopped applying -- would
+        // make every assertion below pass by measuring nothing. Six inputs the
+        // guard MUST reject: NaN and infinite quotients, a zero divisor, the
+        // quotient overflow and underflow `a5696e32b` fixed, and an exact
+        // integer quotient (`floored == d`). Each must route exactly once.
+        let forced = [
+            (f64::NAN, 3.0),
+            (1.0, 0.0),
+            (f64::INFINITY, 2.0),
+            (7.0, 5e-324),
+            (5e-324, -7.0),
+            (4.0, 2.0),
+        ];
+        for (kernel, name) in [
+            (
+                super::python_floor_div_f64 as fn(f64, f64) -> f64,
+                "floordiv",
+            ),
+            (super::python_mod_f64 as fn(f64, f64) -> f64, "mod"),
+        ] {
+            reset();
+            for (lhs, rhs) in forced {
+                std::hint::black_box(kernel(lhs, rhs));
+            }
+            assert_eq!(
+                entries(),
+                forced.len() as u64,
+                "{name}: the fallback counter recorded {} entries for {} inputs the guard \
+                 must reject. This lock measures nothing until that is fixed -- do not \
+                 read the routing assertions below as evidence.",
+                entries(),
+                forced.len()
+            );
+        }
+
+        // THE LOCK. Ordinary magnitudes must not reach `fmod`.
+        let budget = PAIRS * MAX_FALLBACK_PERCENT / 100;
+        for (kernel, name, row) in [
+            (
+                super::python_floor_div_f64 as fn(f64, f64) -> f64,
+                "python_floor_div_f64",
+                "floordiv @10M 6.649x",
+            ),
+            (
+                super::python_mod_f64 as fn(f64, f64) -> f64,
+                "python_mod_f64",
+                "mod @10M 6.064x",
+            ),
+        ] {
+            let mut state = 0x5eed_1234_9abc_def0_u64;
+            let mut finite = 0_usize;
+            reset();
+            for _ in 0..PAIRS {
+                let (lhs, rhs) = ordinary_pair(&mut state);
+                if std::hint::black_box(kernel(lhs, rhs)).is_finite() {
+                    finite += 1;
+                }
+            }
+            let routed = entries() as usize;
+
+            // The corpus has to have been evaluated for the count to mean
+            // anything: a loop the optimiser hollowed out routes zero calls and
+            // would sail through the budget below.
+            assert!(
+                finite * 2 > PAIRS,
+                "{name}: only {finite} of {PAIRS} results were finite, so this corpus is not \
+                 the ordinary-magnitude one the budget was set for"
+            );
+            assert!(
+                routed <= budget,
+                "{name} fell back to npy_divmod_f64 on {routed} of {PAIRS} ordinary pairs \
+                 (budget {budget}). npy_divmod_f64 opens with `lhs % rhs`, which Rust lowers \
+                 to a libm `fmod` CALL -- one per element. That is exactly the regression \
+                 `a5696e32b` shipped green: it cost floordiv @10M 4.46x and took a standing \
+                 8.787x row to 2.003x. The banked row `{row}` in \
+                 .bench-history/standing_math_binary_10m.json no longer describes this code. \
+                 Re-measure it against pandas before relaxing this budget."
+            );
+        }
     }
 
     /// Shared corpus for the two differential tests above: ordinary magnitudes,
