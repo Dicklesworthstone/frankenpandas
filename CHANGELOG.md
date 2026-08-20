@@ -841,6 +841,12 @@ the era that **actually published GitHub Releases** (`fp-python-v0.1.0` 2026-05-
 `v0.1.1` 2026-06-21, `v0.1.2` 2026-06-22, `frankenpandas-v0.2.0` 2026-07-28) and replaced the
 "Rust-only facade" story with a real `fp-python` surface plus a measured-vs-pandas kernel campaign.
 
+### Delivered capability
+
+- Published GitHub Releases through `frankenpandas-v0.2.0` (2026-07-28).
+- Real `fp-python` surface plus measured-vs-pandas kernels.
+- Planning/parity docs now live under `docs/planning/`.
+
 ### Repo-janitor docs reorganization (2026-08-18 .. 2026-08-19)
 
 Root planning/parity docs (`FEATURE_PARITY.md`, `EXHAUSTIVE_LEGACY_ANALYSIS.md`,
