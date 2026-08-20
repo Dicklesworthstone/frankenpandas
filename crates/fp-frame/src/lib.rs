@@ -36006,8 +36006,19 @@ impl SeriesGroupBy<'_> {
                 let lbl = match val {
                     Scalar::Int64(v) => IndexLabel::Int64(*v),
                     Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-                    Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.into()),
-                    Scalar::Float64(v) => IndexLabel::Utf8(format!("{v}")),
+                    // br-frankenpandas-9m9zf: pandas keeps group keys TYPED.
+                    // Measured, live 2.2.3: df.groupby("k").sum().index is
+                    // [False, True] with index dtype `bool`, and a float key
+                    // stays float — never the strings "True"/"False"/"1.5".
+                    Scalar::Bool(v) => IndexLabel::Bool(*v),
+                    Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
+                    // ⚠️ UNTOUCHED AND SUSPECT: this catch-all renders EVERY
+                    // remaining dtype as the string "NaN" — Timedelta64,
+                    // Datetime64, Period and Interval group keys all collapse to
+                    // one label here. Missing values never reach it (skipped
+                    // above), so this is not the null path. Out of scope for
+                    // 9m9zf, which measured only the float and bool arms; filed
+                    // as a separate observation rather than fixed blind.
                     _ => IndexLabel::Utf8("NaN".into()),
                 };
                 order.push(lbl);
@@ -63612,10 +63623,23 @@ impl DataFrame {
                             .map(|s| match s {
                                 Scalar::Int64(v) => IndexLabel::Int64(*v),
                                 Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-                                Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-                                Scalar::Bool(b) => {
-                                    IndexLabel::Utf8(if *b { "True" } else { "False" }.to_string())
+                                // br-frankenpandas-9m9zf: pandas keeps these TYPED.
+                                // Measured, live 2.2.3:
+                                //   pd.MultiIndex.from_frame(df).levels
+                                //     -> [[1.5, 2.5], [False, True]]  float / bool
+                                // These two arms used to stringify to "1.5" and
+                                // "True"/"False".
+                                //
+                                // ⚠️ ONLY these two arms move. The `Null` arm below
+                                // maps to an EMPTY STRING, where the shared
+                                // `scalar_to_typed_index_label` would give a typed
+                                // null — a different question with its own blast
+                                // radius, so this is not routed through that mapper
+                                // wholesale.
+                                Scalar::Float64(v) => {
+                                    IndexLabel::Float64(fp_index::OrderedF64(*v))
                                 }
+                                Scalar::Bool(b) => IndexLabel::Bool(*b),
                                 Scalar::Null(_) => IndexLabel::Utf8(String::new()),
                                 Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
                                 Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
@@ -84943,11 +84967,17 @@ impl DataFrameGroupBy<'_> {
                 // DatetimeIndex). Matches the part-2 dense temporal path and pandas.
                 Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
                 Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
-                Scalar::Bool(v) => IndexLabel::Utf8(if *v {
-                    "True".to_owned()
-                } else {
-                    "False".to_owned()
-                }),
+                // br-frankenpandas-9m9zf, the same correction the temporal arms
+                // above already received. MEASURED, live pandas 2.2.3:
+                //   df.groupby("k").sum().index -> [False, True], index dtype bool
+                //   a float key stays float
+                // never the strings "True"/"False".
+                Scalar::Bool(v) => IndexLabel::Bool(*v),
+                // ⚠️ Float64 had NO arm and fell to the debug catch-all below,
+                // so a float group key became the Rust debug string
+                // "Float64(1.5)" — not even the "1.5" the other stringifying
+                // sites produced.
+                Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
                 other => IndexLabel::Utf8(format!("{other:?}")),
             }
         } else {
@@ -116388,13 +116418,17 @@ mod tests {
         .unwrap();
 
         let result = df.groupby(&["grp"]).unwrap().sum().unwrap();
-        // sort=True (default) gives sorted key order: "False" < "True"
+        // br-frankenpandas-9m9zf: bool group keys stay TYPED. This asserted
+        // Utf8("False")/Utf8("True"), and the test NAME claimed that was
+        // pandas-style. MEASURED, live pandas 2.2.3:
+        //   df.groupby("k").sum().index -> [False, True]
+        //   index dtype                 -> bool
+        //   [type(x).__name__ for x in index] -> ['bool', 'bool']
+        // so the strings were never pandas' answer. sort=True (the default)
+        // still gives sorted key order, False before True.
         assert_eq!(
             result.index().labels(),
-            &[
-                IndexLabel::Utf8("False".to_owned()),
-                IndexLabel::Utf8("True".to_owned()),
-            ]
+            &[IndexLabel::Bool(false), IndexLabel::Bool(true)]
         );
         assert_eq!(result.columns["val"].values()[0], Scalar::Float64(2.0));
         assert_eq!(result.columns["val"].values()[1], Scalar::Float64(4.0));
@@ -164157,15 +164191,24 @@ mod tests {
         assert_eq!(mi.nlevels(), 2);
         assert_eq!(mi.len(), 2);
 
-        // Float64 values should become Utf8 string labels, not empty strings.
+        // br-frankenpandas-9m9zf: float and bool level values stay TYPED.
+        // This asserted Utf8("1.5") and Utf8("True")/"False" with the comment
+        // "(pandas parity)". MEASURED, live pandas 2.2.3, and it is not parity:
+        //   pd.MultiIndex.from_frame(pd.DataFrame({"f":[1.5,2.5],"b":[True,False]}))
+        //     .levels -> [[1.5, 2.5], [False, True]]   float / bool, not strings
         let level0 = mi.get_level_values(0).unwrap();
-        assert_eq!(level0.labels()[0], IndexLabel::Utf8("1.5".into()));
-        assert_eq!(level0.labels()[1], IndexLabel::Utf8("2.5".into()));
+        assert_eq!(
+            level0.labels()[0],
+            IndexLabel::Float64(fp_index::OrderedF64(1.5))
+        );
+        assert_eq!(
+            level0.labels()[1],
+            IndexLabel::Float64(fp_index::OrderedF64(2.5))
+        );
 
-        // Bool values should become Utf8 "True"/"False" labels (pandas parity).
         let level1 = mi.get_level_values(1).unwrap();
-        assert_eq!(level1.labels()[0], IndexLabel::Utf8("True".into()));
-        assert_eq!(level1.labels()[1], IndexLabel::Utf8("False".into()));
+        assert_eq!(level1.labels()[0], IndexLabel::Bool(true));
+        assert_eq!(level1.labels()[1], IndexLabel::Bool(false));
     }
 
     // ── to_timedelta tests ──
