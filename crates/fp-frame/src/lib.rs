@@ -201811,9 +201811,16 @@ mod typed_index_labels_9m9zf {
     //! df.pivot_table(index="k", columns="b")   index float, columns bool
     //! ```
     //!
-    //! These two paths now route through `scalar_to_typed_index_label`. The
+    //! These two paths route through `scalar_to_typed_index_label`. The
     //! stringifying mapper survives for pivot COLUMN NAMES, which are `String`
     //! in FP and cannot hold a typed label — so this is a split, not a retype.
+    //!
+    //! ⚠️ ATTRIBUTION: the ROUTING was landed by a peer in 27604ac59, citing this
+    //! bead; only these TESTS are new here. I had made textually equivalent edits
+    //! in my working tree, so by the time I committed, git saw no diff for them —
+    //! which is why 1e4df0524 is 107 insertions and zero deletions. Its message
+    //! reads as though it made the routing change; it did not, and this note is
+    //! the correction rather than a force-push of shared main.
     //!
     //! ⚠️ The groupby and `to_multi_index` paths are NOT fixed and still
     //! stringify; two tests pin that (`dataframe_groupby_bool_key_labels_are_pandas_style`,
