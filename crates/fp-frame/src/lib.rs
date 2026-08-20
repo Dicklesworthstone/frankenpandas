@@ -764,7 +764,25 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
     }
 }
 
-fn scalar_to_series_value_counts_index_label(value: &Scalar) -> IndexLabel {
+/// Scalar -> INDEX LABEL, keeping pandas' types.
+///
+/// br-frankenpandas-9m9zf. This was named for the Series `value_counts` caller
+/// that first needed it, but the mapping is not specific to that op: pandas keeps
+/// float and bool labels TYPED wherever they land. Measured, live pandas 2.2.3:
+///
+/// ```text
+/// df.groupby("k").sum().index                    [False, True]   dtype bool
+/// Series([1.5,1.5,2.5]).value_counts().index     float
+/// Series(Categorical([1.5,...])).value_counts()  float   (dtype category)
+/// df.pivot_table(index="k", columns="b")         index float, columns bool
+/// pd.crosstab(...)                               index float, columns bool
+/// ```
+///
+/// ⚠️ NOT interchangeable with [`scalar_to_value_counts_index_label`], which
+/// stringifies. That one is still correct for pivot COLUMN NAMES — those are
+/// `String` in FP and cannot hold a typed label — so the two must stay separate.
+/// Routing a caller to the wrong one is silent: both return an `IndexLabel`.
+fn scalar_to_typed_index_label(value: &Scalar) -> IndexLabel {
     match value {
         Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
         // br-frankenpandas-oracle-bool-label-stale-6bqfr: the sibling of the
@@ -802,7 +820,7 @@ fn materialize_value_counts_output(
         let mut labels = Vec::with_capacity(len);
         let mut values = Vec::with_capacity(len);
         for (value, count) in counts {
-            labels.push(scalar_to_series_value_counts_index_label(&value));
+            labels.push(scalar_to_typed_index_label(&value));
             values.push(Scalar::Int64(i64::try_from(count).unwrap_or(i64::MAX)));
         }
         return Ok((labels, values));
@@ -816,7 +834,7 @@ fn materialize_value_counts_output(
                 let mut labels = Vec::with_capacity(chunk.len());
                 let mut values = Vec::with_capacity(chunk.len());
                 for (value, count) in chunk {
-                    labels.push(scalar_to_series_value_counts_index_label(value));
+                    labels.push(scalar_to_typed_index_label(value));
                     values.push(Scalar::Int64(i64::try_from(*count).unwrap_or(i64::MAX)));
                 }
                 (labels, values)
@@ -11441,7 +11459,11 @@ impl Series {
         let mut labels = Vec::with_capacity(counts.len());
         let mut values = Vec::with_capacity(counts.len());
         for (value, count) in counts {
-            labels.push(scalar_to_value_counts_index_label(&value));
+            // br-frankenpandas-9m9zf: categorical value_counts keeps pandas'
+            // types too — Series(Categorical([1.5, 2.5])).value_counts() has
+            // float labels (index dtype category), and the bool sibling has bool
+            // labels. This used the stringifying mapper.
+            labels.push(scalar_to_typed_index_label(&value));
             if normalize {
                 let normalized = if total == 0.0 {
                     0.0
@@ -50398,15 +50420,16 @@ impl DatetimeAccessor<'_> {
     /// Timedelta column. `component` is one of the `fp_types::Timedelta`
     /// component helpers.
     ///
-    /// ⚠️ NaT IS TESTED HERE, BEFORE `component` is ever called.
-    /// `Timedelta::days(NAT)` returns `0` behind a comment asserting pandas does
-    /// the same; pandas returns `nan`
-    /// (br-frankenpandas-timedelta-nat-days-returns-zero-406ni). Routing NaT to
-    /// `Null` first is what keeps that false premise off this path, and it is
-    /// why the helper's own NaT branch stays unreachable from the product.
+    /// ⚠️ NaT IS THE HELPERS' OWN ANSWER NOW, not this function's precaution
+    /// (br-frankenpandas-timedelta-nat-days-returns-zero-406ni). They used to
+    /// return `0` for NaT — one behind a comment asserting pandas did the same,
+    /// when pandas returns `nan` — so this body tested `NAT` in THREE separate
+    /// arms to keep that false premise off the path. They now return
+    /// `Option<i64>`, so the missing case lives in the type and those three
+    /// duplicated tests are gone; forgetting one is no longer possible.
     fn timedelta_component<F>(&self, component: F) -> Result<Series, FrameError>
     where
-        F: Fn(i64) -> i64,
+        F: Fn(i64) -> Option<i64>,
     {
         // Typed all-valid-or-not Timedelta64 fast path: read the raw &[i64]
         // nanos directly, skipping Scalar materialization. Unlike
@@ -50414,16 +50437,7 @@ impl DatetimeAccessor<'_> {
         // accessors have a defined answer for it (missing) rather than needing
         // the Scalar path's fallback.
         if let Some(nanos) = self.series.column().as_timedelta64_slice() {
-            let raw: Vec<Option<i64>> = nanos
-                .iter()
-                .map(|&n| {
-                    if n == fp_types::Timedelta::NAT {
-                        None
-                    } else {
-                        Some(component(n))
-                    }
-                })
-                .collect();
+            let raw: Vec<Option<i64>> = nanos.iter().map(|&n| component(n)).collect();
             let index = self.series.index().clone();
             let column = Column::from_values(Self::promote_components(&raw))?;
             return Series::new(self.series.name(), index, column);
@@ -50435,12 +50449,10 @@ impl DatetimeAccessor<'_> {
             .values()
             .iter()
             .map(|v| match v {
-                Scalar::Timedelta64(nanos) if *nanos != fp_types::Timedelta::NAT => {
-                    Some(component(*nanos))
-                }
+                Scalar::Timedelta64(nanos) => component(*nanos),
                 Scalar::Utf8(text) => match fp_types::Timedelta::parse(text) {
-                    Ok(nanos) if nanos != fp_types::Timedelta::NAT => Some(component(nanos)),
-                    _ => None,
+                    Ok(nanos) => component(nanos),
+                    Err(_) => None,
                 },
                 _ => None,
             })
@@ -68748,7 +68760,12 @@ impl DataFrame {
             };
             if idx_seen.insert(key) {
                 idx_order_keys.push(key);
-                idx_labels.push(scalar_to_value_counts_index_label(val));
+                // br-frankenpandas-9m9zf: pivot ROW labels are an index, and
+                // pandas keeps them typed (measured: pivot_table index float,
+                // columns bool). The COLUMN side still goes through
+                // scalar_to_pivot_column_name -> the stringifying mapper, because
+                // FP column names are String.
+                idx_labels.push(scalar_to_typed_index_label(val));
             }
         }
 
@@ -152612,8 +152629,12 @@ mod tests {
     ///
     /// The -1s row is the one an implementation gets wrong: the day/second split
     /// is EUCLIDEAN, so it is days -1 / seconds 86399, not 0 / -1. The NaT row is
-    /// the other: `Timedelta::days(NAT)` returns 0 internally, and the accessor
-    /// must emit MISSING before that value can escape.
+    /// the other: it must come out MISSING, never 0. That used to rest on this
+    /// accessor testing `NAT` before calling the helper, because
+    /// `Timedelta::days(NAT)` returned 0 internally; the helpers now return
+    /// `Option<i64>` and answer `None` themselves
+    /// (br-frankenpandas-timedelta-nat-days-returns-zero-406ni), so the row is
+    /// still the interesting one but no longer a convention anybody can drop.
     #[test]
     fn dt_timedelta_components_match_pandas_406ni() {
         use fp_types::Timedelta;
