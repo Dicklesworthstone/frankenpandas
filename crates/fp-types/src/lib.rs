@@ -2066,49 +2066,63 @@ impl Timedelta {
         }
     }
 
-    /// Return the days component. Matches `pd.Timedelta.days`.
+    /// Return the days component, or `None` for `NaT`. Matches
+    /// `pd.Timedelta.days`.
+    ///
+    /// ⚠️ `None`, NOT `0`, AND THE TYPE IS THE FIX
+    /// (br-frankenpandas-timedelta-nat-days-returns-zero-406ni). All four
+    /// component helpers used to return `0` for `NaT`, one of them behind a
+    /// comment asserting "pandas returns 0 for NaT.days (no error)". MEASURED,
+    /// live pandas 2.2.3: `pd.NaT.days` is **nan**, and
+    /// `pd.to_timedelta([1, None, -1], unit='s').dt.days` is float64
+    /// `[0.0, nan, -1.0]` — pandas promotes the whole column because NaN cannot
+    /// live in int64.
+    ///
+    /// An `i64` return cannot express that, so correctness depended on every
+    /// caller remembering to test `NAT` first. It did — `timedelta_component`
+    /// checked in three separate arms — but that is a convention, and the bead
+    /// filed it as a landmine for the next person to wire a `.dt` accessor: a
+    /// function whose doc says "matches pandas" handing back a plausible integer
+    /// where pandas has a missing value. `Option<i64>` moves the fact into the
+    /// type, so a caller cannot forget and the duplicated `NAT` tests go away.
     #[must_use]
-    pub fn days(nanos: i64) -> i64 {
+    pub fn days(nanos: i64) -> Option<i64> {
         if nanos == Self::NAT {
-            // ⚠️ pandas returns **nan** here, not 0 — measured, pd.NaT.days is
-            // nan (br-frankenpandas-timedelta-nat-days-returns-zero-406ni; the
-            // previous comment asserted the opposite). This `i64` signature
-            // cannot express that, so EVERY caller must test NAT before calling
-            // and emit a missing value. `DatetimeAccessor::timedelta_component`
-            // does exactly that, which is why this branch is unreachable from
-            // the product and reached only by the unit tests below.
-            return 0;
+            return None;
         }
         // FLOOR division like pandas: pd.Timedelta(-1,'s').days == -1, not 0.
-        nanos.div_euclid(Self::NANOS_PER_DAY)
+        Some(nanos.div_euclid(Self::NANOS_PER_DAY))
     }
 
-    /// Return the seconds component (0-86399). Matches `pd.Timedelta.seconds`.
+    /// Return the seconds component (0-86399), or `None` for `NaT`. Matches
+    /// `pd.Timedelta.seconds`. See [`Self::days`] for why this is an `Option`.
     #[must_use]
-    pub fn seconds(nanos: i64) -> i64 {
+    pub fn seconds(nanos: i64) -> Option<i64> {
         if nanos == Self::NAT {
-            return 0;
+            return None;
         }
         // Floor-normalized time-of-day remainder: pd.Timedelta(-1,'s').seconds == 86399.
-        nanos.rem_euclid(Self::NANOS_PER_DAY) / Self::NANOS_PER_SEC
+        Some(nanos.rem_euclid(Self::NANOS_PER_DAY) / Self::NANOS_PER_SEC)
     }
 
-    /// Return the microseconds component (0-999999). Matches `pd.Timedelta.microseconds`.
+    /// Return the microseconds component (0-999999), or `None` for `NaT`.
+    /// Matches `pd.Timedelta.microseconds`. See [`Self::days`].
     #[must_use]
-    pub fn microseconds(nanos: i64) -> i64 {
+    pub fn microseconds(nanos: i64) -> Option<i64> {
         if nanos == Self::NAT {
-            return 0;
+            return None;
         }
-        nanos.rem_euclid(Self::NANOS_PER_SEC) / Self::NANOS_PER_MICRO
+        Some(nanos.rem_euclid(Self::NANOS_PER_SEC) / Self::NANOS_PER_MICRO)
     }
 
-    /// Return the nanoseconds component (0-999). Matches `pd.Timedelta.nanoseconds`.
+    /// Return the nanoseconds component (0-999), or `None` for `NaT`. Matches
+    /// `pd.Timedelta.nanoseconds`. See [`Self::days`].
     #[must_use]
-    pub fn nanoseconds(nanos: i64) -> i64 {
+    pub fn nanoseconds(nanos: i64) -> Option<i64> {
         if nanos == Self::NAT {
-            return 0;
+            return None;
         }
-        nanos.rem_euclid(Self::NANOS_PER_MICRO)
+        Some(nanos.rem_euclid(Self::NANOS_PER_MICRO))
     }
 
     /// The coarsest [`TimedeltaStringResolution`] that renders `nanos`
@@ -11050,10 +11064,10 @@ mod tests {
         // pandas floor-normalizes negative timedeltas: pd.Timedelta(-1,'s') has
         // days=-1, seconds=86399, components=(-1, 23, 59, 59, 0, 0, 0).
         let neg_1s = -Timedelta::NANOS_PER_SEC;
-        assert_eq!(Timedelta::days(neg_1s), -1);
-        assert_eq!(Timedelta::seconds(neg_1s), 86399);
-        assert_eq!(Timedelta::microseconds(neg_1s), 0);
-        assert_eq!(Timedelta::nanoseconds(neg_1s), 0);
+        assert_eq!(Timedelta::days(neg_1s), Some(-1));
+        assert_eq!(Timedelta::seconds(neg_1s), Some(86399));
+        assert_eq!(Timedelta::microseconds(neg_1s), Some(0));
+        assert_eq!(Timedelta::nanoseconds(neg_1s), Some(0));
         let comp = Timedelta::components(neg_1s);
         assert_eq!(
             (
@@ -11070,8 +11084,41 @@ mod tests {
 
         // pd.Timedelta(-86401,'s'): days=-2, seconds=86399.
         let neg = -86_401 * Timedelta::NANOS_PER_SEC;
-        assert_eq!(Timedelta::days(neg), -2);
-        assert_eq!(Timedelta::seconds(neg), 86399);
+        assert_eq!(Timedelta::days(neg), Some(-2));
+        assert_eq!(Timedelta::seconds(neg), Some(86399));
+    }
+
+    /// br-frankenpandas-timedelta-nat-days-returns-zero-406ni.
+    ///
+    /// All four component helpers returned `0` for `NaT`, one of them behind a
+    /// comment asserting "pandas returns 0 for NaT.days (no error)". MEASURED,
+    /// live pandas 2.2.3: `pd.NaT.days` is **nan**, and
+    /// `pd.to_timedelta([1, None, -1], unit='s').dt.days` is float64
+    /// `[0.0, nan, -1.0]`.
+    ///
+    /// ⚠️ `0` IS THE ONE WRONG ANSWER THAT LOOKS RIGHT. It is a legal value for
+    /// three of these four accessors — `seconds`, `microseconds` and
+    /// `nanoseconds` all legitimately return 0 for a whole number of days — so a
+    /// caller cannot distinguish "midnight" from "missing" by inspecting the
+    /// result. That is the fail-open-as-plausible-data class, and it is why the
+    /// fix is the return TYPE and not a corrected comment.
+    #[test]
+    fn timedelta_components_are_missing_for_nat_not_zero_406ni() {
+        use super::Timedelta;
+        assert_eq!(Timedelta::days(Timedelta::NAT), None);
+        assert_eq!(Timedelta::seconds(Timedelta::NAT), None);
+        assert_eq!(Timedelta::microseconds(Timedelta::NAT), None);
+        assert_eq!(Timedelta::nanoseconds(Timedelta::NAT), None);
+
+        // NON-VACUITY: a whole number of days legitimately answers 0 for the
+        // three sub-day components, so `Some(0)` and `None` must be reachable
+        // from the same accessor. A test that only checked NaT could pass
+        // against a helper that returned `None` unconditionally.
+        let one_day = Timedelta::NANOS_PER_DAY;
+        assert_eq!(Timedelta::days(one_day), Some(1));
+        assert_eq!(Timedelta::seconds(one_day), Some(0));
+        assert_eq!(Timedelta::microseconds(one_day), Some(0));
+        assert_eq!(Timedelta::nanoseconds(one_day), Some(0));
     }
 
     #[test]
