@@ -201796,3 +201796,110 @@ mod dt_component_offset_sign_00ze3 {
         assert_eq!(ints(&without.dt().second().expect("second")), vec![45]);
     }
 }
+
+#[cfg(test)]
+mod typed_index_labels_9m9zf {
+    //! Float and bool INDEX labels stay typed, matching pandas.
+    //!
+    //! br-frankenpandas-9m9zf. `scalar_to_value_counts_index_label` stringifies
+    //! (`1.5` -> `"1.5"`, `true` -> `"True"`) under comments claiming pandas
+    //! parity. pandas does no such thing — MEASURED, live 2.2.3:
+    //!
+    //! ```text
+    //! Series(Categorical([1.5, 2.5, 1.5])).value_counts().index  [1.5, 2.5]  float
+    //! Series(Categorical([True, False, True])).value_counts()    [True, False] bool
+    //! df.pivot_table(index="k", columns="b")   index float, columns bool
+    //! ```
+    //!
+    //! These two paths now route through `scalar_to_typed_index_label`. The
+    //! stringifying mapper survives for pivot COLUMN NAMES, which are `String`
+    //! in FP and cannot hold a typed label — so this is a split, not a retype.
+    //!
+    //! ⚠️ The groupby and `to_multi_index` paths are NOT fixed and still
+    //! stringify; two tests pin that (`dataframe_groupby_bool_key_labels_are_pandas_style`,
+    //! `df_to_multi_index_float_and_bool_columns`). Both name pandas parity they
+    //! do not have. They are the remainder of 9m9zf, deliberately left so this
+    //! change stays reviewable.
+
+    use super::{DataFrame, IndexLabel, Scalar, Series};
+
+    #[test]
+    fn categorical_value_counts_keeps_float_and_bool_labels_typed() {
+        let floats = Series::from_categorical_codes(
+            "f",
+            vec![0, 1, 0],
+            vec![Scalar::Float64(1.5), Scalar::Float64(2.5)],
+            false,
+        )
+        .unwrap();
+        let out = floats.value_counts().unwrap();
+        assert!(
+            matches!(out.index().labels()[0], IndexLabel::Float64(_)),
+            "float category label must stay Float64, got {:?}",
+            out.index().labels()[0]
+        );
+
+        let bools = Series::from_categorical_codes(
+            "b",
+            vec![0, 1, 0],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+            false,
+        )
+        .unwrap();
+        let out = bools.value_counts().unwrap();
+        assert!(
+            matches!(out.index().labels()[0], IndexLabel::Bool(_)),
+            "bool category label must stay Bool, got {:?}",
+            out.index().labels()[0]
+        );
+    }
+
+    #[test]
+    fn pivot_table_keeps_float_row_labels_typed_but_column_names_stay_strings() {
+        let idx: Vec<IndexLabel> = (0..3).map(IndexLabel::Int64).collect();
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                idx.clone(),
+                vec![
+                    Scalar::Float64(1.5),
+                    Scalar::Float64(2.5),
+                    Scalar::Float64(1.5),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                idx.clone(),
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                idx,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "sum").unwrap();
+        for label in pivoted.index.labels() {
+            assert!(
+                matches!(label, IndexLabel::Float64(_)),
+                "pivot ROW label must stay Float64, got {label:?}"
+            );
+        }
+        // The column side is unchanged and must remain a plain String name.
+        assert_eq!(pivoted.column_order.len(), 1);
+        assert_eq!(&*pivoted.column_order[0], "c1");
+    }
+}
