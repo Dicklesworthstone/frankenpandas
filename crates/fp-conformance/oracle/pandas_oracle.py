@@ -4910,23 +4910,40 @@ def _pivot_dropna(payload: dict[str, Any]) -> bool:
 
 
 def _pivot_sort(payload: dict[str, Any]) -> bool:
-    """`pivot_table(sort=...)`, defaulting to the historical override.
+    """`pivot_table(sort=...)`, defaulting to PANDAS' default.
 
-    br-frankenpandas-eay9h, sibling of `_pivot_dropna`. Returns False when absent
-    so every banked fixture is byte-unchanged; a fixture that explicitly asks for
-    True gets pandas' documented default.
+    br-frankenpandas-eay9h, sibling of `_pivot_dropna`, and now settled the same
+    way: absence means pandas' behaviour. An oracle that silently rewrites the
+    argument under test cannot certify parity, so a fixture that deliberately
+    wants the frame's column order must say `pivot_sort: false` and mean it.
 
-    ⚠ THIS ONE IS STILL NOT PANDAS' DEFAULT, deliberately, and unlike `dropna` the
-    reason is measured rather than assumed: asking all 13 oracle-comparing
-    pivot_table cases both ways, sort=True changes exactly ONE —
-    fp_p2d_127_dataframe_pivot_table_multi_values_strict, whose column order moves.
-    That is a one-fixture re-banking decision for the corpus, not a free
-    correction, so it is left to be taken explicitly. The blast radius the bead
-    feared ("reorders rows for all eight at once") is 1 of 15, not 8 of 8.
+    THE DECISION THIS WAS WAITING ON WAS NOT A PREFERENCE, IT WAS A PRODUCT BUG.
+    The note this replaces was right that flipping it moves exactly ONE of the 15
+    oracle-comparing pivot_table cases -- fp_p2d_127_dataframe_pivot_table_multi
+    _values_strict -- and right to refuse to re-bank it alone, because at that
+    point FrankenPandas ordered multi-value output by the caller's `values`
+    argument, which is not a rule pandas has. Re-banking would have laundered FP's
+    answer into the corpus.
+
+    MEASURED, live pandas 2.2.3, one frame, both spellings of `values`:
+
+        values=["sales","profit"]  sort=True   -> profit_A profit_B sales_A sales_B
+        values=["profit","sales"]  sort=True   -> profit_A profit_B sales_A sales_B
+        values=["sales","profit"]  sort=False  -> sales_A sales_B profit_A profit_B
+        values=["profit","sales"]  sort=False  -> sales_A sales_B profit_A profit_B
+
+    pandas does not move when the caller reorders `values`: sort=True is
+    alphabetical by value name, sort=False is the FRAME's column order, and
+    neither consults the argument. `DataFrame::pivot_table_multi_values` now
+    implements the sort=True rule (it exposes no sort knob, so it implements the
+    default), pinned by
+    `pivot_table_multi_values_orders_columns_by_name_not_by_argument_eay9h`, so
+    this default and FP now agree and fp_p2d_127 was re-banked to pandas' answer
+    rather than to FP's.
     """
     raw = payload.get("pivot_sort")
     if raw is None:
-        return False
+        return True
     if not isinstance(raw, bool):
         raise OracleError("dataframe_pivot_table pivot_sort must be a boolean")
     return raw

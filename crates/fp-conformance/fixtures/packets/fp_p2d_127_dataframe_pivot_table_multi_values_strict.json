@@ -5,71 +5,174 @@
   "operation": "dataframe_pivot_table",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "4b3fc0baee4e9d2e23ebef540381bdebb156f40cdab6611d283cfb7976f218fc",
-    "generated_at": "2026-08-16T12:37:54Z"
+    "oracle_script_sha256": "27743b7ff089406ba1f2c8e6f08f434def284f26010758dab55bc14d00776859",
+    "generated_at": "2026-08-20T16:50:48Z"
   },
-  "pivot_values": ["sales", "profit"],
+  "pivot_values": [
+    "sales",
+    "profit"
+  ],
   "pivot_index": "region",
   "pivot_columns": "product",
   "pivot_aggfunc": "sum",
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "columns": {
       "region": [
-        { "kind": "utf8", "value": "east" },
-        { "kind": "utf8", "value": "east" },
-        { "kind": "utf8", "value": "west" },
-        { "kind": "utf8", "value": "east" }
+        {
+          "kind": "utf8",
+          "value": "east"
+        },
+        {
+          "kind": "utf8",
+          "value": "east"
+        },
+        {
+          "kind": "utf8",
+          "value": "west"
+        },
+        {
+          "kind": "utf8",
+          "value": "east"
+        }
       ],
       "product": [
-        { "kind": "utf8", "value": "A" },
-        { "kind": "utf8", "value": "B" },
-        { "kind": "utf8", "value": "A" },
-        { "kind": "utf8", "value": "A" }
+        {
+          "kind": "utf8",
+          "value": "A"
+        },
+        {
+          "kind": "utf8",
+          "value": "B"
+        },
+        {
+          "kind": "utf8",
+          "value": "A"
+        },
+        {
+          "kind": "utf8",
+          "value": "A"
+        }
       ],
       "sales": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 5 },
-        { "kind": "int64", "value": 7 },
-        { "kind": "int64", "value": 3 }
+        {
+          "kind": "int64",
+          "value": 10
+        },
+        {
+          "kind": "int64",
+          "value": 5
+        },
+        {
+          "kind": "int64",
+          "value": 7
+        },
+        {
+          "kind": "int64",
+          "value": 3
+        }
       ],
       "profit": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 4 },
-        { "kind": "int64", "value": 1 }
+        {
+          "kind": "int64",
+          "value": 2
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 4
+        },
+        {
+          "kind": "int64",
+          "value": 1
+        }
       ]
     },
-    "column_order": ["region", "product", "sales", "profit"]
+    "column_order": [
+      "region",
+      "product",
+      "sales",
+      "profit"
+    ]
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "east" },
-      { "kind": "utf8", "value": "west" }
+      {
+        "kind": "utf8",
+        "value": "east"
+      },
+      {
+        "kind": "utf8",
+        "value": "west"
+      }
     ],
     "columns": {
-      "sales_A": [
-        { "kind": "float64", "value": 13.0 },
-        { "kind": "float64", "value": 7.0 }
-      ],
-      "sales_B": [
-        { "kind": "float64", "value": 5.0 },
-        { "kind": "null", "value": "na_n" }
-      ],
       "profit_A": [
-        { "kind": "float64", "value": 3.0 },
-        { "kind": "float64", "value": 4.0 }
+        {
+          "kind": "float64",
+          "value": 3.0
+        },
+        {
+          "kind": "float64",
+          "value": 4.0
+        }
       ],
       "profit_B": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "null", "value": "na_n" }
+        {
+          "kind": "float64",
+          "value": 1.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
+      ],
+      "sales_A": [
+        {
+          "kind": "float64",
+          "value": 13.0
+        },
+        {
+          "kind": "float64",
+          "value": 7.0
+        }
+      ],
+      "sales_B": [
+        {
+          "kind": "float64",
+          "value": 5.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ]
     },
-    "column_order": ["sales_A", "sales_B", "profit_A", "profit_B"]
+    "column_order": [
+      "profit_A",
+      "profit_B",
+      "sales_A",
+      "sales_B"
+    ]
   }
 }

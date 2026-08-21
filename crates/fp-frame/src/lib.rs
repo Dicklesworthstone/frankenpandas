@@ -69055,6 +69055,24 @@ impl DataFrame {
     /// Matches `df.pivot_table(values=['col1','col2'], index=..., columns=..., aggfunc=...)`.
     /// Column names in the result are formatted as "value_column_pivot_value"
     /// (e.g. "sales_East", "profit_East").
+    ///
+    /// ⚠️ THE VALUE GROUPS COME OUT IN NAME ORDER, NOT ARGUMENT ORDER, and that
+    /// is pandas' rule rather than a convenience. br-frankenpandas-eay9h.
+    /// MEASURED, live pandas 2.2.3, one frame, both spellings of `values`:
+    ///
+    /// | call | result |
+    /// |---|---|
+    /// | `values=["sales","profit"]  sort=True`  | `profit_A profit_B sales_A sales_B` |
+    /// | `values=["profit","sales"]  sort=True`  | `profit_A profit_B sales_A sales_B` |
+    /// | `values=["sales","profit"]  sort=False` | `sales_A sales_B profit_A profit_B` |
+    /// | `values=["profit","sales"]  sort=False` | `sales_A sales_B profit_A profit_B` |
+    ///
+    /// pandas DOES NOT MOVE when the caller reorders `values`: `sort=True` (its
+    /// DEFAULT) is alphabetical by value name and `sort=False` preserves the
+    /// FRAME's column order. This method exposes no `sort` knob, so it implements
+    /// the default. Iterating `values` in argument order -- what this did until
+    /// eay9h -- agrees with pandas only when the caller happens to pass the value
+    /// names already sorted.
     pub fn pivot_table_multi_values(
         &self,
         values: &[&str],
@@ -69071,7 +69089,12 @@ impl DataFrame {
         let mut combined_order = Vec::new();
         let mut shared_index = None;
 
-        for &val_col in values {
+        // pandas' `sort=True` default orders the value level by NAME. See the
+        // measured table on this method. br-frankenpandas-eay9h.
+        let mut by_name = values.to_vec();
+        by_name.sort_unstable();
+
+        for &val_col in &by_name {
             let pt = self.pivot_table(val_col, index_col, columns_col, aggfunc)?;
             if shared_index.is_none() {
                 shared_index = Some(pt.index.clone());
@@ -69099,9 +69122,22 @@ impl DataFrame {
     /// Each `(value_col, aggfunc)` entry is pivoted independently and the
     /// result columns are prefixed with the value column name
     /// (`{value_col}_{pivot_column}`), matching the layout of
-    /// `pivot_table_multi_values`. Duplicate value column names are rejected
-    /// (a dict has unique keys). Missing columns and unsupported aggfuncs
-    /// propagate from the single-value `pivot_table` call.
+    /// `pivot_table_multi_values` -- including its NAME ordering. Duplicate value
+    /// column names are rejected (a dict has unique keys). Missing columns and
+    /// unsupported aggfuncs propagate from the single-value `pivot_table` call.
+    ///
+    /// ⚠️ Same rule, measured separately on live pandas 2.2.3 because the dict
+    /// form does NOT follow the list form when `sort=False` (there it keeps the
+    /// dict's own key order, where the list form takes the frame's column order).
+    /// Under pandas' `sort=True` DEFAULT, which is what this implements, both are
+    /// alphabetical and neither moves when the caller reorders the argument:
+    ///
+    /// | call | result |
+    /// |---|---|
+    /// | `aggfunc={"zeta":"sum","alpha":"mean"}` | `alpha_A alpha_B zeta_A zeta_B` |
+    /// | `aggfunc={"alpha":"mean","zeta":"sum"}` | `alpha_A alpha_B zeta_A zeta_B` |
+    ///
+    /// br-frankenpandas-eay9h.
     pub fn pivot_table_aggfunc_dict(
         &self,
         value_aggs: &[(&str, &str)],
@@ -69127,7 +69163,12 @@ impl DataFrame {
         let mut combined_order = Vec::new();
         let mut shared_index: Option<Index> = None;
 
-        for (val_col, aggfunc) in value_aggs {
+        // pandas' `sort=True` default orders the value level by NAME, not by the
+        // dict's key order. br-frankenpandas-eay9h.
+        let mut by_name = value_aggs.to_vec();
+        by_name.sort_unstable_by_key(|(val_col, _)| *val_col);
+
+        for (val_col, aggfunc) in &by_name {
             let pt = self.pivot_table(val_col, index_col, columns_col, aggfunc)?;
             if shared_index.is_none() {
                 shared_index = Some(pt.index.clone());
@@ -84978,6 +85019,25 @@ impl DataFrameGroupBy<'_> {
                 // "Float64(1.5)" — not even the "1.5" the other stringifying
                 // sites produced.
                 Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
+                // br-frankenpandas-no6s4. REACHABLE, verified not assumed: the
+                // loop that builds these groups only skips a missing key when
+                // `self.dropna` is true (lib.rs:84969 `if self.dropna && ...
+                // is_missing() { continue; }`), so under `dropna=false` a null
+                // key survives and lands here. It used to fall to the debug
+                // catch-all below and render as a Rust `{:?}` string.
+                //
+                // MEASURED, live pandas 2.2.3:
+                //   df.groupby("k", dropna=False).sum().index -> [1.0, nan]
+                // the NaN key SURVIVES as a float nan, never a string.
+                //
+                // COLLAPSE rule copied from `scalar_to_typed_index_label`, whose
+                // comment reasons it for exactly this case (br-frankenpandas-8m6ay):
+                // grouping machinery merges None into the nan group, NaT keeps NaT.
+                Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+                Scalar::Null(_) => IndexLabel::Null(NullKind::NaN),
+                // Still the debug rendering for PERIOD and INTERVAL keys, which
+                // `IndexLabel` has no variant for — a representation gap, not a
+                // mapping bug. See br-frankenpandas-no6s4.
                 other => IndexLabel::Utf8(format!("{other:?}")),
             }
         } else {
@@ -157166,51 +157226,205 @@ mod tests {
     }
 
     /// Pins the COLUMN ORDER of a multi-value pivot, which the test above leaves
-    /// unspecified — it only checks membership. br-frankenpandas-eay9h.
+    /// unspecified -- it only checks membership. br-frankenpandas-eay9h.
     ///
-    /// ⚠️ FP ORDERS BY THE `values` ARGUMENT. pandas orders by neither rule that
-    /// argument implies. MEASURED, live pandas 2.2.3, same frame, both spellings:
+    /// MEASURED, live pandas 2.2.3, on the frame this test builds:
     ///
-    ///   values=["sales","profit"]  sort=True  -> profit_A profit_B sales_A sales_B
-    ///   values=["sales","profit"]  sort=False -> sales_A sales_B profit_A profit_B
-    ///   values=["profit","sales"]  sort=True  -> profit_A profit_B sales_A sales_B
-    ///   values=["profit","sales"]  sort=False -> sales_A sales_B profit_A profit_B
+    /// ```text
+    /// frame column order : ['region', 'team', 'zeta', 'alpha', 'Mid']
+    /// values argument    : ['zeta', 'Mid', 'alpha']
+    /// pandas default     : ['Mid_A','Mid_B','alpha_A','alpha_B','zeta_A','zeta_B']
+    /// reversed argument  : ['Mid_A','Mid_B','alpha_A','alpha_B','zeta_A','zeta_B']
+    /// ```
     ///
-    /// So pandas' default (sort=True) is ALPHABETICAL by value name, and its
-    /// sort=False preserves the FRAME's column order — and NEITHER depends on the
-    /// order the caller passes `values` in. FP follows the argument, so it agrees
-    /// with pandas only when the argument happens to match one of those, which is
-    /// why the corpus has never caught it: the single multi-value fixture
-    /// (fp_p2d_127) lists values in frame order.
+    /// THE THREE CANDIDATE RULES ARE PULLED APART ON PURPOSE, which the corpus's
+    /// single multi-value fixture (fp_p2d_127) cannot do -- it lists its values in
+    /// frame order and its two names are already sorted, so all three rules agree
+    /// there and it certified FP's wrong one twice over. Here they disagree:
     ///
-    /// This pins today's behaviour so a change is deliberate; it is NOT an
-    /// endorsement. The target depends on eay9h's open `sort` decision.
+    /// * argument order    -> `zeta  Mid   alpha`   (what FP did before eay9h)
+    /// * frame order       -> `zeta  alpha Mid`     (pandas' `sort=False`)
+    /// * name order        -> `Mid   alpha zeta`    (pandas' `sort=True` DEFAULT)
+    ///
+    /// `Mid` sorts FIRST because Rust and Python both order these bytewise and
+    /// `'M'` (77) precedes `'a'` (97). A test whose value names were all lowercase
+    /// could not tell name order from a case-folded one.
+    ///
+    /// The second half is the negative case that matters: pandas returns the SAME
+    /// columns in the SAME order when the caller reorders `values`, so an
+    /// implementation that consults the argument at all fails it whichever
+    /// permutation it prefers.
     #[test]
-    fn pivot_table_multi_values_orders_columns_by_the_values_argument_eay9h() {
+    fn pivot_table_multi_values_orders_columns_by_name_not_by_argument_eay9h() {
         fn frame() -> DataFrame {
             DataFrame::from_dict(
-                &["region", "product", "sales", "profit"],
+                &["region", "team", "zeta", "alpha", "Mid"],
                 vec![
-                    ("region", vec![Scalar::Utf8("east".into()), Scalar::Utf8("west".into())]),
-                    ("product", vec![Scalar::Utf8("A".into()), Scalar::Utf8("A".into())]),
-                    ("sales", vec![Scalar::Float64(10.0), Scalar::Float64(7.0)]),
-                    ("profit", vec![Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+                    (
+                        "region",
+                        vec![
+                            Scalar::Utf8("A".into()),
+                            Scalar::Utf8("B".into()),
+                            Scalar::Utf8("A".into()),
+                            Scalar::Utf8("B".into()),
+                        ],
+                    ),
+                    (
+                        "team",
+                        vec![
+                            Scalar::Utf8("x".into()),
+                            Scalar::Utf8("x".into()),
+                            Scalar::Utf8("y".into()),
+                            Scalar::Utf8("y".into()),
+                        ],
+                    ),
+                    (
+                        "zeta",
+                        vec![
+                            Scalar::Float64(1.0),
+                            Scalar::Float64(2.0),
+                            Scalar::Float64(3.0),
+                            Scalar::Float64(4.0),
+                        ],
+                    ),
+                    (
+                        "alpha",
+                        vec![
+                            Scalar::Float64(10.0),
+                            Scalar::Float64(20.0),
+                            Scalar::Float64(30.0),
+                            Scalar::Float64(40.0),
+                        ],
+                    ),
+                    (
+                        "Mid",
+                        vec![
+                            Scalar::Float64(5.0),
+                            Scalar::Float64(6.0),
+                            Scalar::Float64(7.0),
+                            Scalar::Float64(8.0),
+                        ],
+                    ),
                 ],
             )
             .unwrap()
         }
 
-        let listed_sales_first = frame()
-            .pivot_table_multi_values(&["sales", "profit"], "region", "product", "sum")
-            .unwrap();
-        assert_eq!(listed_sales_first.column_names(), vec!["sales_A", "profit_A"]);
+        let expected = vec!["Mid_A", "Mid_B", "alpha_A", "alpha_B", "zeta_A", "zeta_B"];
 
-        // Reversing the argument reverses FP's output. pandas does not move at
-        // all between these two calls, under either `sort`.
-        let listed_profit_first = frame()
-            .pivot_table_multi_values(&["profit", "sales"], "region", "product", "sum")
+        let as_listed = frame()
+            .pivot_table_multi_values(&["zeta", "Mid", "alpha"], "team", "region", "sum")
             .unwrap();
-        assert_eq!(listed_profit_first.column_names(), vec!["profit_A", "sales_A"]);
+        assert_eq!(as_listed.column_names(), expected);
+
+        // NEGATIVE CASE: pandas does not move. Neither may we.
+        let reordered = frame()
+            .pivot_table_multi_values(&["alpha", "zeta", "Mid"], "team", "region", "sum")
+            .unwrap();
+        assert_eq!(reordered.column_names(), expected);
+
+        // The cells travel with their names, so a permutation that merely
+        // relabelled would still fail. Values are pandas' own, same run.
+        for (name, want) in [
+            ("Mid_A", 5.0),
+            ("Mid_B", 6.0),
+            ("alpha_A", 10.0),
+            ("alpha_B", 20.0),
+            ("zeta_A", 1.0),
+            ("zeta_B", 2.0),
+        ] {
+            assert_eq!(
+                as_listed.columns[name].values()[0],
+                Scalar::Float64(want),
+                "row x of {name}"
+            );
+            assert_eq!(
+                reordered.columns[name].values()[0],
+                Scalar::Float64(want),
+                "row x of {name} after reordering the values argument"
+            );
+        }
+    }
+
+    /// The dict form takes the same rule, and does NOT inherit it -- it has its
+    /// own loop. br-frankenpandas-eay9h. MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// aggfunc={"zeta":"sum","alpha":"mean"} -> alpha_A alpha_B zeta_A zeta_B
+    /// aggfunc={"alpha":"mean","zeta":"sum"} -> alpha_A alpha_B zeta_A zeta_B
+    /// ```
+    ///
+    /// Note the dict form diverges from the list form under `sort=False` (it keeps
+    /// the dict's key order where the list form takes the frame's), which is why
+    /// this was measured separately rather than assumed. Under the `sort=True`
+    /// default both are name-ordered.
+    #[test]
+    fn pivot_table_aggfunc_dict_orders_columns_by_name_not_by_argument_eay9h() {
+        fn frame() -> DataFrame {
+            DataFrame::from_dict(
+                &["region", "team", "zeta", "alpha"],
+                vec![
+                    (
+                        "region",
+                        vec![
+                            Scalar::Utf8("A".into()),
+                            Scalar::Utf8("B".into()),
+                            Scalar::Utf8("A".into()),
+                            Scalar::Utf8("B".into()),
+                        ],
+                    ),
+                    (
+                        "team",
+                        vec![
+                            Scalar::Utf8("x".into()),
+                            Scalar::Utf8("x".into()),
+                            Scalar::Utf8("y".into()),
+                            Scalar::Utf8("y".into()),
+                        ],
+                    ),
+                    (
+                        "zeta",
+                        vec![
+                            Scalar::Float64(1.0),
+                            Scalar::Float64(2.0),
+                            Scalar::Float64(3.0),
+                            Scalar::Float64(4.0),
+                        ],
+                    ),
+                    (
+                        "alpha",
+                        vec![
+                            Scalar::Float64(10.0),
+                            Scalar::Float64(20.0),
+                            Scalar::Float64(30.0),
+                            Scalar::Float64(40.0),
+                        ],
+                    ),
+                ],
+            )
+            .unwrap()
+        }
+
+        let expected = vec!["alpha_A", "alpha_B", "zeta_A", "zeta_B"];
+
+        let zeta_first = frame()
+            .pivot_table_aggfunc_dict(&[("zeta", "sum"), ("alpha", "mean")], "team", "region")
+            .unwrap();
+        assert_eq!(zeta_first.column_names(), expected);
+
+        let alpha_first = frame()
+            .pivot_table_aggfunc_dict(&[("alpha", "mean"), ("zeta", "sum")], "team", "region")
+            .unwrap();
+        assert_eq!(alpha_first.column_names(), expected);
+
+        // Each value column keeps ITS OWN aggfunc across the reordering: alpha_A
+        // is the mean of one cell (10.0) and zeta_A the sum of one cell (1.0), so
+        // a reorder that carried the aggfuncs along with the names would show up
+        // here rather than in the name list.
+        for pivoted in [&zeta_first, &alpha_first] {
+            assert_eq!(pivoted.columns["alpha_A"].values()[0], Scalar::Float64(10.0));
+            assert_eq!(pivoted.columns["zeta_A"].values()[0], Scalar::Float64(1.0));
+        }
     }
 
     #[test]
@@ -201951,5 +202165,70 @@ mod typed_index_labels_9m9zf {
         // The column side is unchanged and must remain a plain String name.
         assert_eq!(pivoted.column_order.len(), 1);
         assert_eq!(&*pivoted.column_order[0], "c1");
+    }
+}
+
+#[cfg(test)]
+mod groupby_null_key_label_no6s4 {
+    //! A null group key under `dropna=false` keeps a typed null label.
+    //!
+    //! br-frankenpandas-no6s4. `DataFrameGroupBy::group_key_label` had no `Null`
+    //! arm, so the key fell to `IndexLabel::Utf8(format!("{other:?}"))` and the
+    //! label became a Rust debug rendering. MEASURED, live pandas 2.2.3:
+    //!
+    //! ```text
+    //! pd.DataFrame({"k":[1.0, nan, 1.0], "v":[1,2,3]})
+    //!   .groupby("k", dropna=False).sum().index  ->  [1.0, nan]
+    //! ```
+    //!
+    //! The NaN key survives as a float nan — never a string. FP's nearest
+    //! faithful carrier is `IndexLabel::Null`, which already exists.
+
+    use super::{DataFrame, IndexLabel, NullKind, Scalar, Series};
+
+    #[test]
+    fn null_group_key_is_a_typed_null_not_a_debug_string() {
+        let idx: Vec<IndexLabel> = (0..3).map(IndexLabel::Int64).collect();
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "k",
+                idx.clone(),
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(1.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v",
+                idx,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let grouped = df
+            .groupby_full_options(&["k"], true, true, false)
+            .unwrap()
+            .sum()
+            .unwrap();
+
+        let labels = grouped.index().labels();
+        assert!(
+            labels.iter().any(|l| matches!(l, IndexLabel::Null(_))),
+            "the dropna=false null key must keep a typed null label, got {labels:?}"
+        );
+        // The specific failure this guards: a Utf8 label carrying a Rust debug
+        // rendering such as "Null(NaN)". Any Utf8 label here is wrong.
+        assert!(
+            !labels.iter().any(|l| matches!(l, IndexLabel::Utf8(_))),
+            "no group label may be a stringified scalar, got {labels:?}"
+        );
     }
 }

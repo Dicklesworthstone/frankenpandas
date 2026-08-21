@@ -1,0 +1,51 @@
+{
+  "_comment": [
+    "br-frankenpandas-eay9h. ONE fixture, named explicitly, because bulk",
+    "regeneration is forbidden and this pin is load-bearing evidence.",
+    "",
+    "WHAT CHANGED IN THE ORACLE. `_pivot_sort` defaulted to False -- the",
+    "historical hardcoded override -- against pandas' documented default of",
+    "True. It now defaults to True, the same way `_pivot_dropna` was settled",
+    "on 2026-08-17. Of the 15 oracle-comparing pivot_table cases, sort=True",
+    "moves exactly this ONE, because it is the only multi-value case in the",
+    "corpus (enumerated: every other fixture and every conformance_reshape /",
+    "live_oracle case passes a single-element pivot_values).",
+    "",
+    "WHY THIS IS NOT LAUNDERING FP'S ANSWER INTO THE CORPUS. Until today FP",
+    "ordered multi-value output by the caller's `values` argument, which is not",
+    "a rule pandas has, and re-banking this fixture alone would have pinned",
+    "that. MEASURED, live pandas 2.2.3, one frame, both spellings:",
+    "",
+    "    values=[sales,profit] sort=True   profit_A profit_B sales_A sales_B",
+    "    values=[profit,sales] sort=True   profit_A profit_B sales_A sales_B",
+    "    values=[sales,profit] sort=False  sales_A sales_B profit_A profit_B",
+    "    values=[profit,sales] sort=False  sales_A sales_B profit_A profit_B",
+    "",
+    "pandas does not move when the caller reorders `values`: sort=True is",
+    "alphabetical by value name, sort=False is the FRAME's column order.",
+    "DataFrame::pivot_table_multi_values was changed in the same unit of work",
+    "to implement the sort=True rule (it exposes no sort knob, so it must",
+    "implement the default), pinned by",
+    "pivot_table_multi_values_orders_columns_by_name_not_by_argument_eay9h on a",
+    "frame where argument order, frame order and name order all DISAGREE --",
+    "which this fixture cannot do, since it lists its two values in frame order",
+    "and they are already sorted. That coincidence is why the corpus certified",
+    "FP's wrong rule twice over.",
+    "",
+    "So the fixture moves to PANDAS' answer and FP moves to it independently;",
+    "neither was fitted to the other."
+  ],
+  "attributions": {
+    "fp_p2d_127_dataframe_pivot_table_multi_values_strict.json": {
+      "divergence": "eay9h-pivot-sort-default",
+      "bead": "br-frankenpandas-eay9h",
+      "agent": "SilverCoast",
+      "date": "2026-08-20",
+      "moved_key": "expected_frame.column_order",
+      "from": "sales_A, sales_B, profit_A, profit_B",
+      "to": "profit_A, profit_B, sales_A, sales_B",
+      "evidence": "live pandas 2.2.3: pd.pivot_table(df, index='region', columns='product', values=['sales','profit'], aggfunc='sum') with the fixture's own frame yields column order profit_A profit_B sales_A sales_B under pandas' sort=True default, and the SAME order when values is spelled ['profit','sales']"
+    }
+  },
+  "retirements": {}
+}
