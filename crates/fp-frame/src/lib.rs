@@ -1350,9 +1350,7 @@ fn pivot_utf8_key_strs(col: &Column, n: usize) -> Vec<&str> {
         // back to the per-slice form, which still yields "" for a bad slice
         // rather than propagating a failure the old code never propagated.
         return (0..n)
-            .map(|i| {
-                std::str::from_utf8(&bytes[offsets[i]..offsets[i + 1]]).unwrap_or("")
-            })
+            .map(|i| std::str::from_utf8(&bytes[offsets[i]..offsets[i + 1]]).unwrap_or(""))
             .collect();
     }
     col.values()
@@ -2740,8 +2738,7 @@ fn sort_group_order_by_rank(group_order: &mut [GroupKey<'_>]) -> bool {
     // Rank each component independently, in `scalar_key_cmp` order.
     let mut ranks: Vec<FxHashMap<ScalarKey<'_>, u32>> = Vec::with_capacity(width);
     for position in 0..width {
-        let mut distinct: Vec<ScalarKey<'_>> =
-            group_order.iter().map(|k| k[position]).collect();
+        let mut distinct: Vec<ScalarKey<'_>> = group_order.iter().map(|k| k[position]).collect();
         distinct.sort_by(scalar_key_cmp);
         distinct.dedup();
         if u32::try_from(distinct.len()).is_err() {
@@ -2771,8 +2768,9 @@ fn sort_group_order_by_rank(group_order: &mut [GroupKey<'_>]) -> bool {
 
 #[cfg(test)]
 mod group_order_rank_sort_uza04 {
-    use super::{GroupKey, ScalarKey, composite_key_cmp, sort_group_order_by_rank};
     use fp_types::NullKind;
+
+    use super::{GroupKey, ScalarKey, composite_key_cmp, sort_group_order_by_rank};
 
     /// The ONLY thing that matters: ranked order must equal comparator order.
     ///
@@ -2809,7 +2807,10 @@ mod group_order_rank_sort_uza04 {
         let mut keys: Vec<GroupKey<'_>> = Vec::new();
         for (i, av) in a.iter().enumerate() {
             for bv in b.iter().skip(i % 3).take(4) {
-                keys.push(vec![ScalarKey::Utf8(av.as_str()), ScalarKey::Utf8(bv.as_str())]);
+                keys.push(vec![
+                    ScalarKey::Utf8(av.as_str()),
+                    ScalarKey::Utf8(bv.as_str()),
+                ]);
             }
         }
         assert_same_order(keys);
@@ -2835,15 +2836,27 @@ mod group_order_rank_sort_uza04 {
     #[test]
     fn ranked_order_matches_comparator_on_a_single_component() {
         let vals: Vec<String> = (0..30).map(|i| format!("k{:02}", (i * 17) % 30)).collect();
-        assert_same_order(vals.iter().map(|v| vec![ScalarKey::Utf8(v.as_str())]).collect());
+        assert_same_order(
+            vals.iter()
+                .map(|v| vec![ScalarKey::Utf8(v.as_str())])
+                .collect(),
+        );
     }
 
     #[test]
     fn helper_declines_the_cases_it_cannot_guarantee() {
         // THREE components do not pack into one u64 -> must decline, not guess.
         let mut wide: Vec<GroupKey<'_>> = vec![
-            vec![ScalarKey::Int64(1), ScalarKey::Int64(2), ScalarKey::Int64(3)],
-            vec![ScalarKey::Int64(1), ScalarKey::Int64(2), ScalarKey::Int64(1)],
+            vec![
+                ScalarKey::Int64(1),
+                ScalarKey::Int64(2),
+                ScalarKey::Int64(3),
+            ],
+            vec![
+                ScalarKey::Int64(1),
+                ScalarKey::Int64(2),
+                ScalarKey::Int64(1),
+            ],
         ];
         assert!(!sort_group_order_by_rank(&mut wide));
 
@@ -3526,8 +3539,14 @@ fn shift_date_string(date_str: &str, count: i32, unit: char) -> Result<String, F
     let (in_hour, in_minute, in_second) = match time_part {
         Some(text) => {
             let mut fields = text.trim().split(':');
-            let hour = fields.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
-            let minute = fields.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+            let hour = fields
+                .next()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(0);
+            let minute = fields
+                .next()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(0);
             // Seconds may carry a fraction; the offsets below are whole-second, so
             // the fraction is dropped rather than mis-parsed.
             let second = fields
@@ -4179,8 +4198,9 @@ fn anchored_asfreq_anchors(
                     | AsFreqUnit::BusinessQuarterStart(anchor) => {
                         month % 3 == u32::from(anchor) % 3
                     }
-                    AsFreqUnit::BusinessYearEnd(anchor)
-                    | AsFreqUnit::BusinessYearStart(anchor) => month == u32::from(anchor),
+                    AsFreqUnit::BusinessYearEnd(anchor) | AsFreqUnit::BusinessYearStart(anchor) => {
+                        month == u32::from(anchor)
+                    }
                     _ => unreachable!(),
                 };
                 if keep {
@@ -4216,9 +4236,10 @@ fn anchored_asfreq_anchors(
                 };
                 let mut past_end = false;
                 for candidate in [first_day, second_day] {
-                    let date = NaiveDate::from_ymd_opt(year, month, candidate).ok_or_else(|| {
-                        FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
-                    })?;
+                    let date =
+                        NaiveDate::from_ymd_opt(year, month, candidate).ok_or_else(|| {
+                            FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+                        })?;
                     let dt = asfreq_midnight(date)?;
                     if dt > end {
                         past_end = true;
@@ -36012,14 +36033,21 @@ impl SeriesGroupBy<'_> {
                     // stays float — never the strings "True"/"False"/"1.5".
                     Scalar::Bool(v) => IndexLabel::Bool(*v),
                     Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
-                    // ⚠️ UNTOUCHED AND SUSPECT: this catch-all renders EVERY
-                    // remaining dtype as the string "NaN" — Timedelta64,
-                    // Datetime64, Period and Interval group keys all collapse to
-                    // one label here. Missing values never reach it (skipped
-                    // above), so this is not the null path. Out of scope for
-                    // 9m9zf, which measured only the float and bool arms; filed
-                    // as a separate observation rather than fixed blind.
-                    _ => IndexLabel::Utf8("NaN".into()),
+                    // br-frankenpandas-no6s4: temporal keys stay TYPED,
+                    // mirroring the DataFrameGroupBy arms (group_key_label,
+                    // this file ~85009). MEASURED, live pandas 2.2.3:
+                    // s.groupby(datetime_key).sum().index is a typed
+                    // DatetimeIndex; the Timedelta64 analogue stays
+                    // timedelta-typed — never the string "NaN".
+                    Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+                    Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
+                    // Period/Interval still have NO IndexLabel variant — a
+                    // representation gap (no6s4 / 00ze3-class), not a mapping
+                    // bug. The debug rendering keeps distinct groups DISTINCT;
+                    // the old `"NaN"` collapse gave every unlisted key the
+                    // SAME label. Missing values never reach here (skipped
+                    // above), so this is not the null path.
+                    other => IndexLabel::Utf8(format!("{other:?}")),
                 };
                 order.push(lbl);
                 order_keys.push(key);
@@ -42034,9 +42062,7 @@ impl SeriesGroupByExpanding<'_, '_> {
             // Sorting an index permutation rather than the keys themselves keeps
             // `scalar_key_cmp` taking plain `&ScalarKey` arguments.
             let mut visit: Vec<usize> = (0..order_keys.len()).collect();
-            visit.sort_by(|&left, &right| {
-                scalar_key_cmp(&order_keys[left], &order_keys[right])
-            });
+            visit.sort_by(|&left, &right| scalar_key_cmp(&order_keys[left], &order_keys[right]));
             let mut order = Vec::with_capacity(n);
             for &key_pos in &visit {
                 if let Some(rows) = groups.get(&order_keys[key_pos]) {
@@ -42557,9 +42583,7 @@ impl SeriesGroupByRolling<'_, '_> {
             // Sorting an index permutation rather than the keys themselves keeps
             // `scalar_key_cmp` taking plain `&ScalarKey` arguments.
             let mut visit: Vec<usize> = (0..order_keys.len()).collect();
-            visit.sort_by(|&left, &right| {
-                scalar_key_cmp(&order_keys[left], &order_keys[right])
-            });
+            visit.sort_by(|&left, &right| scalar_key_cmp(&order_keys[left], &order_keys[right]));
             let mut order = Vec::with_capacity(n);
             for &key_pos in &visit {
                 if let Some(rows) = groups.get(&order_keys[key_pos]) {
@@ -47952,11 +47976,7 @@ impl DatetimeAccessor<'_> {
     ///
     /// ⚠️ DATETIME-DOMAIN ONLY — see `try_extract_component` for why the period
     /// conversions must not take this path.
-    fn try_extract_component_one_format<F>(
-        &self,
-        func: F,
-        name: &str,
-    ) -> Result<Series, FrameError>
+    fn try_extract_component_one_format<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Result<Scalar, FrameError>,
     {
@@ -50598,8 +50618,7 @@ impl DatetimeAccessor<'_> {
             q * Td::NANOS_PER_MICRO
         }
 
-        let out: Vec<Scalar> = if let Some(slice) = self.series.column().as_timedelta64_slice()
-        {
+        let out: Vec<Scalar> = if let Some(slice) = self.series.column().as_timedelta64_slice() {
             slice
                 .iter()
                 .map(|&n| {
@@ -50690,9 +50709,8 @@ impl DatetimeAccessor<'_> {
 
         // `vec![Vec::with_capacity(n); 7]` CLONES the first vector, and a clone of an
         // empty Vec has no capacity — so six of the seven were allocating from zero.
-        let mut parts: Vec<Vec<Option<i64>>> = (0..7)
-            .map(|_| Vec::with_capacity(nanos.len()))
-            .collect();
+        let mut parts: Vec<Vec<Option<i64>>> =
+            (0..7).map(|_| Vec::with_capacity(nanos.len())).collect();
         for slot in &nanos {
             match slot {
                 None => {
@@ -50713,9 +50731,10 @@ impl DatetimeAccessor<'_> {
                     rem %= Td::NANOS_PER_MILLI;
                     let micros = rem / Td::NANOS_PER_MICRO;
                     let nanos_rem = rem % Td::NANOS_PER_MICRO;
-                    for (part, value) in parts.iter_mut().zip([
-                        days, hours, minutes, seconds, millis, micros, nanos_rem,
-                    ]) {
+                    for (part, value) in parts
+                        .iter_mut()
+                        .zip([days, hours, minutes, seconds, millis, micros, nanos_rem])
+                    {
                         part.push(Some(value));
                     }
                 }
@@ -62179,7 +62198,6 @@ impl DataFrame {
         }
     }
 
-
     /// Filter rows where `mask` is `True`.
     ///
     /// Matches `df[bool_series]` boolean indexing in pandas.
@@ -63636,9 +63654,7 @@ impl DataFrame {
                                 // null — a different question with its own blast
                                 // radius, so this is not routed through that mapper
                                 // wholesale.
-                                Scalar::Float64(v) => {
-                                    IndexLabel::Float64(fp_index::OrderedF64(*v))
-                                }
+                                Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
                                 Scalar::Bool(b) => IndexLabel::Bool(*b),
                                 Scalar::Null(_) => IndexLabel::Utf8(String::new()),
                                 Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
@@ -64848,9 +64864,7 @@ impl DataFrame {
             let original = column.values();
             // Checked in the SAME pass that builds the columns, so that lazy
             // representation is walked once rather than twice.
-            if dtype == DType::Int64
-                && original.iter().any(|v| matches!(v, Scalar::Null(_)))
-            {
+            if dtype == DType::Int64 && original.iter().any(|v| matches!(v, Scalar::Null(_))) {
                 // pandas' own message, verbatim - it surfaces from int(None).
                 return Err(FrameError::CompatibilityRejected(
                     "int() argument must be a string, a bytes-like object or a real number, not 'NoneType'"
@@ -64892,8 +64906,7 @@ impl DataFrame {
                             "cannot convert float infinity to integer".to_string(),
                         ));
                     }
-                    if *raw >= 9_223_372_036_854_775_808.0 || *raw < -9_223_372_036_854_775_808.0
-                    {
+                    if *raw >= 9_223_372_036_854_775_808.0 || *raw < -9_223_372_036_854_775_808.0 {
                         return Err(FrameError::CompatibilityRejected(
                             "Python int too large to convert to C long".to_string(),
                         ));
@@ -83382,13 +83395,7 @@ impl DataFrame {
                     .set_names(vec![None, None]),
             )
         };
-        Self::new_with_axes(
-            new_index,
-            None,
-            columns,
-            column_order,
-            column_multiindex,
-        )
+        Self::new_with_axes(new_index, None, columns, column_order, column_multiindex)
     }
 
     /// Assemble the `align_axis=0` (stacked) compare result: the original
@@ -86465,10 +86472,9 @@ impl DataFrameGroupBy<'_> {
                             }
                         }
                         match best {
-                            Some((_, gi)) => index_label_to_scalar(&label_at(
-                                &self.df.index,
-                                row_indices[gi],
-                            )),
+                            Some((_, gi)) => {
+                                index_label_to_scalar(&label_at(&self.df.index, row_indices[gi]))
+                            }
                             None => Scalar::Null(NullKind::NaN),
                         }
                     }
@@ -94864,8 +94870,7 @@ impl GroupByRolling<'_> {
                     (0..group_vals.len() as i64).map(IndexLabel::from).collect();
                 let gs = Series::from_values(col_name, group_idx, group_vals)?;
                 let rolled = agg(&gs, window, min_periods)?;
-                out[base..base + indices.len()]
-                    .clone_from_slice(&rolled.values()[..indices.len()]);
+                out[base..base + indices.len()].clone_from_slice(&rolled.values()[..indices.len()]);
                 base += indices.len();
             }
             Ok((col_name.to_string(), Column::from_values(out)?))
@@ -95897,9 +95902,8 @@ mod tests {
         SORTED_UNIQUE_UNION_FINGERPRINT_CACHE, SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX, Series,
         SortedUniqueUnionFingerprintKey, ToNumericErrors, ToNumericOptions, TzAmbiguousPolicy,
         TzLocalizeOptions, TzNonexistentPolicy, align_union, align_union_duplicate_aware,
-        align_union_sorted_unique, cut, datetime64_label_from_naive,
-        format_period_label, index_to_frame, index_to_series, int64_unit_range_alignment,
-        parse_datetime64_nanos,
+        align_union_sorted_unique, cut, datetime64_label_from_naive, format_period_label,
+        index_to_frame, index_to_series, int64_unit_range_alignment, parse_datetime64_nanos,
         parse_naive_datetime_value, qcut, record_alignment_semantic_witness,
         semantic_index_identity, semantic_int64_unit_range_labels_fingerprint,
         semantic_integer_index_labels_fingerprint, semantic_sorted_unique_union_output_fingerprint,
@@ -98109,7 +98113,10 @@ mod tests {
 
         assert_eq!(
             cast.columns["a"].values(),
-            &[Scalar::Utf8("True".to_string()), Scalar::Null(NullKind::Null)],
+            &[
+                Scalar::Utf8("True".to_string()),
+                Scalar::Null(NullKind::Null)
+            ],
             "the missing value must survive, and true must render as pandas' 'True'"
         );
 
@@ -98131,7 +98138,10 @@ mod tests {
         .expect("str cast");
         assert_eq!(
             literal.columns["a"].values(),
-            &[Scalar::Utf8("None".to_string()), Scalar::Null(NullKind::Null)],
+            &[
+                Scalar::Utf8("None".to_string()),
+                Scalar::Null(NullKind::Null)
+            ],
             "a literal \"None\" string and a missing value must stay distinct"
         );
     }
@@ -101293,13 +101303,11 @@ mod tests {
         //     reindex([1], method='bogus')    -> ValueError
         // So the refusal this test is for needs a method pandas ALSO refuses.
         assert!(
-            s.reindex_with_method(vec![1_i64.into()], "nearest")
-                .is_ok(),
+            s.reindex_with_method(vec![1_i64.into()], "nearest").is_ok(),
             "nearest is a supported method"
         );
         assert!(
-            s.reindex_with_method(vec![1_i64.into()], "bogus")
-                .is_err(),
+            s.reindex_with_method(vec![1_i64.into()], "bogus").is_err(),
             "an unknown method is still refused"
         );
     }
@@ -142997,6 +143005,80 @@ mod tests {
     }
 
     #[test]
+    fn series_groupby_temporal_keys_stay_typed_no6s4() {
+        // br-frankenpandas-no6s4: a SeriesGroupBy keyed by Datetime64 /
+        // Timedelta64 columns keeps the group-key labels TYPED, matching
+        // pandas' DatetimeIndex / TimedeltaIndex output. The old catch-all
+        // rendered EVERY unlisted dtype as the string "NaN", so two distinct
+        // datetime keys shared one label. Discriminating: before the fix the
+        // first assertion sees Utf8("NaN").
+        let day: i64 = 86_400 * 1_000_000_000;
+        let t0 = 1_704_067_200_000_000_000; // 2024-01-01T00:00Z in ns
+        let positions = vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()];
+
+        let dt_keys = Series::from_values(
+            "k",
+            positions.clone(),
+            vec![
+                Scalar::Datetime64(t0),
+                Scalar::Datetime64(t0 + day),
+                Scalar::Datetime64(t0),
+                Scalar::Datetime64(t0 + day),
+            ],
+        )
+        .unwrap();
+        let vals = Series::from_values(
+            "v",
+            positions.clone(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(10),
+                Scalar::Int64(2),
+                Scalar::Int64(20),
+            ],
+        )
+        .unwrap();
+        let summed = vals.groupby(&dt_keys).unwrap().sum().unwrap();
+        let labels = summed.index().labels();
+        assert_eq!(labels.len(), 2);
+        assert!(
+            matches!(labels[0], IndexLabel::Datetime64(v) if v == t0),
+            "expected typed Datetime64({t0}), got {:?}",
+            labels[0]
+        );
+        assert!(
+            matches!(labels[1], IndexLabel::Datetime64(v) if v == t0 + day),
+            "expected typed Datetime64, got {:?}",
+            labels[1]
+        );
+
+        let td_keys = Series::from_values(
+            "k",
+            positions,
+            vec![
+                Scalar::Timedelta64(day),
+                Scalar::Timedelta64(2 * day),
+                Scalar::Timedelta64(day),
+                Scalar::Timedelta64(2 * day),
+            ],
+        )
+        .unwrap();
+        let summed_td = vals.groupby(&td_keys).unwrap().sum().unwrap();
+        let td_labels = summed_td.index().labels();
+        assert_eq!(td_labels.len(), 2);
+        assert!(
+            matches!(td_labels[0], IndexLabel::Timedelta64(v) if v == day),
+            "expected typed Timedelta64, got {:?}",
+            td_labels[0]
+        );
+        assert!(
+            matches!(td_labels[1], IndexLabel::Timedelta64(v) if v == 2 * day),
+            "expected typed Timedelta64, got {:?}",
+            td_labels[1]
+        );
+    }
+
+    #[test]
     fn series_groupby_sum_mean_timedelta64_c1bxu() {
         // Per br-frankenpandas-c1bxu: SeriesGroupBy::sum and mean on a
         // Timedelta64 source column preserve Timedelta dtype per group.
@@ -148222,22 +148304,86 @@ mod tests {
         let rows: Vec<(i32, u32, u32, u32, u32, u32, i64, &str, &str)> = vec![
             // Monday, Friday, Saturday, Sunday — the weekend roll only shows up
             // on the last two, and it moves business FORWARD to the Monday.
-            (2024, 3, 11, 9, 0, 0, 1_710_147_600_000_000_000,
-             "2024-03-11/2024-03-17", "2024-03-11"),
-            (2024, 3, 15, 12, 0, 0, 1_710_504_000_000_000_000,
-             "2024-03-11/2024-03-17", "2024-03-15"),
-            (2024, 3, 16, 23, 59, 59, 1_710_633_599_000_000_000,
-             "2024-03-11/2024-03-17", "2024-03-18"),
-            (2024, 3, 17, 0, 0, 0, 1_710_633_600_000_000_000,
-             "2024-03-11/2024-03-17", "2024-03-18"),
+            (
+                2024,
+                3,
+                11,
+                9,
+                0,
+                0,
+                1_710_147_600_000_000_000,
+                "2024-03-11/2024-03-17",
+                "2024-03-11",
+            ),
+            (
+                2024,
+                3,
+                15,
+                12,
+                0,
+                0,
+                1_710_504_000_000_000_000,
+                "2024-03-11/2024-03-17",
+                "2024-03-15",
+            ),
+            (
+                2024,
+                3,
+                16,
+                23,
+                59,
+                59,
+                1_710_633_599_000_000_000,
+                "2024-03-11/2024-03-17",
+                "2024-03-18",
+            ),
+            (
+                2024,
+                3,
+                17,
+                0,
+                0,
+                0,
+                1_710_633_600_000_000_000,
+                "2024-03-11/2024-03-17",
+                "2024-03-18",
+            ),
             // The epoch and the instant before it: both fall in the SAME week,
             // which straddles the ordinal-zero boundary.
-            (1970, 1, 1, 0, 0, 0, 0, "1969-12-29/1970-01-04", "1970-01-01"),
-            (1969, 12, 31, 23, 59, 59, -1_000_000_000,
-             "1969-12-29/1970-01-04", "1969-12-31"),
+            (
+                1970,
+                1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                "1969-12-29/1970-01-04",
+                "1970-01-01",
+            ),
+            (
+                1969,
+                12,
+                31,
+                23,
+                59,
+                59,
+                -1_000_000_000,
+                "1969-12-29/1970-01-04",
+                "1969-12-31",
+            ),
             // A leap day, which the month walk gets wrong if it assumes 28.
-            (2024, 2, 29, 12, 34, 56, 1_709_210_096_000_000_000,
-             "2024-02-26/2024-03-03", "2024-02-29"),
+            (
+                2024,
+                2,
+                29,
+                12,
+                34,
+                56,
+                1_709_210_096_000_000_000,
+                "2024-02-26/2024-03-03",
+                "2024-02-29",
+            ),
         ];
 
         for (year, month, day, hour, minute, second, nanos, weekly, business) in rows {
@@ -148294,7 +148440,8 @@ mod tests {
             )
             .unwrap()
         };
-        let one = |df: &DataFrame, func: &str| df.apply(func, 1).unwrap().column().values()[0].clone();
+        let one =
+            |df: &DataFrame, func: &str| df.apply(func, 1).unwrap().column().values()[0].clone();
 
         // {a: 1.0, b: 3.0} — nothing missing.
         let plain = frame(vec![
@@ -152661,7 +152808,11 @@ mod tests {
         for (name, vals) in expect {
             let col = &c.columns[name];
             assert_eq!(col.values()[0], Scalar::Float64(vals[0]), "{name} row0");
-            assert_eq!(col.values()[1], Scalar::Float64(vals[1]), "{name} row1 (euclidean)");
+            assert_eq!(
+                col.values()[1],
+                Scalar::Float64(vals[1]),
+                "{name} row1 (euclidean)"
+            );
             assert!(col.values()[2].is_missing(), "{name} NaT row");
             assert_eq!(col.values()[3], Scalar::Float64(vals[2]), "{name} row3");
         }
@@ -152684,7 +152835,15 @@ mod tests {
         let rounding = Series::from_values(
             "td",
             (0..7_i64).map(Into::into).collect::<Vec<_>>(),
-            vec![td(1), td(-1), td(999), td(-999), td(500), td(1500), td(2500)],
+            vec![
+                td(1),
+                td(-1),
+                td(999),
+                td(-999),
+                td(500),
+                td(1500),
+                td(2500),
+            ],
         )
         .unwrap();
         let r = rounding.dt().to_pytimedelta().expect("to_pytimedelta");
@@ -152699,14 +152858,16 @@ mod tests {
         assert_eq!(got, vec![0, 0, 1_000, -1_000, 0, 2_000, 2_000]);
 
         // NaT survives as missing.
-        let with_nat = Series::from_values(
-            "td",
-            vec![0_i64.into()],
-            vec![Scalar::Null(NullKind::NaN)],
-        )
-        .unwrap();
+        let with_nat =
+            Series::from_values("td", vec![0_i64.into()], vec![Scalar::Null(NullKind::NaN)])
+                .unwrap();
         assert!(
-            with_nat.dt().to_pytimedelta().expect("to_pytimedelta").values()[0].is_missing()
+            with_nat
+                .dt()
+                .to_pytimedelta()
+                .expect("to_pytimedelta")
+                .values()[0]
+                .is_missing()
         );
     }
 
@@ -152753,7 +152914,11 @@ mod tests {
         let secs = s.dt().seconds().expect("seconds");
         assert_eq!(secs.values()[0], Scalar::Float64(1.0));
         assert!(secs.values()[1].is_missing());
-        assert_eq!(secs.values()[2], Scalar::Float64(86399.0), "euclidean remainder");
+        assert_eq!(
+            secs.values()[2],
+            Scalar::Float64(86399.0),
+            "euclidean remainder"
+        );
         assert_eq!(secs.values()[3], Scalar::Float64(3661.0));
 
         let micros = s.dt().microseconds().expect("microseconds");
@@ -157422,7 +157587,10 @@ mod tests {
         // a reorder that carried the aggfuncs along with the names would show up
         // here rather than in the name list.
         for pivoted in [&zeta_first, &alpha_first] {
-            assert_eq!(pivoted.columns["alpha_A"].values()[0], Scalar::Float64(10.0));
+            assert_eq!(
+                pivoted.columns["alpha_A"].values()[0],
+                Scalar::Float64(10.0)
+            );
             assert_eq!(pivoted.columns["zeta_A"].values()[0], Scalar::Float64(1.0));
         }
     }
@@ -157946,7 +158114,10 @@ mod tests {
         for col in ["year", "week", "day"] {
             let v = iso.column(col).unwrap().values();
             assert!(!v[0].is_missing(), "{col}: row 0 matches the locked shape");
-            assert!(v[1].is_missing(), "{col}: row 1 is DATE-ONLY, pandas refuses it");
+            assert!(
+                v[1].is_missing(),
+                "{col}: row 1 is DATE-ONLY, pandas refuses it"
+            );
             assert!(!v[2].is_missing(), "{col}: row 2 matches the locked shape");
         }
         assert_eq!(iso.column("year").unwrap().values()[0], Scalar::Int64(2024));
@@ -157972,9 +158143,15 @@ mod tests {
                 .clone()
         };
         assert_eq!(one("2024-01-15 10:30:00"), Scalar::Utf8("10:30:00".into()));
-        assert_eq!(one("2024-01-15 10:30:00+05:30"), Scalar::Utf8("10:30:00".into()));
+        assert_eq!(
+            one("2024-01-15 10:30:00+05:30"),
+            Scalar::Utf8("10:30:00".into())
+        );
         // ⚠️ the row the old chain turned into Null: '-' was never stripped
-        assert_eq!(one("2024-01-15 10:30:00-05:00"), Scalar::Utf8("10:30:00".into()));
+        assert_eq!(
+            one("2024-01-15 10:30:00-05:00"),
+            Scalar::Utf8("10:30:00".into())
+        );
         assert_eq!(one("2024-01-15T10:30:00Z"), Scalar::Utf8("10:30:00".into()));
         // ⚠️ and lowercase 'z', likewise Null before
         assert_eq!(one("2024-01-15T10:30:00z"), Scalar::Utf8("10:30:00".into()));
@@ -158095,7 +158272,10 @@ mod tests {
                         .column_at(position)
                         .expect("lazy column at position")
                         .values(),
-                    transposed.column(&name).expect("lazy column by name").values(),
+                    transposed
+                        .column(&name)
+                        .expect("lazy column by name")
+                        .values(),
                     "lazy axis: position {position} disagrees with name {name}"
                 );
             }
@@ -160939,11 +161119,21 @@ mod tests {
         // Lexicographic, which is what `fp_types::nanmin`/`nanmax` already do for
         // Utf8 — the machinery was always there; only the dtype filter blocked it.
         assert_eq!(
-            gb.resample("M").min().unwrap().column("tag").unwrap().values(),
+            gb.resample("M")
+                .min()
+                .unwrap()
+                .column("tag")
+                .unwrap()
+                .values(),
             &[utf8("p"), utf8("r"), utf8("s"), utf8("t"), utf8("u")]
         );
         assert_eq!(
-            gb.resample("M").max().unwrap().column("tag").unwrap().values(),
+            gb.resample("M")
+                .max()
+                .unwrap()
+                .column("tag")
+                .unwrap()
+                .values(),
             &[utf8("q"), utf8("r"), utf8("s"), utf8("t"), utf8("v")]
         );
         assert_eq!(
@@ -160956,7 +161146,12 @@ mod tests {
             &[utf8("p"), utf8("r"), utf8("s"), utf8("t"), utf8("u")]
         );
         assert_eq!(
-            gb.resample("M").last().unwrap().column("tag").unwrap().values(),
+            gb.resample("M")
+                .last()
+                .unwrap()
+                .column("tag")
+                .unwrap()
+                .values(),
             &[utf8("q"), utf8("r"), utf8("s"), utf8("t"), utf8("v")]
         );
 
@@ -161074,7 +161269,12 @@ mod tests {
 
         // min/max on bool = logical and/or over the bucket.
         assert_eq!(
-            gb.resample("M").min().unwrap().column("flag").unwrap().values(),
+            gb.resample("M")
+                .min()
+                .unwrap()
+                .column("flag")
+                .unwrap()
+                .values(),
             &[
                 Scalar::Bool(false),
                 Scalar::Bool(true),
@@ -161083,7 +161283,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            gb.resample("M").max().unwrap().column("flag").unwrap().values(),
+            gb.resample("M")
+                .max()
+                .unwrap()
+                .column("flag")
+                .unwrap()
+                .values(),
             &[
                 Scalar::Bool(true),
                 Scalar::Bool(true),
@@ -161094,7 +161299,12 @@ mod tests {
 
         // Datetime64: chronological order, per pandas' measured rows above.
         assert_eq!(
-            gb.resample("M").min().unwrap().column("when").unwrap().values(),
+            gb.resample("M")
+                .min()
+                .unwrap()
+                .column("when")
+                .unwrap()
+                .values(),
             &[
                 Scalar::Datetime64(1709251200000000000),
                 Scalar::Datetime64(1711929600000000000),
@@ -161103,7 +161313,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            gb.resample("M").max().unwrap().column("when").unwrap().values(),
+            gb.resample("M")
+                .max()
+                .unwrap()
+                .column("when")
+                .unwrap()
+                .values(),
             &[
                 Scalar::Datetime64(1709596800000000000),
                 Scalar::Datetime64(1711929600000000000),
@@ -161169,7 +161384,12 @@ mod tests {
             utf8("t"),
             utf8("u"),
         ]);
-        let summed = all_valid.groupby(&["grp"]).unwrap().resample("M").sum().unwrap();
+        let summed = all_valid
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .sum()
+            .unwrap();
         assert_eq!(
             summed.column_names(),
             vec!["grp", "tag"],
@@ -161270,7 +161490,14 @@ mod tests {
             vec![
                 (
                     "grp",
-                    vec![utf8("a"), utf8("a"), utf8("a"), utf8("b"), utf8("b"), utf8("b")],
+                    vec![
+                        utf8("a"),
+                        utf8("a"),
+                        utf8("a"),
+                        utf8("b"),
+                        utf8("b"),
+                        utf8("b"),
+                    ],
                 ),
                 (
                     "v",
@@ -161297,7 +161524,12 @@ mod tests {
         let gb = df.groupby(&["grp"]).unwrap();
 
         assert_eq!(
-            gb.resample("M").median().unwrap().column("v").unwrap().values(),
+            gb.resample("M")
+                .median()
+                .unwrap()
+                .column("v")
+                .unwrap()
+                .values(),
             &[
                 Scalar::Float64(2.0),
                 Scalar::Float64(5.0),
@@ -161306,7 +161538,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            gb.resample("M").prod().unwrap().column("v").unwrap().values(),
+            gb.resample("M")
+                .prod()
+                .unwrap()
+                .column("v")
+                .unwrap()
+                .values(),
             &[
                 Scalar::Float64(3.0),
                 Scalar::Float64(5.0),
@@ -161315,7 +161552,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            gb.resample("M").nunique().unwrap().column("v").unwrap().values(),
+            gb.resample("M")
+                .nunique()
+                .unwrap()
+                .column("v")
+                .unwrap()
+                .values(),
             &[
                 Scalar::Int64(2),
                 Scalar::Int64(1),
@@ -161330,7 +161572,12 @@ mod tests {
 
         // quantile, with the interpolating q that median cannot distinguish.
         assert_eq!(
-            gb.resample("M").quantile(0.5).unwrap().column("v").unwrap().values(),
+            gb.resample("M")
+                .quantile(0.5)
+                .unwrap()
+                .column("v")
+                .unwrap()
+                .values(),
             &[
                 Scalar::Float64(2.0),
                 Scalar::Float64(5.0),
@@ -161342,7 +161589,12 @@ mod tests {
         // A nearest- or lower-order-statistic implementation gives 1.0 and 4.0 here
         // and still passes every q=0.5 assertion above.
         assert_eq!(
-            gb.resample("M").quantile(0.25).unwrap().column("v").unwrap().values(),
+            gb.resample("M")
+                .quantile(0.25)
+                .unwrap()
+                .column("v")
+                .unwrap()
+                .values(),
             &[
                 Scalar::Float64(1.5),
                 Scalar::Float64(5.0),
@@ -162924,12 +163176,9 @@ mod tests {
         assert!(widened.values()[2].is_missing());
 
         // Boolean categories render pandas' spellings, not Rust's.
-        let flags = Series::from_categorical(
-            "c",
-            vec![Scalar::Bool(true), Scalar::Bool(false)],
-            false,
-        )
-        .unwrap();
+        let flags =
+            Series::from_categorical("c", vec![Scalar::Bool(true), Scalar::Bool(false)], false)
+                .unwrap();
         assert_eq!(
             flags.astype(DType::Utf8).unwrap().values(),
             &[
@@ -163018,8 +163267,8 @@ mod tests {
         assert_eq!(got[2], Scalar::Utf8("b".to_owned()));
 
         // A non-categorical Series is untouched by the guard.
-        let plain = Series::from_values("p", vec![IndexLabel::Int64(0)], vec![Scalar::Int64(7)])
-            .unwrap();
+        let plain =
+            Series::from_values("p", vec![IndexLabel::Int64(0)], vec![Scalar::Int64(7)]).unwrap();
         assert_eq!(plain.to_list(), vec![Scalar::Int64(7)]);
     }
 
@@ -163271,7 +163520,11 @@ mod tests {
         // The subset keeps the FULL category list, exactly as pandas does — a
         // category that no surviving row uses is still a category.
         assert_eq!(
-            last_two.cat().expect("still categorical").categories().len(),
+            last_two
+                .cat()
+                .expect("still categorical")
+                .categories()
+                .len(),
             3
         );
     }
@@ -202049,7 +202302,10 @@ mod dt_component_offset_sign_00ze3 {
     fn fractional_seconds_were_accidentally_correct_and_stay_correct_00ze3() {
         let with_fraction = series(&["2024-01-15 10:30:45.123456-05:00"]);
         let without = series(&["2024-01-15 10:30:45-05:00"]);
-        assert_eq!(ints(&with_fraction.dt().second().expect("second")), vec![45]);
+        assert_eq!(
+            ints(&with_fraction.dt().second().expect("second")),
+            vec![45]
+        );
         assert_eq!(ints(&without.dt().second().expect("second")), vec![45]);
     }
 }
