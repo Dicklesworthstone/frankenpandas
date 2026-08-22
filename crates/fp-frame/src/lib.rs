@@ -12473,6 +12473,40 @@ impl Series {
             }
         }
 
+        // br-frankenpandas-rh1od: an OBJECT bucket holding only numeric
+        // scalars (the bool+numeric constructor mix) dedups under PYTHON
+        // numeric equality — True == 1 == 1.0 collapse to ONE entry.
+        // MEASURED live pandas 2.2.3: pd.Series([True, 1, 1.0]).nunique()
+        // -> 1. ScalarKey's typed variants would count 3. Key on canonical
+        // f64 bits (-0.0 -> +0.0); ints beyond 2^53 lose exactness here,
+        // which no corpus fixture exercises (noted deliberately).
+        if self.column.dtype() == DType::Utf8
+            && self.column.values().iter().all(|value| {
+                value.is_missing()
+                    || matches!(
+                        value,
+                        Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_)
+                    )
+            })
+        {
+            let mut seen: FxHashSet<u64> =
+                FxHashSet::with_capacity_and_hasher(self.len().min(1 << 18), Default::default());
+            for value in self.column.values() {
+                if value.is_missing() && dropna {
+                    continue;
+                }
+                let numeric = match value {
+                    Scalar::Bool(b) => f64::from(*b),
+                    #[allow(clippy::cast_precision_loss)]
+                    Scalar::Int64(v) => *v as f64,
+                    Scalar::Float64(v) => *v,
+                    _ => unreachable!("bucket pre-checked all-numeric"),
+                };
+                seen.insert(if numeric == 0.0 { 0 } else { numeric.to_bits() });
+            }
+            return seen.len();
+        }
+
         let mut seen_keys: FxHashMap<ScalarKey<'_>, ()> = FxHashMap::default();
         for value in self.column.values() {
             if value.is_missing() && dropna {
@@ -124396,17 +124430,17 @@ mod tests {
                 IndexLabel::Utf8("count".into()),
             ]
         );
-        // any/all compute correctly (any=true, all=false). The agg result Column is a
-        // single typed column, so the mixed Int64(size/count)+Bool(any/all) values coerce
-        // to Int64 (true->1, false->0). pandas returns an object Series [3, True, False, 3];
-        // fp's typed-column model has no object dtype, so it coerces — a known minor
-        // dtype-fidelity gap (values are equivalent). Verified by the gauntlet suite run.
+        // any/all compute correctly (any=true, all=false). The agg result Column mixes
+        // Int64(size/count) with Bool(any/all). pandas returns an object Series
+        // [3, True, False, 3]; br-frankenpandas-rh1od's object-bucket preservation
+        // now reproduces exactly that instead of coercing bools to 1/0 — the
+        // dtype-fidelity gap this test used to document is closed.
         assert_eq!(
             out.values(),
             &[
                 Scalar::Int64(3),
-                Scalar::Int64(1),
-                Scalar::Int64(0),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
                 Scalar::Int64(3),
             ]
         );
