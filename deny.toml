@@ -25,6 +25,17 @@ ignore = [
   # parents moving off it, or fp-io dropping the hdf5/mysql surfaces, which is a
   # capability decision rather than a bump. br-frankenpandas-v7ymy.
   "RUSTSEC-2026-0173",
+  # lru 0.16.4 is flagged UNSOUND (RUSTSEC-2026-0253, use-after-free in
+  # LruCache::pop()). IGNORED BY USER RULING 2026-08-22 ("Documented ignore"):
+  # mysql 28.0.0 pins lru 0.16.x with no semver-compatible release to move to
+  # (re-checked against crates.io on the ruling date — mysql max_stable was
+  # still 28.0.0 while lru latest was 0.18.2), and retiring the optional
+  # sql-mysql surface would contradict the feature-parity mandate. Exposure is
+  # feature-gated: neither a default build nor any default-feature test links
+  # lru; only builds enabling `sql-mysql` do. Drop this ignore the moment
+  # mysql moves off lru 0.16.x — re-check on every mysql bump.
+  # br-frankenpandas-v7ymy carries the decision and the re-check duty.
+  "RUSTSEC-2026-0253",
 ]
 
 [licenses]

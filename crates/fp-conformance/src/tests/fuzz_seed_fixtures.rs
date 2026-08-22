@@ -2039,6 +2039,28 @@ fn fuzz_column_arith_bytes_accepts_mod_zero_seed() {
 }
 
 #[test]
+fn fuzz_column_arith_bytes_accepts_null_divisor_mod_regression() {
+    // CI run 32393665943 (br-frankenpandas-rabui): Int64 % all-Null column was
+    // mis-promoted to Float64 because the fallback fired on ANY vectorized
+    // decline, not just zero divisors. Locked so the kernel cannot drift again.
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/regression_null_divisor_mod_ci.bin"
+    );
+    fuzz_column_arith_bytes(seed)
+        .expect("null-divisor mod regression seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_accepts_may_artifact_regression() {
+    // The May-2026 crash artifact committed at 48941941f; passes since the
+    // floordiv/mod special-value fix. Kept as a pinned regression seed.
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/regression_may_artifact.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("May artifact regression seed should satisfy invariants");
+}
+
+#[test]
 fn fuzz_column_arith_bytes_accepts_pow_seed() {
     let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/column_arith/pow_seed.bin");
     fuzz_column_arith_bytes(seed).expect("pow seed should satisfy invariants");

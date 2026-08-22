@@ -1,14 +1,21 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
   schedule:
     # br-frankenpandas-edn3q: periodically catch workspace-wide test rot
     # that crate-scoped swarm validation can miss.
-    - cron: "37 8 * * 1"
+    #
+    # br-frankenpandas-ey5sl: PUSH TRIGGER REMOVED BY USER RULING 2026-08-22
+    # ("Scheduled batch CI"). Measured cause: agents push to main at a
+    # ~2.7-minute median while this six-job workflow needs far longer, so the
+    # single pending slot of the concurrency group below was superseded by the
+    # next push almost every time — 0 green runs in 1,200 attempts back to
+    # 2026-07-13, and runs queued >28h under load. Per-commit full-matrix runs
+    # would burn minutes ~15x faster than they complete; a fixed batch keeps
+    # continuous enforcement with bounded cost. PRs still trigger immediately.
+    - cron: "23 */3 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -84,6 +91,26 @@ jobs:
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
           components: clippy, rust-src
+
+      - name: Install HDF5 (all-features leg)
+        # ey5sl triage of run 32393665943: both `--all-features` lint legs
+        # failed in hdf5-metno-sys's build script — "Unable to locate HDF5
+        # root directory and/or headers" — because the `hdf5` feature needs
+        # the system library, which GitHub runners do not ship. Install the
+        # runner-native package instead of dropping the coverage.
+        if: matrix.features == '--all-features'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libhdf5-dev pkg-config
+          elif command -v brew >/dev/null 2>&1; then
+            brew install hdf5
+          else
+            echo "No known package manager on this runner; failing closed" >&2
+            exit 1
+          fi
 
       - name: Check
         run: cargo check --all-targets ${{ matrix.features }}
@@ -196,7 +223,12 @@ jobs:
 
   conformance:
     runs-on: ubuntu-latest
-    needs: [test]
+    # br-frankenpandas-ey5sl scope item 3: deliberately NO `needs: [test]`.
+    # Chaining the parity check behind the full workspace suite meant any
+    # unrelated red test silently disabled pandas-parity verification — the
+    # conformance job was SKIPPED, not failed, for the entire outage, so the
+    # gate read green-adjacent while verifying nothing. The parity signal must
+    # be independent of test-suite health; both jobs now start in parallel.
     env:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-conformance
@@ -410,7 +442,14 @@ jobs:
         # stay in sync. RUSTSEC-2024-0436: `paste` 1.0.15 unmaintained —
         # transitive via parquet 58.x, no direct usage. Drop once parquet
         # replaces paste.
-        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436
+        # RUSTSEC-2026-0173: proc-macro-error2 unmaintained, transitive via
+        # hdf5-metno and mysql; no safe upgrade exists (paths in deny.toml).
+        # RUSTSEC-2026-0253: lru 0.16.x UNSOUND via mysql — IGNORED BY USER
+        # RULING 2026-08-22 ("Documented ignore"): no semver-compatible fix
+        # (mysql still pinned 0.16.x on the ruling date), exposure is gated
+        # behind the non-default sql-mysql feature, and v7ymy owns dropping
+        # the ignore when upstream moves.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0253
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked

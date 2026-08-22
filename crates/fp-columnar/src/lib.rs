@@ -16212,9 +16212,19 @@ impl Column {
             return result;
         }
 
-        // For Mod/FloorDiv: if vectorized failed (likely due to zero divisors), use Float64
+        // For Mod/FloorDiv: promote to Float64 ONLY when a PRESENT right value is a
+        // zero divisor — the same predicate `fuzz_expected_column_arith_dtype` uses
+        // (br-frankenpandas-rabui). A None from try_vectorized_binary does NOT imply
+        // zero divisors: the Int64 arm also declines when an operand dtype is not
+        // Int64 (e.g. DType::Null, whose documented coercion keeps Int64 — README
+        // hierarchy Null < Bool < Int64 < Float64), and promoting those to Float64
+        // diverged from both the oracle and binary_numeric's own scalar fallback.
+        // Runs only on the vectorized-declined path, so hot all-Int64 ops never pay it.
         if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv)
             && matches!(out_dtype, DType::Int64)
+            && right.values.iter().filter(|value| !value.is_missing()).any(
+                |value| matches!(cast_scalar(value, DType::Int64), Ok(Scalar::Int64(0))),
+            )
         {
             out_dtype = DType::Float64;
         }
