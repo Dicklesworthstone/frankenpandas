@@ -8106,18 +8106,21 @@ mod tests {
         // case_when example pattern, and what fd90.181 needed for apply_row
         // closures).
         let mixed: Vec<Scalar> = vec![1i64.into(), 2.0f64.into(), "three".into()];
-        assert_eq!(mixed.len(), 3);
         assert_eq!(mixed[0], Scalar::Int64(1));
         assert_eq!(mixed[1], Scalar::Float64(2.0));
         assert_eq!(mixed[2], Scalar::Utf8("three".to_owned()));
     }
 
     #[test]
-    fn dtype_inference_coerces_numeric_values() {
+    fn dtype_inference_routes_bool_numeric_mix_to_object_bucket_rh1od() {
+        // Was `dtype_inference_coerces_numeric_values` (Bool+Int64+Float64 ->
+        // Float64). br-frankenpandas-rh1od, MEASURED live pandas 2.2.3:
+        // pd.Series([True, 7, 3.5]) constructs OBJECT — no pandas constructor
+        // path produces the numpy common-type Float64 here.
         let values = vec![Scalar::Bool(true), Scalar::Int64(7), Scalar::Float64(3.5)];
         assert_eq!(
             infer_dtype(&values).expect("dtype should infer"),
-            DType::Float64
+            DType::Utf8
         );
     }
 
