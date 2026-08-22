@@ -6539,10 +6539,7 @@ impl Period {
                 // Euclidean, so a pre-epoch ordinal keeps a remainder in 0..5:
                 // ordinal -1 is 1969-12-31, not a negative weekday index.
                 let offset = WEEKDAY_OFFSET[ord.rem_euclid(5) as usize];
-                let days = ord
-                    .div_euclid(5)
-                    .saturating_mul(7)
-                    .saturating_add(offset);
+                let days = ord.div_euclid(5).saturating_mul(7).saturating_add(offset);
                 let (y, m, d) = civil_from_days(days);
                 write!(rendered, "{y:04}-{m:02}-{d:02}")
             }
@@ -6561,10 +6558,7 @@ impl Period {
                 let start = ord.saturating_mul(7).saturating_add(WEEK_ANCHOR_DAY);
                 let (sy, sm, sd) = civil_from_days(start);
                 let (ey, em, ed) = civil_from_days(start.saturating_add(6));
-                write!(
-                    rendered,
-                    "{sy:04}-{sm:02}-{sd:02}/{ey:04}-{em:02}-{ed:02}"
-                )
+                write!(rendered, "{sy:04}-{sm:02}-{sd:02}/{ey:04}-{em:02}-{ed:02}")
             }
             PeriodFreq::Hourly => {
                 let (y, m, d) = civil_from_days(ord.div_euclid(24));
@@ -8701,13 +8695,11 @@ mod tests {
         // lattice (int+float -> float64) — the object bucket is ONLY for the
         // cross-family mix.
         assert_eq!(
-            infer_dtype(&[Scalar::Bool(true), Scalar::Bool(false)])
-                .expect("dtype should infer"),
+            infer_dtype(&[Scalar::Bool(true), Scalar::Bool(false)]).expect("dtype should infer"),
             DType::Bool
         );
         assert_eq!(
-            infer_dtype(&[Scalar::Int64(1), Scalar::Float64(2.5)])
-                .expect("dtype should infer"),
+            infer_dtype(&[Scalar::Int64(1), Scalar::Float64(2.5)]).expect("dtype should infer"),
             DType::Float64
         );
     }
@@ -13622,10 +13614,7 @@ mod tests {
             assert_ne!(rendered, later, "business ordinals must not repeat");
         }
 
-        assert_eq!(
-            Period::new(i64::MIN, PeriodFreq::Weekly).to_string(),
-            "NaT"
-        );
+        assert_eq!(Period::new(i64::MIN, PeriodFreq::Weekly).to_string(), "NaT");
         assert_eq!(
             Period::new(i64::MIN, PeriodFreq::Business).to_string(),
             "NaT"

@@ -15554,17 +15554,13 @@ impl Series {
             // widens). True/False count as 1/0; missing values are skipped
             // (skipna default). String buckets keep the concat arm below.
             DType::Utf8
-                if self
-                    .column
-                    .values()
-                    .iter()
-                    .all(|value| {
-                        value.is_missing()
-                            || matches!(
-                                value,
-                                Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_)
-                            )
-                    }) =>
+                if self.column.values().iter().all(|value| {
+                    value.is_missing()
+                        || matches!(
+                            value,
+                            Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_)
+                        )
+                }) =>
             {
                 let mut total = 0.0f64;
                 let mut saw_float = false;
