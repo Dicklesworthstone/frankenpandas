@@ -16222,9 +16222,11 @@ impl Column {
         // Runs only on the vectorized-declined path, so hot all-Int64 ops never pay it.
         if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv)
             && matches!(out_dtype, DType::Int64)
-            && right.values.iter().filter(|value| !value.is_missing()).any(
-                |value| matches!(cast_scalar(value, DType::Int64), Ok(Scalar::Int64(0))),
-            )
+            && right
+                .values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .any(|value| matches!(cast_scalar(value, DType::Int64), Ok(Scalar::Int64(0))))
         {
             out_dtype = DType::Float64;
         }

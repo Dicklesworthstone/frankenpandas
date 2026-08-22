@@ -5839,6 +5839,42 @@ fn align_union_merge_sorted(left: &Index, right: &Index) -> AlignmentPlan {
 /// - Mixed variants fall back to numeric comparison via `to_f64`. If
 ///   either side is non-numeric (Utf8 vs Int64, etc.), return Equal —
 ///   callers are responsible for not mixing types in a sorted Series.
+///
+/// br-frankenpandas-cxj4s: pandas promotes a compared column AT PADDING
+/// TIME — an equal cell is replaced by NaN inside the ORIGINAL ndarray, so
+/// one equal cell lifts the whole result column to float64 even if every
+/// padded row is then filtered away. FP used to filter first and infer the
+/// dtype from the survivors, so a pure-int survivor list stayed Int64 where
+/// pandas says float64 (fp_p2d_418). MEASURED, live pandas 2.2.3:
+///
+///   df.compare(...) over [1,2] vs [1,3], result_names -> a_left/a_right float64 2.0/3.0
+///   every-row-differs                          -> int64 preserved (no NaN ever lands)
+///   keep_equal=True                            -> input dtype preserved (no NaN lands)
+///   bool column with a padded cell             -> object   (needs hlcgl's object dtype)
+///   utf8 column with a padded cell             -> object   (same)
+///
+/// The bool/utf8 arms are deliberately NOT faked with a Utf8 relabel here;
+/// they are recorded for the object-dtype pass.
+fn compare_promote_padded_column(values: &[Scalar], padded: bool) -> Result<Column, FrameError> {
+    let col = Column::from_values(values.to_vec())?;
+    if !padded || col.dtype() != DType::Int64 {
+        return Ok(col);
+    }
+    let promoted: Vec<Scalar> = values
+        .iter()
+        .map(|value| match value {
+            Scalar::Int64(v) => Scalar::Float64(*v as f64),
+            other => other.clone(),
+        })
+        .collect();
+    Ok(Column::from_values(promoted)?)
+}
+
+/// One compared column's collected state: name, self values, other values,
+/// has-any-diff, had-a-padded-equal-cell. br-frankenpandas-cxj4s factored
+/// this alias out when the padding flag pushed the bare tuple past clippy's
+/// type-complexity threshold.
+type ComparePerCol = (String, Vec<Scalar>, Vec<Scalar>, bool, bool);
 fn compare_scalar_values(left: &Scalar, right: &Scalar) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (left, right) {
@@ -83282,18 +83318,17 @@ impl DataFrame {
 
         let n = self.len();
         let mut has_diff = vec![false; n];
-        // (column name, self values, other values, column-has-any-diff). Built
-        // once; both align_axis layouts are assembled from it.
-        let mut per_col: Vec<(String, Vec<Scalar>, Vec<Scalar>, bool)> =
-            Vec::with_capacity(self.column_order.len());
+        // (column name, self values, other values, column-has-any-diff,
+        // column-had-a-padded-equal-cell). Built once; both align_axis
+        let mut per_col: Vec<ComparePerCol> = Vec::with_capacity(self.column_order.len());
 
         for col_name in &self.column_order {
             let self_col = &self.columns[col_name];
             let other_col = &other.columns[col_name];
-
             let mut self_vals = Vec::with_capacity(n);
             let mut other_vals = Vec::with_capacity(n);
             let mut col_has_diff = false;
+            let mut col_had_padding = false;
 
             for (i, diff_flag) in has_diff.iter_mut().enumerate() {
                 let sv = &self_col.values()[i];
@@ -83308,15 +83343,28 @@ impl DataFrame {
                     self_vals.push(sv.clone());
                     other_vals.push(ov.clone());
                 } else {
+                    // Equal cell padded away. br-frankenpandas-cxj4s: pandas
+                    // replaces it with NaN inside the ORIGINAL ndarray BEFORE
+                    // row filtering, so ONE equal cell promotes the whole
+                    // result column (int64 -> float64; bool/utf8 -> object —
+                    // the latter blocked on hlcgl's object dtype, do not fake
+                    // it with a Utf8 relabel).
+                    col_had_padding = true;
                     self_vals.push(Scalar::Null(NullKind::NaN));
                     other_vals.push(Scalar::Null(NullKind::NaN));
                 }
             }
 
-            per_col.push((col_name.clone(), self_vals, other_vals, col_has_diff));
+            per_col.push((
+                col_name.clone(),
+                self_vals,
+                other_vals,
+                col_has_diff,
+                col_had_padding,
+            ));
         }
 
-        let any_diff_col = per_col.iter().any(|(_, _, _, d)| *d);
+        let any_diff_col = per_col.iter().any(|(_, _, _, d, _)| *d);
         if !any_diff_col && !keep_shape {
             // No differences found - return empty DataFrame.
             // Per br-frankenpandas-mu31x: preserve self.index.name on the
@@ -83347,7 +83395,7 @@ impl DataFrame {
         // (br-frankenpandas-ums1z).
         let mut col_level0: Vec<IndexLabel> = Vec::with_capacity(per_col.len() * 2);
         let mut col_level1: Vec<IndexLabel> = Vec::with_capacity(per_col.len() * 2);
-        for (col_name, self_vals, other_vals, col_has_diff) in &per_col {
+        for (col_name, self_vals, other_vals, col_has_diff, col_had_padding) in &per_col {
             // keep_shape keeps every column pair even when fully equal.
             if !(keep_shape || *col_has_diff) {
                 continue;
@@ -83358,8 +83406,14 @@ impl DataFrame {
                 row_indices.iter().map(|&i| other_vals[i].clone()).collect();
             let self_name = format!("{col_name}_{}", result_names.0);
             let other_name = format!("{col_name}_{}", result_names.1);
-            columns.insert(self_name.clone(), Column::from_values(self_filtered)?);
-            columns.insert(other_name.clone(), Column::from_values(other_filtered)?);
+            columns.insert(
+                self_name.clone(),
+                compare_promote_padded_column(&self_filtered, *col_had_padding)?,
+            );
+            columns.insert(
+                other_name.clone(),
+                compare_promote_padded_column(&other_filtered, *col_had_padding)?,
+            );
             column_order.push(self_name);
             column_order.push(other_name);
             // br-frankenpandas-ums1z: the column axis is TWO LEVELS in pandas, and
@@ -83405,12 +83459,12 @@ impl DataFrame {
         &self,
         result_names: (&str, &str),
         keep_shape: bool,
-        per_col: &[(String, Vec<Scalar>, Vec<Scalar>, bool)],
+        per_col: &[ComparePerCol],
         row_indices: &[usize],
     ) -> Result<Self, FrameError> {
         let mut columns = BTreeMap::new();
         let mut column_order = Vec::new();
-        for (col_name, self_vals, other_vals, col_has_diff) in per_col {
+        for (col_name, self_vals, other_vals, col_has_diff, col_had_padding) in per_col {
             if !(keep_shape || *col_has_diff) {
                 continue;
             }
@@ -83419,7 +83473,10 @@ impl DataFrame {
                 interleaved.push(self_vals[i].clone());
                 interleaved.push(other_vals[i].clone());
             }
-            columns.insert(col_name.clone(), Column::from_values(interleaved)?);
+            columns.insert(
+                col_name.clone(),
+                compare_promote_padded_column(&interleaved, *col_had_padding)?,
+            );
             column_order.push(col_name.clone());
         }
 
@@ -132524,10 +132581,16 @@ mod tests {
         assert_eq!(diff.len(), 1);
         assert!(diff.column("a_self").is_some());
         assert!(diff.column("a_other").is_some());
-        assert_eq!(diff.column("a_self").unwrap().values()[0], Scalar::Int64(2));
+        // br-frankenpandas-cxj4s: row 0 of 'a' is equal, so pandas pads it
+        // with NaN INSIDE the int64 column before dropping the row — the
+        // surviving values are float64 2.0/99.0, measured live on 2.2.3.
+        assert_eq!(
+            diff.column("a_self").unwrap().values()[0],
+            Scalar::Float64(2.0)
+        );
         assert_eq!(
             diff.column("a_other").unwrap().values()[0],
-            Scalar::Int64(99)
+            Scalar::Float64(99.0)
         );
     }
 
@@ -132652,14 +132715,68 @@ mod tests {
             ],
         )
         .unwrap();
-
         let diff = df1.compare_with_result_names(&df2, ("lhs", "rhs")).unwrap();
+        // cxj4s: 'a' row 0 equal -> padded column promotes to float64.
+        assert_eq!(
+            diff.column("a_lhs").unwrap().values()[0],
+            Scalar::Float64(2.0)
+        );
+        assert_eq!(
+            diff.column("a_rhs").unwrap().values()[0],
+            Scalar::Float64(9.0)
+        );
         assert!(diff.column("a_lhs").is_some());
         assert!(diff.column("a_rhs").is_some());
         assert!(diff.column("a_self").is_none());
         assert!(diff.column("a_other").is_none());
-        assert_eq!(diff.column("a_lhs").unwrap().values()[0], Scalar::Int64(2));
-        assert_eq!(diff.column("a_rhs").unwrap().values()[0], Scalar::Int64(9));
+    }
+
+    #[test]
+    fn dataframe_compare_padding_promotes_but_clean_diff_stays_int64_cxj4s() {
+        // The fp_p2d_418 shape: [1,2] vs [1,9] — one equal row pads the
+        // column with NaN before it is dropped, so the survivor renders
+        // float64 2.0/9.0 even though no NaN survives the filter.
+        let padded_l = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        let padded_r = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(9)])],
+        )
+        .unwrap();
+        let out = padded_l.compare(&padded_r).unwrap();
+        assert_eq!(
+            out.column("a_self").unwrap().values()[0],
+            Scalar::Float64(2.0)
+        );
+        assert_eq!(
+            out.column("a_other").unwrap().values()[0],
+            Scalar::Float64(9.0)
+        );
+
+        // No padding anywhere (every row differs) -> input dtype survives,
+        // measured live pandas 2.2.3.
+        let clean_l = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        let clean_r = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(9), Scalar::Int64(3)])],
+        )
+        .unwrap();
+        let clean = clean_l.compare(&clean_r).unwrap();
+        assert_eq!(
+            clean.column("a_self").unwrap().values()[0],
+            Scalar::Int64(1)
+        );
+        assert_eq!(
+            clean.column("a_other").unwrap().values()[0],
+            Scalar::Int64(9)
+        );
     }
 
     fn dataframe_compare_xy_fixture() -> (DataFrame, DataFrame) {
@@ -132696,27 +132813,38 @@ mod tests {
 
     #[test]
     fn dataframe_compare_keep_shape_keeps_all_rows_and_columns() {
-        // Verified vs live pandas 2.2.3: keep_shape keeps every row/col, equal
-        // cells are NaN, differing cells show values.
+        // Verified vs live pandas 2.2.3: keep_shape keeps every row/col; equal
+        // cells render NaN. cxj4s: each column has an equal (padded) cell, so
+        // both columns float64 even where a real value survives.
         let (df1, df2) = dataframe_compare_xy_fixture();
         let out = df1
             .compare_with_options(&df2, ("self", "other"), true, false)
             .unwrap();
         assert_eq!(out.len(), 3);
+        assert_eq!(
+            out.column("x_self").unwrap().values()[1],
+            Scalar::Float64(2.0)
+        );
+        assert_eq!(
+            out.column("x_other").unwrap().values()[1],
+            Scalar::Float64(9.0)
+        );
+        assert!(out.column("y_self").unwrap().values()[1].is_missing());
+        // Row 2: y differs (3 vs 8), x equal -> NaN.
+        assert_eq!(
+            out.column("y_self").unwrap().values()[2],
+            Scalar::Float64(3.0)
+        );
+        assert_eq!(
+            out.column("y_other").unwrap().values()[2],
+            Scalar::Float64(8.0)
+        );
         for col in ["x_self", "x_other", "y_self", "y_other"] {
             assert!(out.column(col).is_some(), "missing {col}");
         }
         // Row 0: all equal -> all NaN.
         assert!(out.column("x_self").unwrap().values()[0].is_missing());
         assert!(out.column("y_other").unwrap().values()[0].is_missing());
-        // Row 1: x differs (2 vs 9), y equal -> NaN.
-        assert_eq!(out.column("x_self").unwrap().values()[1], Scalar::Int64(2));
-        assert_eq!(out.column("x_other").unwrap().values()[1], Scalar::Int64(9));
-        assert!(out.column("y_self").unwrap().values()[1].is_missing());
-        // Row 2: y differs (3 vs 8), x equal -> NaN.
-        assert_eq!(out.column("y_self").unwrap().values()[2], Scalar::Int64(3));
-        assert_eq!(out.column("y_other").unwrap().values()[2], Scalar::Int64(8));
-        assert!(out.column("x_other").unwrap().values()[2].is_missing());
     }
 
     #[test]
@@ -132788,15 +132916,16 @@ mod tests {
             ]
         );
 
-        // x: [2, 9, NaN, NaN]; y: [NaN, NaN, 3, 8].
+        // x: [2.0, 9.0, NaN, NaN]; y: [NaN, NaN, 3.0, 8.0] — cxj4s: both
+        // columns have equal (padded) cells, so both promote to float64.
         let x = out.column("x").unwrap().values();
-        assert_eq!(x[0], Scalar::Int64(2));
-        assert_eq!(x[1], Scalar::Int64(9));
+        assert_eq!(x[0], Scalar::Float64(2.0));
+        assert_eq!(x[1], Scalar::Float64(9.0));
         assert!(x[2].is_missing() && x[3].is_missing());
         let y = out.column("y").unwrap().values();
         assert!(y[0].is_missing() && y[1].is_missing());
-        assert_eq!(y[2], Scalar::Int64(3));
-        assert_eq!(y[3], Scalar::Int64(8));
+        assert_eq!(y[2], Scalar::Float64(3.0));
+        assert_eq!(y[3], Scalar::Float64(8.0));
     }
 
     #[test]

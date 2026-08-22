@@ -5,56 +5,141 @@
   "operation": "dataframe_compare",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "27743b7ff089406ba1f2c8e6f08f434def284f26010758dab55bc14d00776859",
+    "generated_at": "2026-08-22T20:25:06Z"
   },
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
     "columns": {
       "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 2
+        }
       ],
       "b": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
+        {
+          "kind": "int64",
+          "value": 3
+        },
+        {
+          "kind": "int64",
+          "value": 4
+        }
       ]
     },
-    "column_order": ["a", "b"]
+    "column_order": [
+      "a",
+      "b"
+    ]
   },
   "frame_right": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
     "columns": {
       "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 9 }
+        {
+          "kind": "int64",
+          "value": 1
+        },
+        {
+          "kind": "int64",
+          "value": 9
+        }
       ],
       "b": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
+        {
+          "kind": "int64",
+          "value": 3
+        },
+        {
+          "kind": "int64",
+          "value": 4
+        }
       ]
     },
-    "column_order": ["a", "b"]
+    "column_order": [
+      "a",
+      "b"
+    ]
   },
-  "compare_result_names": ["left", "right"],
+  "compare_result_names": [
+    "left",
+    "right"
+  ],
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 1 }
+      {
+        "kind": "int64",
+        "value": 1
+      }
     ],
     "columns": {
       "a_left": [
-        { "kind": "int64", "value": 2 }
+        {
+          "kind": "float64",
+          "value": 2.0
+        }
       ],
       "a_right": [
-        { "kind": "int64", "value": 9 }
+        {
+          "kind": "float64",
+          "value": 9.0
+        }
       ]
     },
-    "column_order": ["a_left", "a_right"]
+    "column_order": [
+      "a_left",
+      "a_right"
+    ],
+    "column_multiindex": {
+      "tuples": [
+        [
+          {
+            "kind": "utf8",
+            "value": "a"
+          },
+          {
+            "kind": "utf8",
+            "value": "left"
+          }
+        ],
+        [
+          {
+            "kind": "utf8",
+            "value": "a"
+          },
+          {
+            "kind": "utf8",
+            "value": "right"
+          }
+        ]
+      ],
+      "names": [
+        null,
+        null
+      ]
+    }
   }
 }
