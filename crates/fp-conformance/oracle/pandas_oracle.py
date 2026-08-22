@@ -487,7 +487,16 @@ def series_dtype_for_payload_values(values: list[dict[str, Any]]) -> str | None:
         if has_null:
             return "boolean"
         return "bool"
-    if kinds <= {"bool", "int64", "float64"}:
+    # br-frankenpandas-rh1od: numeric-only mixes are float64 natively
+    # (pd.Series([1, 2.5]) and [1, None, 2.5] both -> float64), so forcing it
+    # here IS pandas. A BOOL mixed with numerics constructs OBJECT natively
+    # ([True, 2], [True, None, 2], [True, 2.5] all -> object, payloads kept
+    # as Python bools/ints/floats and nulls as NoneType — measured live
+    # 2.2.3). The old `<= {bool, int64, float64}` arm forced float64 there,
+    # rewriting bool kinds on output in violation of this chooser's own
+    # kind-preservation purpose. Bool-mixed payloads now fall through to
+    # native construction (None), exactly as pandas does.
+    if kinds and kinds <= {"int64", "float64"}:
         return "float64"
     return None
 

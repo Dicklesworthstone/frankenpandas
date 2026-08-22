@@ -5,32 +5,69 @@
   "operation": "series_constructor",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "b48fb3339fb77eb988f64fe349732dd49b54d24bf4b78a017e4cfcab36290dee",
+    "generated_at": "2026-08-22T22:47:19Z"
   },
   "left": {
     "name": "bool_int",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "bool", "value": true },
-      { "kind": "int64", "value": 2 },
-      { "kind": "bool", "value": false }
+      {
+        "kind": "bool",
+        "value": true
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "bool",
+        "value": false
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 0 }
-    ]
+      {
+        "kind": "bool",
+        "value": true
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "bool",
+        "value": false
+      }
+    ],
+    "name": "bool_int"
   }
 }

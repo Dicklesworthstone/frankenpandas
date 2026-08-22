@@ -1083,6 +1083,14 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
     let mut saw_timedelta = false;
     let mut saw_datetime = false;
     let mut saw_non_utf8_non_null = false;
+    // br-frankenpandas-rh1od: pandas constructs OBJECT columns whenever a
+    // Python bool mixes with any numeric scalar ([True, 2] -> object,
+    // measured live 2.2.3); numpy's bool<int common-type never fires at the
+    // constructor. FrankenPandas coerced to Int64 here, which no pandas
+    // constructor path produces. Strings already take the object bucket
+    // below (DISC-005); bool+numeric joins them.
+    let mut saw_bool = false;
+    let mut saw_numeric = false;
 
     // NOTE (br-frankenpandas-nywa8): inferring Float64 from a NaN-KIND missing
     // looks like the right central fix for pandas' int64 -> float64 promotion,
@@ -1101,6 +1109,16 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
         match value.dtype() {
             DType::Null => {}
             DType::Utf8 => saw_utf8 = true,
+            DType::Bool => {
+                saw_bool = true;
+                saw_non_utf8_non_null = true;
+                current = common_dtype(current, DType::Bool)?;
+            }
+            DType::Int64 | DType::Float64 => {
+                saw_numeric = true;
+                saw_non_utf8_non_null = true;
+                current = common_dtype(current, value.dtype())?;
+            }
             DType::Timedelta64 => {
                 saw_timedelta = true;
                 if current == DType::Null {
@@ -1129,6 +1147,12 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
             }
         }
 
+        if saw_bool && saw_numeric {
+            // Constructor inference follows pandas object-dtype behavior for
+            // heterogeneous string/scalar payloads while arithmetic coercion
+            // remains governed by the stricter common_dtype lattice.
+            return Ok(DType::Utf8);
+        }
         if saw_utf8 && saw_non_utf8_non_null {
             // Constructor inference follows pandas object-dtype behavior for
             // heterogeneous string/scalar payloads while arithmetic coercion
@@ -7104,10 +7128,13 @@ mod tests {
             Ok(Float64),
             "Int64 + Float64 -> Float64"
         );
+        // br-frankenpandas-rh1od: MEASURED live pandas 2.2.3 — a bool mixed
+        // with numerics constructs OBJECT; the old Int64 coercion here was
+        // numpy common-type behavior no pandas constructor path produces.
         assert_eq!(
             infer_dtype(&[Scalar::Bool(true), Scalar::Int64(3)]),
-            Ok(Int64),
-            "Bool + Int64 -> Int64"
+            Ok(Utf8),
+            "Bool + Int64 -> object bucket (pandas constructs object)"
         );
         assert_eq!(
             infer_dtype(&[Scalar::Utf8("a".into()), Scalar::Int64(3)]),
@@ -8637,6 +8664,51 @@ mod tests {
         assert_eq!(
             infer_dtype(&values).expect("dtype should infer"),
             DType::Utf8
+        );
+    }
+
+    #[test]
+    fn infer_dtype_routes_bool_numeric_mix_to_utf8_object_bucket_rh1od() {
+        // br-frankenpandas-rh1od, MEASURED live pandas 2.2.3: a bool mixed
+        // with any numeric scalar constructs OBJECT ([True, 2] -> object,
+        // payloads preserved); numpy's bool<int common-type never fires at
+        // the constructor. Discriminating: before the change this inferred
+        // Int64 and coerced True -> 1.
+        let values = vec![Scalar::Bool(true), Scalar::Int64(7), Scalar::Bool(false)];
+        assert_eq!(
+            infer_dtype(&values).expect("dtype should infer"),
+            DType::Utf8
+        );
+        let with_float = vec![Scalar::Int64(1), Scalar::Float64(2.5), Scalar::Bool(true)];
+        assert_eq!(
+            infer_dtype(&with_float).expect("dtype should infer"),
+            DType::Utf8
+        );
+        let with_null = vec![
+            Scalar::Bool(true),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(2),
+        ];
+        assert_eq!(
+            infer_dtype(&with_null).expect("dtype should infer"),
+            DType::Utf8
+        );
+    }
+
+    #[test]
+    fn infer_dtype_keeps_nonmixed_bool_and_numeric_paths_rh1od() {
+        // Pure bool stays bool; numeric-only mixes keep the common_dtype
+        // lattice (int+float -> float64) — the object bucket is ONLY for the
+        // cross-family mix.
+        assert_eq!(
+            infer_dtype(&[Scalar::Bool(true), Scalar::Bool(false)])
+                .expect("dtype should infer"),
+            DType::Bool
+        );
+        assert_eq!(
+            infer_dtype(&[Scalar::Int64(1), Scalar::Float64(2.5)])
+                .expect("dtype should infer"),
+            DType::Float64
         );
     }
 

@@ -15546,6 +15546,44 @@ impl Series {
                 }
                 return Ok(Scalar::Int64(total));
             }
+            // br-frankenpandas-rh1od: an OBJECT bucket holding only numeric
+            // scalars (bool/int/float — the bool+numeric constructor mix now
+            // lands here via infer_dtype) sums NUMERICALLY in pandas, not by
+            // string concat: [1, 2.5, True, None, nan].sum() -> 4.5 float;
+            // [1, 2, True].sum() -> 4 int (Python sum semantics: any float
+            // widens). True/False count as 1/0; missing values are skipped
+            // (skipna default). String buckets keep the concat arm below.
+            DType::Utf8
+                if self
+                    .column
+                    .values()
+                    .iter()
+                    .all(|value| {
+                        value.is_missing()
+                            || matches!(
+                                value,
+                                Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_)
+                            )
+                    }) =>
+            {
+                let mut total = 0.0f64;
+                let mut saw_float = false;
+                for val in self.column.values() {
+                    match val {
+                        Scalar::Bool(b) => total += f64::from(*b),
+                        Scalar::Int64(v) => total += *v as f64,
+                        Scalar::Float64(v) => {
+                            saw_float = true;
+                            total += v;
+                        }
+                        _ => {}
+                    }
+                }
+                if saw_float {
+                    return Ok(Scalar::Float64(total));
+                }
+                return Ok(Scalar::Int64(total as i64));
+            }
             // Per br-frankenpandas-f031e: pandas concatenates strings on
             // Series.sum (object dtype). Sister gap to cumsum Utf8 fix in
             // 4e050. Default skipna=True: nulls are skipped silently;
@@ -188117,6 +188155,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Utf8("hello world".into()));
+    }
+
+    #[test]
+    fn series_sum_numeric_object_bucket_sums_numerically_rh1od() {
+        // br-frankenpandas-rh1od: the bool+numeric constructor mix lands in
+        // the Utf8-labeled OBJECT bucket; pandas sums it NUMERICALLY with
+        // Python semantics — True counts as 1, any float widens to float,
+        // missing values skip. MEASURED live 2.2.3:
+        //   pd.Series([1, 2.5, True, None, nan]).sum() -> 4.5
+        //   pd.Series([1, 2, True]).sum()              -> 4 (int)
+        let mixed = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Float64(2.5),
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        assert_eq!(mixed.sum().unwrap(), Scalar::Float64(4.5));
+        // mean shares the funnel: 4.5 / 3 present values.
+        assert_eq!(mixed.mean().unwrap(), Scalar::Float64(1.5));
+
+        let ints = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Bool(true)],
+        )
+        .unwrap();
+        assert_eq!(ints.sum().unwrap(), Scalar::Int64(4));
     }
 
     #[test]

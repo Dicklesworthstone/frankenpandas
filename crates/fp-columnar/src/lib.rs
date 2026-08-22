@@ -10978,11 +10978,20 @@ impl Column {
     /// AG-03: takes ownership of the values vec and uses `cast_scalar_owned`
     /// to skip cloning when values already have the correct dtype.
     pub fn new(dtype: DType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
-        let preserve_utf8_object_bucket = matches!(dtype, DType::Utf8)
-            && values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
+        // br-frankenpandas-rh1od: a bool+numeric mix under a Utf8 label is the
+        // pandas OBJECT bucket (infer_dtype routes it here); coercing would
+        // stringify True -> "True", which no pandas constructor produces.
+        // Preserve the payloads like the DISC-005 string-mix case beside it.
+        let bool_numeric_object_mix = values.iter().any(|value| matches!(value, Scalar::Bool(_)))
             && values
                 .iter()
-                .any(|value| !matches!(value, Scalar::Utf8(_) | Scalar::Null(_)));
+                .any(|value| matches!(value, Scalar::Int64(_) | Scalar::Float64(_)));
+        let preserve_utf8_object_bucket = matches!(dtype, DType::Utf8)
+            && (values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
+                && values
+                    .iter()
+                    .any(|value| !matches!(value, Scalar::Utf8(_) | Scalar::Null(_)))
+                || bool_numeric_object_mix);
         let needs_coercion = values.iter().any(|v| {
             let d = v.dtype();
             d != dtype && d != DType::Null
