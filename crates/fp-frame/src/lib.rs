@@ -76465,6 +76465,46 @@ impl DataFrame {
                 }
                 return Ok(Scalar::Int64(distinct as i64));
             }
+            // br-frankenpandas-rh1od: an OBJECT bucket holding only numeric
+            // scalars (the bool+numeric constructor mix) dedups under PYTHON
+            // numeric equality — True ≡ 1 ≡ 1.0 collapse to one entry.
+            // MEASURED live 2.2.3: pd.DataFrame({'a': [True, 1, 1.0, False]})
+            // .nunique() -> 2 for that column. Same canonical-f64-bits keying
+            // as the Series::nunique arm; ints beyond 2^53 lose exactness by
+            // documented design note.
+            if col.dtype() == DType::Utf8
+                && col.values().iter().all(|value| {
+                    value.is_missing()
+                        || matches!(
+                            value,
+                            Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_)
+                        )
+                })
+            {
+                let mut seen_num: FxHashSet<u64> =
+                    FxHashSet::with_capacity_and_hasher(col.len().min(1 << 18), Default::default());
+                let mut obj_missing = false;
+                for value in col.values() {
+                    if value.is_missing() {
+                        if !dropna {
+                            obj_missing = true;
+                        }
+                        continue;
+                    }
+                    let numeric = match value {
+                        Scalar::Bool(b) => f64::from(*b),
+                        #[allow(clippy::cast_precision_loss)]
+                        Scalar::Int64(v) => *v as f64,
+                        Scalar::Float64(v) => *v,
+                        _ => unreachable!("bucket pre-checked all-numeric"),
+                    };
+                    let normalized = if numeric == 0.0 { 0.0 } else { numeric };
+                    seen_num.insert(normalized.to_bits());
+                }
+                return Ok(Scalar::Int64(
+                    (seen_num.len() + usize::from(obj_missing)) as i64,
+                ));
+            }
             let mut seen: FxHashMap<ScalarKey<'_>, ()> = FxHashMap::default();
             let mut missing_seen = false;
             for v in col.values() {
