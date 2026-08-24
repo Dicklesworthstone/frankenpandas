@@ -6007,54 +6007,15 @@ fn range_index(len: usize) -> Result<Index, FrameError> {
 
 #[inline]
 fn boolean_mask_positions(mask: &[bool]) -> (Vec<usize>, Option<AffineSelectionCertificate>) {
-    let mut affine = AffineSelectionBuilder::default();
-    let mut positions = Vec::with_capacity(mask.len());
-    let mut base = 0usize;
-    let (chunks, remainder) = mask.as_chunks::<8>();
-    for chunk in chunks {
-        if chunk[0] {
-            affine.push(base);
-            positions.push(base);
+    match boolean_mask_selection(mask) {
+        BooleanMaskSelection::Affine(certificate) => {
+            let positions = (0..certificate.len)
+                .map(|offset| certificate.start + offset * certificate.step)
+                .collect();
+            (positions, Some(certificate))
         }
-        if chunk[1] {
-            affine.push(base + 1);
-            positions.push(base + 1);
-        }
-        if chunk[2] {
-            affine.push(base + 2);
-            positions.push(base + 2);
-        }
-        if chunk[3] {
-            affine.push(base + 3);
-            positions.push(base + 3);
-        }
-        if chunk[4] {
-            affine.push(base + 4);
-            positions.push(base + 4);
-        }
-        if chunk[5] {
-            affine.push(base + 5);
-            positions.push(base + 5);
-        }
-        if chunk[6] {
-            affine.push(base + 6);
-            positions.push(base + 6);
-        }
-        if chunk[7] {
-            affine.push(base + 7);
-            positions.push(base + 7);
-        }
-        base += 8;
+        BooleanMaskSelection::Positions(positions) => (positions, None),
     }
-    for &keep in remainder {
-        if keep {
-            affine.push(base);
-            positions.push(base);
-        }
-        base += 1;
-    }
-    let certificate = affine.finish();
-    (positions, certificate)
 }
 
 #[inline]
@@ -6170,6 +6131,53 @@ impl AffineSelectionBuilder {
     }
 }
 
+/// A boolean mask is either an arithmetic selection that can preserve lazy
+/// typed column views, or a materialized positional gather. The latter is
+/// allocated only after the mask has actually disproved the affine shape.
+enum BooleanMaskSelection {
+    Affine(AffineSelectionCertificate),
+    Positions(Vec<usize>),
+}
+
+#[inline]
+fn boolean_mask_selection(mask: &[bool]) -> BooleanMaskSelection {
+    let mut affine = AffineSelectionBuilder::default();
+    let mut positions: Option<Vec<usize>> = None;
+
+    for (position, &keep) in mask.iter().enumerate() {
+        if !keep {
+            continue;
+        }
+        if let Some(positions) = &mut positions {
+            positions.push(position);
+            continue;
+        }
+
+        affine.push(position);
+        if !affine.is_affine {
+            // Positions before `position` are the affine prefix. Rebuild that
+            // prefix once, then append the first non-affine hit and keep
+            // gathering. A mask's selected positions are strictly ascending,
+            // so the arithmetic has already been proven in `push`.
+            let prefix_len = affine.len.saturating_sub(1);
+            let mut gathered = Vec::with_capacity((mask.len() / 2).max(affine.len));
+            for offset in 0..prefix_len {
+                gathered.push(affine.first + offset * affine.step);
+            }
+            gathered.push(position);
+            positions = Some(gathered);
+        }
+    }
+
+    match positions {
+        Some(positions) => BooleanMaskSelection::Positions(positions),
+        None => affine.finish().map_or_else(
+            || BooleanMaskSelection::Positions(Vec::new()),
+            BooleanMaskSelection::Affine,
+        ),
+    }
+}
+
 /// Recognize a strictly-ascending arithmetic progression of normalized row
 /// positions (a contiguous `iloc[a:b]` slice => step 1, or a strided
 /// `iloc[a:b:s]` selection => step s) so positional row selection can route to
@@ -6196,6 +6204,7 @@ fn affine_certificate_from_positions(positions: &[usize]) -> Option<AffineSelect
     builder.finish()
 }
 
+#[cfg(test)]
 #[inline]
 fn boolean_mask_affine_certificate(mask: &[bool]) -> Option<AffineSelectionCertificate> {
     if let Some(certificate) = boolean_mask_every_other_affine_certificate(mask) {
@@ -6268,6 +6277,7 @@ fn boolean_mask_affine_certificate(mask: &[bool]) -> Option<AffineSelectionCerti
     affine.finish()
 }
 
+#[cfg(test)]
 #[inline]
 fn boolean_mask_every_other_affine_certificate(
     mask: &[bool],
@@ -65001,17 +65011,22 @@ impl DataFrame {
             }
         }
 
-        if let Some(certificate) = boolean_mask_affine_certificate(mask)
-            && let Some(result) = self.take_rows_by_affine_certificate_unchecked(certificate)
-        {
-            return result;
+        match boolean_mask_selection(mask) {
+            BooleanMaskSelection::Affine(certificate) => self
+                .take_rows_by_affine_certificate_unchecked(certificate)
+                .unwrap_or_else(|| {
+                    let positions = (0..certificate.len)
+                        .map(|offset| certificate.start + offset * certificate.step)
+                        .collect::<Vec<_>>();
+                    self.take_rows_by_positions_with_affine_certificate_unchecked(
+                        &positions,
+                        Some(certificate),
+                    )
+                }),
+            BooleanMaskSelection::Positions(positions) => {
+                self.take_rows_by_positions_with_affine_certificate_unchecked(&positions, None)
+            }
         }
-
-        let (positions, affine_certificate) = boolean_mask_positions(mask);
-        self.take_rows_by_positions_with_affine_certificate_unchecked(
-            &positions,
-            affine_certificate,
-        )
     }
 
     /// Boolean mask row selection (position-based).
@@ -109431,6 +109446,24 @@ mod tests {
             super::boolean_mask_positions(&non_affine_mask);
         assert_eq!(non_affine_positions, vec![0, 2, 3, 6]);
         assert_eq!(non_affine_certificate, None);
+    }
+
+    #[test]
+    fn boolean_mask_selection_keeps_the_affine_prefix_after_a_break_uza04219() {
+        // A common wrong single-pass implementation starts collecting only
+        // after it sees the first non-affine stride, silently dropping the
+        // first two selected rows. The first three hits below are 1, 4, 6:
+        // the third one is the break, while later hits prove collection
+        // continues in source order.
+        let mask = [false, true, false, false, true, false, true, false, true];
+        match super::boolean_mask_selection(&mask) {
+            super::BooleanMaskSelection::Positions(positions) => {
+                assert_eq!(positions, vec![1, 4, 6, 8]);
+            }
+            super::BooleanMaskSelection::Affine(_) => {
+                panic!("non-affine mask must use positions")
+            }
+        }
     }
 
     #[test]
