@@ -7126,18 +7126,14 @@ fn typed_slice_already_sorted(column: &Column, ascending: bool) -> Option<bool> 
 /// column is not all-valid (br-frankenpandas-jyhf7), so `as_f64_slice` declines
 /// it here and the old path still decides. Ascending uses the same stable
 /// `radix_argsort_f64`; descending keeps the same stable `partial_cmp`
-/// comparison sort over the same `(position, value)` pairs. The `Int64` arm
-/// mirrors its Scalar counterpart's `sort_by` on `(position, value)` unchanged —
-/// note `as_i64_slice` answers only for `DType::Int64`, so an all-valid
-/// `Int64Nullable` key keeps the Scalar path.
+/// comparison sort over the same `(position, value)` pairs. Int64 uses the
+/// matching stable radix permutation in both directions: its signed key
+/// transform preserves numeric order and the stable scatter preserves original
+/// order for ties. `as_i64_slice` answers only for `DType::Int64`, so an
+/// all-valid `Int64Nullable` key keeps the Scalar path.
 fn typed_slice_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>> {
     if let Some(data) = column.as_i64_slice() {
-        let mut keyed: Vec<(usize, i64)> = data.iter().copied().enumerate().collect();
-        keyed.sort_by(|left, right| {
-            let order = left.1.cmp(&right.1);
-            if ascending { order } else { order.reverse() }
-        });
-        return Some(keyed.into_iter().map(|(position, _)| position).collect());
+        return Some(fp_columnar::radix_argsort_i64(data, ascending));
     }
     if let Some(data) = column.as_f64_slice() {
         debug_assert!(
@@ -203031,8 +203027,8 @@ mod single_column_sort_typed_slice_uza04 {
         typed_dense_values_already_sorted, typed_slice_already_sorted, typed_slice_sort_order,
     };
 
-    /// Every shape below is asserted in BOTH directions, since ascending and
-    /// descending take different kernels (radix vs comparison sort).
+    /// Every shape below is asserted in BOTH directions because each direction
+    /// carries its own stable ordering contract.
     fn assert_matches_scalar_path(column: &Column, label: &str) {
         for ascending in [true, false] {
             assert_eq!(
@@ -203086,6 +203082,19 @@ mod single_column_sort_typed_slice_uza04 {
             let column = Column::from_i64_values(data);
             assert_matches_scalar_path(&column, label);
         }
+    }
+
+    #[test]
+    fn typed_i64_radix_keeps_descending_ties_stable_92n1x() {
+        // Planted negative: a non-stable descending implementation could emit
+        // either equal-value pair in reverse input order. Stable pandas sorting
+        // keeps their original positions, including at signed i64 extremes.
+        let column = Column::from_i64_values(vec![2, -5, 2, i64::MIN, -5, i64::MAX]);
+        let ascending = typed_slice_sort_order(&column, true).expect("typed i64 route");
+        let descending = typed_slice_sort_order(&column, false).expect("typed i64 route");
+        assert_eq!(ascending, vec![3, 1, 4, 0, 2, 5]);
+        assert_eq!(descending, vec![5, 0, 2, 1, 4, 3]);
+        assert_ne!(descending, vec![5, 2, 0, 4, 1, 3]);
     }
 
     /// NON-VACUITY. Every assertion above would also pass if the typed route
