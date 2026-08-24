@@ -14,11 +14,19 @@ on:
     # next push almost every time — 0 green runs in 1,200 attempts back to
     # 2026-07-13, and runs queued >28h under load. Per-commit full-matrix runs
     # would burn minutes ~15x faster than they complete; a fixed batch keeps
-    # continuous enforcement with bounded cost. PRs still trigger immediately.
-    - cron: "23 */3 * * *"
+    # continuous enforcement with bounded cost. The 2026-08-23 batch took
+    # 13.7 hours wall-clock, so a three-hour cadence can never drain its
+    # concurrency slot: GitHub replaces the one pending run on every tick
+    # before it creates jobs. Daily leaves enough room for a delayed batch to
+    # start and finish. PRs still trigger immediately.
+    - cron: "23 3 * * *"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Scheduled batches intentionally share one slot, but an operator's
+  # workflow_dispatch must not sit behind that slot's replaceable pending run.
+  # Give manual runs their immutable run id so a real verification run always
+  # reaches the job queue; PRs retain their usual one-slot cancellation group.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'schedule' && 'scheduled' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
