@@ -190,6 +190,8 @@ pub enum IoError {
     Pickle(String),
     #[error("stata error: {0}")]
     Stata(String),
+    #[error("sas error: {0}")]
+    Sas(String),
     #[error("fwf error: {0}")]
     Fwf(String),
     #[error("deferred reader: {0}")]
@@ -1526,25 +1528,24 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     // mixed CSV bails the frame-wide numeric fast paths, so historically EVERY
     // column round-tripped through a `Vec<Scalar>` (parse_scalar per cell + a
     // from_values re-scan) — even a purely-numeric column sitting next to one
-    // Utf8 column. Accumulate each column into a typed Int64/Float64 buffer and,
-    // the instant a cell is a null / bool / non-numeric-text (an AMBIGUOUS
-    // promotion — fp's from_values keeps int+null as NULLABLE Int64, coerces
-    // int+bool to Int64, etc.; see the probe in the commit msg), drop that column
-    // to `Fallback` and rebuild it via the UNCHANGED Scalar path from the raw
+    // Utf8 column. Accumulate each column into a typed Int64/Float64/Bool buffer and,
+    // the instant a cell cannot preserve that column's current type (an AMBIGUOUS
+    // promotion — nullable numbers stay typed, while the existing raw-object
+    // reconstruction preserves ambiguous mixtures such as int+bool as Utf8),
+    // drop that column to `Fallback` and rebuild it via the UNCHANGED Scalar path from the raw
     // bytes (already captured for verbatim). A pure-numeric-no-null column then
     // emits its typed column directly, bit-identical to from_values over the
     // equivalent Scalars: all-Int64 → Int64 (from_i64_values), any-Float64-no-null
     // → Float64 with ints coerced to `x as f64` (from_f64_values) — exactly what
     // Column::from_values + build_csv_object_aware_column produce for those inputs.
     // `valid: None` = all-valid so far (the common fast case, no per-cell bit
-    // tracking); `Some(mask)` = at least one NA has appeared. A numeric column
-    // with nulls stays typed — fp's from_values keeps int+null as NULLABLE Int64
-    // and float+null as Float64, and build_csv_object_aware_column normalizes a
-    // Float null to NaN; `from_{i64,f64}_values_with_validity` reproduce those
-    // exactly (Int64 missing → Null(Null); Float64 missing → Null(NaN); verified).
+    // tracking); `Some(mask)` = at least one NA has appeared. Numeric and Bool
+    // columns with nulls stay typed: Int64 missing → Null(Null), Float64 missing
+    // → Null(NaN), and Bool missing → Null(Null).
     enum ColAcc {
         Int(Vec<i64>, Option<Vec<bool>>),
         Float(Vec<f64>, Option<Vec<bool>>),
+        Bool(Vec<bool>, Option<Vec<bool>>),
         Fallback,
     }
     let mut accs: Vec<ColAcc> = (0..header_count)
@@ -1593,6 +1594,12 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             .push(false);
                         buf.push(0.0);
                     }
+                    ColAcc::Bool(buf, valid) => {
+                        valid
+                            .get_or_insert_with(|| vec![true; buf.len()])
+                            .push(false);
+                        buf.push(false);
+                    }
                     ColAcc::Fallback => {}
                 }
                 continue;
@@ -1612,6 +1619,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
+                    ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
                     ColAcc::Fallback => {}
                 }
             } else if let Ok(v) = trimmed.parse::<f64>() {
@@ -1630,7 +1638,35 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
+                    ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
                     ColAcc::Fallback => {}
+                }
+            } else if field.eq_ignore_ascii_case("true") || field.eq_ignore_ascii_case("false") {
+                let value = field.eq_ignore_ascii_case("true");
+                match acc {
+                    ColAcc::Int(buf, valid) => {
+                        // An Int accumulator can only become Bool if every
+                        // preceding slot is missing. Otherwise `1,true` must
+                        // retain the legacy object fallback rather than lose
+                        // the already-observed numeric value.
+                        let only_missing = valid
+                            .as_ref()
+                            .is_some_and(|mask| mask.iter().all(|&present| !present));
+                        if buf.is_empty() || only_missing {
+                            let mut promoted = vec![false; buf.len()];
+                            promoted.push(value);
+                            *acc = ColAcc::Bool(promoted, valid.take());
+                        } else {
+                            *acc = ColAcc::Fallback;
+                        }
+                    }
+                    ColAcc::Bool(buf, valid) => {
+                        buf.push(value);
+                        if let Some(vv) = valid {
+                            vv.push(true);
+                        }
+                    }
+                    ColAcc::Float(_, _) | ColAcc::Fallback => *acc = ColAcc::Fallback,
                 }
             } else {
                 *acc = ColAcc::Fallback;
@@ -1678,6 +1714,12 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                 match valid.as_deref().and_then(validity_from_bools) {
                     Some(mask) => Column::from_f64_values_with_validity(buf, mask),
                     None => Column::from_f64_values(buf),
+                }
+            }
+            ColAcc::Bool(buf, valid) if has_value(buf.len(), &valid) => {
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_bool_values_with_validity(buf, mask),
+                    None => Column::from_bool_values(buf),
                 }
             }
             // Any ambiguous cell, all-NA, or empty → exact legacy path from raw.
@@ -5799,13 +5841,12 @@ pub fn read_fwf(path: &Path, options: &FwfReadOptions) -> Result<DataFrame, IoEr
 // ── Deferred reader surfaces ───────────────────────────────────────────
 //
 // pandas exposes pd.read_gbq / pd.read_sas / pd.read_spss (read_clipboard is
-// implemented above via an OS subprocess backend). Each remaining one is out of
-// scope for FrankenPandas's local file-format charter:
+// implemented above via an OS subprocess backend). `read_sas` supports the
+// SAS7BDAT dialect below; XPORT and the remaining two surfaces are deferred:
 //
 //   * read_gbq calls Google BigQuery (external service, GCP credentials).
-//   * read_sas / read_spss are proprietary statistical-software formats with
-//     no first-party Rust reader at parity (pandas calls into pyreadstat /
-//     sas7bdat).
+//   * SAS XPORT and read_spss remain statistical-software formats without a
+//     first-party Rust reader at parity (pandas calls into pyreadstat).
 //
 // Following the deferral precedent in fp-frame for plotting (see
 // `plotting_deferred`), expose typed reject-closed entry points so callers
@@ -5939,18 +5980,120 @@ pub fn read_gbq(_query: &str, _project_id: Option<&str>) -> Result<DataFrame, Io
     ))
 }
 
-/// Reject-closed SAS reader.
+/// Read a SAS7BDAT dataset into a `DataFrame`.
 ///
-/// ⚠️ NOT PARITY — pandas SUPPORTS this. Measured on 2.2.3,
-/// `pd.read_sas("/nonexistent")` raises `ValueError: unable to infer format of
-/// SAS file from filename`, i.e. it reached format inference and would have read
-/// a real XPORT/SAS7BDAT file. Refusing here is a capability GAP, not a matched
-/// refusal. br-frankenpandas-9jvao.
-pub fn read_sas(_path: &Path) -> Result<DataFrame, IoError> {
-    Err(deferred_reader_error(
-        "read_sas",
-        "no first-party Rust SAS sas7bdat/xport reader exists at pandas-parity yet",
-    ))
+/// The reader preserves decoded character data, missing cells, and SAS
+/// date/datetime/time cells. XPORT remains a separate format gap: unlike a
+/// `.sas7bdat` file it has no native parser in the safe-Rust backend yet.
+/// br-frankenpandas-9jvao.
+pub fn read_sas(path: &Path) -> Result<DataFrame, IoError> {
+    let mut reader = sas7bdat::SasReader::open(path).map_err(sas_error)?;
+    let column_order = reader
+        .metadata()
+        .variables
+        .iter()
+        .map(|variable| variable.name.trim_end().to_owned())
+        .collect::<Vec<_>>();
+    reject_duplicate_headers(&column_order)?;
+
+    let mut columns = (0..column_order.len())
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<Scalar>>>();
+    let mut row_count: i64 = 0;
+    let mut rows = reader.rows_named().map_err(sas_error)?;
+    while let Some(row) = rows.try_next().map_err(sas_error)? {
+        let row_values = row.values();
+        if row_values.len() != columns.len() {
+            return Err(IoError::Sas(format!(
+                "row {row_count} has {} cells; metadata declares {} columns",
+                row_values.len(),
+                columns.len()
+            )));
+        }
+        for (column, value) in columns.iter_mut().zip(row_values) {
+            column.push(sas_cell_to_scalar(value)?);
+        }
+        row_count = row_count
+            .checked_add(1)
+            .ok_or_else(|| IoError::Sas("row count exceeded i64 range".to_owned()))?;
+    }
+    sas_rows_to_frame(column_order, columns)
+}
+
+fn sas_rows_to_frame(
+    column_order: Vec<String>,
+    columns: Vec<Vec<Scalar>>,
+) -> Result<DataFrame, IoError> {
+    if column_order.len() != columns.len() {
+        return Err(IoError::Sas(format!(
+            "metadata declares {} columns but parser produced {} columns",
+            column_order.len(),
+            columns.len()
+        )));
+    }
+    reject_duplicate_headers(&column_order)?;
+    let row_count = columns.first().map_or(0, Vec::len);
+    if columns.iter().any(|column| column.len() != row_count) {
+        return Err(IoError::Sas(
+            "parser produced columns with inconsistent row counts".to_owned(),
+        ));
+    }
+    let row_count = i64::try_from(row_count)
+        .map_err(|_| IoError::Sas("row count exceeded i64 range".to_owned()))?;
+    let mut out = BTreeMap::new();
+    for (name, values) in column_order.iter().cloned().zip(columns) {
+        out.insert(name, Column::from_values(values)?);
+    }
+    Ok(DataFrame::new_with_column_order(
+        Index::from_i64((0..row_count).collect()),
+        out,
+        column_order,
+    )?)
+}
+
+fn sas_cell_to_scalar(cell: &sas7bdat::CellValue<'_>) -> Result<Scalar, IoError> {
+    use sas7bdat::CellValue;
+
+    match cell {
+        CellValue::Float(value) => Ok(Scalar::Float64(*value)),
+        CellValue::Int32(value) => Ok(Scalar::Float64(f64::from(*value))),
+        CellValue::Int64(value) => {
+            // pandas represents SAS numeric storage as float64, including values
+            // whose original integer spelling exceeds f64's exact range.
+            #[allow(clippy::cast_precision_loss)]
+            let value = *value as f64;
+            Ok(Scalar::Float64(value))
+        }
+        CellValue::NumericString(value) => {
+            value.parse::<f64>().map(Scalar::Float64).map_err(|_| {
+                IoError::Sas(format!(
+                    "numeric SAS cell is not representable as f64: {value}"
+                ))
+            })
+        }
+        CellValue::Str(value) => Ok(Scalar::Utf8(value.to_string())),
+        CellValue::Bytes(_) => Err(IoError::Sas(
+            "SAS reader yielded undecoded bytes; a supported source encoding is required"
+                .to_owned(),
+        )),
+        CellValue::DateTime(value) | CellValue::Date(value) => {
+            let nanos = i64::try_from(value.unix_timestamp_nanos()).map_err(|_| {
+                IoError::Sas("SAS datetime is outside datetime64[ns] range".to_owned())
+            })?;
+            Ok(Scalar::Datetime64(nanos))
+        }
+        CellValue::Time(value) => {
+            let nanos = i64::try_from(value.whole_nanoseconds()).map_err(|_| {
+                IoError::Sas("SAS time is outside timedelta64[ns] range".to_owned())
+            })?;
+            Ok(Scalar::Timedelta64(nanos))
+        }
+        CellValue::Missing(_) => Ok(Scalar::Null(NullKind::NaN)),
+    }
+}
+
+fn sas_error(error: sas7bdat::Error) -> IoError {
+    IoError::Sas(error.to_string())
 }
 
 /// Reject-closed SPSS reader.
@@ -6549,23 +6692,106 @@ enum JsonNumericColumn {
 }
 
 impl JsonNumericColumn {
-    fn push_number(&mut self, number: &serde_json::Number) -> Option<()> {
+    fn push_number(&mut self, number: JsonRecordNumber) {
         match self {
-            Self::Int(values) => {
-                if let Some(value) = number.as_i64() {
-                    values.push(value);
-                } else {
-                    let value = number.as_f64()?;
+            Self::Int(values) => match number {
+                JsonRecordNumber::Int(value) => values.push(value),
+                JsonRecordNumber::Float(value) => {
                     let mut promoted = Vec::with_capacity(values.capacity().saturating_add(1));
                     promoted.extend(values.iter().map(|&prior| prior as f64));
                     promoted.push(value);
                     *self = Self::Float(promoted);
                 }
-            }
-            Self::Float(values) => values.push(number.as_f64()?),
+            },
+            Self::Float(values) => values.push(number.as_f64()),
         }
-        Some(())
     }
+}
+
+/// JSON-number representation for the typed records reader.  This parser is
+/// deliberately stricter than Rust's number parsers: it first accepts exactly
+/// JSON's grammar, then lets the standard library perform the IEEE conversion.
+/// Keeping the grammar check here avoids the per-cell serde deserializer while
+/// preserving the fallback boundary for inputs the generic JSON parser owns.
+#[derive(Clone, Copy, Debug)]
+enum JsonRecordNumber {
+    Int(i64),
+    Float(f64),
+}
+
+impl JsonRecordNumber {
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Int(value) => value as f64,
+            Self::Float(value) => value,
+        }
+    }
+}
+
+fn parse_json_record_number(token: &[u8]) -> Option<JsonRecordNumber> {
+    let mut index = 0usize;
+    if token.get(index) == Some(&b'-') {
+        index += 1;
+    }
+
+    match token.get(index)? {
+        b'0' => {
+            index += 1;
+            if matches!(token.get(index), Some(b'0'..=b'9')) {
+                return None;
+            }
+        }
+        b'1'..=b'9' => {
+            index += 1;
+            while matches!(token.get(index), Some(b'0'..=b'9')) {
+                index += 1;
+            }
+        }
+        _ => return None,
+    }
+
+    let mut is_float = false;
+    if token.get(index) == Some(&b'.') {
+        is_float = true;
+        index += 1;
+        let fraction_start = index;
+        while matches!(token.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+        if index == fraction_start {
+            return None;
+        }
+    }
+
+    if matches!(token.get(index), Some(b'e' | b'E')) {
+        is_float = true;
+        index += 1;
+        if matches!(token.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        while matches!(token.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+        if index == exponent_start {
+            return None;
+        }
+    }
+
+    if index != token.len() {
+        return None;
+    }
+    let token = std::str::from_utf8(token).ok()?;
+    if !is_float {
+        if let Ok(value) = token.parse::<i64>() {
+            return Some(JsonRecordNumber::Int(value));
+        }
+    }
+    token
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(JsonRecordNumber::Float)
 }
 
 /// Parse a range of a homogeneous, numeric flat-records array into typed column
@@ -6641,20 +6867,19 @@ fn parse_json_records_numeric_range(
             if !any {
                 return None;
             }
-            let number = serde_json::from_slice::<serde_json::Number>(&s[value_start..i]).ok()?;
+            let number = parse_json_record_number(&s[value_start..i])?;
             if rows == 0 {
                 names.push(key.to_owned());
-                let column = if let Some(value) = number.as_i64() {
-                    JsonNumericColumn::Int(vec![value])
-                } else {
-                    JsonNumericColumn::Float(vec![number.as_f64()?])
+                let column = match number {
+                    JsonRecordNumber::Int(value) => JsonNumericColumn::Int(vec![value]),
+                    JsonRecordNumber::Float(value) => JsonNumericColumn::Float(vec![value]),
                 };
                 columns.push(column);
             } else {
                 if names.get(field).is_none_or(|expected| expected != key) {
                     return None;
                 }
-                columns.get_mut(field)?.push_number(&number)?;
+                columns.get_mut(field)?.push_number(number);
             }
             field += 1;
             ws!();
@@ -8647,6 +8872,13 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             Arc::new(builder.finish())
         }
         DType::Bool | DType::BoolNullable => {
+            if let Some(values) = column.as_bool_slice() {
+                let mut builder = BooleanBuilder::with_capacity(values.len());
+                for &value in values {
+                    builder.append_value(value);
+                }
+                return Ok(Arc::new(builder.finish()));
+            }
             let mut builder = BooleanBuilder::with_capacity(column.len());
             for value in column.values() {
                 match value {
@@ -8658,6 +8890,17 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             Arc::new(builder.finish())
         }
         DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse => {
+            if column.dtype() == DType::Utf8
+                && let Some((bytes, offsets)) = column.as_utf8_contiguous()
+            {
+                let mut builder = StringBuilder::with_capacity(offsets.len() - 1, bytes.len());
+                for window in offsets.windows(2) {
+                    let value = std::str::from_utf8(&bytes[window[0]..window[1]])
+                        .map_err(|error| IoError::Parquet(error.to_string()))?;
+                    builder.append_value(value);
+                }
+                return Ok(Arc::new(builder.finish()));
+            }
             let mut builder = StringBuilder::with_capacity(column.len(), column.len() * 8);
             for value in column.values() {
                 match value {
@@ -8859,8 +9102,70 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
     RecordBatch::try_new(schema, arrays).map_err(|e| IoError::Parquet(e.to_string()))
 }
 
+/// Build the block-backed representation directly from one homogeneous Arrow
+/// Float64 batch. The Arrow buffers are already column-major, so this copies
+/// each decoded value only once into the frame's column-major backing block.
+///
+/// Nullable columns deliberately do not enter this path: the block store is
+/// all-valid by contract, and the normal typed path carries nullable-float
+/// validity and NaN semantics.
+#[cfg(feature = "block-storage")]
+fn try_record_batch_to_float64_block(batch: &RecordBatch) -> Result<Option<DataFrame>, IoError> {
+    if batch.num_columns() == 0
+        || !batch
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| field.data_type() == &ArrowDataType::Float64)
+    {
+        return Ok(None);
+    }
+
+    let names: Vec<String> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    if names.iter().collect::<HashSet<_>>().len() != names.len() {
+        // The existing BTreeMap path has legacy duplicate-label behavior.
+        // Leave it untouched rather than making the block path observably
+        // stricter.
+        return Ok(None);
+    }
+
+    let rows = batch.num_rows();
+    let capacity = rows.checked_mul(names.len()).ok_or_else(|| {
+        IoError::Parquet("parquet Float64 block dimensions overflow usize".into())
+    })?;
+    let mut block = Vec::with_capacity(capacity);
+    for array in batch.columns() {
+        let floats = array
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("Float64 schema field must carry Float64Array");
+        if floats.null_count() != 0 {
+            return Ok(None);
+        }
+        block.extend_from_slice(floats.values());
+    }
+
+    DataFrame::from_f64_block_columns(
+        Index::new_known_unique_int64_unit_range(0, rows),
+        names,
+        block,
+    )
+    .map(Some)
+    .map_err(IoError::from)
+}
+
 /// Convert an Arrow RecordBatch back into a DataFrame.
 fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> {
+    #[cfg(feature = "block-storage")]
+    if let Some(frame) = try_record_batch_to_float64_block(batch)? {
+        return Ok(frame);
+    }
+
     let n_rows = batch.num_rows();
     let schema = batch.schema();
     let mut columns = BTreeMap::new();
@@ -8941,7 +9246,7 @@ fn arrow_validity_mask(arr: &dyn Array) -> Option<fp_columnar::ValidityMask> {
 /// reads the Arrow buffer directly into a typed fp column, bypassing the per-cell
 /// `Vec<Scalar>` boxing + `Column::new` re-scan of `arrow_array_to_scalars`.
 /// Returns `None` for types that need the Scalar path (Date/Timestamp string
-/// coercion, nullable Utf8, and any uncovered dtype). Bit-identical to that path.
+/// coercion, dictionary arrays, and any uncovered dtype). Bit-identical to that path.
 fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Column> {
     use arrow::array::{
         Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array,
@@ -8991,9 +9296,7 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
                 None => Column::from_bool_values(data),
             })
         }
-        // Only the all-valid case: there is no typed contiguous-nullable-Utf8
-        // constructor, so a StringArray with nulls falls to the Scalar path.
-        ArrowDataType::Utf8 if arr.null_count() == 0 => {
+        ArrowDataType::Utf8 => {
             let t = arr.as_any().downcast_ref::<StringArray>()?;
             let offs = t.value_offsets();
             let len = t.len();
@@ -9001,9 +9304,12 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
             let end = offs[len] as usize;
             let bytes = t.value_data()[start..end].to_vec();
             let offsets: Vec<usize> = offs.iter().map(|&o| o as usize - start).collect();
-            Some(Column::from_utf8_contiguous(bytes, offsets))
+            Some(match arrow_validity_mask(arr) {
+                Some(validity) => Column::from_utf8_values_with_validity(bytes, offsets, validity),
+                None => Column::from_utf8_contiguous(bytes, offsets),
+            })
         }
-        ArrowDataType::LargeUtf8 if arr.null_count() == 0 => {
+        ArrowDataType::LargeUtf8 => {
             let t = arr
                 .as_any()
                 .downcast_ref::<arrow::array::LargeStringArray>()?;
@@ -9013,7 +9319,10 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
             let end = offs[len] as usize;
             let bytes = t.value_data()[start..end].to_vec();
             let offsets: Vec<usize> = offs.iter().map(|&o| o as usize - start).collect();
-            Some(Column::from_utf8_contiguous(bytes, offsets))
+            Some(match arrow_validity_mask(arr) {
+                Some(validity) => Column::from_utf8_values_with_validity(bytes, offsets, validity),
+                None => Column::from_utf8_contiguous(bytes, offsets),
+            })
         }
         _ => None,
     }
@@ -14238,42 +14547,14 @@ pub trait DataFrameIoExt {
 
     /// Write this DataFrame to a CSV file.
     ///
-    /// Matches `pd.DataFrame.to_csv(path)`.
+    /// Matches `pd.DataFrame.to_csv(path)`: the index is included by default.
     fn to_csv_file(&self, path: &Path) -> Result<(), IoError>;
 
     /// Serialize this DataFrame to a CSV string.
     ///
-    /// ⚠️ THIS DOES NOT MATCH `pd.DataFrame.to_csv()` ON THE INDEX, and the claim
-    /// that it did was wrong. pandas writes the index by DEFAULT; this does not.
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19), on a frame with index
-    /// [10, 11] and one column `a`:
-    /// ```text
-    ///   df.to_csv()             -> ",a\n10,1\n11,2\n"   index INCLUDED, leading
-    ///                                                     empty header cell
-    ///   df.to_csv(index=False)  -> "a\n1\n2\n"
-    /// ```
-    /// This method routes to `write_csv_string`, whose `CsvWriteOptions::default()`
-    /// sets `include_index: false` — so its output corresponds to pandas'
-    /// `to_csv(index=False)`, not to bare `to_csv()`.
-    ///
-    /// ⚠️ WHETHER THIS IS DELIBERATE IS GENUINELY UNCLEAR, and I first wrote that it
-    /// was. Evidence BOTH ways, so that a later reader does not inherit my first
-    /// reading:
-    ///   FOR deliberate — a test pins that the first emitted line IS the column
-    ///   names (br-frankenpandas-g9rxa), which an index would break by prepending an
-    ///   empty cell, and the conformance CSV path plus fp-bench consume this shape.
-    ///   AGAINST — the SERIES writers in this same file, `SeriesIoExt::to_csv_file`
-    ///   and `SeriesIoExt::to_csv_string`, both explicitly override the shared
-    ///   default with `include_index: true, ..CsvWriteOptions::default()` precisely
-    ///   to match pandas. Two sibling writers over the same options struct disagree
-    ///   about pandas' default, and only one of them had to reach for an override.
-    /// That asymmetry looks more like an oversight the test later cemented than a
-    /// design. Filed rather than changed: flipping the default is breaking for 39
-    /// call sites here plus conformance and fp-bench.
-    ///
-    /// Only the parity claim is corrected here. Use
-    /// [`Self::to_csv_string_with_options`] with `include_index: true` for pandas'
-    /// default shape — which is exactly what the Series side already does.
+    /// Matches `pd.DataFrame.to_csv()`: the index is included by default. Use
+    /// [`Self::to_csv_string_with_options`] with `include_index: false` to emit
+    /// pandas' `to_csv(index=False)` shape.
     fn to_csv_string(&self) -> Result<String, IoError>;
 
     /// Serialize this DataFrame to a CSV string with explicit write options.
@@ -14539,11 +14820,15 @@ impl DataFrameIoExt for DataFrame {
     }
 
     fn to_csv_file(&self, path: &Path) -> Result<(), IoError> {
-        write_csv(self, path)
+        std::fs::write(path, self.to_csv_string()?)?;
+        Ok(())
     }
 
     fn to_csv_string(&self) -> Result<String, IoError> {
-        write_csv_string(self)
+        self.to_csv_string_with_options(&CsvWriteOptions {
+            include_index: true,
+            ..CsvWriteOptions::default()
+        })
     }
 
     fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError> {
@@ -15143,13 +15428,13 @@ impl SeriesIoExt for Series {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use arrow::{
         array::{Array, Int64Array},
         datatypes::DataType as ArrowDataType,
     };
-    use fp_columnar::Column;
+    use fp_columnar::{Column, ValidityMask};
     use fp_frame::{DataFrame, Series};
     use fp_index::{Index, IndexLabel};
     use fp_types::{DType, NullKind, Scalar, Timestamp};
@@ -15273,32 +15558,10 @@ mod tests {
         assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
     }
 
-    /// The Series and DataFrame CSV writers DISAGREE about pandas index default.
-    ///
-    /// br-frankenpandas-sseeh. This pins an asymmetry that is currently undocumented
-    /// and easy to "tidy" in either direction by accident:
-    ///   `DataFrameIoExt::to_csv_string` takes `CsvWriteOptions::default()`, whose
-    ///   `include_index` is FALSE, so it emits the pandas `to_csv(index=False)` shape.
-    ///   `SeriesIoExt::to_csv_string` overrides that default with
-    ///   `include_index: true`, so it emits the bare `to_csv()` shape.
-    ///
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19), frame with index
-    /// [10, 11] and one column `a`: `df.to_csv()` yields `",a\n10,1\n11,2\n"` with
-    /// the index INCLUDED behind a leading empty header cell, while
-    /// `df.to_csv(index=False)` yields `"a\n1\n2\n"`. pandas writes the index by
-    /// default for BOTH Series and DataFrame, so the Series side matches the
-    /// incumbent here and the DataFrame side does not.
-    ///
-    /// ⚠️ THIS TEST DOES NOT ENDORSE EITHER SHAPE. It exists so that a change to
-    /// `CsvWriteOptions::default()`, or an "obvious" cleanup deleting the Series
-    /// override, fails here loudly instead of silently altering one surface. The
-    /// behaviour decision belongs on the bead, not in this file.
-    ///
-    /// Asserted structurally — a leading comma means the index column is present —
-    /// rather than on exact header text, because the index label spelling is a
-    /// separate concern this test should not also pin.
+    /// Bare DataFrame and Series CSV writers follow pandas' index default, while
+    /// explicit options retain the index-less form.
     #[test]
-    fn csv_index_default_differs_between_series_and_dataframe_sseeh() {
+    fn csv_index_default_matches_pandas_for_dataframe_and_series_sseeh() {
         use super::{DataFrameIoExt, SeriesIoExt};
 
         let idx = vec![10_i64.into(), 11_i64.into()];
@@ -15307,17 +15570,23 @@ mod tests {
         let frame = DataFrame::from_series(vec![series.clone()]).expect("frame");
 
         let frame_csv = frame.to_csv_string().expect("dataframe csv");
-        let frame_header = frame_csv.lines().next().expect("header");
-        assert!(
-            !frame_header.starts_with(','),
-            "DataFrame writer omits the index, so the header must NOT lead with an empty cell; csv={frame_csv:?}"
+        assert_eq!(
+            frame_csv, ",a\n10,1\n11,2\n",
+            "DataFrame.to_csv() must match pandas' index-including default"
         );
 
         let series_csv = series.to_csv_string().expect("series csv");
-        let series_header = series_csv.lines().next().expect("header");
-        assert!(
-            series_header.starts_with(','),
-            "Series writer includes the index, so the header MUST lead with an empty cell as pandas to_csv() does; csv={series_csv:?}"
+        assert_eq!(series_csv, frame_csv, "sibling defaults must agree");
+
+        let indexless = frame
+            .to_csv_string_with_options(&CsvWriteOptions {
+                include_index: false,
+                ..CsvWriteOptions::default()
+            })
+            .expect("explicit indexless dataframe csv");
+        assert_eq!(
+            indexless, "a\n1\n2\n",
+            "explicit include_index=false must not inherit the pandas default"
         );
     }
 
@@ -15457,6 +15726,70 @@ mod tests {
             super::parse_json_records_numeric_range(input, 0, input.len()).is_none(),
             "key reordering must defer instead of assigning by position"
         );
+    }
+
+    #[test]
+    fn json_read_numeric_typed_builder_accepts_only_json_number_grammar_92n1x() {
+        for (token, expected) in [
+            (b"0".as_slice(), super::JsonRecordNumber::Int(0)),
+            (b"-17".as_slice(), super::JsonRecordNumber::Int(-17)),
+            (b"1.25".as_slice(), super::JsonRecordNumber::Float(1.25)),
+            (b"6e-4".as_slice(), super::JsonRecordNumber::Float(0.0006)),
+            (
+                b"9223372036854775808".as_slice(),
+                super::JsonRecordNumber::Float(9.223_372_036_854_776e18),
+            ),
+        ] {
+            let actual = super::parse_json_record_number(token).expect("valid JSON number");
+            let serde = serde_json::from_slice::<serde_json::Number>(token)
+                .expect("serde accepts valid JSON number");
+            match (actual, expected) {
+                (super::JsonRecordNumber::Int(actual), super::JsonRecordNumber::Int(expected)) => {
+                    assert_eq!(actual, expected, "token={token:?}");
+                    assert_eq!(serde.as_i64(), Some(actual), "token={token:?}");
+                }
+                (
+                    super::JsonRecordNumber::Float(actual),
+                    super::JsonRecordNumber::Float(expected),
+                ) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits(), "token={token:?}");
+                    assert_eq!(
+                        serde.as_f64().expect("serde float conversion").to_bits(),
+                        actual.to_bits(),
+                        "token={token:?}"
+                    );
+                }
+                (actual, expected) => {
+                    panic!("token={token:?}: got {actual:?}, expected {expected:?}")
+                }
+            }
+        }
+
+        for invalid in [b"01".as_slice(), b"-", b"1.", b"1e", b"+1", b"1+2"] {
+            assert!(
+                super::parse_json_record_number(invalid).is_none(),
+                "invalid JSON number {invalid:?} must defer"
+            );
+        }
+    }
+
+    #[test]
+    fn json_read_numeric_typed_builder_rejects_mixed_dtype_92n1x() {
+        // The typed numeric path must not turn a bool-bearing column into a
+        // numeric one merely because a neighbouring column is numeric. It must
+        // defer to the scalar parser, which retains the Bool column.
+        let input = br#"{"n":1,"flag":true},{"n":2,"flag":false}"#;
+        assert!(
+            super::parse_json_records_numeric_range(input, 0, input.len()).is_none(),
+            "mixed numeric/bool records must bypass the typed numeric builder"
+        );
+        let frame = read_json_str(
+            r#"[{"n":1,"flag":true},{"n":2,"flag":false}]"#,
+            JsonOrient::Records,
+        )
+        .expect("scalar fallback parses mixed records");
+        assert_eq!(frame.column("n").expect("n").dtype(), DType::Int64);
+        assert_eq!(frame.column("flag").expect("flag").dtype(), DType::Bool);
     }
 
     #[test]
@@ -17830,6 +18163,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_csv_typed_bool_builder_uses_nullable_backing_and_rejects_ragged_rows_3gsa7() {
+        let frame = read_csv_str("flag\nTrue\nNA\nfalse\n").expect("typed bool csv");
+        let flag = frame.column("flag").expect("flag column");
+
+        assert_eq!(flag.dtype(), DType::Bool);
+        let (values, validity) = flag
+            .as_nullable_bool_slice()
+            .expect("typed nullable Bool backing");
+        assert_eq!(values, &[true, false, false]);
+        assert!(validity.get(0));
+        assert!(!validity.get(1));
+        assert!(validity.get(2));
+        assert_eq!(
+            flag.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false)
+            ]
+        );
+
+        // A prior numeric value is semantically ambiguous with Bool and must
+        // keep the legacy Scalar fallback, rather than being retyped as Bool.
+        let mixed = read_csv_str("flag\n1\ntrue\n").expect("mixed csv fallback");
+        assert_eq!(
+            mixed.column("flag").expect("mixed flag").dtype(),
+            DType::Utf8
+        );
+
+        let err =
+            read_csv_str("flag\ntrue,false\nfalse\n").expect_err("overlong ragged row must reject");
+        assert!(
+            matches!(
+                err,
+                IoError::CsvFieldCount {
+                    line: 2,
+                    expected: 1,
+                    found: 2
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
     /// The same fast path must PAD a short row rather than reject it — the
     /// gtkz1 fixture's own input (fp_p2d_016_csv_round_trip_ragged_row_error).
     /// Measured: pd.read_csv("a,b\n1,2\n3\n") -> a=[1,3], b=[2.0, NaN].
@@ -19918,10 +20296,10 @@ mod tests {
         let frame = read_csv_str(input).expect("parse");
         let output = write_csv_string(&frame).expect("write");
 
-        // Golden reference: columns in BTreeMap order; Bool(true) coerced to Float64
-        // in column c (which has Float64 + Bool → Float64), so true → 1.0. A Float64
-        // column writes whole values with a trailing ".0" like pandas (str(float)).
-        let expected = "a,b,c\n1,hello,3.14\n2,,1.0\n3,world,\n";
+        // GOLDEN-CHANGE (live pandas 2.2.3): read_csv keeps c as object because it
+        // contains the string token "true"; to_csv(index=False) therefore emits
+        // the original `true` spelling rather than coercing it to Float64 1.0.
+        let expected = "a,b,c\n1,hello,3.14\n2,,true\n3,world,\n";
         assert_eq!(
             output, expected,
             "output does not match golden reference.\nGot:\n{output}\nExpected:\n{expected}"
@@ -20996,13 +21374,62 @@ mod tests {
     }
 
     #[test]
-    fn read_sas_rejects_with_deferred_marker_2yy4d() {
+    fn read_sas_uses_native_reader_and_never_the_deferred_stub_9jvao() {
         let path = std::path::Path::new("/nonexistent.sas7bdat");
-        let err = super::read_sas(path).expect_err("must reject");
+        let err = super::read_sas(path).expect_err("missing file must fail");
         assert!(
-            matches!(&err, super::IoError::Deferred(message)
-                if message.contains("read_sas") && message.contains("sas7bdat")),
+            matches!(&err, super::IoError::Sas(message) if !message.is_empty()),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn sas_cells_build_typed_frame_and_reject_undecoded_bytes_9jvao() {
+        use std::borrow::Cow;
+
+        let columns = vec![
+            vec![
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Float(1.5))
+                    .expect("numeric SAS cell"),
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Missing(
+                    sas7bdat::MissingValue::System,
+                ))
+                .expect("missing SAS cell"),
+            ],
+            vec![
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Str(Cow::Borrowed("alpha")))
+                    .expect("text SAS cell"),
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Str(Cow::Borrowed("beta")))
+                    .expect("text SAS cell"),
+            ],
+        ];
+        let frame = super::sas_rows_to_frame(vec!["score".into(), "name".into()], columns)
+            .expect("build SAS frame");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(
+            frame.column("score").expect("score").values()[0],
+            Scalar::Float64(1.5)
+        );
+        assert_eq!(
+            frame.column("name").expect("name").values()[1],
+            Scalar::Utf8("beta".into())
+        );
+
+        let undecoded =
+            super::sas_cell_to_scalar(&sas7bdat::CellValue::Bytes(Cow::Borrowed(b"\xff")))
+                .expect_err("raw SAS bytes must not be silently lossy-decoded");
+        assert!(matches!(undecoded, super::IoError::Sas(message) if message.contains("undecoded")));
+    }
+
+    #[test]
+    fn sas_frame_rejects_ragged_parser_output_9jvao() {
+        let err = super::sas_rows_to_frame(
+            vec!["left".into(), "right".into()],
+            vec![vec![Scalar::Float64(1.0)]],
+        )
+        .expect_err("metadata/data width mismatch must fail");
+        assert!(
+            matches!(err, super::IoError::Sas(message) if message.contains("metadata declares"))
         );
     }
 
@@ -21126,7 +21553,17 @@ mod tests {
 
         let frame = make_test_dataframe();
         let csv = frame.to_csv_string().expect("csv string");
-        assert_eq!(csv, super::write_csv_string(&frame).expect("free csv"));
+        assert_eq!(
+            csv,
+            super::write_csv_string_with_options(
+                &frame,
+                &CsvWriteOptions {
+                    include_index: true,
+                    ..CsvWriteOptions::default()
+                },
+            )
+            .expect("pandas-default csv"),
+        );
         assert_eq!(
             frame.to_markdown_string().expect("markdown string"),
             write_markdown_string(&frame).expect("free markdown")
@@ -21334,6 +21771,184 @@ mod tests {
         assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
         assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
         assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn parquet_writer_uses_typed_bool_and_utf8_buffers_uza04() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "flag".to_owned(),
+            Column::from_bool_values(vec![true, false, true]),
+        );
+        columns.insert(
+            "label".to_owned(),
+            Column::from_utf8_contiguous(b"redgreenblue".to_vec(), vec![0, 3, 8, 12]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2]),
+            columns,
+            vec!["flag".to_owned(), "label".to_owned()],
+        )
+        .expect("typed parquet source");
+
+        assert!(
+            !frame
+                .column("flag")
+                .expect("typed bool source")
+                .scalar_cache_is_materialized()
+        );
+        assert!(
+            !frame
+                .column("label")
+                .expect("typed utf8 source")
+                .scalar_cache_is_materialized()
+        );
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write typed parquet");
+
+        assert!(
+            !frame
+                .column("flag")
+                .expect("typed bool source")
+                .scalar_cache_is_materialized(),
+            "all-valid bool must avoid the Scalar fallback"
+        );
+        assert!(
+            !frame
+                .column("label")
+                .expect("typed utf8 source")
+                .scalar_cache_is_materialized(),
+            "all-valid contiguous Utf8 must avoid the Scalar fallback"
+        );
+
+        let decoded = super::read_parquet_bytes(&bytes).expect("read typed parquet");
+        assert_eq!(
+            decoded.column("flag").expect("decoded bool").values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            decoded.column("label").expect("decoded utf8").values(),
+            &[
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("green".to_owned()),
+                Scalar::Utf8("blue".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parquet_reader_uses_nullable_utf8_buffer_and_rejects_dictionary_uza04() {
+        let mut validity = ValidityMask::all_valid(3);
+        validity.set(1, false);
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "label".to_owned(),
+            Column::from_utf8_values_with_validity(b"redblue".to_vec(), vec![0, 3, 3, 7], validity),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2]),
+            columns,
+            vec!["label".to_owned()],
+        )
+        .expect("nullable utf8 source");
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write nullable utf8 parquet");
+        let decoded = super::read_parquet_bytes(&bytes).expect("read nullable utf8 parquet");
+        let label = decoded.column("label").expect("decoded nullable utf8");
+        assert!(
+            label.as_nullable_utf8_contiguous().is_some(),
+            "nullable Utf8 must retain the typed backing"
+        );
+        assert!(
+            !label.scalar_cache_is_materialized(),
+            "typed reader must not materialize a Scalar cache"
+        );
+        assert_eq!(
+            label.values(),
+            &[
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("blue".to_owned()),
+            ]
+        );
+
+        use arrow::{
+            array::{DictionaryArray, Int8Array, StringArray},
+            datatypes::Int8Type,
+        };
+        let dictionary = DictionaryArray::<Int8Type>::try_new(
+            Int8Array::from(vec![Some(0), Some(1), Some(0)]),
+            Arc::new(StringArray::from(vec!["red", "blue"])),
+        )
+        .expect("dictionary array");
+        assert!(
+            super::arrow_array_to_column_typed(&dictionary, dictionary.data_type()).is_none(),
+            "dictionary arrays must not be reinterpreted as direct Utf8 buffers"
+        );
+    }
+
+    #[cfg(feature = "block-storage")]
+    #[test]
+    fn parquet_all_valid_float64_uses_column_major_block_l6uyi() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "left".to_string(),
+            Column::from_f64_values(vec![1.5, -0.0, 3.25]),
+        );
+        columns.insert(
+            "right".to_string(),
+            Column::from_f64_values(vec![4.0, 5.5, 6.75]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![10, 20, 30]),
+            columns,
+            vec!["left".to_string(), "right".to_string()],
+        )
+        .expect("source frame");
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write parquet");
+        let decoded = super::read_parquet_bytes(&bytes).expect("read parquet");
+        let view = decoded
+            .to_numpy_block_view()
+            .expect("all-valid Float64 parquet is block-backed");
+        assert_eq!((view.rows, view.cols), (3, 2));
+        assert_eq!(view.block[0].to_bits(), 1.5_f64.to_bits());
+        assert_eq!(view.block[1].to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(view.block[2].to_bits(), 3.25_f64.to_bits());
+        assert_eq!(view.block[3].to_bits(), 4.0_f64.to_bits());
+        assert_eq!(view.block[4].to_bits(), 5.5_f64.to_bits());
+        assert_eq!(view.block[5].to_bits(), 6.75_f64.to_bits());
+
+        // Negative case: nullable Float64 needs a validity mask, so it must
+        // remain on the ordinary typed decode path rather than dropping the
+        // missing marker into an all-valid block.
+        let nullable = DataFrame::from_dict(
+            &["value"],
+            vec![(
+                "value",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .expect("nullable source frame");
+        let nullable_bytes = super::write_parquet_bytes(&nullable).expect("write nullable parquet");
+        let nullable_decoded =
+            super::read_parquet_bytes(&nullable_bytes).expect("read nullable parquet");
+        assert!(
+            nullable_decoded.to_numpy_block_view().is_none(),
+            "nullable Float64 must not enter the all-valid block path"
+        );
+        assert!(
+            nullable_decoded
+                .column("value")
+                .expect("value column")
+                .values()[1]
+                .is_missing(),
+            "fallback must preserve the parquet null as a missing Float64"
+        );
     }
 
     #[test]
