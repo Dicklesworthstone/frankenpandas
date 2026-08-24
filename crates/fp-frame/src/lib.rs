@@ -163,6 +163,18 @@ pub enum FrameError {
     Index(#[from] IndexError),
 }
 
+fn pandas_temporal_error_class(error: PandasTemporalError) -> &'static str {
+    match error {
+        PandasTemporalError::Overflow => "OverflowError",
+        PandasTemporalError::OutOfBoundsDatetime => "OutOfBoundsDatetime",
+        PandasTemporalError::OutOfBoundsTimedelta => "OutOfBoundsTimedelta",
+        PandasTemporalError::OverflowInTimedeltaOperation => {
+            "ValueError: overflow in timedelta operation"
+        }
+        PandasTemporalError::ZeroDivision => "ZeroDivisionError",
+    }
+}
+
 /// Logical plot kind requested by a pandas-style plotting hook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlotKind {
@@ -8724,14 +8736,39 @@ impl Series {
     ///
     /// Matches `td1 + td2` in pandas for timedelta Series.
     pub fn td_add(&self, other: &Self) -> Result<Self, FrameError> {
-        self.td_binary_op(other, |a, b| a.saturating_add(b), "td_add")
+        self.td_add_with_policy(other, &RuntimePolicy::strict())
+    }
+
+    /// Add two Timedelta64 Series under an explicit runtime policy.
+    ///
+    /// `STRICT` surfaces pandas' `OverflowError` for an unrepresentable
+    /// vectorized addition; `HARDENED` retains the historical `NaT` recovery
+    /// and records it through [`OverflowPolicy`]. A pre-existing `NaT` is
+    /// propagation, not an overflow, under either policy.
+    pub fn td_add_with_policy(
+        &self,
+        other: &Self,
+        policy: &RuntimePolicy,
+    ) -> Result<Self, FrameError> {
+        self.td_binary_op_with_policy(other, Timedelta::try_add, "td_add", policy)
     }
 
     /// Subtract Timedelta64 Series element-wise.
     ///
     /// Matches `td1 - td2` in pandas for timedelta Series.
     pub fn td_sub(&self, other: &Self) -> Result<Self, FrameError> {
-        self.td_binary_op(other, |a, b| a.saturating_sub(b), "td_sub")
+        self.td_sub_with_policy(other, &RuntimePolicy::strict())
+    }
+
+    /// Subtract two Timedelta64 Series under an explicit runtime policy.
+    ///
+    /// See [`Self::td_add_with_policy`] for the strict/hardened split.
+    pub fn td_sub_with_policy(
+        &self,
+        other: &Self,
+        policy: &RuntimePolicy,
+    ) -> Result<Self, FrameError> {
+        self.td_binary_op_with_policy(other, Timedelta::try_sub, "td_sub", policy)
     }
 
     /// Multiply Timedelta64 Series by a numeric scalar.
@@ -8903,6 +8940,50 @@ impl Series {
         // Per br-frankenpandas-c5soe: pandas td binary ops preserve the
         // shared axis name (preserved when both operands agree, None
         // when they differ).
+        let shared_index_name = if self.index.name() == other.index.name() {
+            self.index.name()
+        } else {
+            None
+        };
+        let index = self.index.rename_index(shared_index_name);
+        let column = Column::from_values(out)?;
+        Self::new(format!("{}_{}", self.name, name), index, column)
+    }
+
+    /// Fallible timedelta addition/subtraction with the runtime's exact
+    /// overflow policy. This deliberately remains separate from `td_mod`:
+    /// vectorized division/modulo has pandas' `NaT` contract on zero, whereas
+    /// add/sub must raise in strict mode (br-frankenpandas-fyr1z.3).
+    fn td_binary_op_with_policy<F>(
+        &self,
+        other: &Self,
+        op: F,
+        name: &str,
+        policy: &RuntimePolicy,
+    ) -> Result<Self, FrameError>
+    where
+        F: Fn(i64, i64) -> Result<i64, TemporalFailure>,
+    {
+        self.validate_timedelta_dtype(name)?;
+        other.validate_timedelta_dtype(name)?;
+        let overflow_policy = overflow_policy_for_mode(policy.mode);
+        let mut out = Vec::with_capacity(self.len());
+        for (a, b) in self.values().iter().zip(other.values().iter()) {
+            let result = match (a, b) {
+                (Scalar::Timedelta64(ns1), Scalar::Timedelta64(ns2)) => overflow_policy
+                    .resolve_recording(op(*ns1, *ns2), Timedelta::NAT, Timedelta::NAT)
+                    .map(Scalar::Timedelta64)
+                    .map_err(|failure| {
+                        FrameError::CompatibilityRejected(format!(
+                            "{}: {}",
+                            pandas_temporal_error_class(failure.pandas_error),
+                            failure.op
+                        ))
+                    })?,
+                _ => Scalar::Timedelta64(Timedelta::NAT),
+            };
+            out.push(result);
+        }
         let shared_index_name = if self.index.name() == other.index.name() {
             self.index.name()
         } else {
@@ -166216,6 +166297,67 @@ mod tests {
         assert_eq!(
             result.values()[0],
             Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY - 12 * Timedelta::NANOS_PER_HOUR)
+        );
+    }
+
+    #[test]
+    fn td_add_sub_strict_raise_and_hardened_recovers_t7ht2() {
+        let max = Series::from_values(
+            "left",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(i64::MAX)],
+        )
+        .unwrap();
+        let one =
+            Series::from_values("right", vec![0_i64.into()], vec![Scalar::Timedelta64(1)]).unwrap();
+
+        let add_error = max.td_add(&one).expect_err("strict add must raise");
+        assert!(
+            add_error.to_string().contains("OverflowError"),
+            "strict add must retain pandas' OverflowError class: {add_error}"
+        );
+
+        let min_plus_one = Series::from_values(
+            "left",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(i64::MIN + 1)],
+        )
+        .unwrap();
+        let two =
+            Series::from_values("right", vec![0_i64.into()], vec![Scalar::Timedelta64(2)]).unwrap();
+        let sub_error = min_plus_one
+            .td_sub(&two)
+            .expect_err("strict sub must raise");
+        assert!(
+            sub_error.to_string().contains("OverflowError"),
+            "strict sub must retain pandas' OverflowError class: {sub_error}"
+        );
+
+        let recovered = max
+            .td_add_with_policy(&one, &RuntimePolicy::hardened(None))
+            .expect("hardened addition recovers rather than raising");
+        assert_eq!(
+            recovered.values(),
+            &[Scalar::Timedelta64(Timedelta::NAT)],
+            "the overflowing lane recovers to NaT"
+        );
+    }
+
+    #[test]
+    fn td_add_strict_preserves_nat_propagation_t7ht2() {
+        let nat = Series::from_values(
+            "left",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(Timedelta::NAT)],
+        )
+        .unwrap();
+        let one =
+            Series::from_values("right", vec![0_i64.into()], vec![Scalar::Timedelta64(1)]).unwrap();
+
+        assert_eq!(
+            nat.td_add(&one).unwrap().values(),
+            &[Scalar::Timedelta64(Timedelta::NAT)],
+            "NaT propagation is not an overflow and must not raise in strict mode"
         );
     }
 
