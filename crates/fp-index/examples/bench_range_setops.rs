@@ -455,7 +455,7 @@ fn range_reindex_digest(source: &RangeIndex, target: &RangeIndex) -> usize {
 }
 
 fn range_reindex_legacy_target_values_digest(source: &RangeIndex, target: &RangeIndex) -> usize {
-    let target_values = black_box(target).values();
+    let target_values = black_box(target).values().to_vec();
     let indexer = black_box(source).get_indexer(black_box(&target_values));
     target.len() ^ indexer_digest(&indexer, &[])
 }

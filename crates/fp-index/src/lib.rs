@@ -1470,6 +1470,53 @@ impl IndexLabels {
             .clone()
     }
 
+    /// Resolve this label collection against a lazy affine Int64 source without
+    /// materializing either affine range into an `i64` vector.  The source is
+    /// unique by construction, so each raw target value has at most one
+    /// position; non-Int64 labels are necessarily misses.
+    fn affine_int64_indexer(&self, source: Int64AffineLabels) -> Vec<Option<usize>> {
+        let mut out = Vec::with_capacity(self.len());
+        let mut push_affine = |range: Int64AffineLabels| {
+            for position in 0..range.len {
+                out.push(source.position(range.value_at(position)));
+            }
+        };
+
+        if let Some(range) = self.int64_affine_range() {
+            push_affine(range);
+            return out;
+        }
+        if let Some(runs) = &self.int64_two_affine {
+            push_affine(runs.first);
+            push_affine(runs.second);
+            return out;
+        }
+        if let Some(strided) = &self.int64_strided {
+            for position in 0..strided.len {
+                let offset = strided
+                    .step
+                    .checked_mul(position)
+                    .expect("validated Int64 strided range");
+                let index = strided
+                    .start
+                    .checked_add(offset)
+                    .expect("validated Int64 strided range");
+                out.push(source.position(strided.values[index]));
+            }
+            return out;
+        }
+        if let Some(Some(values)) = self.int64_typed.get() {
+            out.extend(values.iter().map(|&value| source.position(value)));
+            return out;
+        }
+
+        out.extend(self.as_slice().iter().map(|label| match label {
+            IndexLabel::Int64(value) => source.position(*value),
+            _ => None,
+        }));
+        out
+    }
+
     /// The cached `i64` view if it has already been computed (never computes).
     /// Outer `None` = not yet computed; `Some(None)` = known non-Int64.
     fn cached_int64_view(&self) -> Option<Option<Arc<Vec<i64>>>> {
@@ -2574,61 +2621,33 @@ impl Index {
         out
     }
 
-    /// First-occurrence-deduplicated union over raw `i64` keys: every value of
-    /// `a` then `b`, in that order, each emitted once. Bit-identical to the
-    /// `union_with` `FxHashMap<&IndexLabel>` seen-set filter for all-Int64
-    /// indexes, with INLINE `i64` dedup keys (dense bitset over the combined
-    /// value span when bounded, else `FxHashSet<i64>`).
+    /// Multiset union over raw `i64` keys, matching `Index.union(sort=False)`:
+    /// labels keep their first-seen order across `a` then `b`, while each label
+    /// is emitted the maximum of its multiplicities in either input.
     fn union_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
-        let combined_capacity = combined_output_capacity(a.len(), b.len());
-        let mut out: Vec<i64> = Vec::with_capacity(combined_capacity);
-        // Combined span for the single shared dedup set over both inputs.
-        let dense = if a.is_empty() {
-            Self::i64_dense_span(b)
-        } else if b.is_empty() {
-            Self::i64_dense_span(a)
-        } else {
-            let mut min = a[0];
-            let mut max = a[0];
-            for &v in a.iter().chain(b.iter()) {
-                if v < min {
-                    min = v;
-                } else if v > max {
-                    max = v;
-                }
-            }
-            let span = (max as i128 - min as i128 + 1) as u128;
-            let total = a.len().saturating_add(b.len());
-            if span <= (1u128 << 26) && span <= (total as u128).saturating_mul(16) {
-                Some((min, span as usize))
-            } else {
-                None
-            }
-        };
+        let mut counts = FxHashMap::<i64, (usize, usize)>::default();
+        counts.reserve(combined_output_capacity(a.len(), b.len()));
+        let mut order = Vec::with_capacity(combined_output_capacity(a.len(), b.len()));
 
-        let mut seen_bits = Vec::<u64>::new();
-        let mut seen_hash = FxHashSet::<i64>::default();
-        if let Some((_, span)) = dense {
-            seen_bits = vec![0u64; span.div_ceil(64)];
-        } else {
-            seen_hash.reserve(combined_capacity);
-        }
-        for &v in a.iter().chain(b.iter()) {
-            let fresh = match dense {
-                Some((min, _)) => {
-                    let s = (v - min) as usize;
-                    let (w, bit) = (s >> 6, 1u64 << (s & 63));
-                    let f = seen_bits[w] & bit == 0;
-                    if f {
-                        seen_bits[w] |= bit;
-                    }
-                    f
-                }
-                None => seen_hash.insert(v),
-            };
-            if fresh {
-                out.push(v);
+        for &value in a {
+            let entry = counts.entry(value).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(value);
             }
+            entry.0 += 1;
+        }
+        for &value in b {
+            let entry = counts.entry(value).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(value);
+            }
+            entry.1 += 1;
+        }
+
+        let mut out = Vec::with_capacity(combined_output_capacity(a.len(), b.len()));
+        for value in order {
+            let (left_count, right_count) = counts[&value];
+            out.extend(std::iter::repeat_n(value, left_count.max(right_count)));
         }
         out
     }
@@ -2910,6 +2929,13 @@ impl Index {
 
     #[must_use]
     pub fn get_indexer(&self, target: &Index) -> Vec<Option<usize>> {
+        // An affine Int64 source can answer every lookup from its arithmetic
+        // witness.  Keep the target typed as well: materializing the source to
+        // an `Arc<Vec<i64>>` solely to reject a miss-heavy target made this
+        // otherwise O(m) operation pay an avoidable O(n) allocation and scan.
+        if let Some(source) = self.labels.int64_affine_range() {
+            return target.labels.affine_int64_indexer(source);
+        }
         // When `self` is strictly ascending (any SortOrder::Ascending* ⟹
         // globally IndexLabel::Ord-sorted and unique) we can resolve target
         // positions without building the O(n) FxHashMap of `self`
@@ -3587,10 +3613,9 @@ impl Index {
 
     #[must_use]
     pub fn union_with(&self, other: &Self) -> Self {
-        // Typed all-Int64 fast path: inline `i64` dedup instead of the
-        // pointer-keyed `FxHashMap<&IndexLabel>` seen-set (whose probes chase
-        // into the 32-byte enum vector). Bit-identical: self-then-other order,
-        // first-occurrence dedup.
+        // Typed all-Int64 fast path: inline `i64` multiplicity accounting instead
+        // of enum-keyed maps. It retains pandas' first-seen label ordering while
+        // preserving each label's maximum count across the two inputs.
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
             let mut result = Self::from_i64_values(Self::union_i64(&a_i64, &b_i64));
             result.name = self.shared_name(other);
@@ -3598,15 +3623,9 @@ impl Index {
         }
         let self_labels = self.labels();
         let other_labels = other.labels();
-        // Datetime64 / Timedelta64 i64-keyed union: both are ns-backed, but
-        // int64_view() only matches IndexLabel::Int64, so an all-temporal index
-        // fell to the pointer-key FxHashMap<&IndexLabel> fallback (union over a
-        // DatetimeIndex was 0.58x pandas). Extract the ns and reuse the proven
-        // union_i64 (dense-bitset / FxHashSet<i64>, first-occurrence dedup), then
-        // rebuild the matching temporal dtype. Bit-identical: union_i64 yields the
-        // same self-then-other first-occurrence ns sequence the pointer-key path
-        // would, with inline i64 keys instead of enum-pointer probes. Empty inputs
-        // return None so the degenerate empty-union dtype stays the fallback's.
+        // Datetime64 / Timedelta64 are ns-backed, so reuse the typed i64 multiset
+        // union and rebuild the matching temporal dtype. Empty inputs return None
+        // so the degenerate empty-union dtype stays the generic fallback's.
         let temporal_ns = |labels: &[IndexLabel], datetime: bool| -> Option<Vec<i64>> {
             if labels.is_empty() {
                 return None;
@@ -3638,44 +3657,39 @@ impl Index {
             result.name = self.shared_name(other);
             return result;
         }
-        // Typed all-Utf8 fast path: dedup the self-then-other concatenation with an
-        // FxHashSet of `&str` instead of `FxHashMap<&IndexLabel>` — hashes the
-        // string bytes directly, skipping the 32-byte enum load per probe.
-        // Bit-identical: self-then-other order, first-occurrence dedup.
-        if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
-            && other_labels
-                .iter()
-                .all(|l| matches!(l, IndexLabel::Utf8(_)))
-        {
-            let mut seen: FxHashMap<&str, ()> = FxHashMap::default();
-            seen.reserve(combined_output_capacity(
-                self_labels.len(),
-                other_labels.len(),
-            ));
-            let mut labels: Vec<IndexLabel> = Vec::with_capacity(combined_output_capacity(
-                self_labels.len(),
-                other_labels.len(),
-            ));
-            for label in self_labels.iter().chain(other_labels.iter()) {
-                if let IndexLabel::Utf8(s) = label
-                    && seen.insert(s.as_str(), ()).is_none()
-                {
-                    labels.push(label.clone());
-                }
+        let mut counts = FxHashMap::<&IndexLabel, (usize, usize)>::default();
+        counts.reserve(combined_output_capacity(
+            self.labels.len(),
+            other.labels.len(),
+        ));
+        let mut order = Vec::with_capacity(combined_output_capacity(
+            self.labels.len(),
+            other.labels.len(),
+        ));
+        for label in &self.labels {
+            let entry = counts.entry(label).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(label);
             }
-            let mut result = Self::new(labels);
-            result.name = self.shared_name(other);
-            return result;
+            entry.0 += 1;
         }
-        let mut seen = FxHashMap::<&IndexLabel, ()>::default();
+        for label in &other.labels {
+            let entry = counts.entry(label).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(label);
+            }
+            entry.1 += 1;
+        }
         let mut labels = Vec::with_capacity(combined_output_capacity(
             self.labels.len(),
             other.labels.len(),
         ));
-        for label in self.labels.iter().chain(other.labels.iter()) {
-            if seen.insert(label, ()).is_none() {
-                labels.push(label.clone());
-            }
+        for label in order {
+            let (left_count, right_count) = counts[label];
+            labels.extend(std::iter::repeat_n(
+                label.clone(),
+                left_count.max(right_count),
+            ));
         }
         let mut result = Self::new(labels);
         result.name = self.shared_name(other);
@@ -4010,9 +4024,7 @@ impl Index {
                 if first.max(last) >= len {
                     return None;
                 }
-                let label_step =
-                    i64::try_from((affine.step as i128).checked_mul(position_step as i128)?)
-                        .ok()?;
+                let label_step = affine.step.checked_mul(position_step)?;
                 let first_label = value_at(first)?;
                 Index::new_known_unique_int64_affine_range(
                     first_label,
@@ -11372,6 +11384,43 @@ pub struct RangeIndex {
     name: Option<String>,
 }
 
+/// Borrowed, lazily evaluated Int64 values of a [`RangeIndex`].
+///
+/// A `RangeIndex` is an affine sequence, so typed consumers can read its values
+/// without first allocating an owned buffer.  Use [`Self::to_vec`] only when an
+/// owned list is actually required by the receiving API.
+#[derive(Clone, Copy, Debug)]
+pub struct RangeIndexValues<'a> {
+    index: &'a RangeIndex,
+}
+
+impl RangeIndexValues<'_> {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    #[must_use]
+    pub fn get(&self, position: usize) -> Option<i64> {
+        (position < self.len()).then(|| self.index.value_at(position))
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = i64> + DoubleEndedIterator + '_ {
+        (0..self.len()).map(|position| self.index.value_at(position))
+    }
+
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<i64> {
+        self.iter().collect()
+    }
+}
+
 impl RangeIndex {
     pub fn new(start: i64, stop: i64, step: i64) -> Result<Self, IndexError> {
         if step == 0 {
@@ -11623,19 +11672,8 @@ impl RangeIndex {
     }
 
     #[must_use]
-    pub fn values(&self) -> Vec<i64> {
-        let len = self.len();
-        let mut values = Vec::with_capacity(len);
-        let mut value = self.start;
-        for offset in 0..len {
-            values.push(value);
-            if offset + 1 < len {
-                value = value
-                    .checked_add(self.step)
-                    .expect("validated RangeIndex value bounds");
-            }
-        }
-        values
+    pub fn values(&self) -> RangeIndexValues<'_> {
+        RangeIndexValues { index: self }
     }
 
     fn value_at(&self, position: usize) -> i64 {
@@ -11818,8 +11856,7 @@ impl RangeIndex {
                 if first.max(last) >= len {
                     return None;
                 }
-                let label_step = i128::from(self.step).checked_mul(position_step as i128)?;
-                let label_step = i64::try_from(label_step).ok()?;
+                let label_step = self.step.checked_mul(position_step)?;
                 let first_label = self.value_at(first);
                 Index::new_known_unique_int64_affine_range(
                     first_label,
@@ -12027,22 +12064,22 @@ impl RangeIndex {
 
     #[must_use]
     pub fn to_list(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     #[must_use]
     pub fn tolist(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     #[must_use]
     pub fn to_numpy(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     #[must_use]
     pub fn array(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     /// Position of the maximum value, matching `pd.RangeIndex.argmax()`.
@@ -12914,7 +12951,7 @@ impl RangeIndex {
     /// Flatten the range to a `Vec<i64>`, matching `pd.RangeIndex.ravel()`.
     #[must_use]
     pub fn ravel(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     /// Number of levels, matching `pd.RangeIndex.nlevels`. Always `1`.
@@ -16728,6 +16765,17 @@ pub struct MultiIndex {
     identity_codes: Option<Vec<Vec<u32>>>,
 }
 
+/// Typed position plan for an outer alignment of two unique MultiIndexes.
+///
+/// Each vector is indexed by `union_index` row and names the corresponding
+/// source row, or `None` when that side has no matching tuple.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiIndexOuterAlignment {
+    pub union_index: MultiIndex,
+    pub left_positions: Vec<Option<usize>>,
+    pub right_positions: Vec<Option<usize>>,
+}
+
 type Utf8LevelPair<'a> = (&'a [IndexLabel], &'a [IndexLabel]);
 type Utf8LevelPairs<'a> = (Utf8LevelPair<'a>, Utf8LevelPair<'a>);
 
@@ -17177,6 +17225,75 @@ impl MultiIndex {
             });
         }
         Ok(())
+    }
+
+    /// Build the AACE outer-alignment witness without materializing composite
+    /// `Vec<IndexLabel>` tuples when the per-level codes fit in a `u64`.
+    ///
+    /// Outer alignment is only position-preserving for unique composite labels;
+    /// duplicate tuples retain pandas' duplicate-aware expansion surface and
+    /// are rejected here rather than silently choosing a first occurrence.
+    pub fn outer_align(&self, other: &Self) -> Result<MultiIndexOuterAlignment, IndexError> {
+        self.ensure_same_nlevels(other)?;
+        if self.has_duplicates() || other.has_duplicates() {
+            return Err(IndexError::InvalidArgument(
+                "outer_align requires uniquely valued MultiIndexes".to_owned(),
+            ));
+        }
+
+        if let Some((left_keys, right_keys)) = self.factorize_packed_keys(other) {
+            let mut union_levels: Vec<Vec<IndexLabel>> = self
+                .levels
+                .iter()
+                .map(|_| Vec::with_capacity(self.len().saturating_add(other.len())))
+                .collect();
+            let mut union_positions =
+                FxHashMap::<u64, usize>::with_capacity_and_hasher(self.len(), Default::default());
+            let mut left_positions = Vec::with_capacity(self.len().saturating_add(other.len()));
+            let mut right_positions = Vec::with_capacity(self.len().saturating_add(other.len()));
+
+            for (row, &key) in left_keys.iter().enumerate() {
+                union_positions.insert(key, left_positions.len());
+                for (out, level) in union_levels.iter_mut().zip(&self.levels) {
+                    out.push(level[row].clone());
+                }
+                left_positions.push(Some(row));
+                right_positions.push(None);
+            }
+            for (row, &key) in right_keys.iter().enumerate() {
+                if let Some(&union_row) = union_positions.get(&key) {
+                    right_positions[union_row] = Some(row);
+                } else {
+                    union_positions.insert(key, left_positions.len());
+                    for (out, level) in union_levels.iter_mut().zip(&other.levels) {
+                        out.push(level[row].clone());
+                    }
+                    left_positions.push(None);
+                    right_positions.push(Some(row));
+                }
+            }
+
+            return Ok(MultiIndexOuterAlignment {
+                union_index: Self::from_levels_and_names(union_levels, self.shared_names(other)),
+                left_positions,
+                right_positions,
+            });
+        }
+
+        let union_index = self.union(other)?;
+        Ok(MultiIndexOuterAlignment {
+            left_positions: self
+                .get_indexer(&union_index)?
+                .into_iter()
+                .map(|position| usize::try_from(position).ok())
+                .collect(),
+            right_positions: other
+                .get_indexer(&union_index)?
+                .into_iter()
+                .map(|position| usize::try_from(position).ok())
+                .collect(),
+            union_index,
+        })
     }
 
     fn tuple_at(&self, row: usize) -> Vec<IndexLabel> {
@@ -18990,6 +19107,34 @@ impl MultiIndex {
                 self.shared_names(other),
             ));
         }
+        // General typed composite path: pack the dictionary-coded level columns
+        // into one key and gather rows column-by-column.  This preserves the
+        // left-first outer-union order without allocating a `Vec<IndexLabel>`
+        // tuple (or cloning its labels merely to hash it) for every row.
+        if let Some((self_keys, other_keys)) = self.factorize_packed_keys(other) {
+            let mut seen: FxHashSet<u64> = FxHashSet::with_capacity_and_hasher(
+                self.len().saturating_add(other.len()),
+                Default::default(),
+            );
+            let mut levels: Vec<Vec<IndexLabel>> = self
+                .levels
+                .iter()
+                .map(|_| Vec::with_capacity(self.len().saturating_add(other.len())))
+                .collect();
+            for (keys, source) in [(&self_keys, self), (&other_keys, other)] {
+                for (row, &key) in keys.iter().enumerate() {
+                    if seen.insert(key) {
+                        for (out, level) in levels.iter_mut().zip(&source.levels) {
+                            out.push(level[row].clone());
+                        }
+                    }
+                }
+            }
+            return Ok(Self::from_levels_and_names(
+                levels,
+                self.shared_names(other),
+            ));
+        }
         let mut seen = FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(
             combined_output_capacity(self.len(), other.len()),
             Default::default(),
@@ -20422,11 +20567,11 @@ mod tests {
     #[test]
     fn index_variant_wrappers_expose_public_type_surface() {
         let range = RangeIndex::new(1, 7, 2).unwrap().set_name("row");
-        assert_eq!(range.values(), vec![1, 3, 5]);
-        assert_eq!(range.to_list(), range.values());
-        assert_eq!(range.tolist(), range.values());
-        assert_eq!(range.to_numpy(), range.values());
-        assert_eq!(range.array(), range.values());
+        assert_eq!(range.values().to_vec(), vec![1, 3, 5]);
+        assert_eq!(range.to_list(), range.values().to_vec());
+        assert_eq!(range.tolist(), range.values().to_vec());
+        assert_eq!(range.to_numpy(), range.values().to_vec());
+        assert_eq!(range.array(), range.values().to_vec());
         assert_eq!(range.len(), 3);
         assert_eq!(range.size(), 3);
         assert_eq!(range.shape(), (3,));
@@ -21363,6 +21508,42 @@ mod tests {
     }
 
     #[test]
+    fn union_with_preserves_maximum_duplicate_multiplicity_lerb2() {
+        // pandas 2.2.3: Index([3, 1, 2, 1]).union(Index([2, 4, 2]),
+        // sort=False) -> [3, 1, 1, 2, 2, 4]. The output is neither a
+        // deduplicated set nor a concatenation: labels are first-seen ordered,
+        // then repeated by the larger input multiplicity.
+        let left = Index::from_i64_values(vec![3, 1, 2, 1]);
+        let right = Index::from_i64_values(vec![2, 4, 2]);
+        let result = left.union_with(&right);
+        assert_eq!(
+            result.labels.int64_view().unwrap().as_slice(),
+            &[3, 1, 1, 2, 2, 4]
+        );
+        assert_ne!(
+            result.labels.int64_view().unwrap().as_slice(),
+            &[3, 1, 2, 1, 2, 4, 2],
+            "negative: union must not concatenate the duplicate-bearing inputs"
+        );
+    }
+
+    #[test]
+    fn union_with_preserves_utf8_duplicate_multiplicity_lerb2() {
+        let left = Index::new(vec!["b".into(), "a".into(), "b".into()]);
+        let right = Index::new(vec!["a".into(), "a".into(), "c".into()]);
+        assert_eq!(
+            left.union_with(&right).labels(),
+            &[
+                IndexLabel::Utf8("b".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("c".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn difference_removes_other_labels() {
         let left = Index::from_i64(vec![1, 2, 3, 4]);
         let right = Index::from_i64(vec![2, 4]);
@@ -21756,7 +21937,7 @@ mod tests {
     }
 
     #[test]
-    fn int64_set_ops_match_first_seen_reference_c6wel() {
+    fn int64_set_ops_match_pandas_reference_c6wel() {
         fn labels_i64(index: &Index) -> Vec<i64> {
             let mut out = Vec::with_capacity(index.len());
             for label in index.labels() {
@@ -21767,18 +21948,6 @@ mod tests {
                 }
             }
             out
-        }
-
-        fn push_first_seen(
-            values: &[i64],
-            seen: &mut std::collections::BTreeSet<i64>,
-            out: &mut Vec<i64>,
-        ) {
-            for &value in values {
-                if seen.insert(value) {
-                    out.push(value);
-                }
-            }
         }
 
         fn intersection_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
@@ -21794,10 +21963,27 @@ mod tests {
         }
 
         fn union_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
-            let mut seen = std::collections::BTreeSet::new();
+            let mut counts = std::collections::BTreeMap::<i64, (usize, usize)>::new();
+            let mut order = Vec::new();
+            for &value in a {
+                let entry = counts.entry(value).or_insert((0, 0));
+                if entry.0 == 0 && entry.1 == 0 {
+                    order.push(value);
+                }
+                entry.0 += 1;
+            }
+            for &value in b {
+                let entry = counts.entry(value).or_insert((0, 0));
+                if entry.0 == 0 && entry.1 == 0 {
+                    order.push(value);
+                }
+                entry.1 += 1;
+            }
             let mut out = Vec::with_capacity(super::combined_output_capacity(a.len(), b.len()));
-            push_first_seen(a, &mut seen, &mut out);
-            push_first_seen(b, &mut seen, &mut out);
+            for value in order {
+                let (left_count, right_count) = counts[&value];
+                out.extend(std::iter::repeat_n(value, left_count.max(right_count)));
+            }
             out
         }
 
@@ -25305,6 +25491,41 @@ mod tests {
     }
 
     #[test]
+    fn affine_get_indexer_probes_typed_targets_without_materializing_3gsa7() {
+        let source = Index::new_known_unique_int64_affine_range(10, 2, 5).unwrap();
+        let targets = Index::from_i64_values(vec![10, 11, 16, 99, 12]);
+
+        assert_eq!(
+            source.get_indexer(&targets),
+            vec![Some(0), None, Some(3), None, Some(1)]
+        );
+        assert!(
+            source.cached_int64_label_values().is_none(),
+            "affine source lookup must not materialize an i64 label vector"
+        );
+        assert!(
+            targets.labels.materialized.get().is_none(),
+            "typed target lookup must not box values into IndexLabel"
+        );
+
+        let all_miss = Index::new_known_unique_int64_affine_range(11, 2, 5).unwrap();
+        assert_eq!(source.get_indexer(&all_miss), vec![None; 5]);
+        assert!(all_miss.cached_int64_label_values().is_none());
+
+        let descending = Index::new_known_unique_int64_affine_range(18, -2, 5).unwrap();
+        assert_eq!(
+            descending.get_indexer(&targets),
+            vec![Some(4), None, Some(1), None, Some(3)]
+        );
+        assert!(descending.cached_int64_label_values().is_none());
+
+        // Planted negative: a non-Int64 target cannot match an affine Int64
+        // source and must not be treated as a numerically compatible label.
+        let non_int64 = Index::new(vec![IndexLabel::Utf8("10".to_owned())]);
+        assert_eq!(source.get_indexer(&non_int64), vec![None]);
+    }
+
+    #[test]
     fn affine_index_searchsorted_avoids_materialization_lngwv() {
         let affine = Index::new_known_unique_int64_affine_range(1, 2, 4).unwrap();
         for (needle, left, right) in [(0, 0, 0), (1, 0, 1), (2, 1, 1), (7, 3, 4), (8, 4, 4)] {
@@ -25434,6 +25655,44 @@ mod tests {
                 assert_eq!(got.labels(), oracle, "range take {ctx}");
             }
         }
+    }
+
+    #[test]
+    fn arithmetic_take_stays_lazy_and_range_reports_oob_3gsa7() {
+        let affine = Index::new_known_unique_int64_affine_range(10, 3, 10).unwrap();
+        let taken = affine.take(&[1, 3, 5]);
+        assert_eq!(
+            taken.labels.int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 13,
+                step: 6,
+                len: 3,
+            })
+        );
+        assert!(
+            taken.cached_int64_label_values().is_none(),
+            "arithmetic Index::take must retain its affine witness without raw-label materialization"
+        );
+
+        let range = RangeIndex::new(10, 40, 3).unwrap();
+        let range_taken = range.take(&[1, 3, 5]).unwrap();
+        assert_eq!(
+            range_taken.labels.int64_affine_range(),
+            taken.labels.int64_affine_range()
+        );
+        assert!(
+            range_taken.cached_int64_label_values().is_none(),
+            "arithmetic RangeIndex::take must retain its affine witness without raw-label materialization"
+        );
+
+        let error = range.take(&[1, 3, 10]).unwrap_err();
+        assert!(matches!(
+            error,
+            super::IndexError::OutOfBounds {
+                position: 10,
+                length: 10,
+            }
+        ));
     }
 
     #[test]
@@ -27485,6 +27744,49 @@ mod tests {
     }
 
     #[test]
+    fn multi_index_typed_outer_align_preserves_columns_and_rejects_duplicate_tuple_3gsa7()
+    -> Result<(), super::IndexError> {
+        let left = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+        ])?;
+        let right = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 2_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])?;
+
+        let plan = left.outer_align(&right)?;
+        assert_eq!(
+            plan.union_index.to_list(),
+            vec![
+                vec!["a".into(), 1_i64.into()],
+                vec!["a".into(), 2_i64.into()],
+                vec!["b".into(), 1_i64.into()],
+                vec!["c".into(), 3_i64.into()],
+            ]
+        );
+        assert_eq!(plan.left_positions, vec![Some(0), Some(1), Some(2), None]);
+        assert_eq!(plan.right_positions, vec![None, Some(0), None, Some(1)]);
+        assert_eq!(plan.union_index, left.union(&right)?);
+
+        // A repeated value in one level is valid when the complete tuples are
+        // unique; a duplicate tuple is not valid for this unique-only witness.
+        let duplicate_tuple = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])?;
+        let error = duplicate_tuple.outer_align(&right).unwrap_err();
+        assert!(matches!(
+            error,
+            super::IndexError::InvalidArgument(message)
+                if message == "outer_align requires uniquely valued MultiIndexes"
+        ));
+
+        Ok(())
+    }
+
+    #[test]
     fn multi_index_get_indexer_rejects_duplicate_source_d89fe1() -> Result<(), super::IndexError> {
         let source = MultiIndex::from_tuples(vec![
             vec!["a".into(), 1_i64.into()],
@@ -29363,8 +29665,8 @@ mod tests {
         // Original values 10, 8, 6, 4, 2 → sorted ascending 2, 4, 6, 8, 10.
         let sorted = desc.sort_values();
         let sorted_alias = desc.sort();
-        assert_eq!(sorted.values(), vec![2, 4, 6, 8, 10]);
-        assert_eq!(sorted_alias.values(), sorted.values());
+        assert_eq!(sorted.values().to_vec(), vec![2, 4, 6, 8, 10]);
+        assert_eq!(sorted_alias.values().to_vec(), sorted.values().to_vec());
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert!(empty.sort_values().is_empty());
@@ -31144,7 +31446,7 @@ mod tests {
         let r = super::RangeIndex::new(0, 5, 1).unwrap();
         assert!(r.view().equals(&r));
         assert!(r.T().identical(&r));
-        assert_eq!(r.ravel(), r.values());
+        assert_eq!(r.ravel(), r.values().to_vec());
         assert_eq!(r.nlevels(), 1);
 
         let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
@@ -31477,10 +31779,11 @@ mod tests {
     #[test]
     fn range_index_values_generate_arithmetic_progression_without_flat_index_w6q7d() {
         let positive = super::RangeIndex::new(2, 11, 3).unwrap();
-        assert_eq!(positive.values(), vec![2, 5, 8]);
+        assert_eq!(positive.values().to_vec(), vec![2, 5, 8]);
+        assert_eq!(positive.values().get(3), None);
 
         let descending = super::RangeIndex::new(9, 0, -4).unwrap();
-        assert_eq!(descending.values(), vec![9, 5, 1]);
+        assert_eq!(descending.values().to_vec(), vec![9, 5, 1]);
 
         let empty = super::RangeIndex::new(5, 5, 1).unwrap();
         assert!(empty.values().is_empty());
@@ -35112,5 +35415,46 @@ mod ab_to_flat_index_ccfp {
         ab_regime("serial", 49_000, 60);
         // PARALLEL regime: the shipped path at reshape scale.
         ab_regime("parallel", 1_000_000, 5);
+    }
+}
+
+#[cfg(test)]
+mod cached_parallelism_tests {
+    use super::cached_available_parallelism;
+
+    /// br-frankenpandas-q1evw. THE NEGATIVE CASE, mirrored from `fp-columnar`'s
+    /// `cached_parallelism_reports_the_real_machine_not_a_constant_kko5z`: the
+    /// cheap way to make the cgroup walk disappear is to stop asking the OS at
+    /// all and return a constant. That passes every timing test and silently
+    /// serialises — or over-subscribes — the parallel `to_flat_index` path, and
+    /// no benchmark here would catch it, because they all report the thread
+    /// count the kernel CHOSE rather than the one it should have had.
+    ///
+    /// `fp-index` carries its own six-line copy of the helper (it deliberately
+    /// has no `fp-columnar` dependency), so it needs its own pin: the copy can
+    /// rot independently of the original.
+    #[test]
+    fn cached_parallelism_reports_the_real_machine_not_a_constant_q1evw() {
+        let cached = cached_available_parallelism();
+        let live = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        assert_eq!(
+            cached, live,
+            "cached parallelism must equal what the OS reports, not a hardcoded value"
+        );
+        assert!(
+            cached >= 1,
+            "worker counts are sized from this; 0 would divide"
+        );
+    }
+
+    /// The cache must be a cache: one answer per process, so the two call sites
+    /// that split `to_flat_index` cannot size their work from two different
+    /// worker counts.
+    #[test]
+    fn cached_parallelism_is_stable_across_calls_q1evw() {
+        let first = cached_available_parallelism();
+        for _ in 0..64 {
+            assert_eq!(cached_available_parallelism(), first);
+        }
     }
 }

@@ -83,7 +83,10 @@ fn checksum_i64_values(values: &[i64]) -> i64 {
 }
 
 fn current_values_checksum(source: &RangeIndex) -> i64 {
-    checksum_i64_values(&source.values())
+    source
+        .values()
+        .iter()
+        .fold(source.len() as i64, |acc, value| acc.wrapping_add(value))
 }
 
 fn legacy_flat_index_values_checksum(source: &RangeIndex) -> i64 {
