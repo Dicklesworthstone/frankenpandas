@@ -60415,7 +60415,35 @@ impl DataFrame {
         // memory-latency-bound, so spreading the columns across par_map_columns
         // scope workers wins aggregate cache/bandwidth. Bit-identical — every
         // column runs the same take_positions and is reassembled in column_order.
-        let gathered = self.par_map_columns(&self.column_order, |name| {
+        //
+        // BANDWIDTH FLOOR, not the compute-bound default (br-frankenpandas-uza04).
+        // `par_map_columns` passes 16_384, which its own doc reserves for
+        // compute-bound per-column work (round/clip/sqrt/exp/log/trig) where a
+        // few thousand cells amortize the `thread::scope` spawn. A permutation
+        // gather is exactly the other class the doc names, and the contiguous-run
+        // gather a few hundred lines below already passes 4_000_000 for that
+        // reason — this call site was the inconsistent one.
+        //
+        // MEASURED, and it contradicts the 2026-06-27 ledger row that raised
+        // this same floor and reported ~0 gain: `sort_values_single` @10k
+        // (10k x 10 f64 = 100_000 cells, so the old floor fired) runs 499-567us
+        // p50 across 5-8 workers unrestricted, and 250-265us p50 pinned to ONE
+        // cpu with `taskset -c 3`, three runs each on the shipped binary. The
+        // parallel gather is costing 2.1x at this size. That prior row measured
+        // best-of-4 on a loaded box; this is a certified balanced-square row
+        // (0.651x vs pandas, nulls 0.996/0.998) plus a 6-run pinned A/B.
+        //
+        // WHY 262_144 AND NOT `abs`'s 4_000_000: the parallel gather is a LOSS
+        // at 10k x 10 and a WIN at 100k x 10, so the crossover is bracketed
+        // between 100_000 and 1_000_000 cells and the floor has to sit inside
+        // that bracket. 4_000_000 was measured too: it fixes 10k (0.651x ->
+        // 1.30x vs pandas) but serialises 100k as well and costs it
+        // 1.78x -> 1.17x. Both endpoints are measured; the exact crossover
+        // inside the bracket is NOT bisected, and 262_144 is simply a power of
+        // two within it, consistent with the 16_384 / 131_072 floors nearby.
+        // A gather cheaper or dearer per cell than this one may cross
+        // elsewhere.
+        let gathered = self.par_map_columns_min(&self.column_order, 262_144, |name| {
             Ok(self
                 .columns
                 .get(name)
