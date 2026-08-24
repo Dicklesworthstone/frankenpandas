@@ -6518,6 +6518,257 @@ fn scan_json_record_boundaries(s: &[u8]) -> Option<(usize, usize, Vec<usize>)> {
     Some((body_start, body_end, commas))
 }
 
+/// A numeric column being built directly from a flat records payload.  Keeping
+/// the numeric representation here avoids creating a `Scalar` for every cell
+/// only for `Column::from_values` to immediately infer the same representation
+/// again.  This deliberately accepts a narrower shape than the scalar scanner:
+/// every record must have the same unescaped keys in the same order and every
+/// value must be a JSON number.  Any other valid records payload falls through
+/// to the established scalar/serde paths below.
+enum JsonNumericColumn {
+    Int(Vec<i64>),
+    Float(Vec<f64>),
+}
+
+impl JsonNumericColumn {
+    fn push_number(&mut self, number: &serde_json::Number) -> Option<()> {
+        match self {
+            Self::Int(values) => {
+                if let Some(value) = number.as_i64() {
+                    values.push(value);
+                } else {
+                    let value = number.as_f64()?;
+                    let mut promoted = Vec::with_capacity(values.capacity().saturating_add(1));
+                    promoted.extend(values.iter().map(|&prior| prior as f64));
+                    promoted.push(value);
+                    *self = Self::Float(promoted);
+                }
+            }
+            Self::Float(values) => values.push(number.as_f64()?),
+        }
+        Some(())
+    }
+}
+
+/// Parse a range of a homogeneous, numeric flat-records array into typed column
+/// builders.  See [`JsonNumericColumn`] for why this has intentionally strict
+/// admission; `None` is always a performance fallback, never a parse error.
+fn parse_json_records_numeric_range(
+    s: &[u8],
+    lo: usize,
+    hi: usize,
+) -> Option<(Vec<String>, Vec<JsonNumericColumn>, usize)> {
+    let mut i = lo;
+    macro_rules! ws {
+        () => {
+            while i < hi && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r') {
+                i += 1;
+            }
+        };
+    }
+
+    let mut names = Vec::new();
+    let mut columns = Vec::new();
+    let mut rows = 0usize;
+    loop {
+        ws!();
+        if i >= hi {
+            break;
+        }
+        if s[i] != b'{' {
+            return None;
+        }
+        i += 1;
+        let mut field = 0usize;
+        loop {
+            ws!();
+            if i < hi && s[i] == b'}' {
+                i += 1;
+                break;
+            }
+            if i >= hi || s[i] != b'"' {
+                return None;
+            }
+            i += 1;
+            let key_start = i;
+            while i < hi && s[i] != b'"' {
+                if s[i] == b'\\' {
+                    return None;
+                }
+                i += 1;
+            }
+            if i >= hi {
+                return None;
+            }
+            let key = std::str::from_utf8(&s[key_start..i]).ok()?;
+            i += 1;
+            ws!();
+            if i >= hi || s[i] != b':' {
+                return None;
+            }
+            i += 1;
+            ws!();
+            if i >= hi || !matches!(s[i], b'-' | b'0'..=b'9') {
+                return None;
+            }
+            let value_start = i;
+            if s[i] == b'-' {
+                i += 1;
+            }
+            let mut any = false;
+            while i < hi && matches!(s[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                any = true;
+                i += 1;
+            }
+            if !any {
+                return None;
+            }
+            let number = serde_json::from_slice::<serde_json::Number>(&s[value_start..i]).ok()?;
+            if rows == 0 {
+                names.push(key.to_owned());
+                let column = if let Some(value) = number.as_i64() {
+                    JsonNumericColumn::Int(vec![value])
+                } else {
+                    JsonNumericColumn::Float(vec![number.as_f64()?])
+                };
+                columns.push(column);
+            } else {
+                if names.get(field).is_none_or(|expected| expected != key) {
+                    return None;
+                }
+                columns.get_mut(field)?.push_number(&number)?;
+            }
+            field += 1;
+            ws!();
+            if i < hi && s[i] == b',' {
+                i += 1;
+                continue;
+            }
+        }
+        if field != columns.len() {
+            return None;
+        }
+        rows += 1;
+        ws!();
+        if i < hi && s[i] == b',' {
+            i += 1;
+            continue;
+        }
+        if i >= hi {
+            break;
+        }
+        return None;
+    }
+    (!names.is_empty()).then_some((names, columns, rows))
+}
+
+/// Parallel typed builder for homogeneous numeric records.  The standard
+/// fp-bench records payload is ten all-Float64 columns, so this path retains
+/// each worker's contiguous `Vec<f64>` as an immutable chunk and never boxes
+/// the 10 million cells as `Scalar`.  Mixed numeric columns remain supported:
+/// an Int64 chunk is promoted only when another chunk proves the column Float64.
+fn try_read_json_records_numeric_parallel(input: &str) -> Result<Option<DataFrame>, IoError> {
+    let s = input.as_bytes();
+    let Some((body_start, body_end, commas)) = scan_json_record_boundaries(s) else {
+        return Ok(None);
+    };
+    let record_count = commas.len() + 1;
+    const PAR_MIN_RECORDS: usize = 50_000;
+    const PAR_MIN_RECORDS_PER_WORKER: usize = 16_384;
+    if record_count < PAR_MIN_RECORDS {
+        return Ok(None);
+    }
+    let workers = fp_columnar::cached_available_parallelism()
+        .min(16)
+        .min(record_count / PAR_MIN_RECORDS_PER_WORKER)
+        .max(1);
+    if workers < 2 {
+        return Ok(None);
+    }
+    let per_worker = record_count.div_ceil(workers);
+    let mut ranges = Vec::with_capacity(workers);
+    let mut start_record = 0usize;
+    while start_record < record_count {
+        let end_record = (start_record + per_worker).min(record_count);
+        ranges.push((
+            if start_record == 0 {
+                body_start
+            } else {
+                commas[start_record - 1] + 1
+            },
+            if end_record == record_count {
+                body_end
+            } else {
+                commas[end_record - 1]
+            },
+        ));
+        start_record = end_record;
+    }
+    let parsed = std::thread::scope(|scope| {
+        ranges
+            .iter()
+            .map(|&(lo, hi)| scope.spawn(move || parse_json_records_numeric_range(s, lo, hi)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().expect("json numeric parse thread"))
+            .collect::<Vec<_>>()
+    });
+    let Some(mut parts) = parsed.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    let names = parts[0].0.clone();
+    if parts.iter().any(|part| part.0 != names) {
+        return Ok(None);
+    }
+    let rows: usize = parts.iter().map(|part| part.2).sum();
+    let mut out = BTreeMap::new();
+    for (column_index, name) in names.iter().enumerate() {
+        let is_float = parts
+            .iter()
+            .any(|part| matches!(part.1.get(column_index), Some(JsonNumericColumn::Float(_))));
+        let column = if is_float {
+            let mut chunks = Vec::with_capacity(parts.len());
+            for part in &mut parts {
+                let builder = std::mem::replace(
+                    part.1
+                        .get_mut(column_index)
+                        .expect("validated column width"),
+                    JsonNumericColumn::Float(Vec::new()),
+                );
+                let values = match builder {
+                    JsonNumericColumn::Float(values) => values,
+                    JsonNumericColumn::Int(values) => {
+                        values.into_iter().map(|value| value as f64).collect()
+                    }
+                };
+                let length = values.len();
+                chunks.push((std::sync::Arc::from(values), 0, length));
+            }
+            Column::from_f64_all_valid_owned_chunks(chunks, rows)
+        } else {
+            let mut chunks = Vec::with_capacity(parts.len());
+            for part in &mut parts {
+                let builder = std::mem::replace(
+                    part.1
+                        .get_mut(column_index)
+                        .expect("validated column width"),
+                    JsonNumericColumn::Int(Vec::new()),
+                );
+                let JsonNumericColumn::Int(values) = builder else {
+                    unreachable!("is_float checked every numeric chunk");
+                };
+                let length = values.len();
+                chunks.push((std::sync::Arc::from(values), 0, length));
+            }
+            Column::from_i64_all_valid_chunks(chunks, rows)
+        };
+        out.insert(name.clone(), column);
+    }
+    let index = Index::from_i64((0..rows as i64).collect());
+    let frame = DataFrame::new_with_column_order(index, out, names)?;
+    Ok(Some(promote_synthetic_row_multiindex_if_present(&frame)?))
+}
+
 /// Parse a flat records SEQUENCE `{...},{...},…` occupying `s[lo..hi]` (no surrounding
 /// `[` `]`; `hi` is a record boundary or the closing `]` position) into per-column
 /// `Vec<Scalar>` with first-seen column order and `Null` backfill for absent keys —
@@ -6985,8 +7236,12 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
     // defer to the generic path below on any non-flat input, so the frame is
     // bit-identical for every input.
     if matches!(orient, JsonOrient::Records) {
-        // Parallel records fast path first (large homogeneous arrays), then the serial
-        // flat scanner, then the generic Value-tree path. All produce bit-identical frames.
+        // Parallel typed numeric records first (large homogeneous numeric arrays), then
+        // the general parallel/serial flat scanners, then the generic Value-tree path.
+        // Every path either preserves the generic result or returns `None` to defer.
+        if let Some(frame) = try_read_json_records_numeric_parallel(input)? {
+            return Ok(frame);
+        }
         if let Some(frame) = try_read_json_records_flat_parallel(input)? {
             return Ok(frame);
         }
@@ -7785,16 +8040,7 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
         return write_json_string(&materialized, orient);
     }
 
-    let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let row_count = frame.index().len();
-    let column_float_promotions = headers
-        .iter()
-        .map(|name| {
-            frame
-                .column(name)
-                .is_some_and(|column| column_promotes_int_json_values_to_float(column.values()))
-        })
-        .collect::<Vec<_>>();
 
     match orient {
         JsonOrient::Records => {
@@ -7803,6 +8049,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_records_typed(frame, false) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             write_json_records_serde(frame, &headers, &column_float_promotions)
         }
         JsonOrient::Columns => {
@@ -7810,6 +8065,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_columns_typed(frame) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             let mut outer = serde_json::Map::new();
             for (name, promote_int_to_float) in headers.iter().zip(column_float_promotions.iter()) {
                 let mut col_obj = serde_json::Map::new();
@@ -7838,6 +8102,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_index_typed(frame) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             let mut outer = serde_json::Map::new();
             for row_idx in 0..row_count {
                 let mut row_obj = serde_json::Map::new();
@@ -7871,6 +8144,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_split_typed(frame) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             let col_array: Vec<serde_json::Value> = headers
                 .iter()
                 .map(|h| serde_json::Value::String(h.clone()))
@@ -7911,6 +8193,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_values_typed(frame) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             let mut data = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
                 let row: Vec<serde_json::Value> = headers
@@ -15098,6 +15389,56 @@ mod tests {
         assert!(
             par.equals(&ser),
             "parallel json read diverges from the serial flat scanner"
+        );
+    }
+
+    #[test]
+    fn json_read_numeric_parallel_typed_builders_match_scalar_reference_92n1x() {
+        // 60k rows crosses the typed parser's parallel admission boundary. The
+        // Float64 column starts with integral-looking data and later has decimal
+        // tokens, exercising the Int64→Float64 builder promotion without ever
+        // materializing one Scalar per input cell.
+        let mut json = String::with_capacity(1_600_000);
+        json.push('[');
+        for row in 0..60_000_i64 {
+            if row > 0 {
+                json.push(',');
+            }
+            json.push_str(&format!(
+                r#"{{"i":{row},"f":{}}}"#,
+                if row < 20_000 {
+                    row.to_string()
+                } else {
+                    format!("{row}.5")
+                }
+            ));
+        }
+        json.push(']');
+
+        let typed = super::try_read_json_records_numeric_parallel(&json)
+            .expect("typed parse result")
+            .expect("homogeneous numeric input takes typed path");
+        let scalar = super::try_read_json_records_flat_parallel(&json)
+            .expect("scalar parse result")
+            .expect("homogeneous input takes scalar parallel path");
+        assert_eq!(typed.len(), 60_000);
+        assert!(
+            typed.equals(&scalar),
+            "typed parser must preserve every value"
+        );
+        assert_eq!(typed.column("i").expect("i").dtype(), DType::Int64);
+        assert_eq!(typed.column("f").expect("f").dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn json_read_numeric_typed_builder_rejects_key_reordering_92n1x() {
+        // A position-only numeric parser would quietly exchange these values.
+        // Admission must reject the shape so the general records parser retains
+        // its first-seen-key semantics.
+        let input = br#"{"a":1,"b":2.5},{"b":3.5,"a":4}"#;
+        assert!(
+            super::parse_json_records_numeric_range(input, 0, input.len()).is_none(),
+            "key reordering must defer instead of assigning by position"
         );
     }
 
