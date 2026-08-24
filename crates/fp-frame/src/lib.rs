@@ -42612,10 +42612,11 @@ impl SeriesGroupByRolling<'_, '_> {
         }
         let values = if let Some(data) = self.groupby.series.column().as_f64_slice() {
             TypedValues::Float64(data)
-        } else if let Some(data) = self.groupby.series.column().as_i64_slice() {
-            TypedValues::Int64(data)
         } else {
-            return None;
+            // Same three outcomes as the old `else if let ... else { return
+            // None }` chain: a non-Float64, non-Int64 (or nullable) column
+            // declines here exactly as before.
+            TypedValues::Int64(self.groupby.series.column().as_i64_slice()?)
         };
         let (gids, ngroups) = self.groupby.dense_group_ids()?;
         if gids.len() != self.groupby.series.len() {
@@ -42695,7 +42696,7 @@ impl SeriesGroupByRolling<'_, '_> {
             for (position, &row) in group_rows.iter().enumerate() {
                 if position >= self.window {
                     let removed = value_at(group_rows[position - self.window]);
-                    if removed == removed {
+                    if !removed.is_nan() {
                         nobs -= 1;
                         let y = -removed - comp_remove;
                         let next = sum_x + y;
@@ -42708,7 +42709,7 @@ impl SeriesGroupByRolling<'_, '_> {
                 }
 
                 let value = value_at(row);
-                if value == value {
+                if !value.is_nan() {
                     nobs += 1;
                     let y = value - comp_add;
                     let next = sum_x + y;
@@ -68499,9 +68500,11 @@ impl DataFrame {
         // contiguous row range; concatenation preserves order → bit-identical.
         let build = |lo: usize, hi: usize| -> Vec<Vec<Scalar>> {
             let mut out = Vec::with_capacity(hi - lo);
-            for i in lo..hi {
+            // `i` stays the ABSOLUTE row index: the column reads below use it
+            // for `scalar_at(i)`, so this cannot become a plain slice iterator
+            // over `labels[lo..hi]`.
+            for (i, lbl) in labels.iter().enumerate().take(hi).skip(lo) {
                 let mut row = Vec::with_capacity(n_cols + 1);
-                let lbl = &labels[i];
                 row.push(match lbl {
                     IndexLabel::Int64(v) => Scalar::Int64(*v),
                     IndexLabel::Float64(v) => Scalar::Float64(v.0),
