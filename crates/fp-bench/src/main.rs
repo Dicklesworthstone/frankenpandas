@@ -27,7 +27,10 @@ use std::{
 use fp_columnar::{Column, ValidityMask};
 use fp_frame::{DataFrame, Series, to_datetime};
 use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
-use fp_join::{JoinType, merge_dataframes_on_with};
+use fp_join::{
+    JoinType, MergeExecutionOptions, MergeValidateMode, merge_dataframes_on_with,
+    merge_dataframes_on_with_options,
+};
 use fp_types::{DType, NullKind, Scalar};
 use mimalloc::MiMalloc;
 use sha2::{Digest, Sha256};
@@ -193,6 +196,13 @@ where
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    // PROVENANCE SITE, DELIBERATELY NOT CACHED (br-frankenpandas-q1evw). Every
+    // kernel-path caller in fp-frame/fp-io/fp-join/fp-columnar routes through
+    // `fp_columnar::cached_available_parallelism`, because the cgroup walk this
+    // performs costs ~66us per call. This one reports the host's LIVE parallelism
+    // into the bench row beside the thread count the operation actually used, so a
+    // cached value would report the wrong machine after an affinity or quota change.
+    // It runs once per probe, outside every timed region, where the walk is free.
     let runtime_available_parallelism =
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let process_threads_before_probe = process_thread_count();
@@ -1590,6 +1600,9 @@ fn run_elementwise_policy_sweep(workload: &str, rows: usize, consume: bool) -> b
         POLICY_SWEEP_BASELINE.0,
         POLICY_SWEEP_BASELINE.1,
         POLICY_SWEEP_BASELINE.2,
+        // PROVENANCE SITE, DELIBERATELY NOT CACHED (br-frankenpandas-q1evw): this is
+        // the host parallelism stamped into the sweep's JSON row, read live, once,
+        // after the last timed arm. See the note in `probe_operation_threads`.
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
         rows_json.join(","),
     );
@@ -3532,6 +3545,53 @@ fn run(
                 let _ = df.reindex(new_labels.clone()).expect("reindex");
             })
         }
+        ("indexing", "range_index_values") => {
+            // pandas: pd.RangeIndex(0, 2*n, 2).values.sum(). `values()` is an
+            // affine typed view, so this consumes the sequence without an owned
+            // Vec<i64> or an IndexLabel materialization.
+            let range = RangeIndex::new(0, rows as i64 * 2, 2).expect("range index fixture");
+            time_us(|| {
+                let sum = range
+                    .values()
+                    .iter()
+                    .fold(0_i64, |acc, value| acc.wrapping_add(value));
+                black_box(sum);
+            })
+        }
+        ("dataframe_ops", "series_combine_first_typed_values") => {
+            let mut left_validity = ValidityMask::all_valid(rows);
+            for position in (1..rows).step_by(2) {
+                left_validity.set(position, false);
+            }
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let left = Series::new(
+                "left",
+                index.clone(),
+                Column::from_f64_values_with_validity(
+                    (0..rows).map(|value| value as f64).collect(),
+                    left_validity,
+                ),
+            )
+            .expect("left series");
+            let right = Series::new(
+                "right",
+                index,
+                Column::from_f64_values_owned(
+                    (0..rows).map(|value| value as f64 * 2.0).collect(),
+                ),
+            )
+            .expect("right series");
+            time_us(|| {
+                let output = left.combine_first(&right).expect("combine_first");
+                let sum = match output.typed_values().expect("numeric typed view") {
+                    fp_frame::SeriesTypedValues::Float64 { data, .. } => {
+                        data.iter().copied().sum::<f64>()
+                    }
+                    fp_frame::SeriesTypedValues::Int64 { .. } => unreachable!("Float64 output"),
+                };
+                black_box(sum);
+            })
+        }
         ("indexing", "range_index_take_arithmetic") => {
             // pandas: pd.RangeIndex(10, 10 + 3*n, 3).take(arithmetic_positions).
             // Batch repeated takes inside the timed unit so FP's lazy affine
@@ -3572,6 +3632,26 @@ fn run(
             time_us(|| {
                 let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], join_type)
                     .expect("merge");
+            })
+        }
+        // pandas: left.merge(right, on="key", how="inner", validate="one_to_many").
+        // This deliberately measures the validated generic path: the unique
+        // left keys satisfy the contract while the validator need not scan right.
+        ("joins", "join_inner_validate_one_to_many") => {
+            let (left, right) = build_join_frames(rows);
+            time_us(|| {
+                let _ = merge_dataframes_on_with_options(
+                    &left,
+                    &right,
+                    &["key"],
+                    &["key"],
+                    JoinType::Inner,
+                    MergeExecutionOptions {
+                        validate_mode: Some(MergeValidateMode::OneToMany),
+                        ..MergeExecutionOptions::default()
+                    },
+                )
+                .expect("validated merge");
             })
         }
         ("joins", "join_inner_shuffled") => {
