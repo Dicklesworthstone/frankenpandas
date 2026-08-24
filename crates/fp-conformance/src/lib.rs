@@ -1736,6 +1736,7 @@ pub enum RequirementLevel {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureSeries {
     pub name: String,
     pub index: Vec<IndexLabel>,
@@ -1762,6 +1763,7 @@ pub struct FixtureExpectedSeries {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureDataFrame {
     pub index: Vec<IndexLabel>,
     /// Column data, plus the order the fixture WROTE the columns in.
@@ -1781,6 +1783,7 @@ pub struct FixtureDataFrame {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureCategoricalColumn {
     pub categories: Vec<Scalar>,
     #[serde(default)]
@@ -1959,12 +1962,14 @@ pub struct FixtureExpectedDataFrame {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureColumnAssignment {
     pub name: String,
     pub values: Vec<Scalar>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureColumnRename {
     pub from: String,
     pub to: String,
@@ -1987,6 +1992,7 @@ pub struct FixtureExpectedJoin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureProvenance {
     pub pandas_version: String,
     pub oracle_script_sha256: String,
@@ -2005,6 +2011,7 @@ pub struct FixtureProvenance {
 /// mandatory: a retirement without one is indistinguishable from a fixture
 /// someone quietly disabled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureRetirement {
     pub reason: String,
     #[serde(default)]
@@ -2014,6 +2021,7 @@ pub struct FixtureRetirement {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PacketFixture {
     pub packet_id: String,
     pub case_id: String,
@@ -28318,6 +28326,65 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
         .expect("legacy packet fixture should deserialize");
 
         assert!(fixture.fixture_provenance.is_none());
+    }
+
+    #[test]
+    fn fixture_input_structs_reject_unknown_fields_vxbuf() {
+        fn assert_rejects_unknown_field<T>(value: serde_json::Value, field: &str)
+        where
+            T: serde::de::DeserializeOwned,
+        {
+            let error = serde_json::from_value::<T>(value)
+                .expect_err("fixture schema must reject undeclared fields")
+                .to_string();
+            assert!(
+                error.contains(&format!("unknown field `{field}`")),
+                "expected unknown-field error for {field}, got: {error}"
+            );
+        }
+
+        assert_rejects_unknown_field::<super::PacketFixture>(serde_json::json!({
+            "packet_id": "FP-VXBUF-001",
+            "case_id": "reject_unknown_top_level",
+            "mode": "strict",
+            "operation": "series_add",
+            "typoed_packet_field": true
+        }), "typoed_packet_field");
+        assert_rejects_unknown_field::<super::FixtureSeries>(serde_json::json!({
+            "name": "input",
+            "index": [],
+            "values": [],
+            "typoed_series_field": true
+        }), "typoed_series_field");
+        assert_rejects_unknown_field::<super::FixtureDataFrame>(serde_json::json!({
+            "index": [],
+            "columns": {},
+            "typoed_frame_field": true
+        }), "typoed_frame_field");
+        assert_rejects_unknown_field::<super::FixtureCategoricalColumn>(serde_json::json!({
+            "categories": [],
+            "typoed_categorical_field": true
+        }), "typoed_categorical_field");
+        assert_rejects_unknown_field::<super::FixtureColumnAssignment>(serde_json::json!({
+            "name": "a",
+            "values": [],
+            "typoed_assignment_field": true
+        }), "typoed_assignment_field");
+        assert_rejects_unknown_field::<super::FixtureColumnRename>(serde_json::json!({
+            "from": "a",
+            "to": "b",
+            "typoed_rename_field": true
+        }), "typoed_rename_field");
+        assert_rejects_unknown_field::<super::FixtureProvenance>(serde_json::json!({
+            "pandas_version": "2.2.3",
+            "oracle_script_sha256": "sha",
+            "generated_at": "2026-08-24T00:00:00Z",
+            "typoed_provenance_field": true
+        }), "typoed_provenance_field");
+        assert_rejects_unknown_field::<super::FixtureRetirement>(serde_json::json!({
+            "reason": "test",
+            "typoed_retirement_field": true
+        }), "typoed_retirement_field");
     }
 
     #[test]

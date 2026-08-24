@@ -515,6 +515,11 @@ fn main() -> Result<(), AnyError> {
         host: HostFingerprint {
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
+            // PROVENANCE SITE, DELIBERATELY NOT CACHED (br-frankenpandas-q1evw):
+            // this is the HostFingerprint of the machine that produced the baseline,
+            // so it must read the live value. Kernel paths use
+            // `fp_columnar::cached_available_parallelism`; this runs once per
+            // baseline emission and never inside a timed region.
             available_parallelism: std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1),
