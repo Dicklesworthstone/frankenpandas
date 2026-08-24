@@ -14340,42 +14340,14 @@ pub trait DataFrameIoExt {
 
     /// Write this DataFrame to a CSV file.
     ///
-    /// Matches `pd.DataFrame.to_csv(path)`.
+    /// Matches `pd.DataFrame.to_csv(path)`: the index is included by default.
     fn to_csv_file(&self, path: &Path) -> Result<(), IoError>;
 
     /// Serialize this DataFrame to a CSV string.
     ///
-    /// ⚠️ THIS DOES NOT MATCH `pd.DataFrame.to_csv()` ON THE INDEX, and the claim
-    /// that it did was wrong. pandas writes the index by DEFAULT; this does not.
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19), on a frame with index
-    /// [10, 11] and one column `a`:
-    /// ```text
-    ///   df.to_csv()             -> ",a\n10,1\n11,2\n"   index INCLUDED, leading
-    ///                                                     empty header cell
-    ///   df.to_csv(index=False)  -> "a\n1\n2\n"
-    /// ```
-    /// This method routes to `write_csv_string`, whose `CsvWriteOptions::default()`
-    /// sets `include_index: false` — so its output corresponds to pandas'
-    /// `to_csv(index=False)`, not to bare `to_csv()`.
-    ///
-    /// ⚠️ WHETHER THIS IS DELIBERATE IS GENUINELY UNCLEAR, and I first wrote that it
-    /// was. Evidence BOTH ways, so that a later reader does not inherit my first
-    /// reading:
-    ///   FOR deliberate — a test pins that the first emitted line IS the column
-    ///   names (br-frankenpandas-g9rxa), which an index would break by prepending an
-    ///   empty cell, and the conformance CSV path plus fp-bench consume this shape.
-    ///   AGAINST — the SERIES writers in this same file, `SeriesIoExt::to_csv_file`
-    ///   and `SeriesIoExt::to_csv_string`, both explicitly override the shared
-    ///   default with `include_index: true, ..CsvWriteOptions::default()` precisely
-    ///   to match pandas. Two sibling writers over the same options struct disagree
-    ///   about pandas' default, and only one of them had to reach for an override.
-    /// That asymmetry looks more like an oversight the test later cemented than a
-    /// design. Filed rather than changed: flipping the default is breaking for 39
-    /// call sites here plus conformance and fp-bench.
-    ///
-    /// Only the parity claim is corrected here. Use
-    /// [`Self::to_csv_string_with_options`] with `include_index: true` for pandas'
-    /// default shape — which is exactly what the Series side already does.
+    /// Matches `pd.DataFrame.to_csv()`: the index is included by default. Use
+    /// [`Self::to_csv_string_with_options`] with `include_index: false` to emit
+    /// pandas' `to_csv(index=False)` shape.
     fn to_csv_string(&self) -> Result<String, IoError>;
 
     /// Serialize this DataFrame to a CSV string with explicit write options.
@@ -14641,11 +14613,15 @@ impl DataFrameIoExt for DataFrame {
     }
 
     fn to_csv_file(&self, path: &Path) -> Result<(), IoError> {
-        write_csv(self, path)
+        std::fs::write(path, self.to_csv_string()?)?;
+        Ok(())
     }
 
     fn to_csv_string(&self) -> Result<String, IoError> {
-        write_csv_string(self)
+        self.to_csv_string_with_options(&CsvWriteOptions {
+            include_index: true,
+            ..CsvWriteOptions::default()
+        })
     }
 
     fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError> {
@@ -15375,32 +15351,10 @@ mod tests {
         assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
     }
 
-    /// The Series and DataFrame CSV writers DISAGREE about pandas index default.
-    ///
-    /// br-frankenpandas-sseeh. This pins an asymmetry that is currently undocumented
-    /// and easy to "tidy" in either direction by accident:
-    ///   `DataFrameIoExt::to_csv_string` takes `CsvWriteOptions::default()`, whose
-    ///   `include_index` is FALSE, so it emits the pandas `to_csv(index=False)` shape.
-    ///   `SeriesIoExt::to_csv_string` overrides that default with
-    ///   `include_index: true`, so it emits the bare `to_csv()` shape.
-    ///
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19), frame with index
-    /// [10, 11] and one column `a`: `df.to_csv()` yields `",a\n10,1\n11,2\n"` with
-    /// the index INCLUDED behind a leading empty header cell, while
-    /// `df.to_csv(index=False)` yields `"a\n1\n2\n"`. pandas writes the index by
-    /// default for BOTH Series and DataFrame, so the Series side matches the
-    /// incumbent here and the DataFrame side does not.
-    ///
-    /// ⚠️ THIS TEST DOES NOT ENDORSE EITHER SHAPE. It exists so that a change to
-    /// `CsvWriteOptions::default()`, or an "obvious" cleanup deleting the Series
-    /// override, fails here loudly instead of silently altering one surface. The
-    /// behaviour decision belongs on the bead, not in this file.
-    ///
-    /// Asserted structurally — a leading comma means the index column is present —
-    /// rather than on exact header text, because the index label spelling is a
-    /// separate concern this test should not also pin.
+    /// Bare DataFrame and Series CSV writers follow pandas' index default, while
+    /// explicit options retain the index-less form.
     #[test]
-    fn csv_index_default_differs_between_series_and_dataframe_sseeh() {
+    fn csv_index_default_matches_pandas_for_dataframe_and_series_sseeh() {
         use super::{DataFrameIoExt, SeriesIoExt};
 
         let idx = vec![10_i64.into(), 11_i64.into()];
@@ -15409,17 +15363,23 @@ mod tests {
         let frame = DataFrame::from_series(vec![series.clone()]).expect("frame");
 
         let frame_csv = frame.to_csv_string().expect("dataframe csv");
-        let frame_header = frame_csv.lines().next().expect("header");
-        assert!(
-            !frame_header.starts_with(','),
-            "DataFrame writer omits the index, so the header must NOT lead with an empty cell; csv={frame_csv:?}"
+        assert_eq!(
+            frame_csv, ",a\n10,1\n11,2\n",
+            "DataFrame.to_csv() must match pandas' index-including default"
         );
 
         let series_csv = series.to_csv_string().expect("series csv");
-        let series_header = series_csv.lines().next().expect("header");
-        assert!(
-            series_header.starts_with(','),
-            "Series writer includes the index, so the header MUST lead with an empty cell as pandas to_csv() does; csv={series_csv:?}"
+        assert_eq!(series_csv, frame_csv, "sibling defaults must agree");
+
+        let indexless = frame
+            .to_csv_string_with_options(&CsvWriteOptions {
+                include_index: false,
+                ..CsvWriteOptions::default()
+            })
+            .expect("explicit indexless dataframe csv");
+        assert_eq!(
+            indexless, "a\n1\n2\n",
+            "explicit include_index=false must not inherit the pandas default"
         );
     }
 
@@ -21273,7 +21233,17 @@ mod tests {
 
         let frame = make_test_dataframe();
         let csv = frame.to_csv_string().expect("csv string");
-        assert_eq!(csv, super::write_csv_string(&frame).expect("free csv"));
+        assert_eq!(
+            csv,
+            super::write_csv_string_with_options(
+                &frame,
+                &CsvWriteOptions {
+                    include_index: true,
+                    ..CsvWriteOptions::default()
+                },
+            )
+            .expect("pandas-default csv"),
+        );
         assert_eq!(
             frame.to_markdown_string().expect("markdown string"),
             write_markdown_string(&frame).expect("free markdown")
