@@ -68225,13 +68225,46 @@ impl DataFrame {
     /// each column value in column order.
     pub fn to_records(&self) -> Vec<Vec<Scalar>> {
         // Hoist the per-row self.index.labels() (was an accessor call EVERY row)
-        // and the per-cell columns.get(name).values() (n*m BTreeMap lookups) to
-        // once each. Bit-identical.
+        // and resolve each source column once.  The public result necessarily owns
+        // Scalars, but all-valid typed columns need not first build a *second*
+        // column-length Scalar cache merely to clone it into those records.
+        // Nullable and mixed columns retain the Scalar route: their missing-kind
+        // provenance is observable and cannot be reconstructed from a raw buffer.
+        enum RecordColumn<'a> {
+            Float64(&'a [f64]),
+            Int64(&'a [i64]),
+            Bool(&'a [bool]),
+            Scalars(&'a [Scalar]),
+        }
+
+        impl RecordColumn<'_> {
+            fn scalar_at(&self, row: usize) -> Scalar {
+                match self {
+                    Self::Float64(values) => Scalar::Float64(values[row]),
+                    Self::Int64(values) => Scalar::Int64(values[row]),
+                    Self::Bool(values) => Scalar::Bool(values[row]),
+                    Self::Scalars(values) => values[row].clone(),
+                }
+            }
+        }
+
         let labels = self.index.labels();
-        let col_values: Vec<Option<&[Scalar]>> = self
+        let col_values: Vec<Option<RecordColumn<'_>>> = self
             .column_order
             .iter()
-            .map(|name| self.columns.get(name).map(|col| col.values()))
+            .map(|name| {
+                self.columns.get(name).map(|column| {
+                    if let Some(values) = column.as_f64_slice() {
+                        RecordColumn::Float64(values)
+                    } else if let Some(values) = column.as_i64_slice() {
+                        RecordColumn::Int64(values)
+                    } else if let Some(values) = column.as_bool_slice() {
+                        RecordColumn::Bool(values)
+                    } else {
+                        RecordColumn::Scalars(column.values())
+                    }
+                })
+            })
             .collect();
         let n = self.len();
         let n_cols = self.column_order.len();
@@ -68256,7 +68289,11 @@ impl DataFrame {
                     IndexLabel::Null(kind) => Scalar::Null(*kind),
                 });
                 for col_vals in &col_values {
-                    row.push(col_vals.map_or(Scalar::Null(NullKind::Null), |vals| vals[i].clone()));
+                    row.push(
+                        col_vals
+                            .as_ref()
+                            .map_or(Scalar::Null(NullKind::Null), |values| values.scalar_at(i)),
+                    );
                 }
                 out.push(row);
             }
@@ -155613,6 +155650,109 @@ mod tests {
         // Second record: [index=1, a=2, b="y"]
         assert_eq!(records[1][0], Scalar::Int64(1));
         assert_eq!(records[1][1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn to_records_reads_typed_columns_without_materializing_source_scalars_uza04() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "floats".to_string(),
+            Column::from_f64_values(vec![1.25, -2.5]),
+        );
+        columns.insert("ints".to_string(), Column::from_i64_values(vec![4, 9]));
+        columns.insert(
+            "flags".to_string(),
+            Column::from_bool_values(vec![true, false]),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_range(0, 2, 1),
+            columns,
+            vec![
+                "floats".to_string(),
+                "ints".to_string(),
+                "flags".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert!(df.get_column("floats").column().as_f64_slice().is_some());
+        assert!(df.get_column("ints").column().as_i64_slice().is_some());
+        assert!(df.get_column("flags").column().as_bool_slice().is_some());
+        assert!(
+            !df.get_column("floats")
+                .column()
+                .scalar_cache_is_materialized()
+        );
+
+        assert_eq!(
+            df.to_records(),
+            vec![
+                vec![
+                    Scalar::Int64(0),
+                    Scalar::Float64(1.25),
+                    Scalar::Int64(4),
+                    Scalar::Bool(true),
+                ],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Float64(-2.5),
+                    Scalar::Int64(9),
+                    Scalar::Bool(false),
+                ],
+            ]
+        );
+        for name in ["floats", "ints", "flags"] {
+            assert!(
+                !df.get_column(name).column().scalar_cache_is_materialized(),
+                "typed source {name} unexpectedly built a Scalar cache"
+            );
+        }
+    }
+
+    #[test]
+    fn to_records_mixed_column_falls_back_without_poisoning_typed_sibling_uza04() {
+        let mut columns = BTreeMap::new();
+        columns.insert("typed".to_string(), Column::from_i64_values(vec![7, 8]));
+        columns.insert(
+            "mixed".to_string(),
+            Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("x".to_string()), Scalar::Int64(3)],
+            )
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_range(0, 2, 1),
+            columns,
+            vec!["typed".to_string(), "mixed".to_string()],
+        )
+        .unwrap();
+
+        assert!(df.get_column("typed").column().as_i64_slice().is_some());
+        assert!(df.get_column("mixed").column().as_i64_slice().is_none());
+        assert_eq!(
+            df.to_records(),
+            vec![
+                vec![
+                    Scalar::Int64(0),
+                    Scalar::Int64(7),
+                    Scalar::Utf8("x".to_string()),
+                ],
+                vec![Scalar::Int64(1), Scalar::Int64(8), Scalar::Int64(3)],
+            ]
+        );
+        assert!(
+            !df.get_column("typed")
+                .column()
+                .scalar_cache_is_materialized(),
+            "mixed fallback must not force the typed sibling onto the Scalar spine"
+        );
+        assert!(
+            df.get_column("mixed")
+                .column()
+                .scalar_cache_is_materialized(),
+            "planted mixed-dtype negative must stay on the Scalar fallback"
+        );
     }
 
     #[test]

@@ -8899,8 +8899,70 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
     RecordBatch::try_new(schema, arrays).map_err(|e| IoError::Parquet(e.to_string()))
 }
 
+/// Build the block-backed representation directly from one homogeneous Arrow
+/// Float64 batch. The Arrow buffers are already column-major, so this copies
+/// each decoded value only once into the frame's column-major backing block.
+///
+/// Nullable columns deliberately do not enter this path: the block store is
+/// all-valid by contract, and the normal typed path carries nullable-float
+/// validity and NaN semantics.
+#[cfg(feature = "block-storage")]
+fn try_record_batch_to_float64_block(batch: &RecordBatch) -> Result<Option<DataFrame>, IoError> {
+    if batch.num_columns() == 0
+        || !batch
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| field.data_type() == &ArrowDataType::Float64)
+    {
+        return Ok(None);
+    }
+
+    let names: Vec<String> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    if names.iter().collect::<HashSet<_>>().len() != names.len() {
+        // The existing BTreeMap path has legacy duplicate-label behavior.
+        // Leave it untouched rather than making the block path observably
+        // stricter.
+        return Ok(None);
+    }
+
+    let rows = batch.num_rows();
+    let capacity = rows.checked_mul(names.len()).ok_or_else(|| {
+        IoError::Parquet("parquet Float64 block dimensions overflow usize".into())
+    })?;
+    let mut block = Vec::with_capacity(capacity);
+    for array in batch.columns() {
+        let floats = array
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("Float64 schema field must carry Float64Array");
+        if floats.null_count() != 0 {
+            return Ok(None);
+        }
+        block.extend_from_slice(floats.values());
+    }
+
+    DataFrame::from_f64_block_columns(
+        Index::new_known_unique_int64_unit_range(0, rows),
+        names,
+        block,
+    )
+    .map(Some)
+    .map_err(IoError::from)
+}
+
 /// Convert an Arrow RecordBatch back into a DataFrame.
 fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> {
+    #[cfg(feature = "block-storage")]
+    if let Some(frame) = try_record_batch_to_float64_block(batch)? {
+        return Ok(frame);
+    }
+
     let n_rows = batch.num_rows();
     let schema = batch.schema();
     let mut columns = BTreeMap::new();
@@ -21419,6 +21481,70 @@ mod tests {
         assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
         assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
         assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[cfg(feature = "block-storage")]
+    #[test]
+    fn parquet_all_valid_float64_uses_column_major_block_l6uyi() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "left".to_string(),
+            Column::from_f64_values(vec![1.5, -0.0, 3.25]),
+        );
+        columns.insert(
+            "right".to_string(),
+            Column::from_f64_values(vec![4.0, 5.5, 6.75]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![10, 20, 30]),
+            columns,
+            vec!["left".to_string(), "right".to_string()],
+        )
+        .expect("source frame");
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write parquet");
+        let decoded = super::read_parquet_bytes(&bytes).expect("read parquet");
+        let view = decoded
+            .to_numpy_block_view()
+            .expect("all-valid Float64 parquet is block-backed");
+        assert_eq!((view.rows, view.cols), (3, 2));
+        assert_eq!(view.block[0].to_bits(), 1.5_f64.to_bits());
+        assert_eq!(view.block[1].to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(view.block[2].to_bits(), 3.25_f64.to_bits());
+        assert_eq!(view.block[3].to_bits(), 4.0_f64.to_bits());
+        assert_eq!(view.block[4].to_bits(), 5.5_f64.to_bits());
+        assert_eq!(view.block[5].to_bits(), 6.75_f64.to_bits());
+
+        // Negative case: nullable Float64 needs a validity mask, so it must
+        // remain on the ordinary typed decode path rather than dropping the
+        // missing marker into an all-valid block.
+        let nullable = DataFrame::from_dict(
+            &["value"],
+            vec![(
+                "value",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .expect("nullable source frame");
+        let nullable_bytes = super::write_parquet_bytes(&nullable).expect("write nullable parquet");
+        let nullable_decoded =
+            super::read_parquet_bytes(&nullable_bytes).expect("read nullable parquet");
+        assert!(
+            nullable_decoded.to_numpy_block_view().is_none(),
+            "nullable Float64 must not enter the all-valid block path"
+        );
+        assert!(
+            nullable_decoded
+                .column("value")
+                .expect("value column")
+                .values()[1]
+                .is_missing(),
+            "fallback must preserve the parquet null as a missing Float64"
+        );
     }
 
     #[test]
