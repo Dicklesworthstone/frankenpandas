@@ -4064,9 +4064,7 @@ impl Index {
                 if first.max(last) >= len {
                     return None;
                 }
-                let label_step =
-                    i64::try_from((affine.step as i128).checked_mul(position_step as i128)?)
-                        .ok()?;
+                let label_step = affine.step.checked_mul(position_step)?;
                 let first_label = value_at(first)?;
                 Index::new_known_unique_int64_affine_range(
                     first_label,
@@ -11898,8 +11896,7 @@ impl RangeIndex {
                 if first.max(last) >= len {
                     return None;
                 }
-                let label_step = i128::from(self.step).checked_mul(position_step as i128)?;
-                let label_step = i64::try_from(label_step).ok()?;
+                let label_step = self.step.checked_mul(position_step)?;
                 let first_label = self.value_at(first);
                 Index::new_known_unique_int64_affine_range(
                     first_label,
@@ -25549,6 +25546,44 @@ mod tests {
                 assert_eq!(got.labels(), oracle, "range take {ctx}");
             }
         }
+    }
+
+    #[test]
+    fn arithmetic_take_stays_lazy_and_range_reports_oob_3gsa7() {
+        let affine = Index::new_known_unique_int64_affine_range(10, 3, 10).unwrap();
+        let taken = affine.take(&[1, 3, 5]);
+        assert_eq!(
+            taken.labels.int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 13,
+                step: 6,
+                len: 3,
+            })
+        );
+        assert!(
+            taken.cached_int64_label_values().is_none(),
+            "arithmetic Index::take must retain its affine witness without raw-label materialization"
+        );
+
+        let range = RangeIndex::new(10, 40, 3).unwrap();
+        let range_taken = range.take(&[1, 3, 5]).unwrap();
+        assert_eq!(
+            range_taken.labels.int64_affine_range(),
+            taken.labels.int64_affine_range()
+        );
+        assert!(
+            range_taken.cached_int64_label_values().is_none(),
+            "arithmetic RangeIndex::take must retain its affine witness without raw-label materialization"
+        );
+
+        let error = range.take(&[1, 3, 10]).unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::OutOfBounds {
+                position: 10,
+                length: 10,
+            }
+        ));
     }
 
     #[test]
