@@ -41978,6 +41978,24 @@ pub struct SeriesGroupByResample<'grouped, 'data> {
 }
 
 impl SeriesGroupByResample<'_, '_> {
+    /// Gather an all-valid native group without first boxing every value as a
+    /// `Scalar`. Resampling still receives the group's real temporal labels;
+    /// only its value column changes representation.
+    fn typed_group_column(&self, row_indices: &[usize]) -> Option<Column> {
+        let source = self.groupby.series.column();
+        if let Some(values) = source.as_f64_slice() {
+            return Some(Column::from_f64_values(
+                row_indices.iter().map(|&row| values[row]).collect(),
+            ));
+        }
+        if let Some(values) = source.as_i64_slice() {
+            return Some(Column::from_i64_values(
+                row_indices.iter().map(|&row| values[row]).collect(),
+            ));
+        }
+        None
+    }
+
     fn apply_grouped_resample<F>(&self, agg: F) -> Result<Series, FrameError>
     where
         F: Fn(&Series, &str) -> Result<Series, FrameError>,
@@ -41993,7 +42011,6 @@ impl SeriesGroupByResample<'_, '_> {
                 )
             })?;
             let mut group_labels = Vec::with_capacity(row_indices.len());
-            let mut group_values = Vec::with_capacity(row_indices.len());
             for &idx in row_indices {
                 let label = self
                     .groupby
@@ -42007,23 +42024,24 @@ impl SeriesGroupByResample<'_, '_> {
                             "SeriesGroupBy resample source index out of bounds".to_owned(),
                         )
                     })?;
-                let value = self
-                    .groupby
-                    .series
-                    .values()
-                    .get(idx)
-                    .cloned()
-                    .ok_or_else(|| {
-                        FrameError::CompatibilityRejected(
-                            "SeriesGroupBy resample source value out of bounds".to_owned(),
-                        )
-                    })?;
                 group_labels.push(label);
-                group_values.push(value);
             }
 
-            let group_series =
-                Series::from_values(self.groupby.series.name(), group_labels, group_values)?;
+            let group_column = if let Some(column) = self.typed_group_column(row_indices) {
+                column
+            } else {
+                Column::from_values(
+                    row_indices
+                        .iter()
+                        .map(|&idx| self.groupby.series.values()[idx].clone())
+                        .collect(),
+                )?
+            };
+            let group_series = Series::new(
+                self.groupby.series.name(),
+                Index::new(group_labels),
+                group_column,
+            )?;
             let resampled = agg(&group_series, &self.freq)?;
             let group_label = &order[group_pos];
             for (bucket_label, value) in resampled
@@ -42594,10 +42612,11 @@ impl SeriesGroupByRolling<'_, '_> {
         }
         let values = if let Some(data) = self.groupby.series.column().as_f64_slice() {
             TypedValues::Float64(data)
-        } else if let Some(data) = self.groupby.series.column().as_i64_slice() {
-            TypedValues::Int64(data)
         } else {
-            return None;
+            // Same three outcomes as the old `else if let ... else { return
+            // None }` chain: a non-Float64, non-Int64 (or nullable) column
+            // declines here exactly as before.
+            TypedValues::Int64(self.groupby.series.column().as_i64_slice()?)
         };
         let (gids, ngroups) = self.groupby.dense_group_ids()?;
         if gids.len() != self.groupby.series.len() {
@@ -42677,7 +42696,7 @@ impl SeriesGroupByRolling<'_, '_> {
             for (position, &row) in group_rows.iter().enumerate() {
                 if position >= self.window {
                     let removed = value_at(group_rows[position - self.window]);
-                    if removed == removed {
+                    if !removed.is_nan() {
                         nobs -= 1;
                         let y = -removed - comp_remove;
                         let next = sum_x + y;
@@ -42690,7 +42709,7 @@ impl SeriesGroupByRolling<'_, '_> {
                 }
 
                 let value = value_at(row);
-                if value == value {
+                if !value.is_nan() {
                     nobs += 1;
                     let y = value - comp_add;
                     let next = sum_x + y;
@@ -68481,9 +68500,11 @@ impl DataFrame {
         // contiguous row range; concatenation preserves order → bit-identical.
         let build = |lo: usize, hi: usize| -> Vec<Vec<Scalar>> {
             let mut out = Vec::with_capacity(hi - lo);
-            for i in lo..hi {
+            // `i` stays the ABSOLUTE row index: the column reads below use it
+            // for `scalar_at(i)`, so this cannot become a plain slice iterator
+            // over `labels[lo..hi]`.
+            for (i, lbl) in labels.iter().enumerate().take(hi).skip(lo) {
                 let mut row = Vec::with_capacity(n_cols + 1);
-                let lbl = &labels[i];
                 row.push(match lbl {
                     IndexLabel::Int64(v) => Scalar::Int64(*v),
                     IndexLabel::Float64(v) => Scalar::Float64(v.0),
@@ -157909,6 +157930,79 @@ mod tests {
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
             ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn series_groupby_resample_gathers_native_values_without_scalar_boxes_vw0uu()
+    -> Result<(), FrameError> {
+        let index = vec![
+            IndexLabel::Utf8("2024-01-05".into()),
+            IndexLabel::Utf8("2024-01-07".into()),
+            IndexLabel::Utf8("2024-02-03".into()),
+        ];
+        let values = Series::new(
+            "sales",
+            Index::new(index.clone()),
+            Column::from_f64_values(vec![1.5, -2.0, 3.25]),
+        )?;
+        let keys = Series::from_values(
+            "store",
+            index.clone(),
+            vec![
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("west".into()),
+                Scalar::Utf8("east".into()),
+            ],
+        )?;
+        let grouped = values.groupby(&keys)?;
+        let resample = grouped.resample("M");
+
+        let typed = resample
+            .typed_group_column(&[0, 2])
+            .expect("all-valid Float64 source must retain its native buffer");
+        assert_eq!(typed.as_f64_slice(), Some(&[1.5, 3.25][..]));
+
+        let summed = resample.sum()?;
+        assert_eq!(
+            summed.index().labels(),
+            &[
+                IndexLabel::Utf8("east, 2024-01-31".into()),
+                IndexLabel::Utf8("east, 2024-02-29".into()),
+                IndexLabel::Utf8("west, 2024-01-31".into()),
+            ]
+        );
+        assert_eq!(
+            summed.values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Float64(3.25),
+                Scalar::Float64(-2.0),
+            ]
+        );
+
+        // Planted negative: a globally nullable column must not take the
+        // native route, even if this particular group's selected rows happen
+        // to be valid. Otherwise a later reducer could erase the source
+        // validity contract while gathering the raw values.
+        let nullable = Series::from_values(
+            "sales",
+            index,
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.25),
+            ],
+        )?;
+        let nullable_grouped = nullable.groupby(&keys)?;
+        assert!(
+            nullable_grouped
+                .resample("M")
+                .typed_group_column(&[0, 2])
+                .is_none(),
+            "nullable source values must retain the Scalar fallback"
         );
 
         Ok(())

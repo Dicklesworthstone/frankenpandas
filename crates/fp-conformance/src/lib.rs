@@ -2003,6 +2003,8 @@ pub struct FixtureProvenance {
     pub input_matrix: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub intentional_divergence_notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_attestation: Option<String>,
 }
 
 /// Why a fixture was retired, recorded in the fixture itself.
@@ -28334,9 +28336,10 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
         where
             T: serde::de::DeserializeOwned,
         {
-            let error = serde_json::from_value::<T>(value)
-                .expect_err("fixture schema must reject undeclared fields")
-                .to_string();
+            let error = match serde_json::from_value::<T>(value) {
+                Ok(_) => panic!("fixture schema must reject undeclared fields"),
+                Err(error) => error.to_string(),
+            };
             assert!(
                 error.contains(&format!("unknown field `{field}`")),
                 "expected unknown-field error for {field}, got: {error}"
@@ -28385,6 +28388,16 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
             "reason": "test",
             "typoed_retirement_field": true
         }), "typoed_retirement_field");
+    }
+
+    #[test]
+    fn fixture_corpus_loads_with_strict_input_schema_vxbuf() {
+        let fixtures = super::load_fixtures(&super::HarnessConfig::default_paths(), None)
+            .expect("all checked-in fixtures must satisfy the strict schema");
+        assert!(
+            !fixtures.is_empty(),
+            "the checked-in fixture corpus must not be empty"
+        );
     }
 
     #[test]
