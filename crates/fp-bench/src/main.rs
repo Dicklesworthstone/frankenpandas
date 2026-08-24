@@ -3545,6 +3545,53 @@ fn run(
                 let _ = df.reindex(new_labels.clone()).expect("reindex");
             })
         }
+        ("indexing", "range_index_values") => {
+            // pandas: pd.RangeIndex(0, 2*n, 2).values.sum(). `values()` is an
+            // affine typed view, so this consumes the sequence without an owned
+            // Vec<i64> or an IndexLabel materialization.
+            let range = RangeIndex::new(0, rows as i64 * 2, 2).expect("range index fixture");
+            time_us(|| {
+                let sum = range
+                    .values()
+                    .iter()
+                    .fold(0_i64, |acc, value| acc.wrapping_add(value));
+                black_box(sum);
+            })
+        }
+        ("dataframe_ops", "series_combine_first_typed_values") => {
+            let mut left_validity = ValidityMask::all_valid(rows);
+            for position in (1..rows).step_by(2) {
+                left_validity.set(position, false);
+            }
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let left = Series::new(
+                "left",
+                index.clone(),
+                Column::from_f64_values_with_validity(
+                    (0..rows).map(|value| value as f64).collect(),
+                    left_validity,
+                ),
+            )
+            .expect("left series");
+            let right = Series::new(
+                "right",
+                index,
+                Column::from_f64_values_owned(
+                    (0..rows).map(|value| value as f64 * 2.0).collect(),
+                ),
+            )
+            .expect("right series");
+            time_us(|| {
+                let output = left.combine_first(&right).expect("combine_first");
+                let sum = match output.typed_values().expect("numeric typed view") {
+                    fp_frame::SeriesTypedValues::Float64 { data, .. } => {
+                        data.iter().copied().sum::<f64>()
+                    }
+                    fp_frame::SeriesTypedValues::Int64 { .. } => unreachable!("Float64 output"),
+                };
+                black_box(sum);
+            })
+        }
         ("indexing", "range_index_take_arithmetic") => {
             // pandas: pd.RangeIndex(10, 10 + 3*n, 3).take(arithmetic_positions).
             // Batch repeated takes inside the timed unit so FP's lazy affine

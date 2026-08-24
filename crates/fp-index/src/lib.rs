@@ -11372,6 +11372,43 @@ pub struct RangeIndex {
     name: Option<String>,
 }
 
+/// Borrowed, lazily evaluated Int64 values of a [`RangeIndex`].
+///
+/// A `RangeIndex` is an affine sequence, so typed consumers can read its values
+/// without first allocating an owned buffer.  Use [`Self::to_vec`] only when an
+/// owned list is actually required by the receiving API.
+#[derive(Clone, Copy, Debug)]
+pub struct RangeIndexValues<'a> {
+    index: &'a RangeIndex,
+}
+
+impl RangeIndexValues<'_> {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    #[must_use]
+    pub fn get(&self, position: usize) -> Option<i64> {
+        (position < self.len()).then(|| self.index.value_at(position))
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = i64> + DoubleEndedIterator + '_ {
+        (0..self.len()).map(|position| self.index.value_at(position))
+    }
+
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<i64> {
+        self.iter().collect()
+    }
+}
+
 impl RangeIndex {
     pub fn new(start: i64, stop: i64, step: i64) -> Result<Self, IndexError> {
         if step == 0 {
@@ -11623,19 +11660,8 @@ impl RangeIndex {
     }
 
     #[must_use]
-    pub fn values(&self) -> Vec<i64> {
-        let len = self.len();
-        let mut values = Vec::with_capacity(len);
-        let mut value = self.start;
-        for offset in 0..len {
-            values.push(value);
-            if offset + 1 < len {
-                value = value
-                    .checked_add(self.step)
-                    .expect("validated RangeIndex value bounds");
-            }
-        }
-        values
+    pub fn values(&self) -> RangeIndexValues<'_> {
+        RangeIndexValues { index: self }
     }
 
     fn value_at(&self, position: usize) -> i64 {
@@ -12027,22 +12053,22 @@ impl RangeIndex {
 
     #[must_use]
     pub fn to_list(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     #[must_use]
     pub fn tolist(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     #[must_use]
     pub fn to_numpy(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     #[must_use]
     pub fn array(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     /// Position of the maximum value, matching `pd.RangeIndex.argmax()`.
@@ -12914,7 +12940,7 @@ impl RangeIndex {
     /// Flatten the range to a `Vec<i64>`, matching `pd.RangeIndex.ravel()`.
     #[must_use]
     pub fn ravel(&self) -> Vec<i64> {
-        self.values()
+        self.values().to_vec()
     }
 
     /// Number of levels, matching `pd.RangeIndex.nlevels`. Always `1`.
@@ -20422,11 +20448,11 @@ mod tests {
     #[test]
     fn index_variant_wrappers_expose_public_type_surface() {
         let range = RangeIndex::new(1, 7, 2).unwrap().set_name("row");
-        assert_eq!(range.values(), vec![1, 3, 5]);
-        assert_eq!(range.to_list(), range.values());
-        assert_eq!(range.tolist(), range.values());
-        assert_eq!(range.to_numpy(), range.values());
-        assert_eq!(range.array(), range.values());
+        assert_eq!(range.values().to_vec(), vec![1, 3, 5]);
+        assert_eq!(range.to_list(), range.values().to_vec());
+        assert_eq!(range.tolist(), range.values().to_vec());
+        assert_eq!(range.to_numpy(), range.values().to_vec());
+        assert_eq!(range.array(), range.values().to_vec());
         assert_eq!(range.len(), 3);
         assert_eq!(range.size(), 3);
         assert_eq!(range.shape(), (3,));
@@ -29363,8 +29389,8 @@ mod tests {
         // Original values 10, 8, 6, 4, 2 → sorted ascending 2, 4, 6, 8, 10.
         let sorted = desc.sort_values();
         let sorted_alias = desc.sort();
-        assert_eq!(sorted.values(), vec![2, 4, 6, 8, 10]);
-        assert_eq!(sorted_alias.values(), sorted.values());
+        assert_eq!(sorted.values().to_vec(), vec![2, 4, 6, 8, 10]);
+        assert_eq!(sorted_alias.values().to_vec(), sorted.values().to_vec());
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert!(empty.sort_values().is_empty());
@@ -31144,7 +31170,7 @@ mod tests {
         let r = super::RangeIndex::new(0, 5, 1).unwrap();
         assert!(r.view().equals(&r));
         assert!(r.T().identical(&r));
-        assert_eq!(r.ravel(), r.values());
+        assert_eq!(r.ravel(), r.values().to_vec());
         assert_eq!(r.nlevels(), 1);
 
         let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
@@ -31477,10 +31503,11 @@ mod tests {
     #[test]
     fn range_index_values_generate_arithmetic_progression_without_flat_index_w6q7d() {
         let positive = super::RangeIndex::new(2, 11, 3).unwrap();
-        assert_eq!(positive.values(), vec![2, 5, 8]);
+        assert_eq!(positive.values().to_vec(), vec![2, 5, 8]);
+        assert_eq!(positive.values().get(3), None);
 
         let descending = super::RangeIndex::new(9, 0, -4).unwrap();
-        assert_eq!(descending.values(), vec![9, 5, 1]);
+        assert_eq!(descending.values().to_vec(), vec![9, 5, 1]);
 
         let empty = super::RangeIndex::new(5, 5, 1).unwrap();
         assert!(empty.values().is_empty());

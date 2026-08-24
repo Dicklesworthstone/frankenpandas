@@ -2666,6 +2666,30 @@ def bench_reindex_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df.reindex(new_index))
 
 
+def bench_range_index_values_pandas(df: pd.DataFrame) -> list[float]:
+    index = pd.RangeIndex(0, len(df) * 2, 2)
+
+    def op():
+        values = index.values
+        return int(values.sum(dtype=np.int64))
+
+    return time_operation(op)
+
+
+def bench_series_combine_first_typed_values_pandas(df: pd.DataFrame) -> list[float]:
+    n = len(df)
+    left_values = np.arange(n, dtype=np.float64)
+    left_values[1::2] = np.nan
+    left = pd.Series(left_values, copy=False)
+    right = pd.Series(np.arange(n, dtype=np.float64) * 2.0, copy=False)
+
+    def op():
+        values = left.combine_first(right).to_numpy(copy=False)
+        return float(values.sum(dtype=np.float64))
+
+    return time_operation(op)
+
+
 def _range_take_positions(n: int) -> np.ndarray:
     start = n // 8
     return np.arange(start, n - start, 2, dtype=np.intp)
@@ -3078,6 +3102,7 @@ PANDAS_WORKLOADS = {
         "df_explode": bench_df_explode_pandas,
         "df_explode_string_python": bench_df_explode_string_python_pandas,
         "df_explode_string_arrow": bench_df_explode_string_arrow_pandas,
+        "series_combine_first_typed_values": bench_series_combine_first_typed_values_pandas,
     },
     "groupby": {
         "groupby_sum_int64": bench_groupby_sum_pandas,
@@ -3129,6 +3154,7 @@ PANDAS_WORKLOADS = {
         "iloc_slice": bench_iloc_slice_pandas,
         "loc_labels": bench_loc_labels_pandas,
         "reindex": bench_reindex_pandas,
+        "range_index_values": bench_range_index_values_pandas,
         "range_index_take_arithmetic": bench_range_index_take_arithmetic_pandas,
         "affine_index_take_arithmetic": bench_affine_index_take_arithmetic_pandas,
     },
