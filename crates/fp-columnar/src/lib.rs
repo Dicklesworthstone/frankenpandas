@@ -5924,6 +5924,60 @@ impl ScalarValues {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// See [`Column::scalar_cache_is_materialized`]; exhaustive on purpose.
+    fn scalar_cache_is_materialized(&self) -> bool {
+        match self {
+            Self::Eager(_) => true,
+            Self::LazyAllValidInt64 { values, .. }
+            | Self::LazyAllValidInt64Vec { values, .. }
+            | Self::LazyAllValidInt64Chunks { values, .. }
+            | Self::LazyAllValidDatetime64 { values, .. }
+            | Self::LazyAllValidDatetime64Vec { values, .. }
+            | Self::LazyAllValidTimedelta64Vec { values, .. }
+            | Self::LazyAllValidPeriodVec { values, .. }
+            | Self::LazyNullableDatetime64 { values, .. }
+            | Self::LazyNullableTimedelta64 { values, .. }
+            | Self::LazyNullablePeriod { values, .. }
+            | Self::LazyAllValidFloat64 { values, .. }
+            | Self::LazyAllValidFloat64Vec { values, .. }
+            | Self::LazyAllValidFloat64Chunks { values, .. }
+            | Self::LazyAllValidFloat64Slice { values, .. }
+            | Self::LazyAllValidFloat64Dot { values, .. }
+            | Self::LazyAllValidFloat64PairwiseStatMatrixColumn { values, .. }
+            | Self::LazyAllValidFloat64TransposeRow { values, .. }
+            | Self::LazyCombineFirstFloat64 { values, .. }
+            | Self::LazyStridedFloat64 { values, .. }
+            | Self::LazyGatherFloat64 { values, .. }
+            | Self::LazyNullableFloat64 { values, .. }
+            | Self::LazyAllValidBool { values, .. }
+            | Self::LazyShiftedBool { values, .. }
+            | Self::LazyContiguousUtf8 { values, .. }
+            | Self::LazyLowerHexSequenceUtf8 { values, .. }
+            | Self::LazyNullableUtf8 { values, .. }
+            | Self::LazyGatherUtf8 { values, .. }
+            | Self::LazyNullableUtf8Range { values, .. }
+            | Self::LazyNullableInt64 { values, .. }
+            | Self::LazyNullableBool { values, .. }
+            | Self::LazyRepeatRunsInt64 { values, .. }
+            | Self::LazyRepeatValuesInt64 { values, .. }
+            | Self::LazyRepeatedSlicesInt64 { values, .. }
+            | Self::LazyRepeatValuesFloat64 { values, .. }
+            | Self::LazyRepeatedSlicesFloat64 { values, .. }
+            | Self::LazyNullableRepeatedSlicesInt64 { values, .. }
+            | Self::LazyNullableRepeatedSlicesFloat64 { values, .. }
+            | Self::LazyNullableRepeatValuesFloat64 { values, .. }
+            | Self::LazyNullableRepeatedPositionsI64AsFloat64 { values, .. }
+            | Self::LazyNullableDenseCycleRightI64AsFloat64 { values, .. }
+            | Self::LazyNullableDenseCycleLeftI64AsFloat64 { values, .. }
+            | Self::LazyDenseCycleProbeRepeatInt64 { values, .. }
+            | Self::LazyNullableDenseCycleProbeBuildInt64 { values, .. }
+            | Self::LazyLeftJoinDenseCycleLeftInt64 { values, .. }
+            | Self::LazyLeftJoinDenseCycleRightInt64 { values, .. }
+            | Self::LazyNullableRepeatPositionsI64AsFloat64 { values, .. }
+            | Self::LazyUtf8Slice { values, .. } => values.get().is_some(),
+        }
+    }
 }
 
 fn contiguous_utf8_offsets_are_strictly_increasing(bytes: &[u8], offsets: &[usize]) -> bool {
@@ -14887,6 +14941,28 @@ impl Column {
         self.values.len()
     }
 
+    /// Whether this column has actually built its `Vec<Scalar>` yet.
+    ///
+    /// br-frankenpandas-uza04. The typed-columnar campaign rests on a property
+    /// that NOTHING pinned until now: building a frame from typed arrays, and
+    /// reading its metadata, must never box a `Scalar` per cell. Every lazy
+    /// backing keeps its `Vec<Scalar>` behind a `OnceLock` that `as_slice`
+    /// fills on the first `values()` call; this reports whether that boundary
+    /// has been crossed, so a test can assert it never was.
+    ///
+    /// `Eager` reports `true` — it IS the materialized representation, and a
+    /// column that starts life as `Vec<Scalar>` has already paid the cost.
+    ///
+    /// Note this is a property of the CACHE, not of dtype: an all-valid
+    /// `Float64` column reports `false` when fresh and `true` after anything
+    /// calls `values()` on it. That is what makes it useful — it catches a new
+    /// `.values()` call added to a path that used to stay typed.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn scalar_cache_is_materialized(&self) -> bool {
+        self.values.scalar_cache_is_materialized()
+    }
+
     /// Number of elements, matching `pd.Series.size`.
     #[must_use]
     pub fn size(&self) -> usize {
@@ -15960,6 +16036,95 @@ impl Column {
         if all_valid {
             return Ok(Self::from_f64_values(data));
         }
+        Ok(Self::from_f64_values_with_validity(
+            data,
+            ValidityMask::from_words(words, out_len),
+        ))
+    }
+
+    /// Fused Float64-producing arithmetic for two Int64 columns aligned by
+    /// contiguous `Int64` unit ranges.
+    ///
+    /// Outer alignment necessarily introduces a gap when indexes differ, so
+    /// pandas widens the arithmetic result to Float64. This consumes the two
+    /// typed Int64 buffers directly, avoiding both position vectors and the
+    /// `Scalar` reindex/promotion round-trip.
+    pub fn aligned_binary_i64_int64_unit_ranges(
+        &self,
+        right: &Self,
+        left_range: (i64, i64),
+        right_range: (i64, i64),
+        union_range: (i64, i64),
+        op: ArithmeticOp,
+    ) -> Result<Self, ColumnError> {
+        if !matches!(self.dtype, DType::Int64) || !matches!(right.dtype, DType::Int64) {
+            return Err(ColumnError::DTypeMismatch {
+                left: self.dtype,
+                right: right.dtype,
+            });
+        }
+
+        let (left_start, left_end) = left_range;
+        let (right_start, right_end) = right_range;
+        let (union_start, union_end) = union_range;
+        let Some(left_len) = unit_range_len(left_start, left_end) else {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: right.len(),
+            });
+        };
+        let Some(right_len) = unit_range_len(right_start, right_end) else {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: right.len(),
+            });
+        };
+        let Some(out_len) = unit_range_len(union_start, union_end) else {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: right.len(),
+            });
+        };
+        if left_len != self.len() || right_len != right.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: right.len(),
+            });
+        }
+
+        let Some((lsrc, lvalid)) = self.as_i64_slice_with_validity() else {
+            return Err(ColumnError::DTypeMismatch {
+                left: self.dtype,
+                right: right.dtype,
+            });
+        };
+        let Some((rsrc, rvalid)) = right.as_i64_slice_with_validity() else {
+            return Err(ColumnError::DTypeMismatch {
+                left: self.dtype,
+                right: right.dtype,
+            });
+        };
+        let apply = binary_f64_apply(op);
+        let mut data = vec![0.0; out_len];
+        let mut words = vec![0_u64; out_len.div_ceil(64)];
+        let overlap_start = left_start.max(right_start);
+        let overlap_end = left_end.min(right_end);
+
+        if overlap_start <= overlap_end {
+            for value in overlap_start..=overlap_end {
+                let out_idx = (value - union_start) as usize;
+                let left_idx = (value - left_start) as usize;
+                let right_idx = (value - right_start) as usize;
+                if lvalid.get(left_idx) && rvalid.get(right_idx) {
+                    let result = apply(lsrc[left_idx] as f64, rsrc[right_idx] as f64);
+                    data[out_idx] = result;
+                    if !result.is_nan() {
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                }
+            }
+        }
+
         Ok(Self::from_f64_values_with_validity(
             data,
             ValidityMask::from_words(words, out_len),
@@ -34023,6 +34188,43 @@ mod tests {
             .expect("position aligned add");
         let actual = left
             .aligned_binary_f64_int64_unit_ranges(&right, (0, 2), (1, 3), (0, 3), ArithmeticOp::Add)
+            .expect("unit range aligned add");
+
+        assert_eq!(actual.dtype(), expected.dtype());
+        assert_eq!(actual.validity(), expected.validity());
+        assert!(matches!(
+            &actual.values,
+            ScalarValues::LazyNullableFloat64 { values, .. } if values.get().is_none()
+        ));
+        assert_eq!(actual.values(), expected.values());
+    }
+
+    #[test]
+    fn aligned_binary_i64_int64_unit_ranges_matches_position_alignment() {
+        let left = Column::from_i64_values(vec![1, 2, 3]);
+        let right = Column::from_i64_values(vec![10, 20, 30]);
+        let left_positions = [Some(0), Some(1), Some(2), None];
+        let right_positions = [None, Some(0), Some(1), Some(2)];
+
+        let expected_left = left
+            .reindex_by_positions(&left_positions)
+            .expect("left reindex");
+        let expected_right = right
+            .reindex_by_positions(&right_positions)
+            .expect("right reindex");
+        let expected = expected_left
+            .astype(DType::Float64)
+            .expect("outer gap widens left Int64")
+            .binary_numeric(&expected_right, ArithmeticOp::Add)
+            .expect("position aligned add");
+        let actual = left
+            .aligned_binary_i64_int64_unit_ranges(
+                &right,
+                (0, 2),
+                (1, 3),
+                (0, 3),
+                ArithmeticOp::Add,
+            )
             .expect("unit range aligned add");
 
         assert_eq!(actual.dtype(), expected.dtype());
