@@ -35114,3 +35114,44 @@ mod ab_to_flat_index_ccfp {
         ab_regime("parallel", 1_000_000, 5);
     }
 }
+
+#[cfg(test)]
+mod cached_parallelism_tests {
+    use super::cached_available_parallelism;
+
+    /// br-frankenpandas-q1evw. THE NEGATIVE CASE, mirrored from `fp-columnar`'s
+    /// `cached_parallelism_reports_the_real_machine_not_a_constant_kko5z`: the
+    /// cheap way to make the cgroup walk disappear is to stop asking the OS at
+    /// all and return a constant. That passes every timing test and silently
+    /// serialises — or over-subscribes — the parallel `to_flat_index` path, and
+    /// no benchmark here would catch it, because they all report the thread
+    /// count the kernel CHOSE rather than the one it should have had.
+    ///
+    /// `fp-index` carries its own six-line copy of the helper (it deliberately
+    /// has no `fp-columnar` dependency), so it needs its own pin: the copy can
+    /// rot independently of the original.
+    #[test]
+    fn cached_parallelism_reports_the_real_machine_not_a_constant_q1evw() {
+        let cached = cached_available_parallelism();
+        let live = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        assert_eq!(
+            cached, live,
+            "cached parallelism must equal what the OS reports, not a hardcoded value"
+        );
+        assert!(
+            cached >= 1,
+            "worker counts are sized from this; 0 would divide"
+        );
+    }
+
+    /// The cache must be a cache: one answer per process, so the two call sites
+    /// that split `to_flat_index` cannot size their work from two different
+    /// worker counts.
+    #[test]
+    fn cached_parallelism_is_stable_across_calls_q1evw() {
+        let first = cached_available_parallelism();
+        for _ in 0..64 {
+            assert_eq!(cached_available_parallelism(), first);
+        }
+    }
+}

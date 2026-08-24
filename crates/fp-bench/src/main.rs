@@ -193,6 +193,13 @@ where
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    // PROVENANCE SITE, DELIBERATELY NOT CACHED (br-frankenpandas-q1evw). Every
+    // kernel-path caller in fp-frame/fp-io/fp-join/fp-columnar routes through
+    // `fp_columnar::cached_available_parallelism`, because the cgroup walk this
+    // performs costs ~66us per call. This one reports the host's LIVE parallelism
+    // into the bench row beside the thread count the operation actually used, so a
+    // cached value would report the wrong machine after an affinity or quota change.
+    // It runs once per probe, outside every timed region, where the walk is free.
     let runtime_available_parallelism =
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let process_threads_before_probe = process_thread_count();
@@ -1590,6 +1597,9 @@ fn run_elementwise_policy_sweep(workload: &str, rows: usize, consume: bool) -> b
         POLICY_SWEEP_BASELINE.0,
         POLICY_SWEEP_BASELINE.1,
         POLICY_SWEEP_BASELINE.2,
+        // PROVENANCE SITE, DELIBERATELY NOT CACHED (br-frankenpandas-q1evw): this is
+        // the host parallelism stamped into the sweep's JSON row, read live, once,
+        // after the last timed arm. See the note in `probe_operation_threads`.
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
         rows_json.join(","),
     );

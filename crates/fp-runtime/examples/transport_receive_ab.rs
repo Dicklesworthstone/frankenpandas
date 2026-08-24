@@ -236,6 +236,10 @@ fn main() {
     // is too loose to sit under a 1.8x claim on a busy shared host.
     let receives_per_thread: usize = 2_000;
     let rounds: usize = 32;
+    // NOT CACHED, and correctly so (br-frankenpandas-q1evw): this sizes the A/B
+    // harness's worker count ONCE at startup, so the cgroup walk is paid a single
+    // time for the whole process rather than per call. The per-call cache that
+    // `fp_columnar::cached_available_parallelism` provides has nothing to win here.
     let threads = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(4)
@@ -425,6 +429,8 @@ fn main() {
         read_trimmed("/proc/sys/kernel/hostname")
     );
     println!("threads_used       : {threads}");
+    // PROVENANCE SITE, DELIBERATELY NOT CACHED (br-frankenpandas-q1evw): the row
+    // records the live parallelism of the host that produced this A/B.
     println!(
         "available_parallel : {:?}",
         std::thread::available_parallelism().map(std::num::NonZeroUsize::get)
