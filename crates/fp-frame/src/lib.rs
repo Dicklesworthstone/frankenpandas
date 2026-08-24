@@ -71528,7 +71528,11 @@ impl DataFrame {
                     .flatten()
                     .collect();
                 for (name, data) in col_order.iter().zip(produced) {
-                    result_cols.insert(name.clone(), Column::from_f64_values(data));
+                    // The pooled kernel just produced this owned buffer. Keep it
+                    // in the typed backing instead of copying it into Arc<[f64]>.
+                    // `from_f64_values_owned` still routes a NaN output through
+                    // the canonical missing-value constructor.
+                    result_cols.insert(name.clone(), Column::from_f64_values_owned(data));
                 }
 
                 // Materialize the n output columns in ONE scope, parallel
@@ -202336,6 +202340,32 @@ mod dot_column_parallel_materialization_1hjgz {
         let b = frame("b", 3, 0, 1.0);
         let out = a.dot(&b).expect("dot with no output columns");
         assert_eq!(out.column_names().len(), 0);
+    }
+
+    #[test]
+    fn typed_dot_output_keeps_generated_nan_missing_mti15() {
+        // A tempting no-scan constructor would expose the final NaN as a
+        // present Float64. The finite-input fast path can still generate one:
+        // +inf and -inf are produced by the two products and then cancel.
+        let a = frame("a", 1, 2, 6.0);
+        let b = DataFrame::from_series(vec![
+            super::Series::from_values(
+                "out",
+                vec!["a0".into(), "a1".into()],
+                vec![
+                    fp_types::Scalar::Float64(f64::MAX),
+                    fp_types::Scalar::Float64(-f64::MAX),
+                ],
+            )
+            .expect("right-hand column"),
+        ])
+        .expect("right-hand frame");
+
+        let out = a.dot(&b).expect("dot");
+        assert!(
+            out.column("out").expect("output column").values()[0].is_missing(),
+            "generated NaN must remain missing, not take the all-valid owned shortcut"
+        );
     }
 }
 
