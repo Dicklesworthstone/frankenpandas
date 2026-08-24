@@ -7656,11 +7656,13 @@ fn append_json_string(out: &mut String, s: &str) {
     }
 }
 
-/// Extract every column as an all-valid typed slice plus its pre-serialized,
-/// escaped, colon-terminated JSON key (column order = `preserve_order`
-/// insertion order). Returns `None` — caller falls back to the serde tree — on
-/// any column that is not all-valid `Int64`/`Float64`/`Bool`/`Datetime64`,
-/// would take the int→float promotion branch, or on a row-multiindex frame.
+/// Extract every column as a typed slice plus its pre-serialized, escaped,
+/// colon-terminated JSON key (column order = `preserve_order` insertion order).
+/// Returns `None` — caller falls back to the serde tree — when a column has no
+/// typed backing or the frame has a row multiindex.  Do not inspect
+/// `column.values()` here: typed backings already encode a single logical dtype,
+/// and materializing them as `Scalar`s would erase the streaming writer's main
+/// allocation win before it writes its first byte.
 fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<String>)> {
     if frame.row_multiindex().is_some() {
         return None;
@@ -7671,9 +7673,6 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
     let mut keys: Vec<String> = Vec::with_capacity(headers.len());
     for name in &headers {
         let column = frame.column(name.as_str())?;
-        if column_promotes_int_json_values_to_float(column.values()) {
-            return None;
-        }
         let jc = if let Some(s) = column.as_i64_slice() {
             (s.len() == n).then_some(JCol::I(s))?
         } else if let Some(s) = column.as_f64_slice() {
@@ -33952,7 +33951,12 @@ mod fused_numeric_csv_field_tests {
 
 #[cfg(test)]
 mod merge_simple_numeric_csv_chunks_tests {
-    use super::{CsvTypedColumnValues, merge_simple_numeric_csv_chunks};
+    use std::collections::BTreeMap;
+
+    use super::{
+        Column, CsvTypedColumnValues, DataFrame, Index, JsonOrient, Scalar,
+        merge_simple_numeric_csv_chunks, write_json_string,
+    };
 
     /// Verbatim copy of the pre-parallel chunk-major merge, kept as the
     /// reference implementation for the differential test below.
@@ -34507,5 +34511,27 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_index_matches(&rframe);
         assert_values_matches(&rframe);
         assert_split_matches(&rframe);
+    }
+
+    #[test]
+    fn json_records_typed_writer_mixed_dtype_defers_to_serde_92n1x() {
+        // A numeric column alongside a scalar-backed Utf8 column is a mixed-dtype
+        // frame. The writer must decline the typed path rather than assuming all
+        // columns expose contiguous native buffers, while retaining serde output.
+        let mut columns = BTreeMap::new();
+        columns.insert("n".to_string(), Column::from_i64_values(vec![1, 2]));
+        columns.insert(
+            "s".to_string(),
+            Column::from_values(vec![Scalar::Utf8("hi".into()), Scalar::Utf8("x".into())])
+                .expect("scalar-backed utf8"),
+        );
+        let frame = DataFrame::new(Index::new_known_unique_int64_unit_range(0, 2), columns)
+            .expect("mixed frame");
+
+        assert!(super::try_write_json_records_typed(&frame, false).is_none());
+        assert_eq!(
+            write_json_string(&frame, JsonOrient::Records).expect("serde fallback"),
+            r#"[{"n":1,"s":"hi"},{"n":2,"s":"x"}]"#
+        );
     }
 }
