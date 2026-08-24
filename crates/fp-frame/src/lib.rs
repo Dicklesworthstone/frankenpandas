@@ -42587,6 +42587,7 @@ impl SeriesGroupByRolling<'_, '_> {
         if self.window == 0 {
             return None;
         }
+        let n = self.groupby.series.len();
         enum TypedValues<'a> {
             Float64(&'a [f64]),
             Int64(&'a [i64]),
@@ -42602,21 +42603,51 @@ impl SeriesGroupByRolling<'_, '_> {
         if gids.len() != self.groupby.series.len() {
             return None;
         }
+        // The fused layout is intentionally SERIAL. Do not steal a workload
+        // from the existing group-parallel arm: on a large, splittable input
+        // that would turn a measured parallel win into a silent one-worker
+        // regression and invalidate its worker-count witness. Let the generic
+        // path retain ownership whenever its policy selects two or more workers.
+        const SGBROLL_PAR_MIN_ROWS: usize = 100_000;
+        const SGBROLL_PAR_MIN_GROUPS: usize = 2;
+        const SGBROLL_PAR_MIN_PER_WORKER: usize = 8;
+        let workers = match sgb_rolling_max_workers_override() {
+            Some(forced) => forced.max(1),
+            None if n >= SGBROLL_PAR_MIN_ROWS && ngroups >= SGBROLL_PAR_MIN_GROUPS => {
+                fp_columnar::cached_available_parallelism()
+                    .min(16)
+                    .min(ngroups / SGBROLL_PAR_MIN_PER_WORKER)
+                    .max(1)
+            }
+            None => 1,
+        };
+        if workers >= 2 {
+            return None;
+        }
+        record_sgb_rolling_workers(1);
         let labels = self.groupby.dense_group_labels(&gids, ngroups)?;
 
-        // Count first so the only per-group allocation is one exact-sized
-        // position buffer.  These positions replace the old map's `Vec`s, but
-        // never become a Scalar-backed Series.
+        // Count, prefix, then scatter into ONE flat row-position buffer. This
+        // keeps each group's source rows contiguous without allocating a
+        // `Vec<usize>` per group (the remaining allocation cost after removing
+        // `build_groups` and per-group Series construction).
         let mut counts = vec![0_usize; ngroups];
         for &gid in gids.iter() {
             counts[gid] += 1;
         }
-        let mut rows: Vec<Vec<usize>> = counts
-            .iter()
-            .map(|&count| Vec::with_capacity(count))
-            .collect();
+        let mut offsets = Vec::with_capacity(ngroups + 1);
+        let mut total = 0_usize;
+        offsets.push(total);
+        for &count in &counts {
+            total = total.checked_add(count)?;
+            offsets.push(total);
+        }
+        debug_assert_eq!(total, n);
+        let mut write_offsets = offsets[..ngroups].to_vec();
+        let mut rows = vec![0_usize; n];
         for (row, &gid) in gids.iter().enumerate() {
-            rows[gid].push(row);
+            rows[write_offsets[gid]] = row;
+            write_offsets[gid] += 1;
         }
 
         let value_at = |row: usize| -> f64 {
@@ -42625,7 +42656,6 @@ impl SeriesGroupByRolling<'_, '_> {
                 TypedValues::Int64(data) => data[row] as f64,
             }
         };
-        let n = self.groupby.series.len();
         let mut out_f64 = vec![0.0_f64; n];
         let mut out_valid = fp_columnar::ValidityMask::all_invalid(n);
 
@@ -42634,7 +42664,8 @@ impl SeriesGroupByRolling<'_, '_> {
         // and its source positions come from the dense typed grouping layout.
         // Keeping the state local to a group preserves the established rolling
         // bits while avoiding a materialized group Series.
-        for group_rows in &rows {
+        for group in 0..ngroups {
+            let group_rows = &rows[offsets[group]..offsets[group + 1]];
             let mut sum_x = 0.0_f64;
             let mut comp_add = 0.0_f64;
             let mut comp_remove = 0.0_f64;
@@ -42681,9 +42712,7 @@ impl SeriesGroupByRolling<'_, '_> {
                         let mut mean = sum_x / nobs as f64;
                         if num_consec_same >= nobs {
                             mean = prev_value;
-                        } else if (neg_ct == 0 && mean < 0.0)
-                            || (neg_ct == nobs && mean > 0.0)
-                        {
+                        } else if (neg_ct == 0 && mean < 0.0) || (neg_ct == nobs && mean > 0.0) {
                             mean = 0.0;
                         }
                         Some(mean)
@@ -42717,7 +42746,7 @@ impl SeriesGroupByRolling<'_, '_> {
         visit.sort_by(|&left, &right| labels[left].cmp(&labels[right]));
         let mut order = Vec::with_capacity(n);
         for gid in visit {
-            order.extend_from_slice(&rows[gid]);
+            order.extend_from_slice(&rows[offsets[gid]..offsets[gid + 1]]);
         }
         let mut ordered_f64 = Vec::with_capacity(n);
         let mut ordered_valid = fp_columnar::ValidityMask::all_invalid(n);
@@ -200989,7 +201018,10 @@ mod sgb_rolling_group_parallel_u5cg4 {
             })
             .expect("generic mean");
 
-        assert_eq!(bits_and_validity(&direct_sum), bits_and_validity(&generic_sum));
+        assert_eq!(
+            bits_and_validity(&direct_sum),
+            bits_and_validity(&generic_sum)
+        );
         assert_eq!(
             bits_and_validity(&direct_mean),
             bits_and_validity(&generic_mean)
@@ -201025,6 +201057,42 @@ mod sgb_rolling_group_parallel_u5cg4 {
                 .is_none(),
             "Bool keys must stay on the generic grouped-rolling route"
         );
+    }
+
+    #[test]
+    fn dense_grouped_rolling_csr_matches_generic_for_uneven_float_groups_u5cg4() {
+        let index = Index::new((0_i64..9).map(IndexLabel::Int64).collect());
+        let values = Series::new(
+            "v",
+            index.clone(),
+            Column::from_f64_values(vec![1.5, -2.0, 3.25, 4.0, 5.5, -6.0, 7.75, 8.0, 9.5]),
+        )
+        .expect("typed Float64 values");
+        // Group sizes are 5, 2 and 2, and the values are deliberately
+        // interleaved. That forces the count/prefix/scatter layout to advance
+        // distinct write offsets rather than accidentally behaving like a
+        // single contiguous group.
+        let keys = Series::new(
+            "k",
+            index,
+            Column::from_i64_values(vec![7, -2, 7, 1_000, 7, -2, 7, 7, 1_000]),
+        )
+        .expect("dense keys");
+        let grouped = values.groupby(&keys).expect("groupby");
+        let rolling = grouped.rolling(2);
+
+        let direct = rolling
+            .try_dense_grouped_sum_mean(false)
+            .expect("typed uneven groups must take CSR route")
+            .expect("dense sum");
+        let generic = rolling
+            .apply_grouped_rolling(|series, window, min_periods| {
+                series.rolling(window, Some(min_periods)).sum()
+            })
+            .expect("generic sum");
+
+        assert_eq!(bits_and_validity(&direct), bits_and_validity(&generic));
+        assert_eq!(direct.index().labels(), generic.index().labels());
     }
 }
 
