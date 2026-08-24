@@ -1526,25 +1526,24 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     // mixed CSV bails the frame-wide numeric fast paths, so historically EVERY
     // column round-tripped through a `Vec<Scalar>` (parse_scalar per cell + a
     // from_values re-scan) — even a purely-numeric column sitting next to one
-    // Utf8 column. Accumulate each column into a typed Int64/Float64 buffer and,
-    // the instant a cell is a null / bool / non-numeric-text (an AMBIGUOUS
-    // promotion — fp's from_values keeps int+null as NULLABLE Int64, coerces
-    // int+bool to Int64, etc.; see the probe in the commit msg), drop that column
-    // to `Fallback` and rebuild it via the UNCHANGED Scalar path from the raw
+    // Utf8 column. Accumulate each column into a typed Int64/Float64/Bool buffer and,
+    // the instant a cell cannot preserve that column's current type (an AMBIGUOUS
+    // promotion — nullable numbers stay typed, while the existing raw-object
+    // reconstruction preserves ambiguous mixtures such as int+bool as Utf8),
+    // drop that column to `Fallback` and rebuild it via the UNCHANGED Scalar path from the raw
     // bytes (already captured for verbatim). A pure-numeric-no-null column then
     // emits its typed column directly, bit-identical to from_values over the
     // equivalent Scalars: all-Int64 → Int64 (from_i64_values), any-Float64-no-null
     // → Float64 with ints coerced to `x as f64` (from_f64_values) — exactly what
     // Column::from_values + build_csv_object_aware_column produce for those inputs.
     // `valid: None` = all-valid so far (the common fast case, no per-cell bit
-    // tracking); `Some(mask)` = at least one NA has appeared. A numeric column
-    // with nulls stays typed — fp's from_values keeps int+null as NULLABLE Int64
-    // and float+null as Float64, and build_csv_object_aware_column normalizes a
-    // Float null to NaN; `from_{i64,f64}_values_with_validity` reproduce those
-    // exactly (Int64 missing → Null(Null); Float64 missing → Null(NaN); verified).
+    // tracking); `Some(mask)` = at least one NA has appeared. Numeric and Bool
+    // columns with nulls stay typed: Int64 missing → Null(Null), Float64 missing
+    // → Null(NaN), and Bool missing → Null(Null).
     enum ColAcc {
         Int(Vec<i64>, Option<Vec<bool>>),
         Float(Vec<f64>, Option<Vec<bool>>),
+        Bool(Vec<bool>, Option<Vec<bool>>),
         Fallback,
     }
     let mut accs: Vec<ColAcc> = (0..header_count)
@@ -1593,6 +1592,12 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             .push(false);
                         buf.push(0.0);
                     }
+                    ColAcc::Bool(buf, valid) => {
+                        valid
+                            .get_or_insert_with(|| vec![true; buf.len()])
+                            .push(false);
+                        buf.push(false);
+                    }
                     ColAcc::Fallback => {}
                 }
                 continue;
@@ -1612,6 +1617,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
+                    ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
                     ColAcc::Fallback => {}
                 }
             } else if let Ok(v) = trimmed.parse::<f64>() {
@@ -1630,7 +1636,35 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
+                    ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
                     ColAcc::Fallback => {}
+                }
+            } else if field.eq_ignore_ascii_case("true") || field.eq_ignore_ascii_case("false") {
+                let value = field.eq_ignore_ascii_case("true");
+                match acc {
+                    ColAcc::Int(buf, valid) => {
+                        // An Int accumulator can only become Bool if every
+                        // preceding slot is missing. Otherwise `1,true` must
+                        // retain the legacy object fallback rather than lose
+                        // the already-observed numeric value.
+                        let only_missing = valid
+                            .as_ref()
+                            .is_some_and(|mask| mask.iter().all(|&present| !present));
+                        if buf.is_empty() || only_missing {
+                            let mut promoted = vec![false; buf.len()];
+                            promoted.push(value);
+                            *acc = ColAcc::Bool(promoted, valid.take());
+                        } else {
+                            *acc = ColAcc::Fallback;
+                        }
+                    }
+                    ColAcc::Bool(buf, valid) => {
+                        buf.push(value);
+                        if let Some(vv) = valid {
+                            vv.push(true);
+                        }
+                    }
+                    ColAcc::Float(_, _) | ColAcc::Fallback => *acc = ColAcc::Fallback,
                 }
             } else {
                 *acc = ColAcc::Fallback;
@@ -1678,6 +1712,12 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                 match valid.as_deref().and_then(validity_from_bools) {
                     Some(mask) => Column::from_f64_values_with_validity(buf, mask),
                     None => Column::from_f64_values(buf),
+                }
+            }
+            ColAcc::Bool(buf, valid) if has_value(buf.len(), &valid) => {
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_bool_values_with_validity(buf, mask),
+                    None => Column::from_bool_values(buf),
                 }
             }
             // Any ambiguous cell, all-NA, or empty → exact legacy path from raw.
@@ -6154,14 +6194,32 @@ fn is_json_value_end_boundary(input: &str, index: usize) -> bool {
 fn column_from_json_values(values: Vec<Scalar>) -> Result<Column, IoError> {
     let saw_utf8 = values.iter().any(|value| matches!(value, Scalar::Utf8(_)));
     let saw_missing = values.iter().any(Scalar::is_missing);
+    let saw_float = values
+        .iter()
+        .any(|value| matches!(value, Scalar::Float64(_)));
     let saw_numeric_like = values.iter().any(|value| {
         matches!(
             value,
             Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_)
         )
     });
+    let only_numeric_like_or_missing = values.iter().all(|value| {
+        matches!(
+            value,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_) | Scalar::Null(_)
+        )
+    });
 
-    if !saw_utf8 && saw_missing && (saw_numeric_like || values.iter().all(Scalar::is_missing)) {
+    // JSON records follow pandas' numeric unification: a Float64 makes the
+    // entire numeric/bool column Float64 even when no value is missing.  The
+    // missing-value branch was already necessary for JSON nulls; keeping the
+    // same typed construction for float mixes prevents the first Int64 from
+    // fixing the column kind before later floats/bools are considered.
+    if !saw_utf8
+        && only_numeric_like_or_missing
+        && (saw_float
+            || (saw_missing && (saw_numeric_like || values.iter().all(Scalar::is_missing))))
+    {
         let promoted = values
             .into_iter()
             .map(|value| match value {
@@ -6516,6 +6574,257 @@ fn scan_json_record_boundaries(s: &[u8]) -> Option<(usize, usize, Vec<usize>)> {
         return None; // empty array -> generic path
     }
     Some((body_start, body_end, commas))
+}
+
+/// A numeric column being built directly from a flat records payload.  Keeping
+/// the numeric representation here avoids creating a `Scalar` for every cell
+/// only for `Column::from_values` to immediately infer the same representation
+/// again.  This deliberately accepts a narrower shape than the scalar scanner:
+/// every record must have the same unescaped keys in the same order and every
+/// value must be a JSON number.  Any other valid records payload falls through
+/// to the established scalar/serde paths below.
+enum JsonNumericColumn {
+    Int(Vec<i64>),
+    Float(Vec<f64>),
+}
+
+impl JsonNumericColumn {
+    fn push_number(&mut self, number: &serde_json::Number) -> Option<()> {
+        match self {
+            Self::Int(values) => {
+                if let Some(value) = number.as_i64() {
+                    values.push(value);
+                } else {
+                    let value = number.as_f64()?;
+                    let mut promoted = Vec::with_capacity(values.capacity().saturating_add(1));
+                    promoted.extend(values.iter().map(|&prior| prior as f64));
+                    promoted.push(value);
+                    *self = Self::Float(promoted);
+                }
+            }
+            Self::Float(values) => values.push(number.as_f64()?),
+        }
+        Some(())
+    }
+}
+
+/// Parse a range of a homogeneous, numeric flat-records array into typed column
+/// builders.  See [`JsonNumericColumn`] for why this has intentionally strict
+/// admission; `None` is always a performance fallback, never a parse error.
+fn parse_json_records_numeric_range(
+    s: &[u8],
+    lo: usize,
+    hi: usize,
+) -> Option<(Vec<String>, Vec<JsonNumericColumn>, usize)> {
+    let mut i = lo;
+    macro_rules! ws {
+        () => {
+            while i < hi && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r') {
+                i += 1;
+            }
+        };
+    }
+
+    let mut names = Vec::new();
+    let mut columns = Vec::new();
+    let mut rows = 0usize;
+    loop {
+        ws!();
+        if i >= hi {
+            break;
+        }
+        if s[i] != b'{' {
+            return None;
+        }
+        i += 1;
+        let mut field = 0usize;
+        loop {
+            ws!();
+            if i < hi && s[i] == b'}' {
+                i += 1;
+                break;
+            }
+            if i >= hi || s[i] != b'"' {
+                return None;
+            }
+            i += 1;
+            let key_start = i;
+            while i < hi && s[i] != b'"' {
+                if s[i] == b'\\' {
+                    return None;
+                }
+                i += 1;
+            }
+            if i >= hi {
+                return None;
+            }
+            let key = std::str::from_utf8(&s[key_start..i]).ok()?;
+            i += 1;
+            ws!();
+            if i >= hi || s[i] != b':' {
+                return None;
+            }
+            i += 1;
+            ws!();
+            if i >= hi || !matches!(s[i], b'-' | b'0'..=b'9') {
+                return None;
+            }
+            let value_start = i;
+            if s[i] == b'-' {
+                i += 1;
+            }
+            let mut any = false;
+            while i < hi && matches!(s[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                any = true;
+                i += 1;
+            }
+            if !any {
+                return None;
+            }
+            let number = serde_json::from_slice::<serde_json::Number>(&s[value_start..i]).ok()?;
+            if rows == 0 {
+                names.push(key.to_owned());
+                let column = if let Some(value) = number.as_i64() {
+                    JsonNumericColumn::Int(vec![value])
+                } else {
+                    JsonNumericColumn::Float(vec![number.as_f64()?])
+                };
+                columns.push(column);
+            } else {
+                if names.get(field).is_none_or(|expected| expected != key) {
+                    return None;
+                }
+                columns.get_mut(field)?.push_number(&number)?;
+            }
+            field += 1;
+            ws!();
+            if i < hi && s[i] == b',' {
+                i += 1;
+                continue;
+            }
+        }
+        if field != columns.len() {
+            return None;
+        }
+        rows += 1;
+        ws!();
+        if i < hi && s[i] == b',' {
+            i += 1;
+            continue;
+        }
+        if i >= hi {
+            break;
+        }
+        return None;
+    }
+    (!names.is_empty()).then_some((names, columns, rows))
+}
+
+/// Parallel typed builder for homogeneous numeric records.  The standard
+/// fp-bench records payload is ten all-Float64 columns, so this path retains
+/// each worker's contiguous `Vec<f64>` as an immutable chunk and never boxes
+/// the 10 million cells as `Scalar`.  Mixed numeric columns remain supported:
+/// an Int64 chunk is promoted only when another chunk proves the column Float64.
+fn try_read_json_records_numeric_parallel(input: &str) -> Result<Option<DataFrame>, IoError> {
+    let s = input.as_bytes();
+    let Some((body_start, body_end, commas)) = scan_json_record_boundaries(s) else {
+        return Ok(None);
+    };
+    let record_count = commas.len() + 1;
+    const PAR_MIN_RECORDS: usize = 50_000;
+    const PAR_MIN_RECORDS_PER_WORKER: usize = 16_384;
+    if record_count < PAR_MIN_RECORDS {
+        return Ok(None);
+    }
+    let workers = fp_columnar::cached_available_parallelism()
+        .min(16)
+        .min(record_count / PAR_MIN_RECORDS_PER_WORKER)
+        .max(1);
+    if workers < 2 {
+        return Ok(None);
+    }
+    let per_worker = record_count.div_ceil(workers);
+    let mut ranges = Vec::with_capacity(workers);
+    let mut start_record = 0usize;
+    while start_record < record_count {
+        let end_record = (start_record + per_worker).min(record_count);
+        ranges.push((
+            if start_record == 0 {
+                body_start
+            } else {
+                commas[start_record - 1] + 1
+            },
+            if end_record == record_count {
+                body_end
+            } else {
+                commas[end_record - 1]
+            },
+        ));
+        start_record = end_record;
+    }
+    let parsed = std::thread::scope(|scope| {
+        ranges
+            .iter()
+            .map(|&(lo, hi)| scope.spawn(move || parse_json_records_numeric_range(s, lo, hi)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().expect("json numeric parse thread"))
+            .collect::<Vec<_>>()
+    });
+    let Some(mut parts) = parsed.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    let names = parts[0].0.clone();
+    if parts.iter().any(|part| part.0 != names) {
+        return Ok(None);
+    }
+    let rows: usize = parts.iter().map(|part| part.2).sum();
+    let mut out = BTreeMap::new();
+    for (column_index, name) in names.iter().enumerate() {
+        let is_float = parts
+            .iter()
+            .any(|part| matches!(part.1.get(column_index), Some(JsonNumericColumn::Float(_))));
+        let column = if is_float {
+            let mut chunks = Vec::with_capacity(parts.len());
+            for part in &mut parts {
+                let builder = std::mem::replace(
+                    part.1
+                        .get_mut(column_index)
+                        .expect("validated column width"),
+                    JsonNumericColumn::Float(Vec::new()),
+                );
+                let values = match builder {
+                    JsonNumericColumn::Float(values) => values,
+                    JsonNumericColumn::Int(values) => {
+                        values.into_iter().map(|value| value as f64).collect()
+                    }
+                };
+                let length = values.len();
+                chunks.push((std::sync::Arc::from(values), 0, length));
+            }
+            Column::from_f64_all_valid_owned_chunks(chunks, rows)
+        } else {
+            let mut chunks = Vec::with_capacity(parts.len());
+            for part in &mut parts {
+                let builder = std::mem::replace(
+                    part.1
+                        .get_mut(column_index)
+                        .expect("validated column width"),
+                    JsonNumericColumn::Int(Vec::new()),
+                );
+                let JsonNumericColumn::Int(values) = builder else {
+                    unreachable!("is_float checked every numeric chunk");
+                };
+                let length = values.len();
+                chunks.push((std::sync::Arc::from(values), 0, length));
+            }
+            Column::from_i64_all_valid_chunks(chunks, rows)
+        };
+        out.insert(name.clone(), column);
+    }
+    let index = Index::from_i64((0..rows as i64).collect());
+    let frame = DataFrame::new_with_column_order(index, out, names)?;
+    Ok(Some(promote_synthetic_row_multiindex_if_present(&frame)?))
 }
 
 /// Parse a flat records SEQUENCE `{...},{...},…` occupying `s[lo..hi]` (no surrounding
@@ -6985,8 +7294,12 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
     // defer to the generic path below on any non-flat input, so the frame is
     // bit-identical for every input.
     if matches!(orient, JsonOrient::Records) {
-        // Parallel records fast path first (large homogeneous arrays), then the serial
-        // flat scanner, then the generic Value-tree path. All produce bit-identical frames.
+        // Parallel typed numeric records first (large homogeneous numeric arrays), then
+        // the general parallel/serial flat scanners, then the generic Value-tree path.
+        // Every path either preserves the generic result or returns `None` to defer.
+        if let Some(frame) = try_read_json_records_numeric_parallel(input)? {
+            return Ok(frame);
+        }
         if let Some(frame) = try_read_json_records_flat_parallel(input)? {
             return Ok(frame);
         }
@@ -7383,11 +7696,13 @@ fn append_json_string(out: &mut String, s: &str) {
     }
 }
 
-/// Extract every column as an all-valid typed slice plus its pre-serialized,
-/// escaped, colon-terminated JSON key (column order = `preserve_order`
-/// insertion order). Returns `None` — caller falls back to the serde tree — on
-/// any column that is not all-valid `Int64`/`Float64`/`Bool`/`Datetime64`,
-/// would take the int→float promotion branch, or on a row-multiindex frame.
+/// Extract every column as a typed slice plus its pre-serialized, escaped,
+/// colon-terminated JSON key (column order = `preserve_order` insertion order).
+/// Returns `None` — caller falls back to the serde tree — when a column has no
+/// typed backing or the frame has a row multiindex.  Do not inspect
+/// `column.values()` here: typed backings already encode a single logical dtype,
+/// and materializing them as `Scalar`s would erase the streaming writer's main
+/// allocation win before it writes its first byte.
 fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<String>)> {
     if frame.row_multiindex().is_some() {
         return None;
@@ -7398,9 +7713,6 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
     let mut keys: Vec<String> = Vec::with_capacity(headers.len());
     for name in &headers {
         let column = frame.column(name.as_str())?;
-        if column_promotes_int_json_values_to_float(column.values()) {
-            return None;
-        }
         let jc = if let Some(s) = column.as_i64_slice() {
             (s.len() == n).then_some(JCol::I(s))?
         } else if let Some(s) = column.as_f64_slice() {
@@ -7785,16 +8097,7 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
         return write_json_string(&materialized, orient);
     }
 
-    let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let row_count = frame.index().len();
-    let column_float_promotions = headers
-        .iter()
-        .map(|name| {
-            frame
-                .column(name)
-                .is_some_and(|column| column_promotes_int_json_values_to_float(column.values()))
-        })
-        .collect::<Vec<_>>();
 
     match orient {
         JsonOrient::Records => {
@@ -7803,6 +8106,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_records_typed(frame, false) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             write_json_records_serde(frame, &headers, &column_float_promotions)
         }
         JsonOrient::Columns => {
@@ -7810,6 +8122,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_columns_typed(frame) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             let mut outer = serde_json::Map::new();
             for (name, promote_int_to_float) in headers.iter().zip(column_float_promotions.iter()) {
                 let mut col_obj = serde_json::Map::new();
@@ -7838,6 +8159,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_index_typed(frame) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             let mut outer = serde_json::Map::new();
             for row_idx in 0..row_count {
                 let mut row_obj = serde_json::Map::new();
@@ -7871,6 +8201,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_split_typed(frame) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             let col_array: Vec<serde_json::Value> = headers
                 .iter()
                 .map(|h| serde_json::Value::String(h.clone()))
@@ -7911,6 +8250,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_values_typed(frame) {
                 return Ok(s);
             }
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             let mut data = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
                 let row: Vec<serde_json::Value> = headers
@@ -8339,6 +8687,13 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             Arc::new(builder.finish())
         }
         DType::Bool | DType::BoolNullable => {
+            if let Some(values) = column.as_bool_slice() {
+                let mut builder = BooleanBuilder::with_capacity(values.len());
+                for &value in values {
+                    builder.append_value(value);
+                }
+                return Ok(Arc::new(builder.finish()));
+            }
             let mut builder = BooleanBuilder::with_capacity(column.len());
             for value in column.values() {
                 match value {
@@ -8350,6 +8705,17 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             Arc::new(builder.finish())
         }
         DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse => {
+            if column.dtype() == DType::Utf8
+                && let Some((bytes, offsets)) = column.as_utf8_contiguous()
+            {
+                let mut builder = StringBuilder::with_capacity(offsets.len() - 1, bytes.len());
+                for window in offsets.windows(2) {
+                    let value = std::str::from_utf8(&bytes[window[0]..window[1]])
+                        .map_err(|error| IoError::Parquet(error.to_string()))?;
+                    builder.append_value(value);
+                }
+                return Ok(Arc::new(builder.finish()));
+            }
             let mut builder = StringBuilder::with_capacity(column.len(), column.len() * 8);
             for value in column.values() {
                 match value {
@@ -8551,8 +8917,70 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
     RecordBatch::try_new(schema, arrays).map_err(|e| IoError::Parquet(e.to_string()))
 }
 
+/// Build the block-backed representation directly from one homogeneous Arrow
+/// Float64 batch. The Arrow buffers are already column-major, so this copies
+/// each decoded value only once into the frame's column-major backing block.
+///
+/// Nullable columns deliberately do not enter this path: the block store is
+/// all-valid by contract, and the normal typed path carries nullable-float
+/// validity and NaN semantics.
+#[cfg(feature = "block-storage")]
+fn try_record_batch_to_float64_block(batch: &RecordBatch) -> Result<Option<DataFrame>, IoError> {
+    if batch.num_columns() == 0
+        || !batch
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| field.data_type() == &ArrowDataType::Float64)
+    {
+        return Ok(None);
+    }
+
+    let names: Vec<String> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    if names.iter().collect::<HashSet<_>>().len() != names.len() {
+        // The existing BTreeMap path has legacy duplicate-label behavior.
+        // Leave it untouched rather than making the block path observably
+        // stricter.
+        return Ok(None);
+    }
+
+    let rows = batch.num_rows();
+    let capacity = rows.checked_mul(names.len()).ok_or_else(|| {
+        IoError::Parquet("parquet Float64 block dimensions overflow usize".into())
+    })?;
+    let mut block = Vec::with_capacity(capacity);
+    for array in batch.columns() {
+        let floats = array
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("Float64 schema field must carry Float64Array");
+        if floats.null_count() != 0 {
+            return Ok(None);
+        }
+        block.extend_from_slice(floats.values());
+    }
+
+    DataFrame::from_f64_block_columns(
+        Index::new_known_unique_int64_unit_range(0, rows),
+        names,
+        block,
+    )
+    .map(Some)
+    .map_err(IoError::from)
+}
+
 /// Convert an Arrow RecordBatch back into a DataFrame.
 fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> {
+    #[cfg(feature = "block-storage")]
+    if let Some(frame) = try_record_batch_to_float64_block(batch)? {
+        return Ok(frame);
+    }
+
     let n_rows = batch.num_rows();
     let schema = batch.schema();
     let mut columns = BTreeMap::new();
@@ -13930,42 +14358,14 @@ pub trait DataFrameIoExt {
 
     /// Write this DataFrame to a CSV file.
     ///
-    /// Matches `pd.DataFrame.to_csv(path)`.
+    /// Matches `pd.DataFrame.to_csv(path)`: the index is included by default.
     fn to_csv_file(&self, path: &Path) -> Result<(), IoError>;
 
     /// Serialize this DataFrame to a CSV string.
     ///
-    /// ⚠️ THIS DOES NOT MATCH `pd.DataFrame.to_csv()` ON THE INDEX, and the claim
-    /// that it did was wrong. pandas writes the index by DEFAULT; this does not.
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19), on a frame with index
-    /// [10, 11] and one column `a`:
-    /// ```text
-    ///   df.to_csv()             -> ",a\n10,1\n11,2\n"   index INCLUDED, leading
-    ///                                                     empty header cell
-    ///   df.to_csv(index=False)  -> "a\n1\n2\n"
-    /// ```
-    /// This method routes to `write_csv_string`, whose `CsvWriteOptions::default()`
-    /// sets `include_index: false` — so its output corresponds to pandas'
-    /// `to_csv(index=False)`, not to bare `to_csv()`.
-    ///
-    /// ⚠️ WHETHER THIS IS DELIBERATE IS GENUINELY UNCLEAR, and I first wrote that it
-    /// was. Evidence BOTH ways, so that a later reader does not inherit my first
-    /// reading:
-    ///   FOR deliberate — a test pins that the first emitted line IS the column
-    ///   names (br-frankenpandas-g9rxa), which an index would break by prepending an
-    ///   empty cell, and the conformance CSV path plus fp-bench consume this shape.
-    ///   AGAINST — the SERIES writers in this same file, `SeriesIoExt::to_csv_file`
-    ///   and `SeriesIoExt::to_csv_string`, both explicitly override the shared
-    ///   default with `include_index: true, ..CsvWriteOptions::default()` precisely
-    ///   to match pandas. Two sibling writers over the same options struct disagree
-    ///   about pandas' default, and only one of them had to reach for an override.
-    /// That asymmetry looks more like an oversight the test later cemented than a
-    /// design. Filed rather than changed: flipping the default is breaking for 39
-    /// call sites here plus conformance and fp-bench.
-    ///
-    /// Only the parity claim is corrected here. Use
-    /// [`Self::to_csv_string_with_options`] with `include_index: true` for pandas'
-    /// default shape — which is exactly what the Series side already does.
+    /// Matches `pd.DataFrame.to_csv()`: the index is included by default. Use
+    /// [`Self::to_csv_string_with_options`] with `include_index: false` to emit
+    /// pandas' `to_csv(index=False)` shape.
     fn to_csv_string(&self) -> Result<String, IoError>;
 
     /// Serialize this DataFrame to a CSV string with explicit write options.
@@ -14231,11 +14631,15 @@ impl DataFrameIoExt for DataFrame {
     }
 
     fn to_csv_file(&self, path: &Path) -> Result<(), IoError> {
-        write_csv(self, path)
+        std::fs::write(path, self.to_csv_string()?)?;
+        Ok(())
     }
 
     fn to_csv_string(&self) -> Result<String, IoError> {
-        write_csv_string(self)
+        self.to_csv_string_with_options(&CsvWriteOptions {
+            include_index: true,
+            ..CsvWriteOptions::default()
+        })
     }
 
     fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError> {
@@ -14965,32 +15369,10 @@ mod tests {
         assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
     }
 
-    /// The Series and DataFrame CSV writers DISAGREE about pandas index default.
-    ///
-    /// br-frankenpandas-sseeh. This pins an asymmetry that is currently undocumented
-    /// and easy to "tidy" in either direction by accident:
-    ///   `DataFrameIoExt::to_csv_string` takes `CsvWriteOptions::default()`, whose
-    ///   `include_index` is FALSE, so it emits the pandas `to_csv(index=False)` shape.
-    ///   `SeriesIoExt::to_csv_string` overrides that default with
-    ///   `include_index: true`, so it emits the bare `to_csv()` shape.
-    ///
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-19), frame with index
-    /// [10, 11] and one column `a`: `df.to_csv()` yields `",a\n10,1\n11,2\n"` with
-    /// the index INCLUDED behind a leading empty header cell, while
-    /// `df.to_csv(index=False)` yields `"a\n1\n2\n"`. pandas writes the index by
-    /// default for BOTH Series and DataFrame, so the Series side matches the
-    /// incumbent here and the DataFrame side does not.
-    ///
-    /// ⚠️ THIS TEST DOES NOT ENDORSE EITHER SHAPE. It exists so that a change to
-    /// `CsvWriteOptions::default()`, or an "obvious" cleanup deleting the Series
-    /// override, fails here loudly instead of silently altering one surface. The
-    /// behaviour decision belongs on the bead, not in this file.
-    ///
-    /// Asserted structurally — a leading comma means the index column is present —
-    /// rather than on exact header text, because the index label spelling is a
-    /// separate concern this test should not also pin.
+    /// Bare DataFrame and Series CSV writers follow pandas' index default, while
+    /// explicit options retain the index-less form.
     #[test]
-    fn csv_index_default_differs_between_series_and_dataframe_sseeh() {
+    fn csv_index_default_matches_pandas_for_dataframe_and_series_sseeh() {
         use super::{DataFrameIoExt, SeriesIoExt};
 
         let idx = vec![10_i64.into(), 11_i64.into()];
@@ -14999,17 +15381,23 @@ mod tests {
         let frame = DataFrame::from_series(vec![series.clone()]).expect("frame");
 
         let frame_csv = frame.to_csv_string().expect("dataframe csv");
-        let frame_header = frame_csv.lines().next().expect("header");
-        assert!(
-            !frame_header.starts_with(','),
-            "DataFrame writer omits the index, so the header must NOT lead with an empty cell; csv={frame_csv:?}"
+        assert_eq!(
+            frame_csv, ",a\n10,1\n11,2\n",
+            "DataFrame.to_csv() must match pandas' index-including default"
         );
 
         let series_csv = series.to_csv_string().expect("series csv");
-        let series_header = series_csv.lines().next().expect("header");
-        assert!(
-            series_header.starts_with(','),
-            "Series writer includes the index, so the header MUST lead with an empty cell as pandas to_csv() does; csv={series_csv:?}"
+        assert_eq!(series_csv, frame_csv, "sibling defaults must agree");
+
+        let indexless = frame
+            .to_csv_string_with_options(&CsvWriteOptions {
+                include_index: false,
+                ..CsvWriteOptions::default()
+            })
+            .expect("explicit indexless dataframe csv");
+        assert_eq!(
+            indexless, "a\n1\n2\n",
+            "explicit include_index=false must not inherit the pandas default"
         );
     }
 
@@ -15098,6 +15486,56 @@ mod tests {
         assert!(
             par.equals(&ser),
             "parallel json read diverges from the serial flat scanner"
+        );
+    }
+
+    #[test]
+    fn json_read_numeric_parallel_typed_builders_match_scalar_reference_92n1x() {
+        // 60k rows crosses the typed parser's parallel admission boundary. The
+        // Float64 column starts with integral-looking data and later has decimal
+        // tokens, exercising the Int64→Float64 builder promotion without ever
+        // materializing one Scalar per input cell.
+        let mut json = String::with_capacity(1_600_000);
+        json.push('[');
+        for row in 0..60_000_i64 {
+            if row > 0 {
+                json.push(',');
+            }
+            json.push_str(&format!(
+                r#"{{"i":{row},"f":{}}}"#,
+                if row < 20_000 {
+                    row.to_string()
+                } else {
+                    format!("{row}.5")
+                }
+            ));
+        }
+        json.push(']');
+
+        let typed = super::try_read_json_records_numeric_parallel(&json)
+            .expect("typed parse result")
+            .expect("homogeneous numeric input takes typed path");
+        let scalar = super::try_read_json_records_flat_parallel(&json)
+            .expect("scalar parse result")
+            .expect("homogeneous input takes scalar parallel path");
+        assert_eq!(typed.len(), 60_000);
+        assert!(
+            typed.equals(&scalar),
+            "typed parser must preserve every value"
+        );
+        assert_eq!(typed.column("i").expect("i").dtype(), DType::Int64);
+        assert_eq!(typed.column("f").expect("f").dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn json_read_numeric_typed_builder_rejects_key_reordering_92n1x() {
+        // A position-only numeric parser would quietly exchange these values.
+        // Admission must reject the shape so the general records parser retains
+        // its first-seen-key semantics.
+        let input = br#"{"a":1,"b":2.5},{"b":3.5,"a":4}"#;
+        assert!(
+            super::parse_json_records_numeric_range(input, 0, input.len()).is_none(),
+            "key reordering must defer instead of assigning by position"
         );
     }
 
@@ -17472,6 +17910,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_csv_typed_bool_builder_uses_nullable_backing_and_rejects_ragged_rows_3gsa7() {
+        let frame = read_csv_str("flag\nTrue\nNA\nfalse\n").expect("typed bool csv");
+        let flag = frame.column("flag").expect("flag column");
+
+        assert_eq!(flag.dtype(), DType::Bool);
+        let (values, validity) = flag
+            .as_nullable_bool_slice()
+            .expect("typed nullable Bool backing");
+        assert_eq!(values, &[true, false, false]);
+        assert!(validity.get(0));
+        assert!(!validity.get(1));
+        assert!(validity.get(2));
+        assert_eq!(
+            flag.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false)
+            ]
+        );
+
+        // A prior numeric value is semantically ambiguous with Bool and must
+        // keep the legacy Scalar fallback, rather than being retyped as Bool.
+        let mixed = read_csv_str("flag\n1\ntrue\n").expect("mixed csv fallback");
+        assert_eq!(
+            mixed.column("flag").expect("mixed flag").dtype(),
+            DType::Utf8
+        );
+
+        let err =
+            read_csv_str("flag\ntrue,false\nfalse\n").expect_err("overlong ragged row must reject");
+        assert!(
+            matches!(
+                err,
+                IoError::CsvFieldCount {
+                    line: 2,
+                    expected: 1,
+                    found: 2
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
     /// The same fast path must PAD a short row rather than reject it — the
     /// gtkz1 fixture's own input (fp_p2d_016_csv_round_trip_ragged_row_error).
     /// Measured: pd.read_csv("a,b\n1,2\n3\n") -> a=[1,3], b=[2.0, NaN].
@@ -19560,10 +20043,10 @@ mod tests {
         let frame = read_csv_str(input).expect("parse");
         let output = write_csv_string(&frame).expect("write");
 
-        // Golden reference: columns in BTreeMap order; Bool(true) coerced to Float64
-        // in column c (which has Float64 + Bool → Float64), so true → 1.0. A Float64
-        // column writes whole values with a trailing ".0" like pandas (str(float)).
-        let expected = "a,b,c\n1,hello,3.14\n2,,1.0\n3,world,\n";
+        // GOLDEN-CHANGE (live pandas 2.2.3): read_csv keeps c as object because it
+        // contains the string token "true"; to_csv(index=False) therefore emits
+        // the original `true` spelling rather than coercing it to Float64 1.0.
+        let expected = "a,b,c\n1,hello,3.14\n2,,true\n3,world,\n";
         assert_eq!(
             output, expected,
             "output does not match golden reference.\nGot:\n{output}\nExpected:\n{expected}"
@@ -20768,7 +21251,17 @@ mod tests {
 
         let frame = make_test_dataframe();
         let csv = frame.to_csv_string().expect("csv string");
-        assert_eq!(csv, super::write_csv_string(&frame).expect("free csv"));
+        assert_eq!(
+            csv,
+            super::write_csv_string_with_options(
+                &frame,
+                &CsvWriteOptions {
+                    include_index: true,
+                    ..CsvWriteOptions::default()
+                },
+            )
+            .expect("pandas-default csv"),
+        );
         assert_eq!(
             frame.to_markdown_string().expect("markdown string"),
             write_markdown_string(&frame).expect("free markdown")
@@ -20976,6 +21469,133 @@ mod tests {
         assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
         assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
         assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn parquet_writer_uses_typed_bool_and_utf8_buffers_uza04() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "flag".to_owned(),
+            Column::from_bool_values(vec![true, false, true]),
+        );
+        columns.insert(
+            "label".to_owned(),
+            Column::from_utf8_contiguous(b"redgreenblue".to_vec(), vec![0, 3, 8, 12]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2]),
+            columns,
+            vec!["flag".to_owned(), "label".to_owned()],
+        )
+        .expect("typed parquet source");
+
+        assert!(
+            !frame
+                .column("flag")
+                .expect("typed bool source")
+                .scalar_cache_is_materialized()
+        );
+        assert!(
+            !frame
+                .column("label")
+                .expect("typed utf8 source")
+                .scalar_cache_is_materialized()
+        );
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write typed parquet");
+
+        assert!(
+            !frame
+                .column("flag")
+                .expect("typed bool source")
+                .scalar_cache_is_materialized(),
+            "all-valid bool must avoid the Scalar fallback"
+        );
+        assert!(
+            !frame
+                .column("label")
+                .expect("typed utf8 source")
+                .scalar_cache_is_materialized(),
+            "all-valid contiguous Utf8 must avoid the Scalar fallback"
+        );
+
+        let decoded = super::read_parquet_bytes(&bytes).expect("read typed parquet");
+        assert_eq!(
+            decoded.column("flag").expect("decoded bool").values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            decoded.column("label").expect("decoded utf8").values(),
+            &[
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("green".to_owned()),
+                Scalar::Utf8("blue".to_owned()),
+            ]
+        );
+    }
+
+    #[cfg(feature = "block-storage")]
+    #[test]
+    fn parquet_all_valid_float64_uses_column_major_block_l6uyi() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "left".to_string(),
+            Column::from_f64_values(vec![1.5, -0.0, 3.25]),
+        );
+        columns.insert(
+            "right".to_string(),
+            Column::from_f64_values(vec![4.0, 5.5, 6.75]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![10, 20, 30]),
+            columns,
+            vec!["left".to_string(), "right".to_string()],
+        )
+        .expect("source frame");
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write parquet");
+        let decoded = super::read_parquet_bytes(&bytes).expect("read parquet");
+        let view = decoded
+            .to_numpy_block_view()
+            .expect("all-valid Float64 parquet is block-backed");
+        assert_eq!((view.rows, view.cols), (3, 2));
+        assert_eq!(view.block[0].to_bits(), 1.5_f64.to_bits());
+        assert_eq!(view.block[1].to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(view.block[2].to_bits(), 3.25_f64.to_bits());
+        assert_eq!(view.block[3].to_bits(), 4.0_f64.to_bits());
+        assert_eq!(view.block[4].to_bits(), 5.5_f64.to_bits());
+        assert_eq!(view.block[5].to_bits(), 6.75_f64.to_bits());
+
+        // Negative case: nullable Float64 needs a validity mask, so it must
+        // remain on the ordinary typed decode path rather than dropping the
+        // missing marker into an all-valid block.
+        let nullable = DataFrame::from_dict(
+            &["value"],
+            vec![(
+                "value",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .expect("nullable source frame");
+        let nullable_bytes = super::write_parquet_bytes(&nullable).expect("write nullable parquet");
+        let nullable_decoded =
+            super::read_parquet_bytes(&nullable_bytes).expect("read nullable parquet");
+        assert!(
+            nullable_decoded.to_numpy_block_view().is_none(),
+            "nullable Float64 must not enter the all-valid block path"
+        );
+        assert!(
+            nullable_decoded
+                .column("value")
+                .expect("value column")
+                .values()[1]
+                .is_missing(),
+            "fallback must preserve the parquet null as a missing Float64"
+        );
     }
 
     #[test]
@@ -33593,7 +34213,12 @@ mod fused_numeric_csv_field_tests {
 
 #[cfg(test)]
 mod merge_simple_numeric_csv_chunks_tests {
-    use super::{CsvTypedColumnValues, merge_simple_numeric_csv_chunks};
+    use std::collections::BTreeMap;
+
+    use super::{
+        Column, CsvTypedColumnValues, DataFrame, Index, JsonOrient, Scalar,
+        merge_simple_numeric_csv_chunks, write_json_string,
+    };
 
     /// Verbatim copy of the pre-parallel chunk-major merge, kept as the
     /// reference implementation for the differential test below.
@@ -34148,5 +34773,27 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_index_matches(&rframe);
         assert_values_matches(&rframe);
         assert_split_matches(&rframe);
+    }
+
+    #[test]
+    fn json_records_typed_writer_mixed_dtype_defers_to_serde_92n1x() {
+        // A numeric column alongside a scalar-backed Utf8 column is a mixed-dtype
+        // frame. The writer must decline the typed path rather than assuming all
+        // columns expose contiguous native buffers, while retaining serde output.
+        let mut columns = BTreeMap::new();
+        columns.insert("n".to_string(), Column::from_i64_values(vec![1, 2]));
+        columns.insert(
+            "s".to_string(),
+            Column::from_values(vec![Scalar::Utf8("hi".into()), Scalar::Utf8("x".into())])
+                .expect("scalar-backed utf8"),
+        );
+        let frame = DataFrame::new(Index::new_known_unique_int64_unit_range(0, 2), columns)
+            .expect("mixed frame");
+
+        assert!(super::try_write_json_records_typed(&frame, false).is_none());
+        assert_eq!(
+            write_json_string(&frame, JsonOrient::Records).expect("serde fallback"),
+            r#"[{"n":1,"s":"hi"},{"n":2,"s":"x"}]"#
+        );
     }
 }
