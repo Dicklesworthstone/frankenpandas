@@ -56792,7 +56792,11 @@ impl LazyTransposeFramePlan {
                     })
                     .collect();
                 match all_typed {
-                    Some(values) => Column::from_f64_values(values),
+                    // The typed row is already freshly allocated. Move it
+                    // into the all-valid Float64 backing instead of scanning
+                    // then copying it into a second Arc allocation. The
+                    // owned constructor retains the canonical NaN fallback.
+                    Some(values) => Column::from_f64_values_owned(values),
                     None => {
                         let scalars: Vec<Scalar> = self
                             .source_columns
@@ -185505,6 +185509,54 @@ mod tests {
         let mixed_view = mixed.transpose_view().unwrap().expect("promoted view");
         assert_eq!(mixed_view.dtype(), DType::Float64);
         assert_eq!(mixed_view.get_f64(1, 0), Some(3.0));
+    }
+
+    #[cfg(feature = "lazy-transpose-view")]
+    #[test]
+    fn dataframe_lazy_transpose_moves_typed_f64_rows_l4vzc() {
+        let mut finite_columns = BTreeMap::new();
+        finite_columns.insert(
+            "left".to_owned(),
+            Column::from_f64_values(vec![1.5, 2.5]),
+        );
+        finite_columns.insert(
+            "right".to_owned(),
+            Column::from_f64_values(vec![10.5, 20.5]),
+        );
+        let finite = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 2),
+            finite_columns,
+            vec!["left".to_owned(), "right".to_owned()],
+        )
+        .unwrap();
+        let finite_view = finite.transpose_view().unwrap().expect("typed view");
+        assert_eq!(
+            finite_view.column(1).unwrap().as_f64_slice(),
+            Some([2.5, 20.5].as_slice())
+        );
+
+        // Negative: canonical Float64(NaN) remains missing when the owned
+        // constructor takes its NaN fallback; it must not become all-valid.
+        let mut nan_columns = BTreeMap::new();
+        nan_columns.insert(
+            "left".to_owned(),
+            Column::from_f64_values(vec![1.0, f64::NAN]),
+        );
+        nan_columns.insert(
+            "right".to_owned(),
+            Column::from_f64_values(vec![3.0, 4.0]),
+        );
+        let nan_frame = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 2),
+            nan_columns,
+            vec!["left".to_owned(), "right".to_owned()],
+        )
+        .unwrap();
+        let nan_view = nan_frame.transpose_view().unwrap().expect("typed view");
+        let nan_row = nan_view.column(1).unwrap();
+        assert!(matches!(nan_row.values()[0], Scalar::Float64(value) if value.is_nan()));
+        assert!(!nan_row.validity().get(0));
+        assert_eq!(nan_row.values()[1], Scalar::Float64(4.0));
     }
 
     #[cfg(feature = "lazy-transpose-view")]
