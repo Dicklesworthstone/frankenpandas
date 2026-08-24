@@ -30,6 +30,7 @@ rust_xlsxwriter = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 mysql = { workspace = true, optional = true }
 ryu = { workspace = true }
+sas7bdat = { workspace = true }
 scraper = { workspace = true }
 serde-pickle = { workspace = true }
 serde_json = { workspace = true }

@@ -190,6 +190,8 @@ pub enum IoError {
     Pickle(String),
     #[error("stata error: {0}")]
     Stata(String),
+    #[error("sas error: {0}")]
+    Sas(String),
     #[error("fwf error: {0}")]
     Fwf(String),
     #[error("deferred reader: {0}")]
@@ -5839,13 +5841,12 @@ pub fn read_fwf(path: &Path, options: &FwfReadOptions) -> Result<DataFrame, IoEr
 // ── Deferred reader surfaces ───────────────────────────────────────────
 //
 // pandas exposes pd.read_gbq / pd.read_sas / pd.read_spss (read_clipboard is
-// implemented above via an OS subprocess backend). Each remaining one is out of
-// scope for FrankenPandas's local file-format charter:
+// implemented above via an OS subprocess backend). `read_sas` supports the
+// SAS7BDAT dialect below; XPORT and the remaining two surfaces are deferred:
 //
 //   * read_gbq calls Google BigQuery (external service, GCP credentials).
-//   * read_sas / read_spss are proprietary statistical-software formats with
-//     no first-party Rust reader at parity (pandas calls into pyreadstat /
-//     sas7bdat).
+//   * SAS XPORT and read_spss remain statistical-software formats without a
+//     first-party Rust reader at parity (pandas calls into pyreadstat).
 //
 // Following the deferral precedent in fp-frame for plotting (see
 // `plotting_deferred`), expose typed reject-closed entry points so callers
@@ -5979,18 +5980,120 @@ pub fn read_gbq(_query: &str, _project_id: Option<&str>) -> Result<DataFrame, Io
     ))
 }
 
-/// Reject-closed SAS reader.
+/// Read a SAS7BDAT dataset into a `DataFrame`.
 ///
-/// ⚠️ NOT PARITY — pandas SUPPORTS this. Measured on 2.2.3,
-/// `pd.read_sas("/nonexistent")` raises `ValueError: unable to infer format of
-/// SAS file from filename`, i.e. it reached format inference and would have read
-/// a real XPORT/SAS7BDAT file. Refusing here is a capability GAP, not a matched
-/// refusal. br-frankenpandas-9jvao.
-pub fn read_sas(_path: &Path) -> Result<DataFrame, IoError> {
-    Err(deferred_reader_error(
-        "read_sas",
-        "no first-party Rust SAS sas7bdat/xport reader exists at pandas-parity yet",
-    ))
+/// The reader preserves decoded character data, missing cells, and SAS
+/// date/datetime/time cells. XPORT remains a separate format gap: unlike a
+/// `.sas7bdat` file it has no native parser in the safe-Rust backend yet.
+/// br-frankenpandas-9jvao.
+pub fn read_sas(path: &Path) -> Result<DataFrame, IoError> {
+    let mut reader = sas7bdat::SasReader::open(path).map_err(sas_error)?;
+    let column_order = reader
+        .metadata()
+        .variables
+        .iter()
+        .map(|variable| variable.name.trim_end().to_owned())
+        .collect::<Vec<_>>();
+    reject_duplicate_headers(&column_order)?;
+
+    let mut columns = (0..column_order.len())
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<Scalar>>>();
+    let mut row_count: i64 = 0;
+    let mut rows = reader.rows_named().map_err(sas_error)?;
+    while let Some(row) = rows.try_next().map_err(sas_error)? {
+        let row_values = row.values();
+        if row_values.len() != columns.len() {
+            return Err(IoError::Sas(format!(
+                "row {row_count} has {} cells; metadata declares {} columns",
+                row_values.len(),
+                columns.len()
+            )));
+        }
+        for (column, value) in columns.iter_mut().zip(row_values) {
+            column.push(sas_cell_to_scalar(value)?);
+        }
+        row_count = row_count
+            .checked_add(1)
+            .ok_or_else(|| IoError::Sas("row count exceeded i64 range".to_owned()))?;
+    }
+    sas_rows_to_frame(column_order, columns)
+}
+
+fn sas_rows_to_frame(
+    column_order: Vec<String>,
+    columns: Vec<Vec<Scalar>>,
+) -> Result<DataFrame, IoError> {
+    if column_order.len() != columns.len() {
+        return Err(IoError::Sas(format!(
+            "metadata declares {} columns but parser produced {} columns",
+            column_order.len(),
+            columns.len()
+        )));
+    }
+    reject_duplicate_headers(&column_order)?;
+    let row_count = columns.first().map_or(0, Vec::len);
+    if columns.iter().any(|column| column.len() != row_count) {
+        return Err(IoError::Sas(
+            "parser produced columns with inconsistent row counts".to_owned(),
+        ));
+    }
+    let row_count = i64::try_from(row_count)
+        .map_err(|_| IoError::Sas("row count exceeded i64 range".to_owned()))?;
+    let mut out = BTreeMap::new();
+    for (name, values) in column_order.iter().cloned().zip(columns) {
+        out.insert(name, Column::from_values(values)?);
+    }
+    Ok(DataFrame::new_with_column_order(
+        Index::from_i64((0..row_count).collect()),
+        out,
+        column_order,
+    )?)
+}
+
+fn sas_cell_to_scalar(cell: &sas7bdat::CellValue<'_>) -> Result<Scalar, IoError> {
+    use sas7bdat::CellValue;
+
+    match cell {
+        CellValue::Float(value) => Ok(Scalar::Float64(*value)),
+        CellValue::Int32(value) => Ok(Scalar::Float64(f64::from(*value))),
+        CellValue::Int64(value) => {
+            // pandas represents SAS numeric storage as float64, including values
+            // whose original integer spelling exceeds f64's exact range.
+            #[allow(clippy::cast_precision_loss)]
+            let value = *value as f64;
+            Ok(Scalar::Float64(value))
+        }
+        CellValue::NumericString(value) => {
+            value.parse::<f64>().map(Scalar::Float64).map_err(|_| {
+                IoError::Sas(format!(
+                    "numeric SAS cell is not representable as f64: {value}"
+                ))
+            })
+        }
+        CellValue::Str(value) => Ok(Scalar::Utf8(value.to_string())),
+        CellValue::Bytes(_) => Err(IoError::Sas(
+            "SAS reader yielded undecoded bytes; a supported source encoding is required"
+                .to_owned(),
+        )),
+        CellValue::DateTime(value) | CellValue::Date(value) => {
+            let nanos = i64::try_from(value.unix_timestamp_nanos()).map_err(|_| {
+                IoError::Sas("SAS datetime is outside datetime64[ns] range".to_owned())
+            })?;
+            Ok(Scalar::Datetime64(nanos))
+        }
+        CellValue::Time(value) => {
+            let nanos = i64::try_from(value.whole_nanoseconds()).map_err(|_| {
+                IoError::Sas("SAS time is outside timedelta64[ns] range".to_owned())
+            })?;
+            Ok(Scalar::Timedelta64(nanos))
+        }
+        CellValue::Missing(_) => Ok(Scalar::Null(NullKind::NaN)),
+    }
+}
+
+fn sas_error(error: sas7bdat::Error) -> IoError {
+    IoError::Sas(error.to_string())
 }
 
 /// Reject-closed SPSS reader.
@@ -21271,13 +21374,62 @@ mod tests {
     }
 
     #[test]
-    fn read_sas_rejects_with_deferred_marker_2yy4d() {
+    fn read_sas_uses_native_reader_and_never_the_deferred_stub_9jvao() {
         let path = std::path::Path::new("/nonexistent.sas7bdat");
-        let err = super::read_sas(path).expect_err("must reject");
+        let err = super::read_sas(path).expect_err("missing file must fail");
         assert!(
-            matches!(&err, super::IoError::Deferred(message)
-                if message.contains("read_sas") && message.contains("sas7bdat")),
+            matches!(&err, super::IoError::Sas(message) if !message.is_empty()),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn sas_cells_build_typed_frame_and_reject_undecoded_bytes_9jvao() {
+        use std::borrow::Cow;
+
+        let columns = vec![
+            vec![
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Float(1.5))
+                    .expect("numeric SAS cell"),
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Missing(
+                    sas7bdat::MissingValue::System,
+                ))
+                .expect("missing SAS cell"),
+            ],
+            vec![
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Str(Cow::Borrowed("alpha")))
+                    .expect("text SAS cell"),
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Str(Cow::Borrowed("beta")))
+                    .expect("text SAS cell"),
+            ],
+        ];
+        let frame = super::sas_rows_to_frame(vec!["score".into(), "name".into()], columns)
+            .expect("build SAS frame");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(
+            frame.column("score").expect("score").values()[0],
+            Scalar::Float64(1.5)
+        );
+        assert_eq!(
+            frame.column("name").expect("name").values()[1],
+            Scalar::Utf8("beta".into())
+        );
+
+        let undecoded =
+            super::sas_cell_to_scalar(&sas7bdat::CellValue::Bytes(Cow::Borrowed(b"\xff")))
+                .expect_err("raw SAS bytes must not be silently lossy-decoded");
+        assert!(matches!(undecoded, super::IoError::Sas(message) if message.contains("undecoded")));
+    }
+
+    #[test]
+    fn sas_frame_rejects_ragged_parser_output_9jvao() {
+        let err = super::sas_rows_to_frame(
+            vec!["left".into(), "right".into()],
+            vec![vec![Scalar::Float64(1.0)]],
+        )
+        .expect_err("metadata/data width mismatch must fail");
+        assert!(
+            matches!(err, super::IoError::Sas(message) if message.contains("metadata declares"))
         );
     }
 
