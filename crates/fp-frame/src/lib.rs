@@ -7124,13 +7124,12 @@ fn typed_slice_already_sorted(column: &Column, ascending: bool) -> Option<bool> 
 /// element IS this slice. The Scalar arm's `None`-on-NaN has no counterpart for
 /// the same reason as in [`typed_slice_already_sorted`] — a NaN-bearing float
 /// column is not all-valid (br-frankenpandas-jyhf7), so `as_f64_slice` declines
-/// it here and the old path still decides. Ascending uses the same stable
-/// `radix_argsort_f64`; descending keeps the same stable `partial_cmp`
-/// comparison sort over the same `(position, value)` pairs. Int64 uses the
-/// matching stable radix permutation in both directions: its signed key
-/// transform preserves numeric order and the stable scatter preserves original
-/// order for ties. `as_i64_slice` answers only for `DType::Int64`, so an
-/// all-valid `Int64Nullable` key keeps the Scalar path.
+/// it here and the nullable sibling below owns its NaN-last handling. Both
+/// Float64 directions use the matching stable radix permutation; Int64 uses the
+/// signed-key radix permutation; contiguous Utf8 uses its stable MSD byte radix.
+/// Every accepted arm preserves original order for equal keys without touching
+/// the `Vec<Scalar>` spine. `as_i64_slice` answers only for `DType::Int64`, so
+/// an all-valid `Int64Nullable` key keeps the fallback path.
 fn typed_slice_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>> {
     if let Some(data) = column.as_i64_slice() {
         return Some(fp_columnar::radix_argsort_i64(data, ascending));
@@ -7140,14 +7139,41 @@ fn typed_slice_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>
             !data.iter().any(|value| value.is_nan()),
             "as_f64_slice must never expose a NaN (br-frankenpandas-jyhf7)"
         );
-        if ascending {
-            return Some(fp_columnar::radix_argsort_f64(data, true));
-        }
-        let mut keyed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
-        keyed.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
-        return Some(keyed.into_iter().map(|(position, _)| position).collect());
+        return Some(fp_columnar::radix_argsort_f64(data, ascending));
+    }
+    if let Some((bytes, offsets)) = column.as_utf8_contiguous() {
+        let spans: Vec<&[u8]> = offsets
+            .windows(2)
+            .map(|window| &bytes[window[0]..window[1]])
+            .collect();
+        return Some(fp_columnar::utf8_msd_argsort_bytes(&spans, ascending));
     }
     None
+}
+
+/// Stable NaN-last permutation over a nullable Float64 typed buffer.
+///
+/// Values marked missing (including NaN, whose ingestion clears validity) are
+/// appended in input order after the stable radix order of finite/infinite values.
+/// This is exactly pandas' `na_position='last'` contract in either direction,
+/// without materializing a `Vec<Scalar>` just to compare the key column.
+fn typed_nullable_f64_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>> {
+    let (data, validity) = column.as_f64_slice_with_validity()?;
+    let mut valid = Vec::with_capacity(data.len());
+    let mut valid_pos = Vec::with_capacity(data.len());
+    let mut na_pos = Vec::new();
+    for (position, &value) in data.iter().enumerate() {
+        if validity.get(position) && !value.is_nan() {
+            valid.push(value);
+            valid_pos.push(position);
+        } else {
+            na_pos.push(position);
+        }
+    }
+    let sorted = fp_columnar::radix_argsort_f64(&valid, ascending);
+    let mut order: Vec<usize> = sorted.into_iter().map(|index| valid_pos[index]).collect();
+    order.extend(na_pos);
+    Some(order)
 }
 
 fn compare_indexed_i64_value(
@@ -64139,15 +64165,12 @@ impl DataFrame {
         }
 
         let na_first = na_position == "first";
-        // All-valid Utf8 (na_position='last'): argsort_with runs a stable MSD byte
-        // radix for BOTH the contiguous backing (raw &[u8] spans) AND the
-        // Scalar-backed backing (over the materialized &str) — but this gate only
-        // admitted the contiguous one, so a from_values Utf8 sort key fell to the
-        // generic O(n log n) compare_scalars Scalar sort (0.59x vs pandas; ~2.3s at
-        // 2M). Relaxing the gate to any all-valid Utf8 routes both backings through
-        // the same radix. Bit-identical: identical argsort_with call/result.
+        // All-valid Utf8 (na_position='last'): contiguous keys go through the
+        // typed MSD byte radix directly; Scalar-backed keys retain argsort_with's
+        // existing string path. Both are stable byte-lexicographic orderings.
         if !na_first && sort_column.dtype() == DType::Utf8 && sort_column.validity().all() {
-            let order = sort_column.argsort_with(ascending);
+            let order = typed_slice_sort_order(sort_column, ascending)
+                .unwrap_or_else(|| sort_column.argsort_with(ascending));
             return self.reorder_rows_by_positions_unchecked(&order);
         }
         // br-frankenpandas-uza04: try the column's contiguous typed buffer FIRST,
@@ -64179,35 +64202,8 @@ impl DataFrame {
         {
             order
         } else if !na_first
-            && ascending
-            && let Some((data, validity)) = sort_column.as_f64_slice_with_validity()
+            && let Some(order) = typed_nullable_f64_sort_order(sort_column, ascending)
         {
-            // Typed nullable Float64, na_position='last', ascending fast path
-            // (br-frankenpandas-s2i37): the all-valid `typed_dense_sort_order`
-            // above bails on ANY NaN/missing, so a nullable Float64 sort key fell
-            // to the generic O(n log n) `compare_scalars_with_na_position` sort
-            // over materialized `Scalar`s. Radix-argsort the valid finite values
-            // off the raw `&[f64]` (the same stable `radix_argsort_f64` kernel the
-            // all-valid path uses) and append the missing/NaN positions in input
-            // order. Bit-identical to the generic stable sort: for the valid
-            // subset, stable ascending radix == the stable `partial_cmp` compare
-            // (equal values keep input order); NA rows sort last
-            // (`na_position='last'`) and, comparing Equal to one another under a
-            // stable sort, keep their input order — which `na_pos` preserves.
-            let mut valid: Vec<f64> = Vec::with_capacity(data.len());
-            let mut valid_pos: Vec<usize> = Vec::with_capacity(data.len());
-            let mut na_pos: Vec<usize> = Vec::new();
-            for (i, &value) in data.iter().enumerate() {
-                if validity.get(i) && !value.is_nan() {
-                    valid.push(value);
-                    valid_pos.push(i);
-                } else {
-                    na_pos.push(i);
-                }
-            }
-            let sorted = fp_columnar::radix_argsort_f64(&valid, true);
-            let mut order: Vec<usize> = sorted.into_iter().map(|k| valid_pos[k]).collect();
-            order.extend(na_pos);
             order
         } else {
             let mut order = (0..self.len()).collect::<Vec<_>>();
@@ -203024,7 +203020,8 @@ mod single_column_sort_typed_slice_uza04 {
 
     use super::{
         Column, DataFrame, Index, Scalar, typed_dense_sort_order,
-        typed_dense_values_already_sorted, typed_slice_already_sorted, typed_slice_sort_order,
+        typed_dense_values_already_sorted, typed_nullable_f64_sort_order,
+        typed_slice_already_sorted, typed_slice_sort_order,
     };
 
     /// Every shape below is asserted in BOTH directions because each direction
@@ -203095,6 +203092,72 @@ mod single_column_sort_typed_slice_uza04 {
         assert_eq!(ascending, vec![3, 1, 4, 0, 2, 5]);
         assert_eq!(descending, vec![5, 0, 2, 1, 4, 3]);
         assert_ne!(descending, vec![5, 2, 0, 4, 1, 3]);
+    }
+
+    #[test]
+    fn typed_nullable_f64_radix_keeps_nan_last_and_ties_stable_92n1x() {
+        // Planted negative: a descending implementation that reverses equal
+        // keys, or moves NaNs to the front, must not be accepted.
+        let column =
+            Column::from_f64_values(vec![2.0, f64::NAN, -0.0, 2.0, f64::NAN, f64::NEG_INFINITY]);
+        let ascending = typed_nullable_f64_sort_order(&column, true).expect("typed f64 route");
+        let descending = typed_nullable_f64_sort_order(&column, false).expect("typed f64 route");
+        assert_eq!(ascending, vec![5, 2, 0, 3, 1, 4]);
+        assert_eq!(descending, vec![0, 3, 2, 5, 1, 4]);
+        assert_ne!(descending, vec![3, 0, 2, 5, 4, 1]);
+    }
+
+    #[test]
+    fn nullable_f64_sort_values_routes_nan_last_radix_92n1x() {
+        let key = Column::from_f64_values(vec![2.0, f64::NAN, -0.0, 2.0, f64::NAN, -1.0]);
+        let payload = Column::from_i64_values(vec![0, 1, 2, 3, 4, 5]);
+        let frame = DataFrame::new_with_column_order(
+            Index::new((0_i64..6).map(Into::into).collect()),
+            std::collections::BTreeMap::from([
+                ("k".to_owned(), key),
+                ("payload".to_owned(), payload),
+            ]),
+            vec!["k".to_owned(), "payload".to_owned()],
+        )
+        .expect("frame");
+        let descending = frame.sort_values("k", false).expect("sort descending");
+        let payload = descending.column("payload").expect("payload").values();
+        let got: Vec<i64> = payload
+            .iter()
+            .map(|value| match value {
+                Scalar::Int64(value) => *value,
+                other => panic!("payload must remain Int64, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(got, vec![0, 3, 2, 5, 1, 4]);
+        // Planted negative: descending ties and the NaN suffix both remain stable.
+        assert_ne!(got, vec![3, 0, 2, 5, 4, 1]);
+    }
+
+    #[test]
+    fn typed_contiguous_utf8_radix_keeps_descending_ties_stable_92n1x() {
+        // This is deliberately a contiguous Utf8 backing, not Column::from_values:
+        // the typed arm must read byte spans without first constructing Scalars.
+        let values = ["b", "a", "b", "", "aa"];
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::with_capacity(values.len() + 1);
+        offsets.push(0);
+        for value in values {
+            bytes.extend_from_slice(value.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let column = Column::from_utf8_values_with_validity(
+            bytes,
+            offsets,
+            fp_columnar::ValidityMask::all_valid(values.len()),
+        );
+        assert!(column.as_utf8_contiguous().is_some());
+        let ascending = typed_slice_sort_order(&column, true).expect("typed Utf8 route");
+        let descending = typed_slice_sort_order(&column, false).expect("typed Utf8 route");
+        assert_eq!(ascending, vec![3, 1, 4, 0, 2]);
+        assert_eq!(descending, vec![0, 2, 4, 1, 3]);
+        // Planted negative: tie order must not reverse in descending order.
+        assert_ne!(descending, vec![2, 0, 4, 1, 3]);
     }
 
     /// NON-VACUITY. Every assertion above would also pass if the typed route
@@ -203465,6 +203528,110 @@ mod typed_construction_stays_unboxed_uza04 {
             sorted.column("i").expect("payload").as_i64_slice(),
             Some(&[10, 15, 30, 40][..]),
             "and the permutation is the one the sort promised"
+        );
+    }
+
+    /// `filter_bool` end to end, on BOTH of its row-selection routes.
+    ///
+    /// br-frankenpandas-uza04. `DataFrame::loc_bool` has two: a mask whose kept
+    /// positions form an arithmetic progression takes the affine-certificate
+    /// path, and anything else collects positions and gathers. The typed
+    /// contract has to hold on both, or "filter_bool is routed through typed
+    /// storage" is true only for the shape a test happened to pick.
+    ///
+    /// This is the op the campaign kept calling a 0.085x gap; measured against
+    /// live pandas 2.2.3 it is 4.444x FASTER at 10k (certified, effect CI
+    /// [4.27745, 4.54052], A/A nulls 0.99268 / 1.01161). These assertions pin
+    /// the representation that result rests on, so a later change cannot
+    /// quietly put the 32 B/elem spine back under it while every value-level
+    /// test stays green.
+    #[test]
+    fn filter_bool_keeps_both_routes_off_the_spine_uza04() {
+        // SCATTERED route: kept positions 0, 2, 3 are not an arithmetic
+        // progression, so this cannot take the affine certificate.
+        let frame = typed_frame();
+        let scattered = frame
+            .loc_bool(&[true, false, true, true])
+            .expect("scattered mask");
+        assert_no_column_materialized(&scattered, "loc_bool (scattered mask)");
+        assert_no_column_materialized(&frame, "loc_bool (input frame, scattered)");
+        assert_eq!(
+            scattered.column("i").expect("payload").as_i64_slice(),
+            Some(&[30, 40, 15][..]),
+            "scattered filter must keep the surviving rows in input order"
+        );
+
+        // AFFINE route: every other row is a stride-2 progression.
+        let frame = typed_frame();
+        let affine = frame
+            .loc_bool(&[true, false, true, false])
+            .expect("affine mask");
+        assert_no_column_materialized(&affine, "loc_bool (affine mask)");
+        assert_eq!(
+            affine.column("i").expect("payload").as_i64_slice(),
+            Some(&[30, 40][..]),
+            "affine filter must select the stride-2 rows"
+        );
+
+        // Degenerate masks are their own routes: all-true is the whole frame,
+        // all-false is an empty one, and neither may box a Scalar on the way.
+        let frame = typed_frame();
+        let everything = frame.loc_bool(&[true; 4]).expect("all-true mask");
+        assert_no_column_materialized(&everything, "loc_bool (all-true mask)");
+        assert_eq!(everything.shape(), (4, 2));
+        let nothing = frame.loc_bool(&[false; 4]).expect("all-false mask");
+        assert_no_column_materialized(&nothing, "loc_bool (all-false mask)");
+        assert_eq!(nothing.shape(), (0, 2));
+    }
+
+    /// The mixed-dtype negative case for the FILTER path specifically.
+    ///
+    /// A frame carrying one eager mixed column must not drag its typed
+    /// neighbours onto the spine when filtered — the eager column stays eager
+    /// (it has nowhere else to be), and every typed column stays typed.
+    #[test]
+    fn filtering_a_mixed_frame_spares_its_typed_columns_uza04() {
+        let mixed = Column::from_values(vec![
+            Scalar::Int64(1),
+            Scalar::Utf8("two".to_owned()),
+            Scalar::Float64(3.0),
+            Scalar::Int64(4),
+        ])
+        .expect("mixed column");
+        let index = Index::new_known_unique_int64_unit_range(0, 4);
+        let frame = DataFrame::new_with_column_order(
+            index,
+            std::collections::BTreeMap::from([
+                ("mixed".to_owned(), mixed),
+                (
+                    "typed".to_owned(),
+                    Column::from_f64_values(vec![1.0, 2.0, 3.0, 4.0]),
+                ),
+            ]),
+            vec!["mixed".to_owned(), "typed".to_owned()],
+        )
+        .expect("mixed frame");
+
+        let filtered = frame
+            .loc_bool(&[true, false, true, true])
+            .expect("filter mixed frame");
+        assert!(
+            !filtered
+                .column("typed")
+                .expect("typed column")
+                .scalar_cache_is_materialized(),
+            "the typed column must survive the filter still typed, even sharing a \
+             frame with an eager one"
+        );
+        assert_eq!(
+            filtered.column("typed").expect("typed").as_f64_slice(),
+            Some(&[1.0, 3.0, 4.0][..])
+        );
+        // And the eager column is still correct, which is the half that would
+        // break loudly if the two representations were ever confused.
+        assert_eq!(
+            filtered.column("mixed").expect("mixed").values(),
+            &[Scalar::Int64(1), Scalar::Float64(3.0), Scalar::Int64(4),]
         );
     }
 }
