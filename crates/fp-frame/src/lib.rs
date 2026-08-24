@@ -163,6 +163,18 @@ pub enum FrameError {
     Index(#[from] IndexError),
 }
 
+fn pandas_temporal_error_class(error: PandasTemporalError) -> &'static str {
+    match error {
+        PandasTemporalError::Overflow => "OverflowError",
+        PandasTemporalError::OutOfBoundsDatetime => "OutOfBoundsDatetime",
+        PandasTemporalError::OutOfBoundsTimedelta => "OutOfBoundsTimedelta",
+        PandasTemporalError::OverflowInTimedeltaOperation => {
+            "ValueError: overflow in timedelta operation"
+        }
+        PandasTemporalError::ZeroDivision => "ZeroDivisionError",
+    }
+}
+
 /// Logical plot kind requested by a pandas-style plotting hook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlotKind {
@@ -6007,54 +6019,15 @@ fn range_index(len: usize) -> Result<Index, FrameError> {
 
 #[inline]
 fn boolean_mask_positions(mask: &[bool]) -> (Vec<usize>, Option<AffineSelectionCertificate>) {
-    let mut affine = AffineSelectionBuilder::default();
-    let mut positions = Vec::with_capacity(mask.len());
-    let mut base = 0usize;
-    let (chunks, remainder) = mask.as_chunks::<8>();
-    for chunk in chunks {
-        if chunk[0] {
-            affine.push(base);
-            positions.push(base);
+    match boolean_mask_selection(mask) {
+        BooleanMaskSelection::Affine(certificate) => {
+            let positions = (0..certificate.len)
+                .map(|offset| certificate.start + offset * certificate.step)
+                .collect();
+            (positions, Some(certificate))
         }
-        if chunk[1] {
-            affine.push(base + 1);
-            positions.push(base + 1);
-        }
-        if chunk[2] {
-            affine.push(base + 2);
-            positions.push(base + 2);
-        }
-        if chunk[3] {
-            affine.push(base + 3);
-            positions.push(base + 3);
-        }
-        if chunk[4] {
-            affine.push(base + 4);
-            positions.push(base + 4);
-        }
-        if chunk[5] {
-            affine.push(base + 5);
-            positions.push(base + 5);
-        }
-        if chunk[6] {
-            affine.push(base + 6);
-            positions.push(base + 6);
-        }
-        if chunk[7] {
-            affine.push(base + 7);
-            positions.push(base + 7);
-        }
-        base += 8;
+        BooleanMaskSelection::Positions(positions) => (positions, None),
     }
-    for &keep in remainder {
-        if keep {
-            affine.push(base);
-            positions.push(base);
-        }
-        base += 1;
-    }
-    let certificate = affine.finish();
-    (positions, certificate)
 }
 
 #[inline]
@@ -6170,6 +6143,53 @@ impl AffineSelectionBuilder {
     }
 }
 
+/// A boolean mask is either an arithmetic selection that can preserve lazy
+/// typed column views, or a materialized positional gather. The latter is
+/// allocated only after the mask has actually disproved the affine shape.
+enum BooleanMaskSelection {
+    Affine(AffineSelectionCertificate),
+    Positions(Vec<usize>),
+}
+
+#[inline]
+fn boolean_mask_selection(mask: &[bool]) -> BooleanMaskSelection {
+    let mut affine = AffineSelectionBuilder::default();
+    let mut positions: Option<Vec<usize>> = None;
+
+    for (position, &keep) in mask.iter().enumerate() {
+        if !keep {
+            continue;
+        }
+        if let Some(positions) = &mut positions {
+            positions.push(position);
+            continue;
+        }
+
+        affine.push(position);
+        if !affine.is_affine {
+            // Positions before `position` are the affine prefix. Rebuild that
+            // prefix once, then append the first non-affine hit and keep
+            // gathering. A mask's selected positions are strictly ascending,
+            // so the arithmetic has already been proven in `push`.
+            let prefix_len = affine.len.saturating_sub(1);
+            let mut gathered = Vec::with_capacity((mask.len() / 2).max(affine.len));
+            for offset in 0..prefix_len {
+                gathered.push(affine.first + offset * affine.step);
+            }
+            gathered.push(position);
+            positions = Some(gathered);
+        }
+    }
+
+    match positions {
+        Some(positions) => BooleanMaskSelection::Positions(positions),
+        None => affine.finish().map_or_else(
+            || BooleanMaskSelection::Positions(Vec::new()),
+            BooleanMaskSelection::Affine,
+        ),
+    }
+}
+
 /// Recognize a strictly-ascending arithmetic progression of normalized row
 /// positions (a contiguous `iloc[a:b]` slice => step 1, or a strided
 /// `iloc[a:b:s]` selection => step s) so positional row selection can route to
@@ -6196,6 +6216,7 @@ fn affine_certificate_from_positions(positions: &[usize]) -> Option<AffineSelect
     builder.finish()
 }
 
+#[cfg(test)]
 #[inline]
 fn boolean_mask_affine_certificate(mask: &[bool]) -> Option<AffineSelectionCertificate> {
     if let Some(certificate) = boolean_mask_every_other_affine_certificate(mask) {
@@ -6268,6 +6289,7 @@ fn boolean_mask_affine_certificate(mask: &[bool]) -> Option<AffineSelectionCerti
     affine.finish()
 }
 
+#[cfg(test)]
 #[inline]
 fn boolean_mask_every_other_affine_certificate(
     mask: &[bool],
@@ -7124,13 +7146,12 @@ fn typed_slice_already_sorted(column: &Column, ascending: bool) -> Option<bool> 
 /// element IS this slice. The Scalar arm's `None`-on-NaN has no counterpart for
 /// the same reason as in [`typed_slice_already_sorted`] — a NaN-bearing float
 /// column is not all-valid (br-frankenpandas-jyhf7), so `as_f64_slice` declines
-/// it here and the old path still decides. Ascending uses the same stable
-/// `radix_argsort_f64`; descending keeps the same stable `partial_cmp`
-/// comparison sort over the same `(position, value)` pairs. Int64 uses the
-/// matching stable radix permutation in both directions: its signed key
-/// transform preserves numeric order and the stable scatter preserves original
-/// order for ties. `as_i64_slice` answers only for `DType::Int64`, so an
-/// all-valid `Int64Nullable` key keeps the Scalar path.
+/// it here and the nullable sibling below owns its NaN-last handling. Both
+/// Float64 directions use the matching stable radix permutation; Int64 uses the
+/// signed-key radix permutation; contiguous Utf8 uses its stable MSD byte radix.
+/// Every accepted arm preserves original order for equal keys without touching
+/// the `Vec<Scalar>` spine. `as_i64_slice` answers only for `DType::Int64`, so
+/// an all-valid `Int64Nullable` key keeps the fallback path.
 fn typed_slice_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>> {
     if let Some(data) = column.as_i64_slice() {
         return Some(fp_columnar::radix_argsort_i64(data, ascending));
@@ -7140,14 +7161,41 @@ fn typed_slice_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>
             !data.iter().any(|value| value.is_nan()),
             "as_f64_slice must never expose a NaN (br-frankenpandas-jyhf7)"
         );
-        if ascending {
-            return Some(fp_columnar::radix_argsort_f64(data, true));
-        }
-        let mut keyed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
-        keyed.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
-        return Some(keyed.into_iter().map(|(position, _)| position).collect());
+        return Some(fp_columnar::radix_argsort_f64(data, ascending));
+    }
+    if let Some((bytes, offsets)) = column.as_utf8_contiguous() {
+        let spans: Vec<&[u8]> = offsets
+            .windows(2)
+            .map(|window| &bytes[window[0]..window[1]])
+            .collect();
+        return Some(fp_columnar::utf8_msd_argsort_bytes(&spans, ascending));
     }
     None
+}
+
+/// Stable NaN-last permutation over a nullable Float64 typed buffer.
+///
+/// Values marked missing (including NaN, whose ingestion clears validity) are
+/// appended in input order after the stable radix order of finite/infinite values.
+/// This is exactly pandas' `na_position='last'` contract in either direction,
+/// without materializing a `Vec<Scalar>` just to compare the key column.
+fn typed_nullable_f64_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>> {
+    let (data, validity) = column.as_f64_slice_with_validity()?;
+    let mut valid = Vec::with_capacity(data.len());
+    let mut valid_pos = Vec::with_capacity(data.len());
+    let mut na_pos = Vec::new();
+    for (position, &value) in data.iter().enumerate() {
+        if validity.get(position) && !value.is_nan() {
+            valid.push(value);
+            valid_pos.push(position);
+        } else {
+            na_pos.push(position);
+        }
+    }
+    let sorted = fp_columnar::radix_argsort_f64(&valid, ascending);
+    let mut order: Vec<usize> = sorted.into_iter().map(|index| valid_pos[index]).collect();
+    order.extend(na_pos);
+    Some(order)
 }
 
 fn compare_indexed_i64_value(
@@ -8688,14 +8736,39 @@ impl Series {
     ///
     /// Matches `td1 + td2` in pandas for timedelta Series.
     pub fn td_add(&self, other: &Self) -> Result<Self, FrameError> {
-        self.td_binary_op(other, |a, b| a.saturating_add(b), "td_add")
+        self.td_add_with_policy(other, &RuntimePolicy::strict())
+    }
+
+    /// Add two Timedelta64 Series under an explicit runtime policy.
+    ///
+    /// `STRICT` surfaces pandas' `OverflowError` for an unrepresentable
+    /// vectorized addition; `HARDENED` retains the historical `NaT` recovery
+    /// and records it through [`OverflowPolicy`]. A pre-existing `NaT` is
+    /// propagation, not an overflow, under either policy.
+    pub fn td_add_with_policy(
+        &self,
+        other: &Self,
+        policy: &RuntimePolicy,
+    ) -> Result<Self, FrameError> {
+        self.td_binary_op_with_policy(other, Timedelta::try_add, "td_add", policy)
     }
 
     /// Subtract Timedelta64 Series element-wise.
     ///
     /// Matches `td1 - td2` in pandas for timedelta Series.
     pub fn td_sub(&self, other: &Self) -> Result<Self, FrameError> {
-        self.td_binary_op(other, |a, b| a.saturating_sub(b), "td_sub")
+        self.td_sub_with_policy(other, &RuntimePolicy::strict())
+    }
+
+    /// Subtract two Timedelta64 Series under an explicit runtime policy.
+    ///
+    /// See [`Self::td_add_with_policy`] for the strict/hardened split.
+    pub fn td_sub_with_policy(
+        &self,
+        other: &Self,
+        policy: &RuntimePolicy,
+    ) -> Result<Self, FrameError> {
+        self.td_binary_op_with_policy(other, Timedelta::try_sub, "td_sub", policy)
     }
 
     /// Multiply Timedelta64 Series by a numeric scalar.
@@ -8867,6 +8940,50 @@ impl Series {
         // Per br-frankenpandas-c5soe: pandas td binary ops preserve the
         // shared axis name (preserved when both operands agree, None
         // when they differ).
+        let shared_index_name = if self.index.name() == other.index.name() {
+            self.index.name()
+        } else {
+            None
+        };
+        let index = self.index.rename_index(shared_index_name);
+        let column = Column::from_values(out)?;
+        Self::new(format!("{}_{}", self.name, name), index, column)
+    }
+
+    /// Fallible timedelta addition/subtraction with the runtime's exact
+    /// overflow policy. This deliberately remains separate from `td_mod`:
+    /// vectorized division/modulo has pandas' `NaT` contract on zero, whereas
+    /// add/sub must raise in strict mode (br-frankenpandas-fyr1z.3).
+    fn td_binary_op_with_policy<F>(
+        &self,
+        other: &Self,
+        op: F,
+        name: &str,
+        policy: &RuntimePolicy,
+    ) -> Result<Self, FrameError>
+    where
+        F: Fn(i64, i64) -> Result<i64, TemporalFailure>,
+    {
+        self.validate_timedelta_dtype(name)?;
+        other.validate_timedelta_dtype(name)?;
+        let overflow_policy = overflow_policy_for_mode(policy.mode);
+        let mut out = Vec::with_capacity(self.len());
+        for (a, b) in self.values().iter().zip(other.values().iter()) {
+            let result = match (a, b) {
+                (Scalar::Timedelta64(ns1), Scalar::Timedelta64(ns2)) => overflow_policy
+                    .resolve_recording(op(*ns1, *ns2), Timedelta::NAT, Timedelta::NAT)
+                    .map(Scalar::Timedelta64)
+                    .map_err(|failure| {
+                        FrameError::CompatibilityRejected(format!(
+                            "{}: {}",
+                            pandas_temporal_error_class(failure.pandas_error),
+                            failure.op
+                        ))
+                    })?,
+                _ => Scalar::Timedelta64(Timedelta::NAT),
+            };
+            out.push(result);
+        }
         let shared_index_name = if self.index.name() == other.index.name() {
             self.index.name()
         } else {
@@ -9160,6 +9277,25 @@ impl Series {
                 self.name.clone(),
                 self.index.clone(),
                 Column::from_i64_values_owned(out),
+            );
+        }
+
+        // Mixed numeric identity path: pandas promotes Int64/Float64
+        // combine_first to Float64.  Keep the coalesce over typed buffers so a
+        // public typed_values() consumer does not first force the generic
+        // Vec<Scalar> materialization merely to perform that promotion.
+        if self.index == other.index
+            && !self.index.has_duplicates()
+            && let Some((sd, sv)) = self.column.as_i64_slice_with_validity()
+            && let Some(od) = other.column.as_f64_slice()
+        {
+            let out: Vec<f64> = (0..sd.len())
+                .map(|i| if sv.get(i) { sd[i] as f64 } else { od[i] })
+                .collect();
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_f64_values_all_valid_unchecked(out),
             );
         }
 
@@ -41933,6 +42069,24 @@ pub struct SeriesGroupByResample<'grouped, 'data> {
 }
 
 impl SeriesGroupByResample<'_, '_> {
+    /// Gather an all-valid native group without first boxing every value as a
+    /// `Scalar`. Resampling still receives the group's real temporal labels;
+    /// only its value column changes representation.
+    fn typed_group_column(&self, row_indices: &[usize]) -> Option<Column> {
+        let source = self.groupby.series.column();
+        if let Some(values) = source.as_f64_slice() {
+            return Some(Column::from_f64_values(
+                row_indices.iter().map(|&row| values[row]).collect(),
+            ));
+        }
+        if let Some(values) = source.as_i64_slice() {
+            return Some(Column::from_i64_values(
+                row_indices.iter().map(|&row| values[row]).collect(),
+            ));
+        }
+        None
+    }
+
     fn apply_grouped_resample<F>(&self, agg: F) -> Result<Series, FrameError>
     where
         F: Fn(&Series, &str) -> Result<Series, FrameError>,
@@ -41948,7 +42102,6 @@ impl SeriesGroupByResample<'_, '_> {
                 )
             })?;
             let mut group_labels = Vec::with_capacity(row_indices.len());
-            let mut group_values = Vec::with_capacity(row_indices.len());
             for &idx in row_indices {
                 let label = self
                     .groupby
@@ -41962,23 +42115,24 @@ impl SeriesGroupByResample<'_, '_> {
                             "SeriesGroupBy resample source index out of bounds".to_owned(),
                         )
                     })?;
-                let value = self
-                    .groupby
-                    .series
-                    .values()
-                    .get(idx)
-                    .cloned()
-                    .ok_or_else(|| {
-                        FrameError::CompatibilityRejected(
-                            "SeriesGroupBy resample source value out of bounds".to_owned(),
-                        )
-                    })?;
                 group_labels.push(label);
-                group_values.push(value);
             }
 
-            let group_series =
-                Series::from_values(self.groupby.series.name(), group_labels, group_values)?;
+            let group_column = if let Some(column) = self.typed_group_column(row_indices) {
+                column
+            } else {
+                Column::from_values(
+                    row_indices
+                        .iter()
+                        .map(|&idx| self.groupby.series.values()[idx].clone())
+                        .collect(),
+                )?
+            };
+            let group_series = Series::new(
+                self.groupby.series.name(),
+                Index::new(group_labels),
+                group_column,
+            )?;
             let resampled = agg(&group_series, &self.freq)?;
             let group_label = &order[group_pos];
             for (bucket_label, value) in resampled
@@ -42525,6 +42679,206 @@ pub struct SeriesGroupByRolling<'grouped, 'data> {
 }
 
 impl SeriesGroupByRolling<'_, '_> {
+    /// Fused typed grouped rolling sum/mean for dense grouping keys.
+    ///
+    /// `SeriesGroupBy::dense_group_ids` gives every row a first-seen group id
+    /// without constructing the `ScalarKey -> Vec<usize>` map used by
+    /// `build_groups`.  For all-valid native numeric values, sum and mean can
+    /// then run their existing online algorithm directly over those row
+    /// positions: no `Scalar` gather and no short-lived per-group `Series` are
+    /// required.  The emitted order remains pandas' sorted group order, with
+    /// original row order retained inside each group.
+    ///
+    /// This deliberately leaves every other aggregation and any non-typed
+    /// source on `apply_grouped_rolling`: their per-group semantics (notably
+    /// nullable and NaN handling) remain exactly on the established path.
+    fn try_dense_grouped_sum_mean(&self, want_mean: bool) -> Option<Result<Series, FrameError>> {
+        if self.window == 0 {
+            return None;
+        }
+        let n = self.groupby.series.len();
+        enum TypedValues<'a> {
+            Float64(&'a [f64]),
+            Int64(&'a [i64]),
+        }
+        let values = if let Some(data) = self.groupby.series.column().as_f64_slice() {
+            TypedValues::Float64(data)
+        } else {
+            // Same three outcomes as the old `else if let ... else { return
+            // None }` chain: a non-Float64, non-Int64 (or nullable) column
+            // declines here exactly as before.
+            TypedValues::Int64(self.groupby.series.column().as_i64_slice()?)
+        };
+        let (gids, ngroups) = self.groupby.dense_group_ids()?;
+        if gids.len() != self.groupby.series.len() {
+            return None;
+        }
+        // The fused layout is intentionally SERIAL. Do not steal a workload
+        // from the existing group-parallel arm: on a large, splittable input
+        // that would turn a measured parallel win into a silent one-worker
+        // regression and invalidate its worker-count witness. Let the generic
+        // path retain ownership whenever its policy selects two or more workers.
+        const SGBROLL_PAR_MIN_ROWS: usize = 100_000;
+        const SGBROLL_PAR_MIN_GROUPS: usize = 2;
+        const SGBROLL_PAR_MIN_PER_WORKER: usize = 8;
+        let workers = match sgb_rolling_max_workers_override() {
+            Some(forced) => forced.max(1),
+            None if n >= SGBROLL_PAR_MIN_ROWS && ngroups >= SGBROLL_PAR_MIN_GROUPS => {
+                fp_columnar::cached_available_parallelism()
+                    .min(16)
+                    .min(ngroups / SGBROLL_PAR_MIN_PER_WORKER)
+                    .max(1)
+            }
+            None => 1,
+        };
+        if workers >= 2 {
+            return None;
+        }
+        record_sgb_rolling_workers(1);
+        let labels = self.groupby.dense_group_labels(&gids, ngroups)?;
+
+        // Count, prefix, then scatter into ONE flat row-position buffer. This
+        // keeps each group's source rows contiguous without allocating a
+        // `Vec<usize>` per group (the remaining allocation cost after removing
+        // `build_groups` and per-group Series construction).
+        let mut counts = vec![0_usize; ngroups];
+        for &gid in gids.iter() {
+            counts[gid] += 1;
+        }
+        let mut offsets = Vec::with_capacity(ngroups + 1);
+        let mut total = 0_usize;
+        offsets.push(total);
+        for &count in &counts {
+            total = total.checked_add(count)?;
+            offsets.push(total);
+        }
+        debug_assert_eq!(total, n);
+        let mut write_offsets = offsets[..ngroups].to_vec();
+        let mut rows = vec![0_usize; n];
+        for (row, &gid) in gids.iter().enumerate() {
+            rows[write_offsets[gid]] = row;
+            write_offsets[gid] += 1;
+        }
+
+        let value_at = |row: usize| -> f64 {
+            match values {
+                TypedValues::Float64(data) => data[row],
+                TypedValues::Int64(data) => data[row] as f64,
+            }
+        };
+        let mut out_f64 = vec![0.0_f64; n];
+        let mut out_valid = fp_columnar::ValidityMask::all_invalid(n);
+
+        // This is the same add/remove ordering and compensated state used by
+        // `Rolling::rolling_online_sum_mean`, except each gid owns its state
+        // and its source positions come from the dense typed grouping layout.
+        // Keeping the state local to a group preserves the established rolling
+        // bits while avoiding a materialized group Series.
+        for group in 0..ngroups {
+            let group_rows = &rows[offsets[group]..offsets[group + 1]];
+            let mut sum_x = 0.0_f64;
+            let mut comp_add = 0.0_f64;
+            let mut comp_remove = 0.0_f64;
+            let mut nobs = 0_i64;
+            let mut neg_ct = 0_i64;
+            let mut num_consec_same = 0_i64;
+            let mut prev_value = 0.0_f64;
+
+            for (position, &row) in group_rows.iter().enumerate() {
+                if position >= self.window {
+                    let removed = value_at(group_rows[position - self.window]);
+                    if !removed.is_nan() {
+                        nobs -= 1;
+                        let y = -removed - comp_remove;
+                        let next = sum_x + y;
+                        comp_remove = (next - sum_x) - y;
+                        sum_x = next;
+                        if removed.is_sign_negative() {
+                            neg_ct -= 1;
+                        }
+                    }
+                }
+
+                let value = value_at(row);
+                if !value.is_nan() {
+                    nobs += 1;
+                    let y = value - comp_add;
+                    let next = sum_x + y;
+                    comp_add = (next - sum_x) - y;
+                    sum_x = next;
+                    if value.is_sign_negative() {
+                        neg_ct += 1;
+                    }
+                    if value == prev_value {
+                        num_consec_same += 1;
+                    } else {
+                        num_consec_same = 1;
+                    }
+                    prev_value = value;
+                }
+
+                let result = if want_mean {
+                    if nobs as usize >= self.min_periods && nobs > 0 {
+                        let mut mean = sum_x / nobs as f64;
+                        if num_consec_same >= nobs {
+                            mean = prev_value;
+                        } else if (neg_ct == 0 && mean < 0.0) || (neg_ct == nobs && mean > 0.0) {
+                            mean = 0.0;
+                        }
+                        Some(mean)
+                    } else {
+                        None
+                    }
+                } else if nobs == 0 && self.min_periods == 0 {
+                    Some(0.0)
+                } else if nobs as usize >= self.min_periods {
+                    Some(if num_consec_same >= nobs {
+                        prev_value * nobs as f64
+                    } else {
+                        sum_x
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(value) = result {
+                    out_f64[row] = value;
+                    out_valid.set(row, true);
+                }
+            }
+        }
+
+        // `dense_group_labels` is homogeneous for every supported key kind, so
+        // `IndexLabel::cmp` is exactly the corresponding `scalar_key_cmp` order
+        // used by the generic route.  Sort gids, not labels, to retain each
+        // group's source-row order without cloning label values.
+        let mut visit: Vec<usize> = (0..ngroups).collect();
+        visit.sort_by(|&left, &right| labels[left].cmp(&labels[right]));
+        let mut order = Vec::with_capacity(n);
+        for gid in visit {
+            order.extend_from_slice(&rows[offsets[gid]..offsets[gid + 1]]);
+        }
+        let mut ordered_f64 = Vec::with_capacity(n);
+        let mut ordered_valid = fp_columnar::ValidityMask::all_invalid(n);
+        for (out_position, &source_position) in order.iter().enumerate() {
+            ordered_f64.push(out_f64[source_position]);
+            if out_valid.get(source_position) {
+                ordered_valid.set(out_position, true);
+            }
+        }
+        let index = self
+            .groupby
+            .series
+            .index()
+            .take(&order)
+            .rename_index(self.groupby.series.index().name());
+        Some(Series::new(
+            self.groupby.series.name(),
+            index,
+            Column::from_f64_values_with_validity(ordered_f64, ordered_valid),
+        ))
+    }
+
     fn apply_grouped_rolling<F>(&self, agg: F) -> Result<Series, FrameError>
     where
         F: Fn(&Series, usize, usize) -> Result<Series, FrameError> + Sync,
@@ -42889,6 +43243,9 @@ impl SeriesGroupByRolling<'_, '_> {
 
     /// Grouped rolling sum.
     pub fn sum(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.try_dense_grouped_sum_mean(false) {
+            return result;
+        }
         self.apply_grouped_rolling(|series, window, min_periods| {
             series.rolling(window, Some(min_periods)).sum()
         })
@@ -42896,6 +43253,9 @@ impl SeriesGroupByRolling<'_, '_> {
 
     /// Grouped rolling mean.
     pub fn mean(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.try_dense_grouped_sum_mean(true) {
+            return result;
+        }
         self.apply_grouped_rolling(|series, window, min_periods| {
             series.rolling(window, Some(min_periods)).mean()
         })
@@ -56513,7 +56873,11 @@ impl LazyTransposeFramePlan {
                     })
                     .collect();
                 match all_typed {
-                    Some(values) => Column::from_f64_values(values),
+                    // The typed row is already freshly allocated. Move it
+                    // into the all-valid Float64 backing instead of scanning
+                    // then copying it into a second Arc allocation. The
+                    // owned constructor retains the canonical NaN fallback.
+                    Some(values) => Column::from_f64_values_owned(values),
                     None => {
                         let scalars: Vec<Scalar> = self
                             .source_columns
@@ -60136,7 +60500,35 @@ impl DataFrame {
         // memory-latency-bound, so spreading the columns across par_map_columns
         // scope workers wins aggregate cache/bandwidth. Bit-identical — every
         // column runs the same take_positions and is reassembled in column_order.
-        let gathered = self.par_map_columns(&self.column_order, |name| {
+        //
+        // BANDWIDTH FLOOR, not the compute-bound default (br-frankenpandas-uza04).
+        // `par_map_columns` passes 16_384, which its own doc reserves for
+        // compute-bound per-column work (round/clip/sqrt/exp/log/trig) where a
+        // few thousand cells amortize the `thread::scope` spawn. A permutation
+        // gather is exactly the other class the doc names, and the contiguous-run
+        // gather a few hundred lines below already passes 4_000_000 for that
+        // reason — this call site was the inconsistent one.
+        //
+        // MEASURED, and it contradicts the 2026-06-27 ledger row that raised
+        // this same floor and reported ~0 gain: `sort_values_single` @10k
+        // (10k x 10 f64 = 100_000 cells, so the old floor fired) runs 499-567us
+        // p50 across 5-8 workers unrestricted, and 250-265us p50 pinned to ONE
+        // cpu with `taskset -c 3`, three runs each on the shipped binary. The
+        // parallel gather is costing 2.1x at this size. That prior row measured
+        // best-of-4 on a loaded box; this is a certified balanced-square row
+        // (0.651x vs pandas, nulls 0.996/0.998) plus a 6-run pinned A/B.
+        //
+        // WHY 262_144 AND NOT `abs`'s 4_000_000: the parallel gather is a LOSS
+        // at 10k x 10 and a WIN at 100k x 10, so the crossover is bracketed
+        // between 100_000 and 1_000_000 cells and the floor has to sit inside
+        // that bracket. 4_000_000 was measured too: it fixes 10k (0.651x ->
+        // 1.30x vs pandas) but serialises 100k as well and costs it
+        // 1.78x -> 1.17x. Both endpoints are measured; the exact crossover
+        // inside the bracket is NOT bisected, and 262_144 is simply a power of
+        // two within it, consistent with the 16_384 / 131_072 floors nearby.
+        // A gather cheaper or dearer per cell than this one may cross
+        // elsewhere.
+        let gathered = self.par_map_columns_min(&self.column_order, 262_144, |name| {
             Ok(self
                 .columns
                 .get(name)
@@ -64139,15 +64531,12 @@ impl DataFrame {
         }
 
         let na_first = na_position == "first";
-        // All-valid Utf8 (na_position='last'): argsort_with runs a stable MSD byte
-        // radix for BOTH the contiguous backing (raw &[u8] spans) AND the
-        // Scalar-backed backing (over the materialized &str) — but this gate only
-        // admitted the contiguous one, so a from_values Utf8 sort key fell to the
-        // generic O(n log n) compare_scalars Scalar sort (0.59x vs pandas; ~2.3s at
-        // 2M). Relaxing the gate to any all-valid Utf8 routes both backings through
-        // the same radix. Bit-identical: identical argsort_with call/result.
+        // All-valid Utf8 (na_position='last'): contiguous keys go through the
+        // typed MSD byte radix directly; Scalar-backed keys retain argsort_with's
+        // existing string path. Both are stable byte-lexicographic orderings.
         if !na_first && sort_column.dtype() == DType::Utf8 && sort_column.validity().all() {
-            let order = sort_column.argsort_with(ascending);
+            let order = typed_slice_sort_order(sort_column, ascending)
+                .unwrap_or_else(|| sort_column.argsort_with(ascending));
             return self.reorder_rows_by_positions_unchecked(&order);
         }
         // br-frankenpandas-uza04: try the column's contiguous typed buffer FIRST,
@@ -64179,35 +64568,8 @@ impl DataFrame {
         {
             order
         } else if !na_first
-            && ascending
-            && let Some((data, validity)) = sort_column.as_f64_slice_with_validity()
+            && let Some(order) = typed_nullable_f64_sort_order(sort_column, ascending)
         {
-            // Typed nullable Float64, na_position='last', ascending fast path
-            // (br-frankenpandas-s2i37): the all-valid `typed_dense_sort_order`
-            // above bails on ANY NaN/missing, so a nullable Float64 sort key fell
-            // to the generic O(n log n) `compare_scalars_with_na_position` sort
-            // over materialized `Scalar`s. Radix-argsort the valid finite values
-            // off the raw `&[f64]` (the same stable `radix_argsort_f64` kernel the
-            // all-valid path uses) and append the missing/NaN positions in input
-            // order. Bit-identical to the generic stable sort: for the valid
-            // subset, stable ascending radix == the stable `partial_cmp` compare
-            // (equal values keep input order); NA rows sort last
-            // (`na_position='last'`) and, comparing Equal to one another under a
-            // stable sort, keep their input order — which `na_pos` preserves.
-            let mut valid: Vec<f64> = Vec::with_capacity(data.len());
-            let mut valid_pos: Vec<usize> = Vec::with_capacity(data.len());
-            let mut na_pos: Vec<usize> = Vec::new();
-            for (i, &value) in data.iter().enumerate() {
-                if validity.get(i) && !value.is_nan() {
-                    valid.push(value);
-                    valid_pos.push(i);
-                } else {
-                    na_pos.push(i);
-                }
-            }
-            let sorted = fp_columnar::radix_argsort_f64(&valid, true);
-            let mut order: Vec<usize> = sorted.into_iter().map(|k| valid_pos[k]).collect();
-            order.extend(na_pos);
             order
         } else {
             let mut order = (0..self.len()).collect::<Vec<_>>();
@@ -64762,17 +65124,22 @@ impl DataFrame {
             }
         }
 
-        if let Some(certificate) = boolean_mask_affine_certificate(mask)
-            && let Some(result) = self.take_rows_by_affine_certificate_unchecked(certificate)
-        {
-            return result;
+        match boolean_mask_selection(mask) {
+            BooleanMaskSelection::Affine(certificate) => self
+                .take_rows_by_affine_certificate_unchecked(certificate)
+                .unwrap_or_else(|| {
+                    let positions = (0..certificate.len)
+                        .map(|offset| certificate.start + offset * certificate.step)
+                        .collect::<Vec<_>>();
+                    self.take_rows_by_positions_with_affine_certificate_unchecked(
+                        &positions,
+                        Some(certificate),
+                    )
+                }),
+            BooleanMaskSelection::Positions(positions) => {
+                self.take_rows_by_positions_with_affine_certificate_unchecked(&positions, None)
+            }
         }
-
-        let (positions, affine_certificate) = boolean_mask_positions(mask);
-        self.take_rows_by_positions_with_affine_certificate_unchecked(
-            &positions,
-            affine_certificate,
-        )
     }
 
     /// Boolean mask row selection (position-based).
@@ -68210,13 +68577,46 @@ impl DataFrame {
     /// each column value in column order.
     pub fn to_records(&self) -> Vec<Vec<Scalar>> {
         // Hoist the per-row self.index.labels() (was an accessor call EVERY row)
-        // and the per-cell columns.get(name).values() (n*m BTreeMap lookups) to
-        // once each. Bit-identical.
+        // and resolve each source column once.  The public result necessarily owns
+        // Scalars, but all-valid typed columns need not first build a *second*
+        // column-length Scalar cache merely to clone it into those records.
+        // Nullable and mixed columns retain the Scalar route: their missing-kind
+        // provenance is observable and cannot be reconstructed from a raw buffer.
+        enum RecordColumn<'a> {
+            Float64(&'a [f64]),
+            Int64(&'a [i64]),
+            Bool(&'a [bool]),
+            Scalars(&'a [Scalar]),
+        }
+
+        impl RecordColumn<'_> {
+            fn scalar_at(&self, row: usize) -> Scalar {
+                match self {
+                    Self::Float64(values) => Scalar::Float64(values[row]),
+                    Self::Int64(values) => Scalar::Int64(values[row]),
+                    Self::Bool(values) => Scalar::Bool(values[row]),
+                    Self::Scalars(values) => values[row].clone(),
+                }
+            }
+        }
+
         let labels = self.index.labels();
-        let col_values: Vec<Option<&[Scalar]>> = self
+        let col_values: Vec<Option<RecordColumn<'_>>> = self
             .column_order
             .iter()
-            .map(|name| self.columns.get(name).map(|col| col.values()))
+            .map(|name| {
+                self.columns.get(name).map(|column| {
+                    if let Some(values) = column.as_f64_slice() {
+                        RecordColumn::Float64(values)
+                    } else if let Some(values) = column.as_i64_slice() {
+                        RecordColumn::Int64(values)
+                    } else if let Some(values) = column.as_bool_slice() {
+                        RecordColumn::Bool(values)
+                    } else {
+                        RecordColumn::Scalars(column.values())
+                    }
+                })
+            })
             .collect();
         let n = self.len();
         let n_cols = self.column_order.len();
@@ -68228,9 +68628,11 @@ impl DataFrame {
         // contiguous row range; concatenation preserves order → bit-identical.
         let build = |lo: usize, hi: usize| -> Vec<Vec<Scalar>> {
             let mut out = Vec::with_capacity(hi - lo);
-            for i in lo..hi {
+            // `i` stays the ABSOLUTE row index: the column reads below use it
+            // for `scalar_at(i)`, so this cannot become a plain slice iterator
+            // over `labels[lo..hi]`.
+            for (i, lbl) in labels.iter().enumerate().take(hi).skip(lo) {
                 let mut row = Vec::with_capacity(n_cols + 1);
-                let lbl = &labels[i];
                 row.push(match lbl {
                     IndexLabel::Int64(v) => Scalar::Int64(*v),
                     IndexLabel::Float64(v) => Scalar::Float64(v.0),
@@ -68241,7 +68643,11 @@ impl DataFrame {
                     IndexLabel::Null(kind) => Scalar::Null(*kind),
                 });
                 for col_vals in &col_values {
-                    row.push(col_vals.map_or(Scalar::Null(NullKind::Null), |vals| vals[i].clone()));
+                    row.push(
+                        col_vals
+                            .as_ref()
+                            .map_or(Scalar::Null(NullKind::Null), |values| values.scalar_at(i)),
+                    );
                 }
                 out.push(row);
             }
@@ -70182,6 +70588,151 @@ impl DataFrame {
         Some(result_cols)
     }
 
+    /// Compute a pairwise matrix when every column shares one missing-value mask.
+    ///
+    /// Independent missing patterns require a distinct count and both marginal
+    /// moments for every pair.  When the pattern is shared, those values depend
+    /// only on the column, so compute them once and retain the historical
+    /// left-to-right product fold for each pair.  This deliberately does not
+    /// compact or reassociate rows: corr/cov results retain their exact bits.
+    fn pairwise_shared_nan_pattern_stat_matrix(
+        numeric_cols: &[String],
+        col_data: &[std::borrow::Cow<'_, [f64]>],
+        stat: &str,
+        min_periods: usize,
+    ) -> Result<Option<BTreeMap<String, Column>>, FrameError> {
+        let n = numeric_cols.len();
+        let Some(first) = col_data.first() else {
+            return Ok(Some(BTreeMap::new()));
+        };
+        let len = first.len();
+        if n != col_data.len() || !first.iter().any(|value| value.is_nan()) {
+            return Ok(None);
+        }
+
+        let mut sum = vec![0.0_f64; n];
+        let mut sum2 = vec![0.0_f64; n];
+        let mut count = 0_usize;
+        for row in 0..len {
+            let missing = first[row].is_nan();
+            if col_data
+                .iter()
+                .skip(1)
+                .any(|column| column[row].is_nan() != missing)
+            {
+                return Ok(None);
+            }
+            if missing {
+                continue;
+            }
+            for (column_idx, column) in col_data.iter().enumerate() {
+                let value = column[row];
+                sum[column_idx] += value;
+                sum2[column_idx] += value * value;
+            }
+            count += 1;
+        }
+
+        let compute_pair = |i: usize, j: usize| -> (f64, f64) {
+            let mut sum_xy = 0.0_f64;
+            for (&x, &y) in col_data[i].iter().zip(col_data[j].iter()) {
+                if x.is_nan() {
+                    continue;
+                }
+                sum_xy += x * y;
+            }
+            let v_ij = Self::finalize_pairwise_stat(
+                stat,
+                min_periods,
+                count,
+                sum[i],
+                sum[j],
+                sum_xy,
+                sum2[i],
+                sum2[j],
+            );
+            let v_ji = if i != j {
+                Self::finalize_pairwise_stat(
+                    stat,
+                    min_periods,
+                    count,
+                    sum[j],
+                    sum[i],
+                    sum_xy,
+                    sum2[j],
+                    sum2[i],
+                )
+            } else {
+                v_ij
+            };
+            (v_ij, v_ji)
+        };
+
+        let pairs: Vec<(usize, usize)> =
+            (0..n).flat_map(|j| (0..=j).map(move |i| (i, j))).collect();
+        let mut mat = vec![0.0_f64; n * n];
+        let worker_count = fp_columnar::cached_available_parallelism()
+            .min(64)
+            .min(pairs.len().max(1));
+        let big_enough = (pairs.len() as u128) * (len as u128) >= (1u128 << 20);
+        if worker_count >= 2 && big_enough {
+            const MORSEL: usize = 8;
+            let pairs_ref: &[(usize, usize)] = &pairs;
+            let compute_ref = &compute_pair;
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let cells: Vec<(usize, usize, f64, f64)> = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(worker_count);
+                for _ in 0..worker_count {
+                    let next = &next;
+                    handles.push(scope.spawn(move || {
+                        let mut out = Vec::new();
+                        loop {
+                            let start =
+                                next.fetch_add(MORSEL, std::sync::atomic::Ordering::Relaxed);
+                            if start >= pairs_ref.len() {
+                                break;
+                            }
+                            let end = (start + MORSEL).min(pairs_ref.len());
+                            for &(i, j) in &pairs_ref[start..end] {
+                                let (v_ij, v_ji) = compute_ref(i, j);
+                                out.push((i, j, v_ij, v_ji));
+                            }
+                        }
+                        out
+                    }));
+                }
+                let mut all = Vec::new();
+                for handle in handles {
+                    if let Ok(mut part) = handle.join() {
+                        all.append(&mut part);
+                    }
+                }
+                all
+            });
+            for (i, j, v_ij, v_ji) in cells {
+                mat[i * n + j] = v_ij;
+                if i != j {
+                    mat[j * n + i] = v_ji;
+                }
+            }
+        } else {
+            for (i, j) in pairs {
+                let (v_ij, v_ji) = compute_pair(i, j);
+                mat[i * n + j] = v_ij;
+                if i != j {
+                    mat[j * n + i] = v_ji;
+                }
+            }
+        }
+
+        let mut result_cols = BTreeMap::new();
+        for (j, name) in numeric_cols.iter().enumerate() {
+            let vals = (0..n).map(|i| Scalar::Float64(mat[i * n + j])).collect();
+            result_cols.insert(name.clone(), Column::new(DType::Float64, vals)?);
+        }
+        Ok(Some(result_cols))
+    }
+
     /// Finalize a pairwise cov/corr cell from accumulated moments.
     ///
     /// Arithmetic is bit-identical to the historical per-pair inline form.
@@ -70272,6 +70823,15 @@ impl DataFrame {
             .map(|v| std::borrow::Cow::Borrowed(v.as_slice()))
             .collect();
         let col_data: &[std::borrow::Cow<'_, [f64]>] = &shifted;
+
+        if let Some(result_cols) = Self::pairwise_shared_nan_pattern_stat_matrix(
+            numeric_cols,
+            col_data,
+            stat,
+            min_periods,
+        )? {
+            return Ok(result_cols);
+        }
 
         let mut mat = vec![0.0_f64; n * n];
 
@@ -71250,7 +71810,11 @@ impl DataFrame {
                     .flatten()
                     .collect();
                 for (name, data) in col_order.iter().zip(produced) {
-                    result_cols.insert(name.clone(), Column::from_f64_values(data));
+                    // The pooled kernel just produced this owned buffer. Keep it
+                    // in the typed backing instead of copying it into Arc<[f64]>.
+                    // `from_f64_values_owned` still routes a NaN output through
+                    // the canonical missing-value constructor.
+                    result_cols.insert(name.clone(), Column::from_f64_values_owned(data));
                 }
 
                 // Materialize the n output columns in ONE scope, parallel
@@ -109152,6 +109716,24 @@ mod tests {
     }
 
     #[test]
+    fn boolean_mask_selection_keeps_the_affine_prefix_after_a_break_uza04219() {
+        // A common wrong single-pass implementation starts collecting only
+        // after it sees the first non-affine stride, silently dropping the
+        // first two selected rows. The first three hits below are 1, 4, 6:
+        // the third one is the break, while later hits prove collection
+        // continues in source order.
+        let mask = [false, true, false, false, true, false, true, false, true];
+        match super::boolean_mask_selection(&mask) {
+            super::BooleanMaskSelection::Positions(positions) => {
+                assert_eq!(positions, vec![1, 4, 6, 8]);
+            }
+            super::BooleanMaskSelection::Affine(_) => {
+                panic!("non-affine mask must use positions")
+            }
+        }
+    }
+
+    #[test]
     fn boolean_mask_affine_certificate_recognizes_every_other_octets() {
         let even_mask = [
             true, false, true, false, true, false, true, false, true, false,
@@ -114733,6 +115315,68 @@ mod tests {
         assert!(
             (c - (-0.9166666666666666)).abs() < 1e-6,
             "df.cov must be -0.91666.., got {c}"
+        );
+    }
+
+    #[test]
+    fn dataframe_corr_cov_reuses_shared_nan_mask_uza04219() {
+        let labels = vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()];
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "x",
+                labels.clone(),
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "y",
+                labels,
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(6.0),
+                    Scalar::Float64(8.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let corr = df.corr().unwrap();
+        assert_eq!(corr.columns["x"].values()[1], Scalar::Float64(1.0));
+        let cov = df.cov().unwrap();
+        assert!((cov.columns["x"].values()[1].to_f64().unwrap() - 14.0 / 3.0).abs() < 1e-12);
+
+        let shared_x = [1.0, f64::NAN, 3.0, 4.0];
+        let shared_y = [2.0, f64::NAN, 6.0, 8.0];
+        let shared = [
+            std::borrow::Cow::Borrowed(shared_x.as_slice()),
+            std::borrow::Cow::Borrowed(shared_y.as_slice()),
+        ];
+        let names = ["x".to_owned(), "y".to_owned()];
+        assert!(
+            DataFrame::pairwise_shared_nan_pattern_stat_matrix(&names, &shared, "corr", 1)
+                .unwrap()
+                .is_some()
+        );
+
+        // Negative: independently missing columns must decline this fast path;
+        // each pair then retains its own observation count in the generic route.
+        let independent_x = [1.0, f64::NAN, 3.0, 4.0];
+        let independent_y = [2.0, 4.0, f64::NAN, 8.0];
+        let independent = [
+            std::borrow::Cow::Borrowed(independent_x.as_slice()),
+            std::borrow::Cow::Borrowed(independent_y.as_slice()),
+        ];
+        assert!(
+            DataFrame::pairwise_shared_nan_pattern_stat_matrix(&names, &independent, "corr", 1,)
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -120924,6 +121568,37 @@ mod tests {
         )
         .unwrap();
         assert!(non_numeric.typed_values().is_none());
+    }
+
+    #[test]
+    fn combine_first_mixed_numeric_promotes_to_typed_float64_without_scalar_spine() {
+        // Planted negative: retaining the Int64 dtype, or treating its missing
+        // slot as zero, would both hide the required pandas Float64 promotion.
+        let index = Index::from_range(0, 3, 1);
+        let mut left_validity = fp_columnar::ValidityMask::all_valid(3);
+        left_validity.set(1, false);
+        let left = Series::new(
+            "left",
+            index.clone(),
+            Column::from_i64_values_with_validity(vec![1, 0, 3], left_validity),
+        )
+        .unwrap();
+        let right = Series::new(
+            "right",
+            index,
+            Column::from_f64_values_owned(vec![10.5, 20.5, 30.5]),
+        )
+        .unwrap();
+
+        let combined = left.combine_first(&right).unwrap();
+        match combined.typed_values() {
+            Some(super::SeriesTypedValues::Float64 { data, validity }) => {
+                assert_eq!(data, &[1.0, 20.5, 3.0]);
+                assert!(validity.all());
+            }
+            other => panic!("mixed numeric combine_first must promote to Float64, got {other:?}"),
+        }
+        assert_ne!(combined.values(), &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(3)]);
     }
 
     #[test]
@@ -155570,6 +156245,109 @@ mod tests {
     }
 
     #[test]
+    fn to_records_reads_typed_columns_without_materializing_source_scalars_uza04() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "floats".to_string(),
+            Column::from_f64_values(vec![1.25, -2.5]),
+        );
+        columns.insert("ints".to_string(), Column::from_i64_values(vec![4, 9]));
+        columns.insert(
+            "flags".to_string(),
+            Column::from_bool_values(vec![true, false]),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_range(0, 2, 1),
+            columns,
+            vec![
+                "floats".to_string(),
+                "ints".to_string(),
+                "flags".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert!(df.get_column("floats").column().as_f64_slice().is_some());
+        assert!(df.get_column("ints").column().as_i64_slice().is_some());
+        assert!(df.get_column("flags").column().as_bool_slice().is_some());
+        assert!(
+            !df.get_column("floats")
+                .column()
+                .scalar_cache_is_materialized()
+        );
+
+        assert_eq!(
+            df.to_records(),
+            vec![
+                vec![
+                    Scalar::Int64(0),
+                    Scalar::Float64(1.25),
+                    Scalar::Int64(4),
+                    Scalar::Bool(true),
+                ],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Float64(-2.5),
+                    Scalar::Int64(9),
+                    Scalar::Bool(false),
+                ],
+            ]
+        );
+        for name in ["floats", "ints", "flags"] {
+            assert!(
+                !df.get_column(name).column().scalar_cache_is_materialized(),
+                "typed source {name} unexpectedly built a Scalar cache"
+            );
+        }
+    }
+
+    #[test]
+    fn to_records_mixed_column_falls_back_without_poisoning_typed_sibling_uza04() {
+        let mut columns = BTreeMap::new();
+        columns.insert("typed".to_string(), Column::from_i64_values(vec![7, 8]));
+        columns.insert(
+            "mixed".to_string(),
+            Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("x".to_string()), Scalar::Int64(3)],
+            )
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_range(0, 2, 1),
+            columns,
+            vec!["typed".to_string(), "mixed".to_string()],
+        )
+        .unwrap();
+
+        assert!(df.get_column("typed").column().as_i64_slice().is_some());
+        assert!(df.get_column("mixed").column().as_i64_slice().is_none());
+        assert_eq!(
+            df.to_records(),
+            vec![
+                vec![
+                    Scalar::Int64(0),
+                    Scalar::Int64(7),
+                    Scalar::Utf8("x".to_string()),
+                ],
+                vec![Scalar::Int64(1), Scalar::Int64(8), Scalar::Int64(3)],
+            ]
+        );
+        assert!(
+            !df.get_column("typed")
+                .column()
+                .scalar_cache_is_materialized(),
+            "mixed fallback must not force the typed sibling onto the Scalar spine"
+        );
+        assert!(
+            df.get_column("mixed")
+                .column()
+                .scalar_cache_is_materialized(),
+            "planted mixed-dtype negative must stay on the Scalar fallback"
+        );
+    }
+
+    #[test]
     fn to_records_parallel_matches_serial_prefix_ironquail() {
         // Record i = [Int64(i), col vals] depends only on i. The 40k frame builds via
         // the SERIAL path (< TORECORDS_PAR_MIN_ROWS); the 60k via the CHUNKED-PARALLEL
@@ -157518,6 +158296,79 @@ mod tests {
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
             ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn series_groupby_resample_gathers_native_values_without_scalar_boxes_vw0uu()
+    -> Result<(), FrameError> {
+        let index = vec![
+            IndexLabel::Utf8("2024-01-05".into()),
+            IndexLabel::Utf8("2024-01-07".into()),
+            IndexLabel::Utf8("2024-02-03".into()),
+        ];
+        let values = Series::new(
+            "sales",
+            Index::new(index.clone()),
+            Column::from_f64_values(vec![1.5, -2.0, 3.25]),
+        )?;
+        let keys = Series::from_values(
+            "store",
+            index.clone(),
+            vec![
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("west".into()),
+                Scalar::Utf8("east".into()),
+            ],
+        )?;
+        let grouped = values.groupby(&keys)?;
+        let resample = grouped.resample("M");
+
+        let typed = resample
+            .typed_group_column(&[0, 2])
+            .expect("all-valid Float64 source must retain its native buffer");
+        assert_eq!(typed.as_f64_slice(), Some(&[1.5, 3.25][..]));
+
+        let summed = resample.sum()?;
+        assert_eq!(
+            summed.index().labels(),
+            &[
+                IndexLabel::Utf8("east, 2024-01-31".into()),
+                IndexLabel::Utf8("east, 2024-02-29".into()),
+                IndexLabel::Utf8("west, 2024-01-31".into()),
+            ]
+        );
+        assert_eq!(
+            summed.values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Float64(3.25),
+                Scalar::Float64(-2.0),
+            ]
+        );
+
+        // Planted negative: a globally nullable column must not take the
+        // native route, even if this particular group's selected rows happen
+        // to be valid. Otherwise a later reducer could erase the source
+        // validity contract while gathering the raw values.
+        let nullable = Series::from_values(
+            "sales",
+            index,
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.25),
+            ],
+        )?;
+        let nullable_grouped = nullable.groupby(&keys)?;
+        assert!(
+            nullable_grouped
+                .resample("M")
+                .typed_group_column(&[0, 2])
+                .is_none(),
+            "nullable source values must retain the Scalar fallback"
         );
 
         Ok(())
@@ -165446,6 +166297,67 @@ mod tests {
         assert_eq!(
             result.values()[0],
             Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY - 12 * Timedelta::NANOS_PER_HOUR)
+        );
+    }
+
+    #[test]
+    fn td_add_sub_strict_raise_and_hardened_recovers_t7ht2() {
+        let max = Series::from_values(
+            "left",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(i64::MAX)],
+        )
+        .unwrap();
+        let one =
+            Series::from_values("right", vec![0_i64.into()], vec![Scalar::Timedelta64(1)]).unwrap();
+
+        let add_error = max.td_add(&one).expect_err("strict add must raise");
+        assert!(
+            add_error.to_string().contains("OverflowError"),
+            "strict add must retain pandas' OverflowError class: {add_error}"
+        );
+
+        let min_plus_one = Series::from_values(
+            "left",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(i64::MIN + 1)],
+        )
+        .unwrap();
+        let two =
+            Series::from_values("right", vec![0_i64.into()], vec![Scalar::Timedelta64(2)]).unwrap();
+        let sub_error = min_plus_one
+            .td_sub(&two)
+            .expect_err("strict sub must raise");
+        assert!(
+            sub_error.to_string().contains("OverflowError"),
+            "strict sub must retain pandas' OverflowError class: {sub_error}"
+        );
+
+        let recovered = max
+            .td_add_with_policy(&one, &RuntimePolicy::hardened(None))
+            .expect("hardened addition recovers rather than raising");
+        assert_eq!(
+            recovered.values(),
+            &[Scalar::Timedelta64(Timedelta::NAT)],
+            "the overflowing lane recovers to NaT"
+        );
+    }
+
+    #[test]
+    fn td_add_strict_preserves_nat_propagation_t7ht2() {
+        let nat = Series::from_values(
+            "left",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(Timedelta::NAT)],
+        )
+        .unwrap();
+        let one =
+            Series::from_values("right", vec![0_i64.into()], vec![Scalar::Timedelta64(1)]).unwrap();
+
+        assert_eq!(
+            nat.td_add(&one).unwrap().values(),
+            &[Scalar::Timedelta64(Timedelta::NAT)],
+            "NaT propagation is not an overflow and must not raise in strict mode"
         );
     }
 
@@ -184743,6 +185655,54 @@ mod tests {
 
     #[cfg(feature = "lazy-transpose-view")]
     #[test]
+    fn dataframe_lazy_transpose_moves_typed_f64_rows_l4vzc() {
+        let mut finite_columns = BTreeMap::new();
+        finite_columns.insert(
+            "left".to_owned(),
+            Column::from_f64_values(vec![1.5, 2.5]),
+        );
+        finite_columns.insert(
+            "right".to_owned(),
+            Column::from_f64_values(vec![10.5, 20.5]),
+        );
+        let finite = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 2),
+            finite_columns,
+            vec!["left".to_owned(), "right".to_owned()],
+        )
+        .unwrap();
+        let finite_view = finite.transpose_view().unwrap().expect("typed view");
+        assert_eq!(
+            finite_view.column(1).unwrap().as_f64_slice(),
+            Some([2.5, 20.5].as_slice())
+        );
+
+        // Negative: canonical Float64(NaN) remains missing when the owned
+        // constructor takes its NaN fallback; it must not become all-valid.
+        let mut nan_columns = BTreeMap::new();
+        nan_columns.insert(
+            "left".to_owned(),
+            Column::from_f64_values(vec![1.0, f64::NAN]),
+        );
+        nan_columns.insert(
+            "right".to_owned(),
+            Column::from_f64_values(vec![3.0, 4.0]),
+        );
+        let nan_frame = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 2),
+            nan_columns,
+            vec!["left".to_owned(), "right".to_owned()],
+        )
+        .unwrap();
+        let nan_view = nan_frame.transpose_view().unwrap().expect("typed view");
+        let nan_row = nan_view.column(1).unwrap();
+        assert!(matches!(nan_row.values()[0], Scalar::Float64(value) if value.is_nan()));
+        assert!(!nan_row.validity().get(0));
+        assert_eq!(nan_row.values()[1], Scalar::Float64(4.0));
+    }
+
+    #[cfg(feature = "lazy-transpose-view")]
+    #[test]
     fn dataframe_lazy_transpose_slot_key_resolution_is_canonical_cod_fp() {
         let position = LazyDataFrameColumns::homogeneous_transpose_column_position;
 
@@ -200586,6 +201546,123 @@ mod sgb_rolling_group_parallel_u5cg4 {
             "one group must stay serial however large the frame — there is nothing              to split"
         );
     }
+
+    #[test]
+    fn dense_typed_grouped_sum_mean_matches_generic_and_rejects_bool_key_vw0uu() {
+        let index = Index::new((0_i64..6).map(IndexLabel::Int64).collect());
+        let values = Series::new(
+            "v",
+            index.clone(),
+            Column::from_i64_values(vec![1, 10, 3, 20, 5, 30]),
+        )
+        .expect("typed values");
+        // First-seen order is 2, 1, while grouped rolling's public output is
+        // sorted by key: [1's source rows, then 2's source rows].  This pins
+        // both the dense direct-address route and its final group-order gather.
+        let dense_keys = Series::new(
+            "k",
+            index.clone(),
+            Column::from_i64_values(vec![2, 1, 2, 1, 2, 1]),
+        )
+        .expect("dense keys");
+        let grouped = values.groupby(&dense_keys).expect("groupby");
+        let rolling = grouped.rolling(2);
+
+        let direct_sum = rolling
+            .try_dense_grouped_sum_mean(false)
+            .expect("typed Int64 key and values must take dense route")
+            .expect("dense sum");
+        let generic_sum = rolling
+            .apply_grouped_rolling(|series, window, min_periods| {
+                series.rolling(window, Some(min_periods)).sum()
+            })
+            .expect("generic sum");
+        let direct_mean = rolling
+            .try_dense_grouped_sum_mean(true)
+            .expect("typed Int64 key and values must take dense route")
+            .expect("dense mean");
+        let generic_mean = rolling
+            .apply_grouped_rolling(|series, window, min_periods| {
+                series.rolling(window, Some(min_periods)).mean()
+            })
+            .expect("generic mean");
+
+        assert_eq!(
+            bits_and_validity(&direct_sum),
+            bits_and_validity(&generic_sum)
+        );
+        assert_eq!(
+            bits_and_validity(&direct_mean),
+            bits_and_validity(&generic_mean)
+        );
+        assert_eq!(
+            direct_sum.index().labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(5),
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(4),
+            ],
+            "dense output must retain source order inside sorted groups"
+        );
+
+        // Planted negative: Bool keys are deliberately outside
+        // `dense_group_ids`; accepting them here would silently substitute a
+        // different grouping representation instead of taking the established
+        // generic route.
+        let bool_keys = Series::new(
+            "k",
+            index,
+            Column::from_bool_values(vec![true, false, true, false, true, false]),
+        )
+        .expect("bool keys");
+        let bool_grouped = values.groupby(&bool_keys).expect("bool groupby");
+        assert!(
+            bool_grouped
+                .rolling(2)
+                .try_dense_grouped_sum_mean(false)
+                .is_none(),
+            "Bool keys must stay on the generic grouped-rolling route"
+        );
+    }
+
+    #[test]
+    fn dense_grouped_rolling_csr_matches_generic_for_uneven_float_groups_u5cg4() {
+        let index = Index::new((0_i64..9).map(IndexLabel::Int64).collect());
+        let values = Series::new(
+            "v",
+            index.clone(),
+            Column::from_f64_values(vec![1.5, -2.0, 3.25, 4.0, 5.5, -6.0, 7.75, 8.0, 9.5]),
+        )
+        .expect("typed Float64 values");
+        // Group sizes are 5, 2 and 2, and the values are deliberately
+        // interleaved. That forces the count/prefix/scatter layout to advance
+        // distinct write offsets rather than accidentally behaving like a
+        // single contiguous group.
+        let keys = Series::new(
+            "k",
+            index,
+            Column::from_i64_values(vec![7, -2, 7, 1_000, 7, -2, 7, 7, 1_000]),
+        )
+        .expect("dense keys");
+        let grouped = values.groupby(&keys).expect("groupby");
+        let rolling = grouped.rolling(2);
+
+        let direct = rolling
+            .try_dense_grouped_sum_mean(false)
+            .expect("typed uneven groups must take CSR route")
+            .expect("dense sum");
+        let generic = rolling
+            .apply_grouped_rolling(|series, window, min_periods| {
+                series.rolling(window, Some(min_periods)).sum()
+            })
+            .expect("generic sum");
+
+        assert_eq!(bits_and_validity(&direct), bits_and_validity(&generic));
+        assert_eq!(direct.index().labels(), generic.index().labels());
+    }
 }
 
 #[cfg(test)]
@@ -201734,6 +202811,32 @@ mod dot_column_parallel_materialization_1hjgz {
         let b = frame("b", 3, 0, 1.0);
         let out = a.dot(&b).expect("dot with no output columns");
         assert_eq!(out.column_names().len(), 0);
+    }
+
+    #[test]
+    fn typed_dot_output_keeps_generated_nan_missing_mti15() {
+        // A tempting no-scan constructor would expose the final NaN as a
+        // present Float64. The finite-input fast path can still generate one:
+        // +inf and -inf are produced by the two products and then cancel.
+        let a = frame("a", 1, 2, 6.0);
+        let b = DataFrame::from_series(vec![
+            super::Series::from_values(
+                "out",
+                vec!["a0".into(), "a1".into()],
+                vec![
+                    fp_types::Scalar::Float64(f64::MAX),
+                    fp_types::Scalar::Float64(-f64::MAX),
+                ],
+            )
+            .expect("right-hand column"),
+        ])
+        .expect("right-hand frame");
+
+        let out = a.dot(&b).expect("dot");
+        assert!(
+            out.column("out").expect("output column").values()[0].is_missing(),
+            "generated NaN must remain missing, not take the all-valid owned shortcut"
+        );
     }
 }
 
@@ -203024,7 +204127,8 @@ mod single_column_sort_typed_slice_uza04 {
 
     use super::{
         Column, DataFrame, Index, Scalar, typed_dense_sort_order,
-        typed_dense_values_already_sorted, typed_slice_already_sorted, typed_slice_sort_order,
+        typed_dense_values_already_sorted, typed_nullable_f64_sort_order,
+        typed_slice_already_sorted, typed_slice_sort_order,
     };
 
     /// Every shape below is asserted in BOTH directions because each direction
@@ -203095,6 +204199,72 @@ mod single_column_sort_typed_slice_uza04 {
         assert_eq!(ascending, vec![3, 1, 4, 0, 2, 5]);
         assert_eq!(descending, vec![5, 0, 2, 1, 4, 3]);
         assert_ne!(descending, vec![5, 2, 0, 4, 1, 3]);
+    }
+
+    #[test]
+    fn typed_nullable_f64_radix_keeps_nan_last_and_ties_stable_92n1x() {
+        // Planted negative: a descending implementation that reverses equal
+        // keys, or moves NaNs to the front, must not be accepted.
+        let column =
+            Column::from_f64_values(vec![2.0, f64::NAN, -0.0, 2.0, f64::NAN, f64::NEG_INFINITY]);
+        let ascending = typed_nullable_f64_sort_order(&column, true).expect("typed f64 route");
+        let descending = typed_nullable_f64_sort_order(&column, false).expect("typed f64 route");
+        assert_eq!(ascending, vec![5, 2, 0, 3, 1, 4]);
+        assert_eq!(descending, vec![0, 3, 2, 5, 1, 4]);
+        assert_ne!(descending, vec![3, 0, 2, 5, 4, 1]);
+    }
+
+    #[test]
+    fn nullable_f64_sort_values_routes_nan_last_radix_92n1x() {
+        let key = Column::from_f64_values(vec![2.0, f64::NAN, -0.0, 2.0, f64::NAN, -1.0]);
+        let payload = Column::from_i64_values(vec![0, 1, 2, 3, 4, 5]);
+        let frame = DataFrame::new_with_column_order(
+            Index::new((0_i64..6).map(Into::into).collect()),
+            std::collections::BTreeMap::from([
+                ("k".to_owned(), key),
+                ("payload".to_owned(), payload),
+            ]),
+            vec!["k".to_owned(), "payload".to_owned()],
+        )
+        .expect("frame");
+        let descending = frame.sort_values("k", false).expect("sort descending");
+        let payload = descending.column("payload").expect("payload").values();
+        let got: Vec<i64> = payload
+            .iter()
+            .map(|value| match value {
+                Scalar::Int64(value) => *value,
+                other => panic!("payload must remain Int64, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(got, vec![0, 3, 2, 5, 1, 4]);
+        // Planted negative: descending ties and the NaN suffix both remain stable.
+        assert_ne!(got, vec![3, 0, 2, 5, 4, 1]);
+    }
+
+    #[test]
+    fn typed_contiguous_utf8_radix_keeps_descending_ties_stable_92n1x() {
+        // This is deliberately a contiguous Utf8 backing, not Column::from_values:
+        // the typed arm must read byte spans without first constructing Scalars.
+        let values = ["b", "a", "b", "", "aa"];
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::with_capacity(values.len() + 1);
+        offsets.push(0);
+        for value in values {
+            bytes.extend_from_slice(value.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let column = Column::from_utf8_values_with_validity(
+            bytes,
+            offsets,
+            fp_columnar::ValidityMask::all_valid(values.len()),
+        );
+        assert!(column.as_utf8_contiguous().is_some());
+        let ascending = typed_slice_sort_order(&column, true).expect("typed Utf8 route");
+        let descending = typed_slice_sort_order(&column, false).expect("typed Utf8 route");
+        assert_eq!(ascending, vec![3, 1, 4, 0, 2]);
+        assert_eq!(descending, vec![0, 2, 4, 1, 3]);
+        // Planted negative: tie order must not reverse in descending order.
+        assert_ne!(descending, vec![2, 0, 4, 1, 3]);
     }
 
     /// NON-VACUITY. Every assertion above would also pass if the typed route
@@ -203465,6 +204635,110 @@ mod typed_construction_stays_unboxed_uza04 {
             sorted.column("i").expect("payload").as_i64_slice(),
             Some(&[10, 15, 30, 40][..]),
             "and the permutation is the one the sort promised"
+        );
+    }
+
+    /// `filter_bool` end to end, on BOTH of its row-selection routes.
+    ///
+    /// br-frankenpandas-uza04. `DataFrame::loc_bool` has two: a mask whose kept
+    /// positions form an arithmetic progression takes the affine-certificate
+    /// path, and anything else collects positions and gathers. The typed
+    /// contract has to hold on both, or "filter_bool is routed through typed
+    /// storage" is true only for the shape a test happened to pick.
+    ///
+    /// This is the op the campaign kept calling a 0.085x gap; measured against
+    /// live pandas 2.2.3 it is 4.444x FASTER at 10k (certified, effect CI
+    /// [4.27745, 4.54052], A/A nulls 0.99268 / 1.01161). These assertions pin
+    /// the representation that result rests on, so a later change cannot
+    /// quietly put the 32 B/elem spine back under it while every value-level
+    /// test stays green.
+    #[test]
+    fn filter_bool_keeps_both_routes_off_the_spine_uza04() {
+        // SCATTERED route: kept positions 0, 2, 3 are not an arithmetic
+        // progression, so this cannot take the affine certificate.
+        let frame = typed_frame();
+        let scattered = frame
+            .loc_bool(&[true, false, true, true])
+            .expect("scattered mask");
+        assert_no_column_materialized(&scattered, "loc_bool (scattered mask)");
+        assert_no_column_materialized(&frame, "loc_bool (input frame, scattered)");
+        assert_eq!(
+            scattered.column("i").expect("payload").as_i64_slice(),
+            Some(&[30, 40, 15][..]),
+            "scattered filter must keep the surviving rows in input order"
+        );
+
+        // AFFINE route: every other row is a stride-2 progression.
+        let frame = typed_frame();
+        let affine = frame
+            .loc_bool(&[true, false, true, false])
+            .expect("affine mask");
+        assert_no_column_materialized(&affine, "loc_bool (affine mask)");
+        assert_eq!(
+            affine.column("i").expect("payload").as_i64_slice(),
+            Some(&[30, 40][..]),
+            "affine filter must select the stride-2 rows"
+        );
+
+        // Degenerate masks are their own routes: all-true is the whole frame,
+        // all-false is an empty one, and neither may box a Scalar on the way.
+        let frame = typed_frame();
+        let everything = frame.loc_bool(&[true; 4]).expect("all-true mask");
+        assert_no_column_materialized(&everything, "loc_bool (all-true mask)");
+        assert_eq!(everything.shape(), (4, 2));
+        let nothing = frame.loc_bool(&[false; 4]).expect("all-false mask");
+        assert_no_column_materialized(&nothing, "loc_bool (all-false mask)");
+        assert_eq!(nothing.shape(), (0, 2));
+    }
+
+    /// The mixed-dtype negative case for the FILTER path specifically.
+    ///
+    /// A frame carrying one eager mixed column must not drag its typed
+    /// neighbours onto the spine when filtered — the eager column stays eager
+    /// (it has nowhere else to be), and every typed column stays typed.
+    #[test]
+    fn filtering_a_mixed_frame_spares_its_typed_columns_uza04() {
+        let mixed = Column::from_values(vec![
+            Scalar::Int64(1),
+            Scalar::Utf8("two".to_owned()),
+            Scalar::Float64(3.0),
+            Scalar::Int64(4),
+        ])
+        .expect("mixed column");
+        let index = Index::new_known_unique_int64_unit_range(0, 4);
+        let frame = DataFrame::new_with_column_order(
+            index,
+            std::collections::BTreeMap::from([
+                ("mixed".to_owned(), mixed),
+                (
+                    "typed".to_owned(),
+                    Column::from_f64_values(vec![1.0, 2.0, 3.0, 4.0]),
+                ),
+            ]),
+            vec!["mixed".to_owned(), "typed".to_owned()],
+        )
+        .expect("mixed frame");
+
+        let filtered = frame
+            .loc_bool(&[true, false, true, true])
+            .expect("filter mixed frame");
+        assert!(
+            !filtered
+                .column("typed")
+                .expect("typed column")
+                .scalar_cache_is_materialized(),
+            "the typed column must survive the filter still typed, even sharing a \
+             frame with an eager one"
+        );
+        assert_eq!(
+            filtered.column("typed").expect("typed").as_f64_slice(),
+            Some(&[1.0, 3.0, 4.0][..])
+        );
+        // And the eager column is still correct, which is the half that would
+        // break loudly if the two representations were ever confused.
+        assert_eq!(
+            filtered.column("mixed").expect("mixed").values(),
+            &[Scalar::Int64(1), Scalar::Float64(3.0), Scalar::Int64(4),]
         );
     }
 }
