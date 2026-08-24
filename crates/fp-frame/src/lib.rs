@@ -38653,10 +38653,14 @@ impl SeriesGroupBy<'_> {
     /// boolean AND/OR is order-independent, first-seen group order matches
     /// `build_groups`, the typed slice is all-valid (f64 no-NaN) so the truthy
     /// predicate is exactly `bool` / `!=0` / `!=0.0`. `None` (→ `agg_scalar`) for
-    /// non-typed values or non-dense Int64 keys.
+    /// non-typed values or a key `dense_group_ids` cannot number.
+    ///
+    /// br-frankenpandas-uza04: the key gate used to be `as_i64_slice`, so a Utf8
+    /// key returned `None` on the first line and all/any fell to `agg_scalar` —
+    /// hash grouping plus a per-group index `Vec`, the one cost every sibling
+    /// reduction skips. That is why `groupby_all_str @1M` ran 30.5ms while
+    /// `min_str`/`max_str`/`prod_str` on the SAME key ran 2.2-2.3ms.
     fn group_bool_reduce_dense(&self, want_all: bool) -> Option<Result<Series, FrameError>> {
-        let keys = self.by.column.as_i64_slice()?;
-        let n = keys.len();
         let bool_d = self.series.column.as_bool_slice();
         let i64_d = if bool_d.is_none() {
             self.series.column.as_i64_slice()
@@ -38668,17 +38672,33 @@ impl SeriesGroupBy<'_> {
         } else {
             None
         };
+        if bool_d.is_none() && i64_d.is_none() && f64_d.is_none() {
+            return None;
+        }
+        // The KEY is grouped by the shared dense primitive rather than by a
+        // hand-rolled Int64 histogram. `dense_group_ids` covers the bounded-Int64
+        // histogram this used to inline AND the arms it used to reject outright —
+        // wide/sparse Int64, contiguous Utf8, scalar-backed Utf8, Datetime64,
+        // Timedelta64 — every one of them numbering gids in the same FIRST-SEEN
+        // order as `build_groups`, which is exactly the order the `agg_scalar`
+        // fallback below emits. So widening the gate cannot reorder a result: it
+        // only decides which of two paths computes the identical Series. It is
+        // also memoized on the groupby, so a second reduction over the same keys
+        // pays nothing.
+        let (gids, ngroups) = self.dense_group_ids()?;
+        let n = gids.len();
         let len_ok = bool_d.is_none_or(|d| d.len() == n)
             && i64_d.is_none_or(|d| d.len() == n)
             && f64_d.is_none_or(|d| d.len() == n);
-        if (bool_d.is_none() && i64_d.is_none() && f64_d.is_none()) || !len_ok {
+        if !len_ok {
             return None;
         }
-        let (min, range) = i64_dense_histogram_range(keys)?;
-        let mut gid_of = vec![usize::MAX; range];
-        let mut key_of_gid: Vec<i64> = Vec::new();
-        let mut acc: Vec<bool> = Vec::new();
-        for (row, &k) in keys.iter().enumerate() {
+        let labels = self.dense_group_labels(&gids, ngroups)?;
+        // Seeding with `want_all` is the identity of the fold it feeds: `true &&
+        // t == t` for all, `false || t == t` for any, so the first row of a group
+        // still decides that group's opening value exactly as the old push did.
+        let mut acc = vec![want_all; ngroups];
+        for (row, &g) in gids.iter().enumerate() {
             let truthy = if let Some(d) = bool_d {
                 d[row]
             } else if let Some(d) = i64_d {
@@ -38686,19 +38706,12 @@ impl SeriesGroupBy<'_> {
             } else {
                 f64_d.unwrap()[row] != 0.0
             };
-            let off = (k as i128 - min as i128) as usize;
-            let gid = gid_of[off];
-            if gid == usize::MAX {
-                gid_of[off] = key_of_gid.len();
-                key_of_gid.push(k);
-                acc.push(truthy);
-            } else if want_all {
-                acc[gid] = acc[gid] && truthy;
+            if want_all {
+                acc[g] = acc[g] && truthy;
             } else {
-                acc[gid] = acc[gid] || truthy;
+                acc[g] = acc[g] || truthy;
             }
         }
-        let labels: Vec<IndexLabel> = key_of_gid.iter().map(|&k| IndexLabel::Int64(k)).collect();
         let values: Vec<Scalar> = acc.iter().map(|&b| Scalar::Bool(b)).collect();
         let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
@@ -205697,5 +205710,248 @@ mod mixed_dense_group_order_uza04 {
             })
             .collect();
         assert_eq!(counts, vec![2, 1, 1, 1, 1]);
+    }
+}
+
+#[cfg(test)]
+mod group_bool_reduce_utf8_key_uza04 {
+    //! `SeriesGroupBy::all`/`any` reduce a Utf8-keyed group densely, in the same
+    //! FIRST-SEEN group order the `agg_scalar` fallback produced.
+    //!
+    //! br-frankenpandas-uza04. `group_bool_reduce_dense` opened with
+    //! `self.by.column.as_i64_slice()?`, so ANY Utf8 key returned `None` on the
+    //! first line and all/any fell back to `agg_scalar` — hash grouping plus one
+    //! heap `Vec<usize>` per group. That is the cost every sibling reduction on
+    //! the same key already skips, and it is why `groupby_all_str @1M` measured
+    //! 30.5ms against 2.2-2.3ms for `min_str`/`max_str`/`prod_str`.
+    //!
+    //! THE FAILURE MODE THESE TESTS EXIST FOR: the widened gate admits key types
+    //! whose gid numbering is produced by a DIFFERENT primitive than the Int64
+    //! histogram that used to be inlined here. If any of them numbered groups in
+    //! sorted — rather than first-seen — order, every group's flag would still be
+    //! individually correct while the SERIES was silently permuted. Aggregates
+    //! alone cannot see that, so each test asserts the LABEL SEQUENCE and pairs
+    //! every label with its own flag.
+
+    use fp_index::IndexLabel;
+    use fp_types::Scalar;
+
+    use super::{FrameError, Series};
+
+    /// (label, flag) pairs in emitted order — a permutation cannot survive this.
+    fn pairs(s: &Series) -> Vec<(String, bool)> {
+        let values = s.column().values();
+        s.index()
+            .labels()
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let flag = match &values[i] {
+                    Scalar::Bool(b) => *b,
+                    other => panic!("bool reduction produced {other:?}"),
+                };
+                (l.to_string(), flag)
+            })
+            .collect()
+    }
+
+    fn utf8_keys(keys: &[&str]) -> Result<Series, FrameError> {
+        Series::from_values(
+            "key",
+            (0_i64..keys.len() as i64).map(Into::into).collect(),
+            keys.iter().map(|s| Scalar::Utf8((*s).into())).collect(),
+        )
+    }
+
+    fn f64_values(v: &[f64]) -> Result<Series, FrameError> {
+        Series::from_values(
+            "v",
+            (0_i64..v.len() as i64).map(Into::into).collect(),
+            v.iter().map(|&x| Scalar::Float64(x)).collect(),
+        )
+    }
+
+    /// The keys are deliberately NOT in sorted order: "b" appears before "a", so
+    /// a sorted-order regression flips the two rows and this fails.
+    #[test]
+    fn utf8_key_all_keeps_first_seen_group_order() -> Result<(), FrameError> {
+        let keys = utf8_keys(&["b", "a", "b", "a"])?;
+        // group b: 1.0, 1.0 -> all true.   group a: 1.0, 0.0 -> all false.
+        let values = f64_values(&[1.0, 1.0, 1.0, 0.0])?;
+        let out = values.groupby(&keys)?.all()?;
+        assert_eq!(
+            pairs(&out),
+            vec![("b".to_string(), true), ("a".to_string(), false)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn utf8_key_any_keeps_first_seen_group_order() -> Result<(), FrameError> {
+        let keys = utf8_keys(&["b", "a", "b", "a"])?;
+        // group b: 0.0, 0.0 -> any false.  group a: 0.0, 1.0 -> any true.
+        let values = f64_values(&[0.0, 0.0, 0.0, 1.0])?;
+        let out = values.groupby(&keys)?.any()?;
+        assert_eq!(
+            pairs(&out),
+            vec![("b".to_string(), false), ("a".to_string(), true)]
+        );
+        Ok(())
+    }
+
+    /// A singleton group must take its flag from its ONE row, and a group whose
+    /// only truthy row is last must still be caught — this is the case a fold
+    /// seeded with the wrong identity gets wrong.
+    #[test]
+    fn utf8_key_singleton_and_last_row_decides() -> Result<(), FrameError> {
+        let keys = utf8_keys(&["z", "y", "y", "x"])?;
+        let values = f64_values(&[0.0, 0.0, 3.0, 7.0])?;
+        assert_eq!(
+            pairs(&values.groupby(&keys)?.any()?),
+            vec![
+                ("z".to_string(), false),
+                ("y".to_string(), true),
+                ("x".to_string(), true),
+            ]
+        );
+        assert_eq!(
+            pairs(&values.groupby(&keys)?.all()?),
+            vec![
+                ("z".to_string(), false),
+                ("y".to_string(), false),
+                ("x".to_string(), true),
+            ]
+        );
+        Ok(())
+    }
+
+    /// Int64 values reduce by `!= 0` and Bool values by identity, on the same
+    /// Utf8 key — the two truthiness arms the f64 tests above do not cover.
+    #[test]
+    fn utf8_key_int64_and_bool_values() -> Result<(), FrameError> {
+        let keys = utf8_keys(&["p", "q", "p", "q"])?;
+        let ints = Series::from_values(
+            "v",
+            (0_i64..4).map(Into::into).collect(),
+            vec![
+                Scalar::Int64(5),
+                Scalar::Int64(0),
+                Scalar::Int64(-1),
+                Scalar::Int64(0),
+            ],
+        )?;
+        assert_eq!(
+            pairs(&ints.groupby(&keys)?.all()?),
+            vec![("p".to_string(), true), ("q".to_string(), false)]
+        );
+
+        let bools = Series::from_values(
+            "v",
+            (0_i64..4).map(Into::into).collect(),
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ],
+        )?;
+        assert_eq!(
+            pairs(&bools.groupby(&keys)?.any()?),
+            vec![("p".to_string(), true), ("q".to_string(), false)]
+        );
+        Ok(())
+    }
+
+    /// The Int64-key arm this function always had must be untouched by the
+    /// widened gate — same first-seen order, keys emitted unsorted.
+    #[test]
+    fn int64_key_arm_is_unchanged() -> Result<(), FrameError> {
+        let keys = Series::from_values(
+            "key",
+            (0_i64..4).map(Into::into).collect(),
+            vec![
+                Scalar::Int64(7),
+                Scalar::Int64(3),
+                Scalar::Int64(7),
+                Scalar::Int64(3),
+            ],
+        )?;
+        let values = f64_values(&[1.0, 1.0, 1.0, 0.0])?;
+        assert_eq!(
+            pairs(&values.groupby(&keys)?.all()?),
+            vec![("7".to_string(), true), ("3".to_string(), false)]
+        );
+        Ok(())
+    }
+
+    /// EQUIVALENCE WITNESS: over a 600-row key/value pattern the dense reduction
+    /// must equal an independently computed first-seen reference. Built by hand
+    /// from the inputs rather than by calling another FrameError path, so a bug
+    /// shared by both paths cannot cancel out.
+    #[test]
+    fn utf8_key_matches_independent_reference_at_scale() -> Result<(), FrameError> {
+        let n = 600_usize;
+        let key_names: Vec<String> = (0..n).map(|i| format!("g{:03}", (i * 7) % 37)).collect();
+        // Every third group is forced all-truthy so `all` yields BOTH outcomes;
+        // with a plain `(i*13)%5` every group caught a zero and the `all`
+        // reference was uniformly false, which the guard at the end rejects.
+        let vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if (i * 7) % 37 % 3 == 0 {
+                    1.0
+                } else {
+                    ((i * 13) % 5) as f64
+                }
+            })
+            .collect();
+
+        let keys = Series::from_values(
+            "key",
+            (0_i64..n as i64).map(Into::into).collect(),
+            key_names.iter().map(|s| Scalar::Utf8(s.into())).collect(),
+        )?;
+        let values = f64_values(&vals)?;
+
+        let mut order: Vec<String> = Vec::new();
+        let mut all_ref: Vec<bool> = Vec::new();
+        let mut any_ref: Vec<bool> = Vec::new();
+        for (name, &v) in key_names.iter().zip(vals.iter()) {
+            let truthy = v != 0.0;
+            match order.iter().position(|o| o == name) {
+                Some(g) => {
+                    all_ref[g] = all_ref[g] && truthy;
+                    any_ref[g] = any_ref[g] || truthy;
+                }
+                None => {
+                    order.push(name.clone());
+                    all_ref.push(truthy);
+                    any_ref.push(truthy);
+                }
+            }
+        }
+
+        let got_all = values.groupby(&keys)?.all()?;
+        let got_any = values.groupby(&keys)?.any()?;
+        assert_eq!(
+            pairs(&got_all),
+            order
+                .iter()
+                .cloned()
+                .zip(all_ref.iter().copied())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            pairs(&got_any),
+            order
+                .iter()
+                .cloned()
+                .zip(any_ref.iter().copied())
+                .collect::<Vec<_>>()
+        );
+        // Non-degenerate: both outcomes present, so neither assert is vacuous.
+        assert!(all_ref.iter().any(|&b| b) && all_ref.iter().any(|&b| !b));
+        assert!(any_ref.iter().any(|&b| b));
+        let _ = IndexLabel::Int64(0);
+        Ok(())
     }
 }
