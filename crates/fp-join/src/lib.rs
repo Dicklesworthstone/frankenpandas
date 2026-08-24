@@ -1139,9 +1139,6 @@ fn validate_merge_cardinality(
     left_keys: &[CompositeJoinKey],
     right_keys: &[CompositeJoinKey],
 ) -> Result<(), JoinError> {
-    let left_has_duplicates = has_duplicate_composite_keys(left_keys);
-    let right_has_duplicates = has_duplicate_composite_keys(right_keys);
-
     let fail = |message: &str| {
         Err(JoinError::Frame(FrameError::CompatibilityRejected(
             message.to_owned(),
@@ -1150,20 +1147,23 @@ fn validate_merge_cardinality(
 
     match validate_mode {
         MergeValidateMode::OneToOne => {
-            if left_has_duplicates {
+            // Preserve pandas's left-first failure precedence when both sides
+            // duplicate while avoiding an unnecessary right-side scan on a
+            // left-side failure.
+            if has_duplicate_composite_keys(left_keys) {
                 return fail("merge validate='one_to_one' failed: left keys are not unique");
             }
-            if right_has_duplicates {
+            if has_duplicate_composite_keys(right_keys) {
                 return fail("merge validate='one_to_one' failed: right keys are not unique");
             }
         }
         MergeValidateMode::OneToMany => {
-            if left_has_duplicates {
+            if has_duplicate_composite_keys(left_keys) {
                 return fail("merge validate='one_to_many' failed: left keys are not unique");
             }
         }
         MergeValidateMode::ManyToOne => {
-            if right_has_duplicates {
+            if has_duplicate_composite_keys(right_keys) {
                 return fail("merge validate='many_to_one' failed: right keys are not unique");
             }
         }
@@ -1175,6 +1175,93 @@ fn validate_merge_cardinality(
 
 fn validate_mode_allows_fast_positions(validate_mode: Option<MergeValidateMode>) -> bool {
     matches!(validate_mode, None | Some(MergeValidateMode::ManyToMany))
+}
+
+/// Duplicate detection straight off a single all-valid `Int64` key buffer.
+///
+/// br-frankenpandas-uza04. `has_duplicate_composite_keys` needs a
+/// `Vec<CompositeJoinKey>`, which `collect_composite_keys` builds by reading
+/// `column.values()[row]` — the 32 B/elem `Scalar` spine plus a `SmallVec` per
+/// row. For one all-valid Int64 column the same question is an `FxHashSet<i64>`
+/// over the contiguous buffer, pre-sized so the build side never rehashes.
+///
+/// Returns `None` when this shape does not apply (more than one key column, a
+/// non-`Int64` dtype, or any missing value — `as_i64_slice` answers only for
+/// all-valid `DType::Int64`), and the caller keeps the generic path, which is
+/// also where null-key duplicate semantics stay owned.
+fn typed_single_int64_key_has_duplicates(key_columns: &[&Column]) -> Option<bool> {
+    let [column] = key_columns else {
+        return None;
+    };
+    let data = column.as_i64_slice()?;
+    let mut seen = FxHashSet::with_capacity_and_hasher(data.len(), Default::default());
+    Some(!data.iter().all(|&key| seen.insert(key)))
+}
+
+/// Typed sibling of [`validate_merge_cardinality`]: enforce the mode off raw
+/// key buffers, and report whether it was able to.
+///
+/// `Ok(true)` means the mode was fully enforced here and PASSED, so the caller
+/// may use the fast positions paths. `Ok(false)` means this shape is not
+/// covered and the generic path must still run `validate_merge_cardinality`.
+/// `Err` is a real validation failure and carries the SAME message the generic
+/// checker produces, because the two must be indistinguishable to a caller.
+///
+/// Precedence matters and is preserved: `OneToOne` reports a left-side failure
+/// before looking at the right, exactly as the generic checker does. It also
+/// declines outright unless BOTH sides are typed, so it can never report a
+/// right-side failure that the generic checker would have pre-empted with a
+/// left-side one it could not see.
+fn typed_validate_merge_cardinality(
+    validate_mode: MergeValidateMode,
+    left_key_columns: &[&Column],
+    right_key_columns: &[&Column],
+) -> Result<bool, JoinError> {
+    let fail = |message: &str| {
+        Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            message.to_owned(),
+        )))
+    };
+
+    match validate_mode {
+        MergeValidateMode::ManyToMany => Ok(true),
+        MergeValidateMode::OneToMany => {
+            match typed_single_int64_key_has_duplicates(left_key_columns) {
+                Some(true) => fail("merge validate='one_to_many' failed: left keys are not unique"),
+                Some(false) => Ok(true),
+                None => Ok(false),
+            }
+        }
+        MergeValidateMode::ManyToOne => {
+            match typed_single_int64_key_has_duplicates(right_key_columns) {
+                Some(true) => {
+                    fail("merge validate='many_to_one' failed: right keys are not unique")
+                }
+                Some(false) => Ok(true),
+                None => Ok(false),
+            }
+        }
+        MergeValidateMode::OneToOne => {
+            // Both sides must be typed before deciding anything: a left-side
+            // failure outranks a right-side one, so answering from the right
+            // alone could surface the wrong message.
+            let Some(left_duplicated) = typed_single_int64_key_has_duplicates(left_key_columns)
+            else {
+                return Ok(false);
+            };
+            let Some(right_duplicated) = typed_single_int64_key_has_duplicates(right_key_columns)
+            else {
+                return Ok(false);
+            };
+            if left_duplicated {
+                return fail("merge validate='one_to_one' failed: left keys are not unique");
+            }
+            if right_duplicated {
+                return fail("merge validate='one_to_one' failed: right keys are not unique");
+            }
+            Ok(true)
+        }
+    }
 }
 
 fn reorder_vec_by_index<T: Clone>(values: &mut Vec<T>, order: &[usize]) {
@@ -9025,7 +9112,42 @@ pub fn merge_dataframes_on_with_options(
 
     let left_key_columns = collect_join_key_columns(left, left_on, "left")?;
     let right_key_columns = collect_join_key_columns(right, right_on, "right")?;
-    let validate_allows_fast_positions = validate_mode_allows_fast_positions(validate_mode);
+
+    // br-frankenpandas-uza04: settle `validate=` HERE, off the raw typed key
+    // buffer, instead of letting it drag the whole merge onto the generic
+    // Scalar path.
+    //
+    // `validate_merge_cardinality` is called in exactly ONE place — the generic
+    // `collect_composite_keys` branch at the bottom of this function — so
+    // `validate_mode_allows_fast_positions` had to return false for every
+    // enforcing mode purely to *route execution there*. The cost of asking for
+    // a cardinality guarantee was therefore the entire fast-path family:
+    // `dense_packed_int64_inner_positions`, `typed_wide_two_i64_key_positions`,
+    // `bounded_composite_multi_i64_key_positions`,
+    // `typed_wide_multi_i64_key_positions` and the single-key inner/left
+    // shortcuts, all disabled, plus a `Vec<CompositeJoinKey>` built by reading
+    // `column.values()[row]` — 32 B/elem of `Scalar` spine and a `SmallVec` per
+    // row — on both sides.
+    //
+    // A single all-valid Int64 key needs none of that: duplicate detection is
+    // an `FxHashSet<i64>` over `as_i64_slice`. When that check applies AND
+    // passes, the merge is free to take exactly the path it would have taken
+    // with no `validate=` at all, because a passing validation adds nothing to
+    // the output — it only decides whether the merge is allowed to happen.
+    //
+    // Semantics preserved exactly: same messages, same left-before-right
+    // precedence, same modes checked on the same sides. Moving the check
+    // earlier is unobservable because nothing between this point and the old
+    // call site can fail — every fast-path helper in between returns `Option`,
+    // never `Err`.
+    let typed_validation_settled = match validate_mode {
+        Some(mode) => {
+            typed_validate_merge_cardinality(mode, &left_key_columns, &right_key_columns)?
+        }
+        None => false,
+    };
+    let validate_allows_fast_positions =
+        validate_mode_allows_fast_positions(validate_mode) || typed_validation_settled;
 
     if matches!(join_type, JoinType::Inner)
         && left_on.len() == 1
@@ -9552,7 +9674,14 @@ pub fn merge_dataframes_on_with_options(
             // Convert key columns to hashable composite keys.
             let left_keys = collect_composite_keys(&left_key_columns);
             let right_keys = collect_composite_keys(&right_key_columns);
-            if let Some(validate_mode) = validate_mode {
+            // Skip when the typed checker above already enforced this mode
+            // (br-frankenpandas-uza04) — re-running it here would be a second
+            // full pass over both key sides for an answer already known. A
+            // shape the typed checker declined still lands here and is checked
+            // exactly as before.
+            if let Some(validate_mode) = validate_mode
+                && !typed_validation_settled
+            {
                 validate_merge_cardinality(validate_mode, &left_keys, &right_keys)?;
             }
 
@@ -18890,6 +19019,40 @@ mod tests {
     }
 
     #[test]
+    fn merge_validate_one_to_one_keeps_left_error_precedence_when_both_sides_duplicate() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("left_v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right frame");
+
+        let err = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect_err("one_to_one must reject duplicate left keys before right keys");
+        assert!(format!("{err}").contains("left keys are not unique"));
+    }
+
+    #[test]
     fn merge_validate_one_to_many_allows_duplicate_right_keys() {
         let left = DataFrame::from_dict(
             &["id", "left_v"],
@@ -20725,5 +20888,255 @@ mod tests {
                 "column {k} differs"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod typed_validate_cardinality_uza04 {
+    //! `validate=` must stop costing the whole fast-path family.
+    //!
+    //! br-frankenpandas-uza04. `validate_merge_cardinality` lives in exactly
+    //! one place — the generic `collect_composite_keys` branch — so
+    //! `validate_mode_allows_fast_positions` returned false for every enforcing
+    //! mode purely to route execution there. Asking for a cardinality guarantee
+    //! therefore disabled `dense_packed_int64_inner_positions`, the typed
+    //! two-key and multi-key position paths, and the single-key inner/left
+    //! shortcuts, and additionally built a `Vec<CompositeJoinKey>` off
+    //! `column.values()[row]` on both sides.
+    //!
+    //! `typed_validate_merge_cardinality` settles the common shape (one
+    //! all-valid Int64 key) off the raw buffer, so a PASSING validation lets
+    //! the merge take the same path it would have taken with no `validate=`.
+    //! These tests pin the two things that has to preserve: the rejections, and
+    //! the output.
+
+    use fp_columnar::Column;
+    use fp_frame::DataFrame;
+    use fp_index::Index;
+    use fp_types::{NullKind, Scalar};
+
+    use super::{
+        JoinType, MergeExecutionOptions, MergeValidateMode, merge_dataframes_on_with_options,
+        typed_single_int64_key_has_duplicates,
+    };
+
+    fn int_frame(name: &str, keys: Vec<i64>, payload: Vec<i64>) -> DataFrame {
+        let index = Index::new_known_unique_int64_unit_range(0, keys.len());
+        DataFrame::new_with_column_order(
+            index,
+            std::collections::BTreeMap::from([
+                ("id".to_owned(), Column::from_i64_values(keys)),
+                (name.to_owned(), Column::from_i64_values(payload)),
+            ]),
+            vec!["id".to_owned(), name.to_owned()],
+        )
+        .expect("typed int frame")
+    }
+
+    fn merge(
+        left: &DataFrame,
+        right: &DataFrame,
+        validate: Option<MergeValidateMode>,
+    ) -> Result<super::MergedDataFrame, super::JoinError> {
+        merge_dataframes_on_with_options(
+            left,
+            right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: validate,
+                ..MergeExecutionOptions::default()
+            },
+        )
+    }
+
+    /// THE DUPLICATE-KEY NEGATIVE CASE. The typed checker is now what rejects a
+    /// non-unique left key under `one_to_many`, so it has to reject with the
+    /// same message the generic checker produced — a caller cannot tell which
+    /// one ran.
+    #[test]
+    fn duplicate_left_keys_still_reject_under_one_to_many_uza04() {
+        let left = int_frame("left_v", vec![1, 2, 2, 3], vec![10, 20, 21, 30]);
+        let right = int_frame("right_v", vec![1, 2, 3], vec![100, 200, 300]);
+        let error = merge(&left, &right, Some(MergeValidateMode::OneToMany))
+            .expect_err("duplicate left keys must be rejected");
+        assert!(
+            format!("{error}")
+                .contains("merge validate='one_to_many' failed: left keys are not unique"),
+            "message must match the generic checker exactly, got: {error}"
+        );
+    }
+
+    #[test]
+    fn duplicate_right_keys_still_reject_under_many_to_one_uza04() {
+        let left = int_frame("left_v", vec![1, 2, 3], vec![10, 20, 30]);
+        let right = int_frame("right_v", vec![1, 2, 2], vec![100, 200, 201]);
+        let error = merge(&left, &right, Some(MergeValidateMode::ManyToOne))
+            .expect_err("duplicate right keys must be rejected");
+        assert!(
+            format!("{error}")
+                .contains("merge validate='many_to_one' failed: right keys are not unique"),
+            "message must match the generic checker exactly, got: {error}"
+        );
+    }
+
+    /// PRECEDENCE. With BOTH sides duplicated under `one_to_one`, pandas — and
+    /// the generic checker — report the LEFT failure. The typed checker must
+    /// not answer from whichever side it happened to inspect first.
+    #[test]
+    fn one_to_one_reports_the_left_failure_first_uza04() {
+        let left = int_frame("left_v", vec![1, 1, 2], vec![10, 11, 20]);
+        let right = int_frame("right_v", vec![1, 1, 2], vec![100, 101, 200]);
+        let error = merge(&left, &right, Some(MergeValidateMode::OneToOne))
+            .expect_err("both sides duplicated must be rejected");
+        let message = format!("{error}");
+        assert!(
+            message.contains("left keys are not unique"),
+            "left-before-right precedence must hold, got: {message}"
+        );
+        assert!(
+            !message.contains("right keys are not unique"),
+            "the right-side message must not pre-empt the left one, got: {message}"
+        );
+    }
+
+    #[test]
+    fn one_to_one_still_catches_a_right_only_duplicate_uza04() {
+        let left = int_frame("left_v", vec![1, 2, 3], vec![10, 20, 30]);
+        let right = int_frame("right_v", vec![1, 2, 2], vec![100, 200, 201]);
+        let error = merge(&left, &right, Some(MergeValidateMode::OneToOne))
+            .expect_err("right duplicate must be rejected");
+        assert!(
+            format!("{error}")
+                .contains("merge validate='one_to_one' failed: right keys are not unique"),
+            "got: {error}"
+        );
+    }
+
+    /// THE SAFETY PROPERTY OF THE WHOLE LEVER: a validation that PASSES must
+    /// leave the merge output byte-identical to the unvalidated merge, because
+    /// it now takes the same fast path. If enabling those paths changed row
+    /// order, pairing, or column content, this is what catches it.
+    #[test]
+    fn a_passing_validation_produces_the_unvalidated_output_uza04() {
+        let left = int_frame("left_v", vec![5, 1, 4, 2, 3], vec![50, 10, 40, 20, 30]);
+        let right = int_frame("right_v", vec![3, 1, 2, 9], vec![300, 100, 200, 900]);
+
+        let unvalidated = merge(&left, &right, None).expect("plain merge");
+        for mode in [
+            MergeValidateMode::OneToOne,
+            MergeValidateMode::OneToMany,
+            MergeValidateMode::ManyToOne,
+            MergeValidateMode::ManyToMany,
+        ] {
+            let validated = merge(&left, &right, Some(mode)).expect("validation should pass");
+            assert_eq!(
+                validated.index.len(),
+                unvalidated.index.len(),
+                "{mode:?}: row count changed"
+            );
+            assert_eq!(
+                validated.column_order, unvalidated.column_order,
+                "{mode:?}: column order changed"
+            );
+            for name in ["id", "left_v", "right_v"] {
+                assert_eq!(
+                    validated.columns.get(name).expect("column").values(),
+                    unvalidated.columns.get(name).expect("column").values(),
+                    "{mode:?}: column {name} differs from the unvalidated merge"
+                );
+            }
+        }
+    }
+
+    /// NON-VACUITY, both directions. Every assertion above would still pass if
+    /// the typed checker declined everything and the generic path did all the
+    /// work — the lever would simply not exist.
+    #[test]
+    fn the_typed_checker_fires_on_typed_keys_and_declines_otherwise_uza04() {
+        let unique = Column::from_i64_values(vec![1, 2, 3]);
+        assert_eq!(
+            typed_single_int64_key_has_duplicates(&[&unique]),
+            Some(false),
+            "an all-valid Int64 key must be answered typed"
+        );
+        let duplicated = Column::from_i64_values(vec![1, 2, 2]);
+        assert_eq!(
+            typed_single_int64_key_has_duplicates(&[&duplicated]),
+            Some(true),
+            "and duplicates must be seen"
+        );
+
+        // A key with a missing value has no contiguous all-valid buffer, so the
+        // typed checker declines and null-key duplicate semantics stay owned by
+        // the generic path.
+        let nullable = Column::from_values(vec![
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(3),
+        ])
+        .expect("nullable int column");
+        assert_eq!(
+            typed_single_int64_key_has_duplicates(&[&nullable]),
+            None,
+            "a nullable key must decline"
+        );
+
+        // Utf8 keys decline too (this lever is Int64-only for now).
+        let text = Column::from_values(vec![
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Utf8("b".to_owned()),
+        ])
+        .expect("utf8 column");
+        assert_eq!(
+            typed_single_int64_key_has_duplicates(&[&text]),
+            None,
+            "a Utf8 key must decline"
+        );
+
+        // Multi-key merges decline: the composite question is not this one.
+        assert_eq!(
+            typed_single_int64_key_has_duplicates(&[&unique, &duplicated]),
+            None,
+            "more than one key column must decline"
+        );
+    }
+
+    /// A shape the typed checker DECLINES must still be validated — the generic
+    /// path has to keep running for it. A nullable left key with a repeated
+    /// value under `one_to_many` is the case that would silently start passing
+    /// if the skip flag were set too broadly.
+    #[test]
+    fn a_declined_shape_is_still_validated_by_the_generic_path_uza04() {
+        let index = Index::new_known_unique_int64_unit_range(0, 3);
+        let left = DataFrame::new_with_column_order(
+            index,
+            std::collections::BTreeMap::from([
+                (
+                    "id".to_owned(),
+                    Column::from_values(vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::Null),
+                    ])
+                    .expect("nullable id column"),
+                ),
+                (
+                    "left_v".to_owned(),
+                    Column::from_i64_values(vec![10, 11, 30]),
+                ),
+            ]),
+            vec!["id".to_owned(), "left_v".to_owned()],
+        )
+        .expect("nullable left frame");
+        let right = int_frame("right_v", vec![1, 2, 3], vec![100, 200, 300]);
+
+        let error = merge(&left, &right, Some(MergeValidateMode::OneToMany))
+            .expect_err("a duplicated nullable left key must still be rejected");
+        assert!(
+            format!("{error}").contains("left keys are not unique"),
+            "the generic checker must still own declined shapes, got: {error}"
+        );
     }
 }
