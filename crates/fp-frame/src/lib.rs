@@ -203266,3 +203266,196 @@ mod single_column_sort_typed_slice_uza04 {
         );
     }
 }
+
+#[cfg(test)]
+mod typed_construction_stays_unboxed_uza04 {
+    //! Building a frame from typed arrays must never box a `Scalar` per cell.
+    //!
+    //! br-frankenpandas-uza04. This is the property the whole typed-columnar
+    //! campaign rests on, and until now NOTHING pinned it. Every typed fast
+    //! path in the tree — including the single-column sort routing added in
+    //! this same bead — is silently worth nothing the moment some construction
+    //! or validation path calls `values()` and forces the 32 B/elem spine into
+    //! existence. Such a regression would break no existing test: results stay
+    //! bit-identical, only the cost changes.
+    //!
+    //! `Column::scalar_cache_is_materialized` reports whether the `OnceLock`
+    //! holding the `Vec<Scalar>` has been filled, so the boundary is now
+    //! observable and these tests assert it is not crossed.
+
+    use super::{Column, DataFrame, Index, Scalar};
+
+    fn typed_frame() -> DataFrame {
+        let index = Index::new_known_unique_int64_unit_range(0, 4);
+        DataFrame::new_with_column_order(
+            index,
+            std::collections::BTreeMap::from([
+                (
+                    "f".to_owned(),
+                    Column::from_f64_values(vec![3.0, 1.0, 4.0, 1.5]),
+                ),
+                (
+                    "i".to_owned(),
+                    Column::from_i64_values(vec![30, 10, 40, 15]),
+                ),
+            ]),
+            vec!["f".to_owned(), "i".to_owned()],
+        )
+        .expect("typed frame")
+    }
+
+    fn assert_no_column_materialized(frame: &DataFrame, after: &str) {
+        // Positional `column_name_at`, not `column_names()`: the latter hands
+        // out `Vec<&String>` and so forces every label of a lazy column axis
+        // into existence (br-frankenpandas-r18qs). A test about not
+        // materializing must not itself materialize.
+        for position in 0..frame.shape().1 {
+            let name = frame
+                .column_name_at(position)
+                .expect("every column position has a name");
+            let column = frame.column(&name).expect("column listed in order exists");
+            assert!(
+                !column.scalar_cache_is_materialized(),
+                "column {name:?} boxed a Vec<Scalar> after {after}"
+            );
+        }
+    }
+
+    /// Construction itself, and every metadata read, must stay off the spine.
+    ///
+    /// `DataFrame::new_with_axes` validates column lengths via `Column::len`,
+    /// which resolves through `ScalarValues::len` — an INHERENT method whose
+    /// exhaustive match reads each backing's own length. If it ever went
+    /// through the `Deref<Target = [Scalar]>` instead, every frame built
+    /// anywhere in the library would materialize on construction. This test is
+    /// what catches that.
+    #[test]
+    fn typed_construction_and_metadata_never_box_scalars_uza04() {
+        let frame = typed_frame();
+        assert_no_column_materialized(&frame, "construction");
+
+        assert_eq!(frame.len(), 4);
+        assert_eq!(frame.shape(), (4, 2));
+        assert_eq!(frame.column_name_at(0).as_deref(), Some("f"));
+        assert_eq!(frame.column_name_at(1).as_deref(), Some("i"));
+        assert_no_column_materialized(&frame, "len/shape/column_name_at");
+    }
+
+    /// NON-VACUITY. Every assertion above would pass against an accessor that
+    /// always answered `false`. Reading `values()` MUST flip it.
+    #[test]
+    fn the_accessor_observes_the_boundary_it_claims_to_uza04() {
+        let column = Column::from_f64_values(vec![1.0, 2.0, 3.0]);
+        assert!(
+            !column.scalar_cache_is_materialized(),
+            "a freshly built typed column has no Scalar cache"
+        );
+        let _ = column.values();
+        assert!(
+            column.scalar_cache_is_materialized(),
+            "values() builds the Vec<Scalar>, and the accessor must say so"
+        );
+    }
+
+    /// THE MIXED-DTYPE NEGATIVE CASE. A column whose cells are not one dtype
+    /// has no typed representation to be lazy about: `Column::from_values`
+    /// keeps it `Eager`, i.e. already materialized. The typed contract must
+    /// NOT be claimed for it, and a test suite that reported "nothing
+    /// materialized" here would be measuring nothing.
+    #[test]
+    fn a_mixed_dtype_column_is_eager_and_says_so_uza04() {
+        let mixed = Column::from_values(vec![
+            Scalar::Int64(1),
+            Scalar::Utf8("two".to_owned()),
+            Scalar::Float64(3.0),
+        ])
+        .expect("mixed column");
+        assert!(
+            mixed.scalar_cache_is_materialized(),
+            "a mixed-dtype column IS the Scalar representation; it cannot be lazy"
+        );
+        assert!(
+            mixed.as_f64_slice().is_none() && mixed.as_i64_slice().is_none(),
+            "and it exposes no contiguous typed buffer"
+        );
+
+        // It still composes into a frame; the point is that the frame is
+        // honest about which columns are on the typed path and which are not.
+        let index = Index::new_known_unique_int64_unit_range(0, 3);
+        let frame = DataFrame::new_with_column_order(
+            index,
+            std::collections::BTreeMap::from([
+                ("mixed".to_owned(), mixed),
+                (
+                    "typed".to_owned(),
+                    Column::from_f64_values(vec![1.0, 2.0, 3.0]),
+                ),
+            ]),
+            vec!["mixed".to_owned(), "typed".to_owned()],
+        )
+        .expect("mixed frame");
+        assert!(
+            frame
+                .column("mixed")
+                .expect("mixed column")
+                .scalar_cache_is_materialized(),
+            "the mixed column stays eager inside the frame"
+        );
+        assert!(
+            !frame
+                .column("typed")
+                .expect("typed column")
+                .scalar_cache_is_materialized(),
+            "and its typed neighbour is NOT dragged onto the spine with it"
+        );
+    }
+
+    /// What the `Vec<Scalar>` dict constructors actually cost, measured rather
+    /// than assumed. `DataFrame::from_dict` takes `Vec<(&str, Vec<Scalar>)>`,
+    /// so the caller boxes every cell before FrankenPandas sees it — but
+    /// `Column::from_values` then RECOVERS a typed backing for a homogeneous
+    /// run, so the resulting column is typed and unmaterialized and downstream
+    /// ops stay on the fast path.
+    ///
+    /// So the dict API's cost is the input buffer plus one unboxing scan, NOT
+    /// a permanently eager column. A caller holding typed arrays should build
+    /// `Column`s directly and use `new_with_column_order` (as `typed_frame`
+    /// does) to skip both; a caller holding heterogeneous data loses nothing.
+    #[test]
+    fn homogeneous_from_dict_recovers_a_typed_backing_uza04() {
+        let frame = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .expect("dict frame");
+        let column = frame.column("a").expect("column a");
+        assert!(
+            !column.scalar_cache_is_materialized(),
+            "a homogeneous Float64 dict column must come out typed, not eager"
+        );
+        assert_eq!(column.as_f64_slice(), Some(&[1.0, 2.0, 3.0][..]));
+    }
+
+    /// The sort routing landed in this bead must not undo the property: a
+    /// typed frame sorted by a typed key produces typed, unmaterialized
+    /// output columns.
+    #[test]
+    fn sorting_a_typed_frame_keeps_the_output_off_the_spine_uza04() {
+        let frame = typed_frame();
+        let sorted = frame.sort_values("f", true).expect("sort");
+        assert_no_column_materialized(&sorted, "sort_values");
+        assert_no_column_materialized(&frame, "sort_values (input frame)");
+        assert_eq!(
+            sorted.column("i").expect("payload").as_i64_slice(),
+            Some(&[10, 15, 30, 40][..]),
+            "and the permutation is the one the sort promised"
+        );
+    }
+}
