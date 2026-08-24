@@ -5980,13 +5980,17 @@ pub fn read_gbq(_query: &str, _project_id: Option<&str>) -> Result<DataFrame, Io
     ))
 }
 
-/// Read a SAS7BDAT dataset into a `DataFrame`.
+/// Read a SAS7BDAT or SAS Transport (XPORT) dataset into a `DataFrame`.
 ///
 /// The reader preserves decoded character data, missing cells, and SAS
-/// date/datetime/time cells. XPORT remains a separate format gap: unlike a
-/// `.sas7bdat` file it has no native parser in the safe-Rust backend yet.
+/// date/datetime/time cells. XPORT numeric missing values are represented as
+/// FP NaN-nulls, matching the transport parser's `NaN` representation.
 /// br-frankenpandas-9jvao.
 pub fn read_sas(path: &Path) -> Result<DataFrame, IoError> {
+    if is_sas_xport_path(path) {
+        return read_sas_xport(path);
+    }
+
     let mut reader = sas7bdat::SasReader::open(path).map_err(sas_error)?;
     let column_order = reader
         .metadata()
@@ -6012,6 +6016,54 @@ pub fn read_sas(path: &Path) -> Result<DataFrame, IoError> {
         }
         for (column, value) in columns.iter_mut().zip(row_values) {
             column.push(sas_cell_to_scalar(value)?);
+        }
+        row_count = row_count
+            .checked_add(1)
+            .ok_or_else(|| IoError::Sas("row count exceeded i64 range".to_owned()))?;
+    }
+    sas_rows_to_frame(column_order, columns)
+}
+
+fn is_sas_xport_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(std::ffi::OsStr::to_str),
+        Some(extension)
+            if extension.eq_ignore_ascii_case("xpt")
+                || extension.eq_ignore_ascii_case("xpt5")
+                || extension.eq_ignore_ascii_case("xpt8")
+                || extension.eq_ignore_ascii_case("xport")
+    )
+}
+
+fn read_sas_xport(path: &Path) -> Result<DataFrame, IoError> {
+    use sas_xport::sas::xport::XportReader;
+
+    let reader = XportReader::from_path(path).map_err(xport_error)?;
+    let Some(mut dataset) = reader.next_dataset().map_err(xport_error)? else {
+        return sas_rows_to_frame(Vec::new(), Vec::new());
+    };
+    let column_order = dataset
+        .schema()
+        .variables()
+        .iter()
+        .map(|variable| variable.full_name().to_owned())
+        .collect::<Vec<_>>();
+    reject_duplicate_headers(&column_order)?;
+
+    let mut columns = (0..column_order.len())
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<Scalar>>>();
+    let mut row_count: i64 = 0;
+    while let Some(row) = dataset.next_record().map_err(xport_error)? {
+        if row.len() != columns.len() {
+            return Err(IoError::Sas(format!(
+                "XPORT row {row_count} has {} cells; metadata declares {} columns",
+                row.len(),
+                columns.len()
+            )));
+        }
+        for (column, value) in columns.iter_mut().zip(row.iter()) {
+            column.push(xport_cell_to_scalar(value));
         }
         row_count = row_count
             .checked_add(1)
@@ -6093,6 +6145,20 @@ fn sas_cell_to_scalar(cell: &sas7bdat::CellValue<'_>) -> Result<Scalar, IoError>
 }
 
 fn sas_error(error: sas7bdat::Error) -> IoError {
+    IoError::Sas(error.to_string())
+}
+
+fn xport_cell_to_scalar(value: &sas_xport::sas::xport::XportValue<'_>) -> Scalar {
+    match value {
+        sas_xport::sas::xport::XportValue::Character(value) => Scalar::Utf8(value.to_string()),
+        sas_xport::sas::xport::XportValue::Number(value) if value.is_nan() => {
+            Scalar::Null(NullKind::NaN)
+        }
+        sas_xport::sas::xport::XportValue::Number(value) => Scalar::Float64(*value),
+    }
+}
+
+fn xport_error(error: sas_xport::sas::xport::XportError) -> IoError {
     IoError::Sas(error.to_string())
 }
 
@@ -21381,6 +21447,69 @@ mod tests {
             matches!(&err, super::IoError::Sas(message) if !message.is_empty()),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn read_sas_xport_builds_typed_frame_and_keeps_missing_numeric_as_null_9jvao() {
+        use sas_xport::sas::{
+            SasVariableType,
+            xport::{XportMetadata, XportSchema, XportValue, XportVariable, XportWriter},
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_sas_xport_{}_{}.xpt",
+            std::process::id(),
+            line!()
+        ));
+        let mut subject = XportVariable::builder();
+        subject
+            .short_name("SUBJECT")
+            .value_type(SasVariableType::Character)
+            .value_length(12);
+        let mut score = XportVariable::builder();
+        score
+            .short_name("SCORE")
+            .value_type(SasVariableType::Numeric)
+            .value_length(8);
+        let schema = XportSchema::builder()
+            .dataset_name("DM")
+            .add_variable(subject)
+            .add_variable(score)
+            .try_build()
+            .expect("build XPORT schema");
+        let writer = XportWriter::from_file(
+            std::fs::File::create(&path).expect("create XPORT fixture"),
+            XportMetadata::builder().build(),
+        )
+        .expect("open XPORT writer");
+        let mut writer = writer.write_schema(schema).expect("write XPORT schema");
+        writer
+            .write_record(&[XportValue::from("A-01"), XportValue::from(1.5)])
+            .expect("write first XPORT record");
+        writer
+            .write_record(&[XportValue::from("A-02"), XportValue::from(f64::NAN)])
+            .expect("write missing XPORT record");
+        writer.finish().expect("finish XPORT fixture");
+
+        let frame = super::read_sas(&path).expect("read XPORT fixture");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(
+            frame.column("SUBJECT").expect("subject").values(),
+            &[Scalar::Utf8("A-01".into()), Scalar::Utf8("A-02".into())]
+        );
+        assert_eq!(
+            frame.column("SCORE").expect("score").values(),
+            &[Scalar::Float64(1.5), Scalar::Null(NullKind::NaN)],
+            "XPORT numeric NaN is a missing value, never a Float64(NaN) payload"
+        );
+    }
+
+    #[test]
+    fn xport_numeric_nan_is_not_a_float_payload_9jvao() {
+        let scalar =
+            super::xport_cell_to_scalar(&sas_xport::sas::xport::XportValue::Number(f64::NAN));
+        assert_eq!(scalar, Scalar::Null(NullKind::NaN));
+        assert_ne!(scalar, Scalar::Float64(f64::NAN));
     }
 
     #[test]

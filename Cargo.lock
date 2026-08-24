@@ -1448,6 +1448,7 @@ dependencies = [
  "rust_xlsxwriter",
  "ryu",
  "sas7bdat",
+ "sas_xport",
  "scraper",
  "serde-pickle",
  "serde_json",
@@ -1838,6 +1839,12 @@ checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "ibm_hfp"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3669430a66a65694b30ebaa4efb35d894ffce6dc8d5bd6264dcc4fa41f0b045e"
 
 [[package]]
 name = "icu_collections"
@@ -3256,6 +3263,16 @@ dependencies = [
  "thiserror",
  "time",
  "walkdir",
+]
+
+[[package]]
+name = "sas_xport"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ec8f430d471d4e960f674350712ab5988ae38e417f0ccff74a27eff4e6946cd"
+dependencies = [
+ "encoding_rs",
+ "ibm_hfp",
 ]
 
 [[package]]
