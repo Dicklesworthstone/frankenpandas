@@ -34218,13 +34218,7 @@ mod tests {
             .binary_numeric(&expected_right, ArithmeticOp::Add)
             .expect("position aligned add");
         let actual = left
-            .aligned_binary_i64_int64_unit_ranges(
-                &right,
-                (0, 2),
-                (1, 3),
-                (0, 3),
-                ArithmeticOp::Add,
-            )
+            .aligned_binary_i64_int64_unit_ranges(&right, (0, 2), (1, 3), (0, 3), ArithmeticOp::Add)
             .expect("unit range aligned add");
 
         assert_eq!(actual.dtype(), expected.dtype());

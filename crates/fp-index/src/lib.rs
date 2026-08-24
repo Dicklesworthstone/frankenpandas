@@ -21648,7 +21648,10 @@ mod tests {
     #[test]
     fn asof_on_a_non_monotonic_index_is_a_documented_divergence() {
         let unsorted = Index::from_i64(vec![30, 10, 20]);
-        assert!(!unsorted.is_sorted(), "precondition: the index is non-monotonic");
+        assert!(
+            !unsorted.is_sorted(),
+            "precondition: the index is non-monotonic"
+        );
 
         // pandas: ValueError. Here: None, because the scan stops at 30.
         assert_eq!(unsorted.asof(&IndexLabel::Int64(25)), None);
@@ -31249,11 +31252,17 @@ mod tests {
         let daily = super::PeriodIndex::new(vec![Period::new(19_797, PeriodFreq::Daily)]);
         assert_eq!(
             daily.asfreq_with_how("ns", "start")?.values(),
-            &[Period::new(1_710_460_800_000_000_000, PeriodFreq::Nanoseconds)]
+            &[Period::new(
+                1_710_460_800_000_000_000,
+                PeriodFreq::Nanoseconds
+            )]
         );
         assert_eq!(
             daily.asfreq_with_how("ns", "end")?.values(),
-            &[Period::new(1_710_547_199_999_999_999, PeriodFreq::Nanoseconds)]
+            &[Period::new(
+                1_710_547_199_999_999_999,
+                PeriodFreq::Nanoseconds
+            )]
         );
         // ...and the same day widened to milliseconds from the epoch.
         let epoch_day = super::PeriodIndex::new(vec![Period::new(0, PeriodFreq::Daily)]);
@@ -31286,17 +31295,26 @@ mod tests {
         );
 
         // One step between adjacent sub-second units, each way.
-        let millis =
-            super::PeriodIndex::new(vec![Period::new(1_710_498_645_123, PeriodFreq::Milliseconds)]);
+        let millis = super::PeriodIndex::new(vec![Period::new(
+            1_710_498_645_123,
+            PeriodFreq::Milliseconds,
+        )]);
         assert_eq!(
             millis.asfreq_with_how("ns", "start")?.values(),
-            &[Period::new(1_710_498_645_123_000_000, PeriodFreq::Nanoseconds)]
+            &[Period::new(
+                1_710_498_645_123_000_000,
+                PeriodFreq::Nanoseconds
+            )]
         );
         assert_eq!(
             millis.asfreq_with_how("ns", "end")?.values(),
-            &[Period::new(1_710_498_645_123_999_999, PeriodFreq::Nanoseconds)]
+            &[Period::new(
+                1_710_498_645_123_999_999,
+                PeriodFreq::Nanoseconds
+            )]
         );
-        let secondly = super::PeriodIndex::new(vec![Period::new(1_710_498_645, PeriodFreq::Secondly)]);
+        let secondly =
+            super::PeriodIndex::new(vec![Period::new(1_710_498_645, PeriodFreq::Secondly)]);
         assert_eq!(
             secondly.asfreq_with_how("us", "start")?.values(),
             &[Period::new(1_710_498_645_000_000, PeriodFreq::Microseconds)]

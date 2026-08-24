@@ -30479,26 +30479,45 @@ impl Ewm<'_> {
         // emitted value is `Float64(weighted_avg)`, and `from_f64_values` (all
         // finite ⇒ all-valid) yields the identical column.
         if let Some(data) = self.series.column().as_f64_slice() {
-            let mut out = Vec::with_capacity(data.len());
-            for &x in data {
-                nobs += 1;
-                if nobs == 1 {
-                    weighted_avg = x;
-                } else {
-                    old_wt *= old_wt_factor;
-                    if weighted_avg != x {
-                        weighted_avg = (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
-                    }
-                    if self.adjust {
-                        old_wt += new_wt;
+            // `collect()` over a TrustedLen iterator, not `push` into a
+            // `with_capacity` Vec (br-frankenpandas-uza04). `slice::Iter` is
+            // TrustedLen and `Map` preserves it, so the collect allocates once
+            // and writes each slot with NO per-element capacity check; `push`
+            // pays that check on every one of the n iterations. `adjust` is
+            // hoisted into a local for the same reason — it is loop-invariant,
+            // and reading it through `self` inside the loop is a field load the
+            // optimizer cannot always prove is unchanging across the fdiv.
+            //
+            // THE ARITHMETIC IS UNTOUCHED, which is the whole constraint here:
+            // the ewm recurrence is BIT-LOCKED (docs/NEGATIVE_EVIDENCE.md — the
+            // per-element debias fdiv cannot be reassociated without breaking
+            // goldens). Same operands, same order, same single division, same
+            // min_periods NaN prefix; only the loop's bookkeeping changes.
+            let adjust = self.adjust;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&x| {
+                    nobs += 1;
+                    if nobs == 1 {
+                        weighted_avg = x;
                     } else {
-                        old_wt = 1.0;
+                        old_wt *= old_wt_factor;
+                        if weighted_avg != x {
+                            weighted_avg =
+                                (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
+                        }
+                        if adjust {
+                            old_wt += new_wt;
+                        } else {
+                            old_wt = 1.0;
+                        }
                     }
-                }
-                // min_periods gate (issue #19): pandas emits NaN until `minp`
-                // observations have been seen (`weighted if nobs >= minp`).
-                out.push(if nobs >= minp { weighted_avg } else { f64::NAN });
-            }
+                    // min_periods gate (issue #19): pandas emits NaN until
+                    // `minp` observations have been seen (`weighted if nobs >=
+                    // minp`).
+                    if nobs >= minp { weighted_avg } else { f64::NAN }
+                })
+                .collect();
             let index = self.series.index().clone();
             // MOVE the finite output into the backing (from_f64_values_owned) instead
             // of from_f64_values' Arc::from(Vec) realloc-copy + NaN re-scan. The
@@ -30524,25 +30543,34 @@ impl Ewm<'_> {
         // ewm fdiv in the same order, same min_periods NaN prefix; all emitted values
         // finite ⇒ `from_f64_values_owned` matches, exactly as the Float64 arm does.
         if let Some(data) = self.series.column().as_i64_slice() {
-            let mut out = Vec::with_capacity(data.len());
-            for &v in data {
-                let x = v as f64;
-                nobs += 1;
-                if nobs == 1 {
-                    weighted_avg = x;
-                } else {
-                    old_wt *= old_wt_factor;
-                    if weighted_avg != x {
-                        weighted_avg = (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
-                    }
-                    if self.adjust {
-                        old_wt += new_wt;
+            // Same TrustedLen `collect()` + hoisted `adjust` as the Float64 arm
+            // above, for the same reason and with the same bit-identity
+            // constraint (br-frankenpandas-uza04). Leaving this sibling on the
+            // `push` loop would be the exact missing-sibling shape this bead has
+            // been closing all session.
+            let adjust = self.adjust;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&v| {
+                    let x = v as f64;
+                    nobs += 1;
+                    if nobs == 1 {
+                        weighted_avg = x;
                     } else {
-                        old_wt = 1.0;
+                        old_wt *= old_wt_factor;
+                        if weighted_avg != x {
+                            weighted_avg =
+                                (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
+                        }
+                        if adjust {
+                            old_wt += new_wt;
+                        } else {
+                            old_wt = 1.0;
+                        }
                     }
-                }
-                out.push(if nobs >= minp { weighted_avg } else { f64::NAN });
-            }
+                    if nobs >= minp { weighted_avg } else { f64::NAN }
+                })
+                .collect();
             let index = self.series.index().clone();
             return Series::new(
                 self.series.name(),
@@ -121690,7 +121718,10 @@ mod tests {
             }
             other => panic!("mixed numeric combine_first must promote to Float64, got {other:?}"),
         }
-        assert_ne!(combined.values(), &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(3)]);
+        assert_ne!(
+            combined.values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(3)]
+        );
     }
 
     #[test]
@@ -185838,10 +185869,7 @@ mod tests {
     #[test]
     fn dataframe_lazy_transpose_moves_typed_f64_rows_l4vzc() {
         let mut finite_columns = BTreeMap::new();
-        finite_columns.insert(
-            "left".to_owned(),
-            Column::from_f64_values(vec![1.5, 2.5]),
-        );
+        finite_columns.insert("left".to_owned(), Column::from_f64_values(vec![1.5, 2.5]));
         finite_columns.insert(
             "right".to_owned(),
             Column::from_f64_values(vec![10.5, 20.5]),
@@ -185865,10 +185893,7 @@ mod tests {
             "left".to_owned(),
             Column::from_f64_values(vec![1.0, f64::NAN]),
         );
-        nan_columns.insert(
-            "right".to_owned(),
-            Column::from_f64_values(vec![3.0, 4.0]),
-        );
+        nan_columns.insert("right".to_owned(), Column::from_f64_values(vec![3.0, 4.0]));
         let nan_frame = DataFrame::new_with_column_order(
             Index::new_known_unique_int64_unit_range(0, 2),
             nan_columns,
@@ -205112,5 +205137,174 @@ mod transpose_row_prealloc_uza04 {
                 "width {width}: row 1"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ewm_mean_loop_shape_uza04 {
+    //! The ewm recurrence is BIT-LOCKED; only its loop bookkeeping changed.
+    //!
+    //! br-frankenpandas-uza04. `Ewm::mean`'s typed arms built their output by
+    //! `push`ing into a `with_capacity` Vec and re-read `self.adjust` inside the
+    //! loop. Both are per-element costs that have nothing to do with the
+    //! arithmetic: `push` pays a capacity check on every one of the n
+    //! iterations, and the field read is loop-invariant. They are now a
+    //! `collect()` over a TrustedLen iterator (one allocation, no per-element
+    //! check) with `adjust` hoisted into a local.
+    //!
+    //! docs/NEGATIVE_EVIDENCE.md records that the per-element debias fdiv cannot
+    //! be reassociated without breaking goldens, so these tests exist to prove
+    //! the change did NOT touch it: same operands, same order, same single
+    //! division, same min_periods NaN prefix. Every assertion is an exact f64
+    //! comparison against the recurrence computed independently below.
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::Series;
+
+    /// The reference recurrence, written out longhand exactly as pandas'
+    /// `aggregations.pyx::ewm` specifies it, so the test does not just re-run
+    /// the implementation it is checking.
+    fn reference_ewm_mean(data: &[f64], alpha: f64, adjust: bool, min_periods: usize) -> Vec<f64> {
+        let old_wt_factor = 1.0 - alpha;
+        let new_wt = if adjust { 1.0 } else { alpha };
+        let minp = min_periods.max(1);
+        let mut weighted_avg = f64::NAN;
+        let mut old_wt = 1.0_f64;
+        let mut nobs = 0_usize;
+        let mut out = Vec::new();
+        for &x in data {
+            nobs += 1;
+            if nobs == 1 {
+                weighted_avg = x;
+            } else {
+                old_wt *= old_wt_factor;
+                if weighted_avg != x {
+                    weighted_avg = (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
+                }
+                if adjust {
+                    old_wt += new_wt;
+                } else {
+                    old_wt = 1.0;
+                }
+            }
+            out.push(if nobs >= minp { weighted_avg } else { f64::NAN });
+        }
+        out
+    }
+
+    fn series_from_f64(values: Vec<f64>) -> Series {
+        let index = Index::new_known_unique_int64_unit_range(0, values.len());
+        Series::new("s", index, Column::from_f64_values(values)).expect("series")
+    }
+
+    fn series_from_i64(values: Vec<i64>) -> Series {
+        let index = Index::new_known_unique_int64_unit_range(0, values.len());
+        Series::new("s", index, Column::from_i64_values(values)).expect("series")
+    }
+
+    fn assert_bits_match(actual: &Series, expected: &[f64], label: &str) {
+        let column = actual.column();
+        assert_eq!(column.len(), expected.len(), "{label}: length");
+        let got = column.values();
+        for (position, want) in expected.iter().enumerate() {
+            let cell = &got[position];
+            if want.is_nan() {
+                assert!(
+                    cell.is_missing(),
+                    "{label}: row {position} should be the min_periods NaN prefix, got {cell:?}"
+                );
+                continue;
+            }
+            let have = match cell {
+                fp_types::Scalar::Float64(value) => *value,
+                other => panic!("{label}: row {position} must be Float64, got {other:?}"),
+            };
+            // BIT comparison, not approximate: the recurrence is bit-locked, so
+            // "close enough" would silently accept a reassociated fdiv.
+            assert_eq!(
+                have.to_bits(),
+                want.to_bits(),
+                "{label}: row {position} bits differ — got {have}, want {want}"
+            );
+        }
+    }
+
+    /// The Float64 arm, both `adjust` modes — the flag is now hoisted, so both
+    /// have to be exercised or the hoist is unpinned.
+    #[test]
+    fn float64_arm_is_bit_identical_in_both_adjust_modes_uza04() {
+        let data = vec![1.0, 2.0, 2.0, -3.5, 10.25, 0.0, -0.0, 7.5, 7.5, 1e12, 1e-12];
+        for adjust in [true, false] {
+            for alpha in [0.5_f64, 0.1, 0.9] {
+                let series = series_from_f64(data.clone());
+                let actual = series
+                    .ewm_with_options(None, Some(alpha), adjust, 0)
+                    .mean()
+                    .expect("mean");
+                let expected = reference_ewm_mean(&data, alpha, adjust, 0);
+                assert_bits_match(&actual, &expected, &format!("f64 adjust={adjust} alpha={alpha}"));
+            }
+        }
+    }
+
+    /// The `weighted_avg != x` branch is the one the loop can skip; a run of
+    /// EQUAL values takes it every time, and signed zero is the case where
+    /// `!=` and bit-equality disagree.
+    #[test]
+    fn equal_and_signed_zero_runs_keep_their_bits_uza04() {
+        let data = vec![4.0, 4.0, 4.0, 0.0, -0.0, 0.0, 4.0];
+        let series = series_from_f64(data.clone());
+        let actual = series
+            .ewm_with_options(None, Some(0.3), true, 0)
+            .mean()
+            .expect("mean");
+        assert_bits_match(&actual, &reference_ewm_mean(&data, 0.3, true, 0), "equal-run");
+    }
+
+    /// min_periods drives the NaN prefix, which the collect writes per element
+    /// exactly as the push did.
+    #[test]
+    fn min_periods_prefix_is_unchanged_uza04() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        for min_periods in [0_usize, 1, 3, 5] {
+            let series = series_from_f64(data.clone());
+            let actual = series
+                .ewm_with_options(None, Some(0.5), true, min_periods)
+                .mean()
+                .expect("mean");
+            let expected = reference_ewm_mean(&data, 0.5, true, min_periods);
+            assert_bits_match(&actual, &expected, &format!("min_periods={min_periods}"));
+        }
+    }
+
+    /// The Int64 sibling arm got the identical rewrite, so it gets the identical
+    /// proof — including that `v as f64` still feeds the same recurrence.
+    #[test]
+    fn int64_arm_is_bit_identical_in_both_adjust_modes_uza04() {
+        let raw = vec![1_i64, 2, 2, -3, 10, 0, 7, 7, 1_000_000];
+        let as_f64: Vec<f64> = raw.iter().map(|&v| v as f64).collect();
+        for adjust in [true, false] {
+            let series = series_from_i64(raw.clone());
+            let actual = series
+                .ewm_with_options(None, Some(0.4), adjust, 0)
+                .mean()
+                .expect("mean");
+            let expected = reference_ewm_mean(&as_f64, 0.4, adjust, 0);
+            assert_bits_match(&actual, &expected, &format!("i64 adjust={adjust}"));
+        }
+    }
+
+    /// An empty input must still produce an empty column rather than tripping
+    /// the collect's size hint.
+    #[test]
+    fn empty_input_produces_empty_output_uza04() {
+        let series = series_from_f64(Vec::new());
+        let actual = series
+            .ewm_with_options(None, Some(0.5), true, 0)
+            .mean()
+            .expect("mean");
+        assert_eq!(actual.column().len(), 0);
     }
 }
