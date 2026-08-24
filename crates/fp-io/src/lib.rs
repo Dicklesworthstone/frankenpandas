@@ -9061,7 +9061,7 @@ fn arrow_validity_mask(arr: &dyn Array) -> Option<fp_columnar::ValidityMask> {
 /// reads the Arrow buffer directly into a typed fp column, bypassing the per-cell
 /// `Vec<Scalar>` boxing + `Column::new` re-scan of `arrow_array_to_scalars`.
 /// Returns `None` for types that need the Scalar path (Date/Timestamp string
-/// coercion, nullable Utf8, and any uncovered dtype). Bit-identical to that path.
+/// coercion, dictionary arrays, and any uncovered dtype). Bit-identical to that path.
 fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Column> {
     use arrow::array::{
         Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array,
@@ -9111,9 +9111,7 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
                 None => Column::from_bool_values(data),
             })
         }
-        // Only the all-valid case: there is no typed contiguous-nullable-Utf8
-        // constructor, so a StringArray with nulls falls to the Scalar path.
-        ArrowDataType::Utf8 if arr.null_count() == 0 => {
+        ArrowDataType::Utf8 => {
             let t = arr.as_any().downcast_ref::<StringArray>()?;
             let offs = t.value_offsets();
             let len = t.len();
@@ -9121,9 +9119,12 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
             let end = offs[len] as usize;
             let bytes = t.value_data()[start..end].to_vec();
             let offsets: Vec<usize> = offs.iter().map(|&o| o as usize - start).collect();
-            Some(Column::from_utf8_contiguous(bytes, offsets))
+            Some(match arrow_validity_mask(arr) {
+                Some(validity) => Column::from_utf8_values_with_validity(bytes, offsets, validity),
+                None => Column::from_utf8_contiguous(bytes, offsets),
+            })
         }
-        ArrowDataType::LargeUtf8 if arr.null_count() == 0 => {
+        ArrowDataType::LargeUtf8 => {
             let t = arr
                 .as_any()
                 .downcast_ref::<arrow::array::LargeStringArray>()?;
@@ -9133,7 +9134,10 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
             let end = offs[len] as usize;
             let bytes = t.value_data()[start..end].to_vec();
             let offsets: Vec<usize> = offs.iter().map(|&o| o as usize - start).collect();
-            Some(Column::from_utf8_contiguous(bytes, offsets))
+            Some(match arrow_validity_mask(arr) {
+                Some(validity) => Column::from_utf8_values_with_validity(bytes, offsets, validity),
+                None => Column::from_utf8_contiguous(bytes, offsets),
+            })
         }
         _ => None,
     }
@@ -15239,13 +15243,13 @@ impl SeriesIoExt for Series {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use arrow::{
         array::{Array, Int64Array},
         datatypes::DataType as ArrowDataType,
     };
-    use fp_columnar::Column;
+    use fp_columnar::{Column, ValidityMask};
     use fp_frame::{DataFrame, Series};
     use fp_index::{Index, IndexLabel};
     use fp_types::{DType, NullKind, Scalar, Timestamp};
@@ -21531,6 +21535,57 @@ mod tests {
                 Scalar::Utf8("green".to_owned()),
                 Scalar::Utf8("blue".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn parquet_reader_uses_nullable_utf8_buffer_and_rejects_dictionary_uza04() {
+        let mut validity = ValidityMask::all_valid(3);
+        validity.set(1, false);
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "label".to_owned(),
+            Column::from_utf8_values_with_validity(b"redblue".to_vec(), vec![0, 3, 3, 7], validity),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2]),
+            columns,
+            vec!["label".to_owned()],
+        )
+        .expect("nullable utf8 source");
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write nullable utf8 parquet");
+        let decoded = super::read_parquet_bytes(&bytes).expect("read nullable utf8 parquet");
+        let label = decoded.column("label").expect("decoded nullable utf8");
+        assert!(
+            label.as_nullable_utf8_contiguous().is_some(),
+            "nullable Utf8 must retain the typed backing"
+        );
+        assert!(
+            !label.scalar_cache_is_materialized(),
+            "typed reader must not materialize a Scalar cache"
+        );
+        assert_eq!(
+            label.values(),
+            &[
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("blue".to_owned()),
+            ]
+        );
+
+        use arrow::{
+            array::{DictionaryArray, Int8Array, StringArray},
+            datatypes::Int8Type,
+        };
+        let dictionary = DictionaryArray::<Int8Type>::try_new(
+            Int8Array::from(vec![Some(0), Some(1), Some(0)]),
+            Arc::new(StringArray::from(vec!["red", "blue"])),
+        )
+        .expect("dictionary array");
+        assert!(
+            super::arrow_array_to_column_typed(&dictionary, dictionary.data_type()).is_none(),
+            "dictionary arrays must not be reinterpreted as direct Utf8 buffers"
         );
     }
 
