@@ -9189,6 +9189,25 @@ impl Series {
             );
         }
 
+        // Mixed numeric identity path: pandas promotes Int64/Float64
+        // combine_first to Float64.  Keep the coalesce over typed buffers so a
+        // public typed_values() consumer does not first force the generic
+        // Vec<Scalar> materialization merely to perform that promotion.
+        if self.index == other.index
+            && !self.index.has_duplicates()
+            && let Some((sd, sv)) = self.column.as_i64_slice_with_validity()
+            && let Some(od) = other.column.as_f64_slice()
+        {
+            let out: Vec<f64> = (0..sd.len())
+                .map(|i| if sv.get(i) { sd[i] as f64 } else { od[i] })
+                .collect();
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_f64_values_all_valid_unchecked(out),
+            );
+        }
+
         if self.index == other.index
             && !self.index.has_duplicates()
             && let Some((sd, sv)) = self.column.as_f64_slice_with_validity()
@@ -120920,6 +120939,37 @@ mod tests {
         )
         .unwrap();
         assert!(non_numeric.typed_values().is_none());
+    }
+
+    #[test]
+    fn combine_first_mixed_numeric_promotes_to_typed_float64_without_scalar_spine() {
+        // Planted negative: retaining the Int64 dtype, or treating its missing
+        // slot as zero, would both hide the required pandas Float64 promotion.
+        let index = Index::from_range(0, 3, 1);
+        let mut left_validity = fp_columnar::ValidityMask::all_valid(3);
+        left_validity.set(1, false);
+        let left = Series::new(
+            "left",
+            index.clone(),
+            Column::from_i64_values_with_validity(vec![1, 0, 3], left_validity),
+        )
+        .unwrap();
+        let right = Series::new(
+            "right",
+            index,
+            Column::from_f64_values_owned(vec![10.5, 20.5, 30.5]),
+        )
+        .unwrap();
+
+        let combined = left.combine_first(&right).unwrap();
+        match combined.typed_values() {
+            Some(super::SeriesTypedValues::Float64 { data, validity }) => {
+                assert_eq!(data, &[1.0, 20.5, 3.0]);
+                assert!(validity.all());
+            }
+            other => panic!("mixed numeric combine_first must promote to Float64, got {other:?}"),
+        }
+        assert_ne!(combined.values(), &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(3)]);
     }
 
     #[test]
