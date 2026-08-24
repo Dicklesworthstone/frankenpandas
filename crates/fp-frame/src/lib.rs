@@ -8158,6 +8158,17 @@ impl Series {
                 ));
             }
 
+            // pandas aborts the complete vectorized temporal add/sub operation
+            // when any present lane overflows. The columnar kernel deliberately
+            // keeps its per-lane NaT recovery for hardened mode, so STRICT must
+            // preflight the exact-position temporal pairs before it can enter
+            // that kernel (br-frankenpandas-lrgdu).
+            if matches!(policy.mode, RuntimeMode::Strict)
+                && let Some(column) = self.strict_temporal_binary_same_index(other, op)?
+            {
+                return Self::new(out_name, union_index, column);
+            }
+
             let column = if matches!(self.column.dtype(), DType::Float64)
                 && matches!(other.column.dtype(), DType::Float64)
             {
@@ -8310,6 +8321,61 @@ impl Series {
         };
 
         Self::new(out_name, union_index, column)
+    }
+
+    /// Apply the pandas STRICT whole-operation failure rule for elementwise
+    /// temporal addition/subtraction on equal indexes.
+    ///
+    /// The columnar temporal kernel is intentionally infallible so hardened
+    /// callers retain the useful per-lane `NaT` recovery. pandas instead raises
+    /// `OverflowError` and returns no result when any present lane in a
+    /// vectorized add/sub overflows, so the strict caller must detect it before
+    /// allocating the output column.
+    fn strict_temporal_binary_same_index(
+        &self,
+        other: &Self,
+        op: ArithmeticOp,
+    ) -> Result<Option<Column>, FrameError> {
+        let output_datetime = match (self.column.dtype(), other.column.dtype(), op) {
+            (DType::Datetime64, DType::Datetime64, ArithmeticOp::Sub)
+            | (DType::Timedelta64, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub) => {
+                false
+            }
+            (DType::Datetime64, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub)
+            | (DType::Timedelta64, DType::Datetime64, ArithmeticOp::Add) => true,
+            _ => return Ok(None),
+        };
+
+        let mut output = Vec::with_capacity(self.len());
+        for (left, right) in self.values().iter().zip(other.values()) {
+            let raw = match (left, right) {
+                (Scalar::Timedelta64(left), Scalar::Timedelta64(right))
+                | (Scalar::Datetime64(left), Scalar::Datetime64(right))
+                | (Scalar::Datetime64(left), Scalar::Timedelta64(right))
+                | (Scalar::Timedelta64(left), Scalar::Datetime64(right)) => {
+                    let result = if matches!(op, ArithmeticOp::Add) {
+                        Timedelta::try_add(*left, *right)
+                    } else {
+                        Timedelta::try_sub(*left, *right)
+                    };
+                    result.map_err(|failure| {
+                        FrameError::CompatibilityRejected(format!(
+                            "{}: Overflow in int64 addition ({})",
+                            pandas_temporal_error_class(failure.pandas_error),
+                            failure.op
+                        ))
+                    })?
+                }
+                _ => Timedelta::NAT,
+            };
+            output.push(if output_datetime {
+                Scalar::Datetime64(raw)
+            } else {
+                Scalar::Timedelta64(raw)
+            });
+        }
+
+        Ok(Some(Column::from_values(output)?))
     }
 
     pub fn add_with_policy(
@@ -166358,6 +166424,95 @@ mod tests {
             nat.td_add(&one).unwrap().values(),
             &[Scalar::Timedelta64(Timedelta::NAT)],
             "NaT propagation is not an overflow and must not raise in strict mode"
+        );
+    }
+
+    #[test]
+    fn strict_temporal_series_add_aborts_whole_result_lrgdu() {
+        let left = Series::from_values(
+            "left",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Timedelta64(0), Scalar::Timedelta64(i64::MAX)],
+        )
+        .unwrap();
+        let one = Series::from_values(
+            "right",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Timedelta64(1), Scalar::Timedelta64(1)],
+        )
+        .unwrap();
+
+        let strict_error = left
+            .add(&one)
+            .expect_err("one overflowing lane must abort strict Series.add");
+        assert!(
+            strict_error.to_string().contains("OverflowError"),
+            "strict vectorized add must retain pandas' OverflowError class: {strict_error}"
+        );
+
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
+        let hardened = left
+            .add_with_policy(&one, &RuntimePolicy::hardened(None), &mut ledger)
+            .expect("hardened Series.add keeps element-local recovery");
+        assert_eq!(
+            hardened.values(),
+            &[Scalar::Timedelta64(1), Scalar::Null(NullKind::NaT)],
+            "hardened mode retains the pre-existing safe lane and recovers only the overflow"
+        );
+
+        let timestamp_max = Series::from_values(
+            "timestamp",
+            vec![0_i64.into()],
+            vec![Scalar::Datetime64(i64::MAX)],
+        )
+        .unwrap();
+        let duration =
+            Series::from_values("duration", vec![0_i64.into()], vec![Scalar::Timedelta64(1)])
+                .unwrap();
+        assert!(
+            timestamp_max
+                .add(&duration)
+                .expect_err("strict datetime + timedelta must abort on overflow")
+                .to_string()
+                .contains("OverflowError")
+        );
+    }
+
+    #[test]
+    fn strict_temporal_series_sub_keeps_nat_boundary_lrgdu() {
+        let left = Series::from_values(
+            "left",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Timedelta64(i64::MIN + 1),
+                Scalar::Timedelta64(i64::MIN + 1),
+            ],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "right",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Timedelta64(1), Scalar::Timedelta64(2)],
+        )
+        .unwrap();
+
+        let strict_error = left
+            .sub(&right)
+            .expect_err("two nanoseconds below Timedelta.min must abort strict subtraction");
+        assert!(strict_error.to_string().contains("OverflowError"));
+
+        let one_ns_boundary =
+            Series::from_values("right", vec![0_i64.into()], vec![Scalar::Timedelta64(1)]).unwrap();
+        let boundary_left = Series::from_values(
+            "left",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(i64::MIN + 1)],
+        )
+        .unwrap();
+        assert_eq!(
+            boundary_left.sub(&one_ns_boundary).unwrap().values(),
+            &[Scalar::Timedelta64(Timedelta::NAT)],
+            "the NaT-sentinel collision one nanosecond below Timedelta.min is not an overflow"
         );
     }
 
