@@ -31,6 +31,7 @@ rusqlite = { workspace = true, optional = true }
 mysql = { workspace = true, optional = true }
 ryu = { workspace = true }
 sas7bdat = { workspace = true }
+sas_xport = { workspace = true }
 scraper = { workspace = true }
 serde-pickle = { workspace = true }
 serde_json = { workspace = true }

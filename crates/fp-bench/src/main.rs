@@ -3576,9 +3576,7 @@ fn run(
             let right = Series::new(
                 "right",
                 index,
-                Column::from_f64_values_owned(
-                    (0..rows).map(|value| value as f64 * 2.0).collect(),
-                ),
+                Column::from_f64_values_owned((0..rows).map(|value| value as f64 * 2.0).collect()),
             )
             .expect("right series");
             time_us(|| {
