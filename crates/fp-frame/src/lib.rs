@@ -42570,6 +42570,176 @@ pub struct SeriesGroupByRolling<'grouped, 'data> {
 }
 
 impl SeriesGroupByRolling<'_, '_> {
+    /// Fused typed grouped rolling sum/mean for dense grouping keys.
+    ///
+    /// `SeriesGroupBy::dense_group_ids` gives every row a first-seen group id
+    /// without constructing the `ScalarKey -> Vec<usize>` map used by
+    /// `build_groups`.  For all-valid native numeric values, sum and mean can
+    /// then run their existing online algorithm directly over those row
+    /// positions: no `Scalar` gather and no short-lived per-group `Series` are
+    /// required.  The emitted order remains pandas' sorted group order, with
+    /// original row order retained inside each group.
+    ///
+    /// This deliberately leaves every other aggregation and any non-typed
+    /// source on `apply_grouped_rolling`: their per-group semantics (notably
+    /// nullable and NaN handling) remain exactly on the established path.
+    fn try_dense_grouped_sum_mean(&self, want_mean: bool) -> Option<Result<Series, FrameError>> {
+        if self.window == 0 {
+            return None;
+        }
+        enum TypedValues<'a> {
+            Float64(&'a [f64]),
+            Int64(&'a [i64]),
+        }
+        let values = if let Some(data) = self.groupby.series.column().as_f64_slice() {
+            TypedValues::Float64(data)
+        } else if let Some(data) = self.groupby.series.column().as_i64_slice() {
+            TypedValues::Int64(data)
+        } else {
+            return None;
+        };
+        let (gids, ngroups) = self.groupby.dense_group_ids()?;
+        if gids.len() != self.groupby.series.len() {
+            return None;
+        }
+        let labels = self.groupby.dense_group_labels(&gids, ngroups)?;
+
+        // Count first so the only per-group allocation is one exact-sized
+        // position buffer.  These positions replace the old map's `Vec`s, but
+        // never become a Scalar-backed Series.
+        let mut counts = vec![0_usize; ngroups];
+        for &gid in gids.iter() {
+            counts[gid] += 1;
+        }
+        let mut rows: Vec<Vec<usize>> = counts
+            .iter()
+            .map(|&count| Vec::with_capacity(count))
+            .collect();
+        for (row, &gid) in gids.iter().enumerate() {
+            rows[gid].push(row);
+        }
+
+        let value_at = |row: usize| -> f64 {
+            match values {
+                TypedValues::Float64(data) => data[row],
+                TypedValues::Int64(data) => data[row] as f64,
+            }
+        };
+        let n = self.groupby.series.len();
+        let mut out_f64 = vec![0.0_f64; n];
+        let mut out_valid = fp_columnar::ValidityMask::all_invalid(n);
+
+        // This is the same add/remove ordering and compensated state used by
+        // `Rolling::rolling_online_sum_mean`, except each gid owns its state
+        // and its source positions come from the dense typed grouping layout.
+        // Keeping the state local to a group preserves the established rolling
+        // bits while avoiding a materialized group Series.
+        for group_rows in &rows {
+            let mut sum_x = 0.0_f64;
+            let mut comp_add = 0.0_f64;
+            let mut comp_remove = 0.0_f64;
+            let mut nobs = 0_i64;
+            let mut neg_ct = 0_i64;
+            let mut num_consec_same = 0_i64;
+            let mut prev_value = 0.0_f64;
+
+            for (position, &row) in group_rows.iter().enumerate() {
+                if position >= self.window {
+                    let removed = value_at(group_rows[position - self.window]);
+                    if removed == removed {
+                        nobs -= 1;
+                        let y = -removed - comp_remove;
+                        let next = sum_x + y;
+                        comp_remove = (next - sum_x) - y;
+                        sum_x = next;
+                        if removed.is_sign_negative() {
+                            neg_ct -= 1;
+                        }
+                    }
+                }
+
+                let value = value_at(row);
+                if value == value {
+                    nobs += 1;
+                    let y = value - comp_add;
+                    let next = sum_x + y;
+                    comp_add = (next - sum_x) - y;
+                    sum_x = next;
+                    if value.is_sign_negative() {
+                        neg_ct += 1;
+                    }
+                    if value == prev_value {
+                        num_consec_same += 1;
+                    } else {
+                        num_consec_same = 1;
+                    }
+                    prev_value = value;
+                }
+
+                let result = if want_mean {
+                    if nobs as usize >= self.min_periods && nobs > 0 {
+                        let mut mean = sum_x / nobs as f64;
+                        if num_consec_same >= nobs {
+                            mean = prev_value;
+                        } else if (neg_ct == 0 && mean < 0.0)
+                            || (neg_ct == nobs && mean > 0.0)
+                        {
+                            mean = 0.0;
+                        }
+                        Some(mean)
+                    } else {
+                        None
+                    }
+                } else if nobs == 0 && self.min_periods == 0 {
+                    Some(0.0)
+                } else if nobs as usize >= self.min_periods {
+                    Some(if num_consec_same >= nobs {
+                        prev_value * nobs as f64
+                    } else {
+                        sum_x
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(value) = result {
+                    out_f64[row] = value;
+                    out_valid.set(row, true);
+                }
+            }
+        }
+
+        // `dense_group_labels` is homogeneous for every supported key kind, so
+        // `IndexLabel::cmp` is exactly the corresponding `scalar_key_cmp` order
+        // used by the generic route.  Sort gids, not labels, to retain each
+        // group's source-row order without cloning label values.
+        let mut visit: Vec<usize> = (0..ngroups).collect();
+        visit.sort_by(|&left, &right| labels[left].cmp(&labels[right]));
+        let mut order = Vec::with_capacity(n);
+        for gid in visit {
+            order.extend_from_slice(&rows[gid]);
+        }
+        let mut ordered_f64 = Vec::with_capacity(n);
+        let mut ordered_valid = fp_columnar::ValidityMask::all_invalid(n);
+        for (out_position, &source_position) in order.iter().enumerate() {
+            ordered_f64.push(out_f64[source_position]);
+            if out_valid.get(source_position) {
+                ordered_valid.set(out_position, true);
+            }
+        }
+        let index = self
+            .groupby
+            .series
+            .index()
+            .take(&order)
+            .rename_index(self.groupby.series.index().name());
+        Some(Series::new(
+            self.groupby.series.name(),
+            index,
+            Column::from_f64_values_with_validity(ordered_f64, ordered_valid),
+        ))
+    }
+
     fn apply_grouped_rolling<F>(&self, agg: F) -> Result<Series, FrameError>
     where
         F: Fn(&Series, usize, usize) -> Result<Series, FrameError> + Sync,
@@ -42934,6 +43104,9 @@ impl SeriesGroupByRolling<'_, '_> {
 
     /// Grouped rolling sum.
     pub fn sum(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.try_dense_grouped_sum_mean(false) {
+            return result;
+        }
         self.apply_grouped_rolling(|series, window, min_periods| {
             series.rolling(window, Some(min_periods)).sum()
         })
@@ -42941,6 +43114,9 @@ impl SeriesGroupByRolling<'_, '_> {
 
     /// Grouped rolling mean.
     pub fn mean(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.try_dense_grouped_sum_mean(true) {
+            return result;
+        }
         self.apply_grouped_rolling(|series, window, min_periods| {
             series.rolling(window, Some(min_periods)).mean()
         })
@@ -200770,6 +200946,84 @@ mod sgb_rolling_group_parallel_u5cg4 {
             sgb_rolling_last_worker_count(),
             1,
             "one group must stay serial however large the frame — there is nothing              to split"
+        );
+    }
+
+    #[test]
+    fn dense_typed_grouped_sum_mean_matches_generic_and_rejects_bool_key_vw0uu() {
+        let index = Index::new((0_i64..6).map(IndexLabel::Int64).collect());
+        let values = Series::new(
+            "v",
+            index.clone(),
+            Column::from_i64_values(vec![1, 10, 3, 20, 5, 30]),
+        )
+        .expect("typed values");
+        // First-seen order is 2, 1, while grouped rolling's public output is
+        // sorted by key: [1's source rows, then 2's source rows].  This pins
+        // both the dense direct-address route and its final group-order gather.
+        let dense_keys = Series::new(
+            "k",
+            index.clone(),
+            Column::from_i64_values(vec![2, 1, 2, 1, 2, 1]),
+        )
+        .expect("dense keys");
+        let grouped = values.groupby(&dense_keys).expect("groupby");
+        let rolling = grouped.rolling(2);
+
+        let direct_sum = rolling
+            .try_dense_grouped_sum_mean(false)
+            .expect("typed Int64 key and values must take dense route")
+            .expect("dense sum");
+        let generic_sum = rolling
+            .apply_grouped_rolling(|series, window, min_periods| {
+                series.rolling(window, Some(min_periods)).sum()
+            })
+            .expect("generic sum");
+        let direct_mean = rolling
+            .try_dense_grouped_sum_mean(true)
+            .expect("typed Int64 key and values must take dense route")
+            .expect("dense mean");
+        let generic_mean = rolling
+            .apply_grouped_rolling(|series, window, min_periods| {
+                series.rolling(window, Some(min_periods)).mean()
+            })
+            .expect("generic mean");
+
+        assert_eq!(bits_and_validity(&direct_sum), bits_and_validity(&generic_sum));
+        assert_eq!(
+            bits_and_validity(&direct_mean),
+            bits_and_validity(&generic_mean)
+        );
+        assert_eq!(
+            direct_sum.index().labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(5),
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(4),
+            ],
+            "dense output must retain source order inside sorted groups"
+        );
+
+        // Planted negative: Bool keys are deliberately outside
+        // `dense_group_ids`; accepting them here would silently substitute a
+        // different grouping representation instead of taking the established
+        // generic route.
+        let bool_keys = Series::new(
+            "k",
+            index,
+            Column::from_bool_values(vec![true, false, true, false, true, false]),
+        )
+        .expect("bool keys");
+        let bool_grouped = values.groupby(&bool_keys).expect("bool groupby");
+        assert!(
+            bool_grouped
+                .rolling(2)
+                .try_dense_grouped_sum_mean(false)
+                .is_none(),
+            "Bool keys must stay on the generic grouped-rolling route"
         );
     }
 }
