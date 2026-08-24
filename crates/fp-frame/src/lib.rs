@@ -5066,7 +5066,7 @@ impl Int64UnitRangeAlignment {
     }
 }
 
-fn sorted_int64_unit_range(labels: &[IndexLabel]) -> Option<(i64, i64)> {
+fn sorted_int64_unit_range_labels(labels: &[IndexLabel]) -> Option<(i64, i64)> {
     let start = match labels.first()? {
         IndexLabel::Int64(value) => *value,
         IndexLabel::Float64(_)
@@ -5102,8 +5102,20 @@ fn int64_unit_range_alignment(left: &Index, right: &Index) -> Option<Int64UnitRa
         return None;
     }
 
-    let (left_start, left_end) = sorted_int64_unit_range(left.labels())?;
-    let (right_start, right_end) = sorted_int64_unit_range(right.labels())?;
+    // A RangeIndex already carries this affine descriptor. Reading `labels()`
+    // first would turn its lazy backing into one `IndexLabel` allocation per
+    // row before the typed take path can do any work.
+    let bounds = |index: &Index| {
+        index
+            .int64_unit_range_labels()
+            .and_then(|(start, len)| {
+                let len = i64::try_from(len).ok()?;
+                Some((start, start.checked_add(len.checked_sub(1)?)?))
+            })
+            .or_else(|| sorted_int64_unit_range_labels(index.labels()))
+    };
+    let (left_start, left_end) = bounds(left)?;
+    let (right_start, right_end) = bounds(right)?;
 
     if left_end < right_start {
         if right_start.checked_sub(left_end)? > 1 {
@@ -8114,9 +8126,12 @@ impl Series {
             return Self::new(out_name, union_index, column);
         }
 
+        let typed_unit_range_columns = matches!(
+            (self.column.dtype(), other.column.dtype()),
+            (DType::Float64, DType::Float64) | (DType::Int64, DType::Int64)
+        );
         if !has_duplicate_labels
-            && matches!(self.column.dtype(), DType::Float64)
-            && matches!(other.column.dtype(), DType::Float64)
+            && typed_unit_range_columns
             && let Some(range) = int64_unit_range_alignment(&self.index, &other.index)
         {
             let union_index = range.union_index(&self.index, &other.index);
@@ -8137,13 +8152,23 @@ impl Series {
                 ));
             }
 
-            let column = self.column.aligned_binary_f64_int64_unit_ranges(
-                &other.column,
-                range.left_range(),
-                range.right_range(),
-                range.union_range(),
-                op,
-            )?;
+            let column = match self.column.dtype() {
+                DType::Float64 => self.column.aligned_binary_f64_int64_unit_ranges(
+                    &other.column,
+                    range.left_range(),
+                    range.right_range(),
+                    range.union_range(),
+                    op,
+                )?,
+                DType::Int64 => self.column.aligned_binary_i64_int64_unit_ranges(
+                    &other.column,
+                    range.left_range(),
+                    range.right_range(),
+                    range.union_range(),
+                    op,
+                )?,
+                _ => unreachable!("typed unit-range gate admits only numeric peers"),
+            };
             return Self::new(out_name, union_index, column);
         }
 
@@ -96584,6 +96609,36 @@ mod tests {
     }
 
     #[test]
+    fn series_add_i64_range_indexes_use_typed_outer_take() {
+        let left = Series::new(
+            "left",
+            Index::new_known_unique_int64_unit_range(0, 3),
+            Column::from_i64_values(vec![1, 2, 3]),
+        )
+        .expect("left");
+        let right = Series::new(
+            "right",
+            Index::new_known_unique_int64_unit_range(1, 3),
+            Column::from_i64_values(vec![10, 20, 30]),
+        )
+        .expect("right");
+
+        let out = left.add(&right).expect("range-index add");
+
+        assert_eq!(out.dtype(), DType::Float64);
+        assert_eq!(out.index().int64_unit_range_labels(), Some((0, 4)));
+        assert_eq!(
+            out.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(12.0),
+                Scalar::Float64(23.0),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+    }
+
+    #[test]
     fn int64_unit_range_alignment_rejects_non_unit_mixed_and_gapped_labels() {
         let unit = Index::new((0..3_i64).map(IndexLabel::Int64).collect());
         let non_unit = Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(2)]);
@@ -96592,10 +96647,12 @@ mod tests {
             IndexLabel::Utf8("1".to_string()),
         ]);
         let gapped = Index::new(vec![IndexLabel::Int64(5), IndexLabel::Int64(6)]);
+        let duplicate = Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(0)]);
 
         assert!(int64_unit_range_alignment(&non_unit, &unit).is_none());
         assert!(int64_unit_range_alignment(&mixed, &unit).is_none());
         assert!(int64_unit_range_alignment(&unit, &gapped).is_none());
+        assert!(int64_unit_range_alignment(&duplicate, &unit).is_none());
     }
 
     #[test]
