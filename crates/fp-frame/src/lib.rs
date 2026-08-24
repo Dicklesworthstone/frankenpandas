@@ -72585,7 +72585,7 @@ impl DataFrame {
         }
         let mut gid_table = vec![usize::MAX; combined];
         let mut count: Vec<i64> = Vec::new();
-        let mut key_of_gid: Vec<Vec<MixedKey>> = Vec::new();
+        let mut key_of_gid: Vec<Vec<MixedKey<'_>>> = Vec::new();
         for row in 0..n {
             let mut slot = 0usize;
             for c in 0..ncol {
@@ -72601,8 +72601,11 @@ impl DataFrame {
                     (0..ncol)
                         .map(|c| match &cols[c] {
                             ColKey::Int(s, _) => MixedKey::Int64(s[row]),
+                            // Borrowed, not `to_string()`d — see `MixedKey`. The
+                            // ordering below is count-first, so this site keeps its
+                            // comparison sort; only the allocation goes away.
                             ColKey::Str(codes, inverse) => {
-                                MixedKey::Utf8(inverse[codes[row] as usize].to_string())
+                                MixedKey::Utf8(inverse[codes[row] as usize])
                             }
                         })
                         .collect(),
@@ -85410,22 +85413,29 @@ struct DenseMultiInt64Grouping {
 /// One key-column value within a dense multi-key group tuple. Derived `Ord` orders
 /// by variant then value — and since a given key level always has ONE column dtype,
 /// only same-variant comparisons happen within a tuple position, where this equals
-/// `scalar_key_cmp` (Int64 == i64 cmp, Utf8 == str cmp). So `Vec<MixedKey>::cmp` ==
+/// `scalar_key_cmp` (Int64 == i64 cmp, Utf8 == str cmp). So `[MixedKey]::cmp` ==
 /// `composite_key_cmp` for any mix of Int64/Utf8 keys → bit-identical group order.
+///
+/// br-frankenpandas-uza04: the Utf8 arm BORROWS. It used to own a `String`, which
+/// cost one allocation per group PER KEY LEVEL — 10,000 of them on the certified
+/// `df_groupby_2strkey_sum @10k` loss (5,000 groups x 2 levels) to re-materialize at
+/// most 150 distinct short strings. The borrow is from the key column itself, which
+/// outlives the grouping, so the values are the same bytes and every comparison,
+/// `Display` and `IndexLabel` below is unchanged.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum MixedKey {
+enum MixedKey<'a> {
     Int64(i64),
-    Utf8(String),
+    Utf8(&'a str),
 }
-impl MixedKey {
+impl MixedKey<'_> {
     fn to_index_label(&self) -> IndexLabel {
         match self {
             MixedKey::Int64(v) => IndexLabel::Int64(*v),
-            MixedKey::Utf8(s) => IndexLabel::Utf8(s.clone()),
+            MixedKey::Utf8(s) => IndexLabel::Utf8((*s).to_owned()),
         }
     }
 }
-impl std::fmt::Display for MixedKey {
+impl std::fmt::Display for MixedKey<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MixedKey::Int64(v) => write!(f, "{v}"),
@@ -85436,14 +85446,28 @@ impl std::fmt::Display for MixedKey {
 
 /// Dense grouping over ≥2 all-valid key columns where each is bounded-Int64 or
 /// contiguous-Utf8 and at least one is Utf8 — the Utf8/mixed sibling of
-/// [`DenseMultiInt64Grouping`]. `key_of_gid[g]` holds the owned per-level key values;
+/// [`DenseMultiInt64Grouping`]. [`Self::key`] gives group `g`'s per-level key values;
 /// `order` sorts gids by the key tuple, which equals `composite_key_cmp`, so the
 /// output group order is byte-identical to the generic `build_groups` path.
-struct DenseMultiMixedGrouping {
+///
+/// br-frankenpandas-uza04: the key tuples are ONE FLAT `Vec` of `ngroups * ncol`
+/// borrowed cells, not a `Vec<Vec<_>>`. The nested form allocated once per group on
+/// top of once per Utf8 cell; both allocations are gone and the tuples are still
+/// read the same way, through `key(g)`.
+struct DenseMultiMixedGrouping<'a> {
     gid_per_row: Vec<usize>,
     ngroups: usize,
     order: Vec<usize>,
-    key_of_gid: Vec<Vec<MixedKey>>,
+    /// `ngroups * ncol` cells, group-major: group `g` occupies `g*ncol..(g+1)*ncol`.
+    key_cells: Vec<MixedKey<'a>>,
+    ncol: usize,
+}
+
+impl<'a> DenseMultiMixedGrouping<'a> {
+    /// Group `g`'s key tuple, one cell per `by` level, in `by` order.
+    fn key(&self, g: usize) -> &[MixedKey<'a>] {
+        &self.key_cells[g * self.ncol..(g + 1) * self.ncol]
+    }
 }
 
 impl DataFrameGroupBy<'_> {
@@ -89106,15 +89130,26 @@ impl DataFrameGroupBy<'_> {
     }
 
     /// Dense grouping over ≥2 all-valid key columns where each is bounded-Int64 or
-    /// contiguous-Utf8 and ≥1 is Utf8. Factorizes each Utf8 key to first-seen u32
-    /// codes (keeping a code→str inverse) and treats each Int64 key as `value - min`,
-    /// packs them into a bounded mixed-radix gid table, and records each gid's owned
-    /// per-level key values. Bypasses `build_groups` (the per-row `Vec<ScalarKey>`
-    /// heap-alloc + composite hash). Bit-identical group order: gids are sorted by the
-    /// key tuple via `MixedKey::cmp`, which equals `composite_key_cmp`. Returns None
-    /// for all-Int64 keys (the faster `multi_int64_dense_grouping` handles those), any
-    /// non-Int64/Utf8 key, or a combined cardinality past the dense gate.
-    fn multi_mixed_dense_grouping(&self) -> Option<DenseMultiMixedGrouping> {
+    /// contiguous-Utf8 and ≥1 is Utf8. Factorizes each Utf8 key to **rank-ordered**
+    /// u32 codes (keeping a code→str inverse) and treats each Int64 key as
+    /// `value - min`, packs them into a bounded mixed-radix gid table, and records
+    /// each gid's borrowed per-level key values. Bypasses `build_groups` (the per-row
+    /// `Vec<ScalarKey>` heap-alloc + composite hash).
+    ///
+    /// **Group order comes from the packing, not from a comparison sort**
+    /// (br-frankenpandas-uza04). Both code families are monotone in their level's key
+    /// value — `value - min` trivially, and the Utf8 codes because they are assigned
+    /// by sorted rank rather than by first appearance — and `slot` is their mixed-radix
+    /// combination with `by`-order-descending strides, i.e. the lexicographic rank of
+    /// the key tuple. So ascending `slot` IS ascending `[MixedKey]::cmp`, which is
+    /// `composite_key_cmp`: same group order as before, and as `build_groups`, with the
+    /// per-tuple string comparisons replaced by integer ones. Ranking costs one sort of
+    /// each level's DISTINCT values (never more than the group count) instead of one
+    /// sort of every group's whole tuple.
+    ///
+    /// Returns None for all-Int64 keys (the faster `multi_int64_dense_grouping` handles
+    /// those), any non-Int64/Utf8 key, or a combined cardinality past the dense gate.
+    fn multi_mixed_dense_grouping(&self) -> Option<DenseMultiMixedGrouping<'_>> {
         if self.by.len() < 2 {
             return None;
         }
@@ -89174,6 +89209,24 @@ impl DataFrameGroupBy<'_> {
                     }
                     codes.push(code);
                 }
+                // RANK the codes (br-frankenpandas-uza04). Factorization above hands
+                // out codes in first-appearance order; re-labelling them by sorted
+                // rank is what makes the packed `slot` below ordered by key VALUE, and
+                // so lets the sorted group order fall out of the table scan instead of
+                // a comparison sort over whole key tuples. `sort_unstable_by_key` on
+                // `&str` is byte-lexicographic — the same comparison `MixedKey::Utf8`
+                // derives and the same one `scalar_key_cmp` performs — and the
+                // distinct values are unique, so instability cannot reorder anything.
+                let mut by_rank: Vec<u32> = (0..card).collect();
+                by_rank.sort_unstable_by_key(|&c| inverse[c as usize]);
+                let mut rank_of_code = vec![0u32; card as usize];
+                for (rank, &code) in by_rank.iter().enumerate() {
+                    rank_of_code[code as usize] = rank as u32;
+                }
+                for code in &mut codes {
+                    *code = rank_of_code[*code as usize];
+                }
+                let inverse: Vec<&str> = by_rank.iter().map(|&c| inverse[c as usize]).collect();
                 ranges.push(card as usize);
                 cols.push(ColKey::Str { codes, inverse });
             } else {
@@ -89198,7 +89251,12 @@ impl DataFrameGroupBy<'_> {
         }
         let mut gid_table = vec![usize::MAX; combined];
         let mut gid_per_row = vec![0usize; n];
-        let mut key_of_gid: Vec<Vec<MixedKey>> = Vec::new();
+        let mut key_cells: Vec<MixedKey<'_>> = Vec::new();
+        // Which slot each gid occupies, in gid order. Recorded here because gids are
+        // still handed out in FIRST-SEEN order — `gid_per_row` is unchanged by this
+        // rewrite — so the slot (= the key tuple's lexicographic rank) has to be
+        // carried separately to order them.
+        let mut slot_of_gid: Vec<usize> = Vec::new();
         for row in 0..n {
             let mut slot = 0usize;
             for c in 0..ncol {
@@ -89209,34 +89267,53 @@ impl DataFrameGroupBy<'_> {
                 slot += code * strides[c];
             }
             let g = if gid_table[slot] == usize::MAX {
-                let ng = key_of_gid.len();
+                let ng = slot_of_gid.len();
                 gid_table[slot] = ng;
-                key_of_gid.push(
-                    (0..ncol)
-                        .map(|c| match &cols[c] {
-                            ColKey::Int { s, .. } => MixedKey::Int64(s[row]),
-                            ColKey::Str { codes, inverse } => {
-                                MixedKey::Utf8(inverse[codes[row] as usize].to_string())
-                            }
-                        })
-                        .collect(),
-                );
+                slot_of_gid.push(slot);
+                for c in 0..ncol {
+                    key_cells.push(match &cols[c] {
+                        ColKey::Int { s, .. } => MixedKey::Int64(s[row]),
+                        ColKey::Str { codes, inverse } => {
+                            MixedKey::Utf8(inverse[codes[row] as usize])
+                        }
+                    });
+                }
                 ng
             } else {
                 gid_table[slot]
             };
             gid_per_row[row] = g;
         }
-        let ngroups = key_of_gid.len();
-        let mut order: Vec<usize> = (0..ngroups).collect();
+        let ngroups = slot_of_gid.len();
+        let mut order: Vec<usize> = Vec::with_capacity(ngroups);
         if self.sort {
-            order.sort_by(|&a, &b| key_of_gid[a].cmp(&key_of_gid[b]));
+            // Ascending slot == ascending key tuple (see the doc comment). Two ways to
+            // enumerate the occupied slots in ascending order, chosen on which is
+            // cheaper — they produce the SAME sequence, because each occupied slot
+            // holds exactly one gid.
+            if combined <= ngroups.saturating_mul(8) {
+                // Dense table: walk it. O(combined), no comparisons at all.
+                for &g in &gid_table {
+                    if g != usize::MAX {
+                        order.push(g);
+                    }
+                }
+            } else {
+                // Sparse table: sorting the gids by their slot is cheaper than
+                // scanning mostly-empty slots. Still an INTEGER sort, and the slots
+                // are distinct, so unstable is safe.
+                order.extend(0..ngroups);
+                order.sort_unstable_by_key(|&g| slot_of_gid[g]);
+            }
+        } else {
+            order.extend(0..ngroups);
         }
         Some(DenseMultiMixedGrouping {
             gid_per_row,
             ngroups,
             order,
-            key_of_gid,
+            key_cells,
+            ncol,
         })
     }
 
@@ -89768,14 +89845,14 @@ impl DataFrameGroupBy<'_> {
     /// (Int64 plain, Utf8 verbatim), matching the generic `build_groups` assembly.
     fn multi_dense_index_mixed(
         &self,
-        grouping: &DenseMultiMixedGrouping,
+        grouping: &DenseMultiMixedGrouping<'_>,
     ) -> Result<(Index, fp_index::MultiIndex), FrameError> {
         let mut labels = Vec::with_capacity(grouping.order.len());
         let mut level_arrays: Vec<Vec<IndexLabel>> = (0..self.by.len())
             .map(|_| Vec::with_capacity(grouping.order.len()))
             .collect();
         for &g in &grouping.order {
-            let key = &grouping.key_of_gid[g];
+            let key = grouping.key(g);
             let parts: Vec<String> = key.iter().map(ToString::to_string).collect();
             labels.push(IndexLabel::Utf8(parts.join(", ")));
             for (level_idx, value) in key.iter().enumerate() {
@@ -93561,7 +93638,7 @@ impl DataFrameGroupBy<'_> {
                     .iter()
                     .map(|&gid| {
                         let parts: Vec<String> =
-                            g.key_of_gid[gid].iter().map(ToString::to_string).collect();
+                            g.key(gid).iter().map(ToString::to_string).collect();
                         IndexLabel::Utf8(parts.join(", "))
                     })
                     .collect();
@@ -205306,5 +205383,319 @@ mod ewm_mean_loop_shape_uza04 {
             .mean()
             .expect("mean");
         assert_eq!(actual.column().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod mixed_dense_group_order_uza04 {
+    //! Multi-key dense grouping orders groups by the PACKING, not by comparing
+    //! key tuples — and the order is the same one.
+    //!
+    //! br-frankenpandas-uza04. `df_groupby_2strkey_sum @10k` is a certified LOSS
+    //! (0.853x vs pandas 2.2.3, 2026-08-18, A/A null 1.00242 / 0.99786), and its
+    //! profile puts the time in `multi_mixed_dense_grouping` plus the `sort_by`
+    //! underneath it. That function used to (a) factorize each Utf8 key in
+    //! FIRST-APPEARANCE order, (b) materialize every group's key tuple as an owned
+    //! `Vec<MixedKey>` holding `String`s — 5,000 Vecs and 10,000 Strings at 10k for
+    //! at most 150 distinct short keys — and (c) sort the gids by comparing those
+    //! tuples.
+    //!
+    //! Now the Utf8 codes are assigned by SORTED RANK, which makes the packed
+    //! mixed-radix `slot` the lexicographic rank of the key tuple, so the sorted
+    //! group order is read straight off the table; the tuples are borrowed cells in
+    //! one flat buffer.
+    //!
+    //! THE FAILURE MODE THESE TESTS EXIST FOR: a wrong rank assignment mis-orders
+    //! GROUPS while every value inside every group stays correct. Aggregates alone
+    //! cannot see it — the tests below assert the LABEL SEQUENCE, and pair each
+    //! group's label with its own aggregate so a permutation cannot pass.
+
+    use fp_index::IndexLabel;
+    use fp_types::Scalar;
+
+    use super::DataFrame;
+
+    /// Build a frame from string key columns plus one f64 value column.
+    fn frame(k1: &[&str], k2: &[&str], v: &[f64]) -> DataFrame {
+        DataFrame::from_dict(
+            &["k1", "k2", "v"],
+            vec![
+                (
+                    "k1",
+                    k1.iter().map(|s| Scalar::Utf8((*s).to_owned())).collect(),
+                ),
+                (
+                    "k2",
+                    k2.iter().map(|s| Scalar::Utf8((*s).to_owned())).collect(),
+                ),
+                ("v", v.iter().map(|&x| Scalar::Float64(x)).collect()),
+            ],
+        )
+        .expect("frame")
+    }
+
+    fn flat_labels(df: &DataFrame) -> Vec<String> {
+        df.index()
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Utf8(s) => s.clone(),
+                other => panic!("composite group label must be Utf8, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn values(df: &DataFrame, column: &str) -> Vec<f64> {
+        df.column(column)
+            .expect("value column")
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Float64(x) => *x,
+                other => panic!("expected Float64, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The reference: sorted distinct key tuples with their group sums, computed
+    /// here by plain `str` comparison rather than by re-running the kernel.
+    fn reference(k1: &[&str], k2: &[&str], v: &[f64]) -> (Vec<String>, Vec<f64>) {
+        let mut tuples: Vec<(&str, &str)> = k1.iter().copied().zip(k2.iter().copied()).collect();
+        tuples.sort_unstable();
+        tuples.dedup();
+        let sums: Vec<f64> = tuples
+            .iter()
+            .map(|&(a, b)| {
+                k1.iter()
+                    .zip(k2)
+                    .zip(v)
+                    .filter(|((x, y), _)| **x == a && **y == b)
+                    .map(|(_, &value)| value)
+                    .sum()
+            })
+            .collect();
+        (
+            tuples.iter().map(|(a, b)| format!("{a}, {b}")).collect(),
+            sums,
+        )
+    }
+
+    /// FIRST-APPEARANCE ORDER IS THE OPPOSITE OF SORTED ORDER HERE. Every key is
+    /// introduced in descending order, so a factorization that forgot to rank its
+    /// codes would emit the groups exactly backwards.
+    #[test]
+    fn descending_first_appearance_still_emits_sorted_groups_uza04() {
+        let k1 = ["c", "c", "b", "b", "a", "a"];
+        let k2 = ["z", "y", "z", "y", "z", "y"];
+        let v = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+        let (want_labels, want_sums) = reference(&k1, &k2, &v);
+        assert_eq!(
+            want_labels,
+            vec!["a, y", "a, z", "b, y", "b, z", "c, y", "c, z"],
+            "the reference itself must be in sorted order, not input order"
+        );
+
+        let got = frame(&k1, &k2, &v)
+            .groupby(&["k1", "k2"])
+            .expect("groupby")
+            .sum()
+            .expect("sum");
+        assert_eq!(flat_labels(&got), want_labels);
+        assert_eq!(values(&got, "v"), want_sums);
+    }
+
+    /// Level PRECEDENCE: k1 decides first, k2 only breaks ties. A packing whose
+    /// strides ran the other way would order by k2 first — and the sums travel
+    /// with the labels, so the permutation is visible in both.
+    #[test]
+    fn leading_level_takes_precedence_over_trailing_uza04() {
+        let k1 = ["b", "a", "b", "a"];
+        let k2 = ["p", "q", "q", "p"];
+        let v = [1.0, 2.0, 4.0, 8.0];
+        let got = frame(&k1, &k2, &v)
+            .groupby(&["k1", "k2"])
+            .expect("groupby")
+            .sum()
+            .expect("sum");
+        assert_eq!(flat_labels(&got), vec!["a, p", "a, q", "b, p", "b, q"]);
+        // a,p = 8 · a,q = 2 · b,p = 1 · b,q = 4 — pinned individually so a swap of
+        // the two middle groups cannot pass on the label check alone.
+        assert_eq!(values(&got, "v"), vec![8.0, 2.0, 1.0, 4.0]);
+    }
+
+    /// Ordering is BYTE-lexicographic, so the cases that separate it from any
+    /// "looks sorted" shortcut: unequal-length keys where one is a prefix of the
+    /// other, digits against letters, and upper against lower case.
+    #[test]
+    fn byte_lexicographic_edges_uza04() {
+        let k1 = ["ab", "a", "B", "b", "1", "abc"];
+        let k2 = ["x", "x", "x", "x", "x", "x"];
+        let v = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+        let (want_labels, want_sums) = reference(&k1, &k2, &v);
+        assert_eq!(
+            want_labels,
+            vec!["1, x", "B, x", "a, x", "ab, x", "abc, x", "b, x"],
+            "byte order: digits < uppercase < lowercase, and a prefix sorts first"
+        );
+        let got = frame(&k1, &k2, &v)
+            .groupby(&["k1", "k2"])
+            .expect("groupby")
+            .sum()
+            .expect("sum");
+        assert_eq!(flat_labels(&got), want_labels);
+        assert_eq!(values(&got, "v"), want_sums);
+    }
+
+    /// A MIXED Int64 + Utf8 key: the Int64 level is packed as `value - min`, which
+    /// must stay in the same order as the ranked Utf8 level beside it. Negative
+    /// values are the case where a raw `as usize` cast would wrap.
+    #[test]
+    fn mixed_int64_and_utf8_levels_uza04() {
+        let ints: [i64; 6] = [5, -3, 5, 0, -3, 0];
+        let strs = ["q", "q", "p", "p", "p", "q"];
+        let vals = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+        let df = DataFrame::from_dict(
+            &["ki", "ks", "v"],
+            vec![
+                ("ki", ints.iter().map(|&v| Scalar::Int64(v)).collect()),
+                (
+                    "ks",
+                    strs.iter().map(|s| Scalar::Utf8((*s).to_owned())).collect(),
+                ),
+                ("v", vals.iter().map(|&x| Scalar::Float64(x)).collect()),
+            ],
+        )
+        .expect("frame");
+
+        let got = df
+            .groupby(&["ki", "ks"])
+            .expect("groupby")
+            .sum()
+            .expect("sum");
+        assert_eq!(
+            flat_labels(&got),
+            vec!["-3, p", "-3, q", "0, p", "0, q", "5, p", "5, q"]
+        );
+        assert_eq!(values(&got, "v"), vec![16.0, 2.0, 8.0, 32.0, 4.0, 1.0]);
+    }
+
+    /// BOTH enumeration branches must agree. `order` is read off a table walk when
+    /// the packed table is dense relative to the group count and from an integer
+    /// sort of the gids when it is sparse; the same key values are fed through both
+    /// by changing only how many rows carry them.
+    ///
+    /// 20 distinct k1 x 20 distinct k2 packs to 400 slots either way. Filling ALL
+    /// 400 combinations (400 rows, 400 groups) leaves the table dense — `400 <=
+    /// 400*8` — so `order` is a table walk. Using only 20 of those combinations,
+    /// each on two rows (40 rows, 20 groups), leaves 400 slots holding 20 groups —
+    /// past the 8x cutoff, so `order` is an integer sort — while `400 <= 16*40`
+    /// keeps the dense gate itself open.
+    #[test]
+    fn dense_walk_and_sparse_sort_agree_uza04() {
+        let names: Vec<String> = (0..20).map(|i| format!("k{:02}", (i * 7) % 20)).collect();
+        let k1: Vec<&str> = names.iter().map(String::as_str).collect();
+        let k2: Vec<&str> = names.iter().rev().map(String::as_str).collect();
+
+        // 40 rows over 20 tuples → 400 slots, 20 groups: the SPARSE sort branch.
+        let sk1: Vec<&str> = k1.iter().flat_map(|s| [*s, *s]).collect();
+        let sk2: Vec<&str> = k2.iter().flat_map(|s| [*s, *s]).collect();
+        let sv: Vec<f64> = (0..40).map(|i| f64::from(i) + 0.5).collect();
+        let sparse = frame(&sk1, &sk2, &sv)
+            .groupby(&["k1", "k2"])
+            .expect("groupby")
+            .sum()
+            .expect("sum");
+
+        // 400 rows covering every combination → 400 slots, 400 groups: the DENSE
+        // walk branch.
+        let dk1: Vec<&str> = k1.iter().flat_map(|s| [*s; 20]).collect();
+        let dk2: Vec<&str> = k1.iter().flat_map(|_| k2.iter().copied()).collect();
+        let dv: Vec<f64> = (0..400).map(|i| f64::from(i) * 0.25).collect();
+        let dense = frame(&dk1, &dk2, &dv)
+            .groupby(&["k1", "k2"])
+            .expect("groupby")
+            .sum()
+            .expect("sum");
+
+        let (want_sparse_labels, want_sparse_sums) = reference(&sk1, &sk2, &sv);
+        assert_eq!(want_sparse_labels.len(), 20, "sparse: 20 occupied of 400 slots");
+        assert_eq!(flat_labels(&sparse), want_sparse_labels);
+        assert_eq!(values(&sparse, "v"), want_sparse_sums);
+
+        let (want_dense_labels, want_dense_sums) = reference(&dk1, &dk2, &dv);
+        assert_eq!(want_dense_labels.len(), 400, "dense: every slot occupied");
+        assert_eq!(flat_labels(&dense), want_dense_labels);
+        assert_eq!(values(&dense, "v"), want_dense_sums);
+    }
+
+    /// CROSS-PATH: the same key tuples routed through the GENERIC `build_groups`
+    /// path must come out in the same order. The dense gate declines when the
+    /// packed table would exceed 16 slots per row, so one row per tuple (400 slots,
+    /// 20 rows) takes the generic path while the same tuples spread over 40 rows
+    /// (400 slots, 40 rows) take the dense one.
+    #[test]
+    fn dense_and_generic_paths_emit_the_same_group_order_uza04() {
+        let names: Vec<String> = (0..20).map(|i| format!("v{:02}", (i * 13) % 20)).collect();
+        let k1: Vec<&str> = names.iter().map(String::as_str).collect();
+        let k2: Vec<&str> = names.iter().rev().map(String::as_str).collect();
+        let ones = vec![1.0_f64; 20];
+
+        // 400 slots over 20 rows: 400 > 20*16, gate DECLINES → generic build_groups.
+        let generic = frame(&k1, &k2, &ones)
+            .groupby(&["k1", "k2"])
+            .expect("groupby")
+            .sum()
+            .expect("sum");
+
+        // Same 20 tuples, each row duplicated: 400 slots over 40 rows, 400 <= 640,
+        // gate ADMITS → dense mixed grouping.
+        let dk1: Vec<&str> = k1.iter().flat_map(|s| [*s, *s]).collect();
+        let dk2: Vec<&str> = k2.iter().flat_map(|s| [*s, *s]).collect();
+        let dense = frame(&dk1, &dk2, &vec![1.0_f64; 40])
+            .groupby(&["k1", "k2"])
+            .expect("groupby")
+            .sum()
+            .expect("sum");
+
+        assert_eq!(
+            flat_labels(&dense),
+            flat_labels(&generic),
+            "dense mixed grouping must reproduce build_groups' group order"
+        );
+        assert_eq!(values(&generic, "v"), vec![1.0; 20]);
+        assert_eq!(values(&dense, "v"), vec![2.0; 20]);
+    }
+
+    /// `size()` reads the key tuples through the same flat buffer, and its labels
+    /// are built independently of the aggregation paths above.
+    #[test]
+    fn size_labels_follow_the_same_order_uza04() {
+        let k1 = ["c", "a", "b", "a", "c", "a"];
+        let k2 = ["y", "x", "y", "x", "x", "y"];
+        let v = [0.0; 6];
+        let got = frame(&k1, &k2, &v)
+            .groupby(&["k1", "k2"])
+            .expect("groupby")
+            .size()
+            .expect("size");
+        let labels: Vec<String> = got
+            .index()
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Utf8(s) => s.clone(),
+                other => panic!("expected Utf8 label, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(labels, vec!["a, x", "a, y", "b, y", "c, x", "c, y"]);
+        let counts: Vec<i64> = got
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Int64(x) => *x,
+                other => panic!("expected Int64 count, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(counts, vec![2, 1, 1, 1, 1]);
     }
 }
