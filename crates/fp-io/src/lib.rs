@@ -20003,10 +20003,10 @@ mod tests {
         let frame = read_csv_str(input).expect("parse");
         let output = write_csv_string(&frame).expect("write");
 
-        // Golden reference: columns in BTreeMap order; Bool(true) coerced to Float64
-        // in column c (which has Float64 + Bool → Float64), so true → 1.0. A Float64
-        // column writes whole values with a trailing ".0" like pandas (str(float)).
-        let expected = "a,b,c\n1,hello,3.14\n2,,1.0\n3,world,\n";
+        // GOLDEN-CHANGE (live pandas 2.2.3): read_csv keeps c as object because it
+        // contains the string token "true"; to_csv(index=False) therefore emits
+        // the original `true` spelling rather than coercing it to Float64 1.0.
+        let expected = "a,b,c\n1,hello,3.14\n2,,true\n3,world,\n";
         assert_eq!(
             output, expected,
             "output does not match golden reference.\nGot:\n{output}\nExpected:\n{expected}"
