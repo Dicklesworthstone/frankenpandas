@@ -42,11 +42,34 @@
 //! Without `--features block-storage` it refuses to run rather than silently
 //! measuring the ordinary arm twice and reporting a tax of 1.000x.
 
-use std::{collections::BTreeMap, hint::black_box, time::Instant};
+use std::{collections::BTreeMap, fmt::Write as _, hint::black_box, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::Index;
+use sha2::{Digest, Sha256};
+
+/// SELF-reported binary identity, in the canonical shape the perf ledger's
+/// preflight gate requires (`bench_elf_sha256=<sha> (<bytes> bytes) <abs path>`).
+///
+/// The point is that the PROCESS reports what it is. A sha computed afterwards
+/// by `sha256sum` proves only that some file on disk had that digest, not that
+/// the numbers below came out of it — which is the whole reason the gate insists
+/// on this marker.
+fn self_identity() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_owned();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_owned();
+    };
+    let digest = Sha256::digest(&bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    format!("{hex} ({} bytes) {}", bytes.len(), path.display())
+}
 
 /// Deterministic payload; no `rand`, so a rerun on another host is comparable.
 fn column_values(rows: usize, col: usize) -> Vec<f64> {
@@ -110,6 +133,21 @@ fn median(mut values: Vec<f64>) -> f64 {
     }
 }
 
+/// ⚠️ SMALL SIZES ARE ALLOCATOR-STATE DEPENDENT — DO NOT QUOTE A 10k TAX.
+///
+/// At 10k x 10 (0.8 MB) this bench has produced BOTH ~2.1x and ~0.97x for the
+/// same source, on the same host, minutes apart. The variable is what the
+/// allocator already holds: the CONSOLIDATED arm wants one contiguous 0.8 MB
+/// buffer per iteration, so whether that comes from a warm free block or a
+/// fresh mmap (page faults, `clear_page_erms`) decides the arm. Merely adding a
+/// startup self-hash — which reads the executable into a large `Vec<u8>` and
+/// drops it — was enough to move the 10k number by 2x, while leaving 100k
+/// untouched. Running `100k` before `10k` is likewise a different measurement
+/// from running `10k` alone.
+///
+/// 100k x 10 (8 MB) is stable across every binary and ordering tried, because
+/// there the 8 MB copy dominates any allocator bookkeeping. Rest conclusions on
+/// that size; treat the small size as context only.
 #[cfg(feature = "block-storage")]
 fn run_size(rows: usize, cols: usize, rounds: usize) {
     // Warm the allocator and any one-time init so round 0 is not an outlier
@@ -200,6 +238,7 @@ fn main() {
         .and_then(|arg| arg.parse().ok())
         .unwrap_or(15);
 
+    println!("bench_elf_sha256={}", self_identity());
     println!("bench_fresh_frame_consolidation_tax (br-frankenpandas-uza04)");
     println!("fresh frame per timed slot; ABBA interleave; median of per-round ratios");
     println!("TAX = consolidated / ordinary; AA_NULL = ordinary / ordinary");
@@ -207,6 +246,19 @@ fn main() {
     // The ledger's own worked example is a 100k x 10 f64 frame (8 MB), so that
     // size is the one the predicate is really about. 10k is carried alongside
     // because a fixed per-construction cost would show up there first.
-    run_size(10_000, 10, rounds);
-    run_size(100_000, 10, rounds);
+    //
+    // The size list is selectable because the ORDER matters at small sizes: see
+    // the small-size warning in `run_size`. `10k` alone and `10k` after `100k`
+    // are different measurements, and being able to run each is how that was
+    // established rather than guessed.
+    let sizes: Vec<usize> = match std::env::args().nth(2) {
+        Some(list) => list
+            .split(',')
+            .filter_map(|entry| entry.trim().parse().ok())
+            .collect(),
+        None => vec![10_000, 100_000],
+    };
+    for rows in sizes {
+        run_size(rows, 10, rounds);
+    }
 }

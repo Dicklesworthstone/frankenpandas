@@ -1526,25 +1526,24 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     // mixed CSV bails the frame-wide numeric fast paths, so historically EVERY
     // column round-tripped through a `Vec<Scalar>` (parse_scalar per cell + a
     // from_values re-scan) — even a purely-numeric column sitting next to one
-    // Utf8 column. Accumulate each column into a typed Int64/Float64 buffer and,
-    // the instant a cell is a null / bool / non-numeric-text (an AMBIGUOUS
-    // promotion — fp's from_values keeps int+null as NULLABLE Int64, coerces
-    // int+bool to Int64, etc.; see the probe in the commit msg), drop that column
-    // to `Fallback` and rebuild it via the UNCHANGED Scalar path from the raw
+    // Utf8 column. Accumulate each column into a typed Int64/Float64/Bool buffer and,
+    // the instant a cell cannot preserve that column's current type (an AMBIGUOUS
+    // promotion — nullable numbers stay typed, while the existing raw-object
+    // reconstruction preserves ambiguous mixtures such as int+bool as Utf8),
+    // drop that column to `Fallback` and rebuild it via the UNCHANGED Scalar path from the raw
     // bytes (already captured for verbatim). A pure-numeric-no-null column then
     // emits its typed column directly, bit-identical to from_values over the
     // equivalent Scalars: all-Int64 → Int64 (from_i64_values), any-Float64-no-null
     // → Float64 with ints coerced to `x as f64` (from_f64_values) — exactly what
     // Column::from_values + build_csv_object_aware_column produce for those inputs.
     // `valid: None` = all-valid so far (the common fast case, no per-cell bit
-    // tracking); `Some(mask)` = at least one NA has appeared. A numeric column
-    // with nulls stays typed — fp's from_values keeps int+null as NULLABLE Int64
-    // and float+null as Float64, and build_csv_object_aware_column normalizes a
-    // Float null to NaN; `from_{i64,f64}_values_with_validity` reproduce those
-    // exactly (Int64 missing → Null(Null); Float64 missing → Null(NaN); verified).
+    // tracking); `Some(mask)` = at least one NA has appeared. Numeric and Bool
+    // columns with nulls stay typed: Int64 missing → Null(Null), Float64 missing
+    // → Null(NaN), and Bool missing → Null(Null).
     enum ColAcc {
         Int(Vec<i64>, Option<Vec<bool>>),
         Float(Vec<f64>, Option<Vec<bool>>),
+        Bool(Vec<bool>, Option<Vec<bool>>),
         Fallback,
     }
     let mut accs: Vec<ColAcc> = (0..header_count)
@@ -1593,6 +1592,12 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             .push(false);
                         buf.push(0.0);
                     }
+                    ColAcc::Bool(buf, valid) => {
+                        valid
+                            .get_or_insert_with(|| vec![true; buf.len()])
+                            .push(false);
+                        buf.push(false);
+                    }
                     ColAcc::Fallback => {}
                 }
                 continue;
@@ -1612,6 +1617,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
+                    ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
                     ColAcc::Fallback => {}
                 }
             } else if let Ok(v) = trimmed.parse::<f64>() {
@@ -1630,7 +1636,35 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
+                    ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
                     ColAcc::Fallback => {}
+                }
+            } else if field.eq_ignore_ascii_case("true") || field.eq_ignore_ascii_case("false") {
+                let value = field.eq_ignore_ascii_case("true");
+                match acc {
+                    ColAcc::Int(buf, valid) => {
+                        // An Int accumulator can only become Bool if every
+                        // preceding slot is missing. Otherwise `1,true` must
+                        // retain the legacy object fallback rather than lose
+                        // the already-observed numeric value.
+                        let only_missing = valid
+                            .as_ref()
+                            .is_some_and(|mask| mask.iter().all(|&present| !present));
+                        if buf.is_empty() || only_missing {
+                            let mut promoted = vec![false; buf.len()];
+                            promoted.push(value);
+                            *acc = ColAcc::Bool(promoted, valid.take());
+                        } else {
+                            *acc = ColAcc::Fallback;
+                        }
+                    }
+                    ColAcc::Bool(buf, valid) => {
+                        buf.push(value);
+                        if let Some(vv) = valid {
+                            vv.push(true);
+                        }
+                    }
+                    ColAcc::Float(_, _) | ColAcc::Fallback => *acc = ColAcc::Fallback,
                 }
             } else {
                 *acc = ColAcc::Fallback;
@@ -1678,6 +1712,12 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                 match valid.as_deref().and_then(validity_from_bools) {
                     Some(mask) => Column::from_f64_values_with_validity(buf, mask),
                     None => Column::from_f64_values(buf),
+                }
+            }
+            ColAcc::Bool(buf, valid) if has_value(buf.len(), &valid) => {
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_bool_values_with_validity(buf, mask),
+                    None => Column::from_bool_values(buf),
                 }
             }
             // Any ambiguous cell, all-NA, or empty → exact legacy path from raw.
@@ -17824,6 +17864,51 @@ mod tests {
                     line: 2,
                     expected: 2,
                     found: 3
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_csv_typed_bool_builder_uses_nullable_backing_and_rejects_ragged_rows_3gsa7() {
+        let frame = read_csv_str("flag\nTrue\nNA\nfalse\n").expect("typed bool csv");
+        let flag = frame.column("flag").expect("flag column");
+
+        assert_eq!(flag.dtype(), DType::Bool);
+        let (values, validity) = flag
+            .as_nullable_bool_slice()
+            .expect("typed nullable Bool backing");
+        assert_eq!(values, &[true, false, false]);
+        assert!(validity.get(0));
+        assert!(!validity.get(1));
+        assert!(validity.get(2));
+        assert_eq!(
+            flag.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false)
+            ]
+        );
+
+        // A prior numeric value is semantically ambiguous with Bool and must
+        // keep the legacy Scalar fallback, rather than being retyped as Bool.
+        let mixed = read_csv_str("flag\n1\ntrue\n").expect("mixed csv fallback");
+        assert_eq!(
+            mixed.column("flag").expect("mixed flag").dtype(),
+            DType::Utf8
+        );
+
+        let err =
+            read_csv_str("flag\ntrue,false\nfalse\n").expect_err("overlong ragged row must reject");
+        assert!(
+            matches!(
+                err,
+                IoError::CsvFieldCount {
+                    line: 2,
+                    expected: 1,
+                    found: 2
                 }
             ),
             "got {err:?}"
