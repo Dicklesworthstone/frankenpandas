@@ -242,6 +242,57 @@ pub fn materialize_float64_dot_block_prepacked(
     out
 }
 
+/// `out[i] = a[i] / b[i]` for every lane, returning whether ANY result is NaN.
+///
+/// br-frankenpandas-uza04. `div @1M` is a CERTIFIED 0.57x LOSS against live
+/// pandas 2.2.3 (FP 640.60us vs pandas 348.41us, both 1 thread, A/A null FP
+/// 0.98132 / pandas 0.99986). The cause is lane width, not the loop: the
+/// baseline fp-columnar kernel disassembles to SSE2 `divpd`, two f64 per
+/// instruction, while numpy runtime-dispatches a 4-lane AVX2 `vdivpd`. At ~2.6
+/// cycles/element measured, FP is already at 2-lane `divpd` throughput — it is
+/// not scalar and not stalled, it is simply half as wide.
+///
+/// Two OTHER hypotheses for this same row were measured and REJECTED first, so
+/// this is not a third guess at the loop shape: the `collect` rewrite
+/// (6b2147a7, 0.919x) and an integer-counter NaN witness (1.0153x against a
+/// pre-registered 1.05x rule). Both left the instruction mix unchanged. Width is
+/// what is left.
+///
+/// BIT-IDENTICAL to the baseline loop. IEEE-754 division is correctly rounded
+/// per lane and lane-independent, so `vdivpd` and `divpd` produce the same bits
+/// for the same inputs; widening changes how many divides retire per cycle, not
+/// what any one of them returns. There is no reduction here to reassociate and
+/// no `a*b+c` for `+fma` to contract, so the `+fma` half of this crate's profile
+/// cannot alter the arithmetic either.
+///
+/// The NaN witness is folded into the same pass, exactly as the baseline kernel
+/// does it, so the caller still gets `output_nan` without a second traversal
+/// over the 8MB output — a second pass was measured and rejected on this very
+/// row (docs/NEGATIVE_EVIDENCE.md 2026-08-17).
+///
+/// ⚠️ `#[inline(never)]` AND NON-GENERIC, for the reason documented on
+/// [`materialize_float64_dot`]: an inlinable or generic entry point codegens in
+/// the CALLER's baseline crate and the `+avx2` flag is silently lost, leaving a
+/// green build with correct values and no speedup.
+///
+/// ⚠️ CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`. This crate is
+/// compiled for AVX2 unconditionally; entering it on a pre-AVX2 CPU is SIGILL.
+///
+/// # Panics
+/// Panics if `a`, `b` and `out` do not all have the same length.
+#[inline(never)]
+pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+    assert_eq!(a.len(), b.len(), "div_f64_into: a/b length mismatch");
+    assert_eq!(a.len(), out.len(), "div_f64_into: out length mismatch");
+    let mut output_nan = false;
+    for ((x, y), d) in a.iter().zip(b.iter()).zip(out.iter_mut()) {
+        let r = x / y;
+        output_nan |= r.is_nan();
+        *d = r;
+    }
+    output_nan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +416,122 @@ mod tests {
             materialize_float64_dot_block(&[], &b_slices, 3),
             vec![vec![0.0_f64; 3]]
         );
+    }
+}
+
+#[cfg(test)]
+mod div_f64_into_uza04 {
+    //! The AVX2 divide must equal the baseline scalar loop BIT FOR BIT, including
+    //! on the special values where a "reasonable" divide differs from IEEE-754.
+    //!
+    //! br-frankenpandas-uza04. This kernel exists only to widen `divpd` (2 lanes)
+    //! to `vdivpd` (4 lanes) on the certified `div @1M` 0.57x loss. Widening must
+    //! not change a single result, so these tests compare against a reference
+    //! computed the ordinary way rather than against hand-written expectations —
+    //! a shared misconception cannot then cancel out.
+    //!
+    //! THE FAILURE MODE THESE EXIST FOR: a vector divide processes lanes in
+    //! blocks, so a bug in the remainder handling corrupts only the tail — the
+    //! last 1..3 elements of a non-multiple-of-4 length. Every length below is
+    //! therefore checked, not just round ones.
+
+    /// The baseline fp-columnar loop, reproduced exactly.
+    fn reference(a: &[f64], b: &[f64]) -> (Vec<f64>, bool) {
+        let mut out = vec![0.0_f64; a.len()];
+        let mut nan = false;
+        for ((x, y), d) in a.iter().zip(b.iter()).zip(out.iter_mut()) {
+            let r = x / y;
+            nan |= r.is_nan();
+            *d = r;
+        }
+        (out, nan)
+    }
+
+    fn assert_bit_identical(a: &[f64], b: &[f64]) {
+        let (want, want_nan) = reference(a, b);
+        let mut got = vec![0.0_f64; a.len()];
+        let got_nan = super::div_f64_into(a, b, &mut got);
+        assert_eq!(got_nan, want_nan, "NaN witness disagreed (len {})", a.len());
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert_eq!(
+                g.to_bits(),
+                w.to_bits(),
+                "lane {i} of {} differs: {g:?} vs {w:?}",
+                a.len()
+            );
+        }
+    }
+
+    /// Every length from 0 to 33 — covers all four remainder classes of a 4-wide
+    /// body plus the empty and sub-vector cases.
+    #[test]
+    fn every_tail_length_is_bit_identical() {
+        for n in 0..34_usize {
+            let a: Vec<f64> = (0..n).map(|i| (i as f64) * 1.7 - 11.0).collect();
+            let b: Vec<f64> = (0..n).map(|i| (i as f64) * 0.3 + 1.1).collect();
+            assert_bit_identical(&a, &b);
+        }
+    }
+
+    /// IEEE-754 division corner cases: x/0 is ±inf, 0/0 and inf/inf are NaN,
+    /// signed zeros carry sign, and subnormals must not be flushed.
+    #[test]
+    fn ieee_special_values_are_bit_identical() {
+        let a = [
+            1.0,
+            -1.0,
+            0.0,
+            -0.0,
+            0.0,
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NAN,
+            1.0,
+            f64::MIN_POSITIVE,
+            5e-324,
+            -3.5,
+        ];
+        let b = [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            2.0,
+            1.0,
+            f64::NAN,
+            2.0,
+            2.0,
+            -0.0,
+        ];
+        assert_bit_identical(&a, &b);
+    }
+
+    /// The witness is FALSE when no result is NaN and TRUE when one is, including
+    /// when the only NaN is produced in the tail rather than the vector body.
+    #[test]
+    fn nan_witness_tracks_the_results_including_in_the_tail() {
+        let clean_a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let clean_b = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0];
+        let mut out = vec![0.0_f64; 7];
+        assert!(!super::div_f64_into(&clean_a, &clean_b, &mut out));
+
+        // 0.0/0.0 = NaN placed at index 6, the tail of a 4-wide body.
+        let tail_a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.0];
+        let tail_b = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 0.0];
+        assert!(super::div_f64_into(&tail_a, &tail_b, &mut out));
+        assert_bit_identical(&tail_a, &tail_b);
+    }
+
+    /// A length past any plausible unroll factor, with a NaN only near the end.
+    #[test]
+    fn long_run_with_late_nan_is_bit_identical() {
+        let n = 1021_usize; // prime, so no unroll factor divides it
+        let mut a: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 + 1.0).collect();
+        let mut b: Vec<f64> = (0..n).map(|i| ((i % 7) as f64) - 3.0).collect();
+        a[n - 2] = 0.0;
+        b[n - 2] = 0.0;
+        assert_bit_identical(&a, &b);
     }
 }

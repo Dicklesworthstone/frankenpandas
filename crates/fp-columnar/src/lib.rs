@@ -2044,7 +2044,32 @@ fn apply_f64_slices_nan_tracked_into(
         ArithmeticOp::Add => sweep_propagating!(|x: f64, y: f64| x + y),
         ArithmeticOp::Sub => sweep_propagating!(|x: f64, y: f64| x - y),
         ArithmeticOp::Mul => sweep_propagating!(|x: f64, y: f64| x * y),
-        ArithmeticOp::Div => sweep_propagating!(|x: f64, y: f64| x / y),
+        // br-frankenpandas-uza04: hand the divide to the ISA-isolated crate when
+        // the CPU actually has the feature it was compiled for. THIS crate stays
+        // baseline (+sse4.1 only), which is what keeps sqrt/log out of the blast
+        // radius of the blanket x86-64-v3 policy that was measured and rejected
+        // (CyanLynx 2026-07-31: sqrt 0.361x, log regressed). The width is the
+        // whole lever: this arm emits SSE2 `divpd` (2 lanes) against numpy's
+        // 4-lane AVX2 `vdivpd`, which is the 0.57x on `div @1M`.
+        //
+        // ⚠️ THE GUARD IS NOT OPTIONAL AND NOT TYPE-ENFORCED. fp-dot-kernel emits
+        // AVX2 unconditionally, so entering it on a pre-AVX2 CPU is SIGILL, not a
+        // graceful fallback. The fall-through below is the original kernel and is
+        // a complete implementation, never a stub.
+        ArithmeticOp::Div => {
+            #[cfg(target_arch = "x86_64")]
+            let dispatched = if std::arch::is_x86_feature_detected!("avx2") {
+                output_nan |= fp_dot_kernel::div_f64_into(a, b, data);
+                true
+            } else {
+                false
+            };
+            #[cfg(not(target_arch = "x86_64"))]
+            let dispatched = false;
+            if !dispatched {
+                sweep_propagating!(|x: f64, y: f64| x / y);
+            }
+        }
         ArithmeticOp::Mod => sweep_propagating!(python_mod_f64),
         ArithmeticOp::Pow => sweep!(|x: f64, y: f64| x.powf(y)),
         ArithmeticOp::FloorDiv => sweep_propagating!(python_floor_div_f64),
