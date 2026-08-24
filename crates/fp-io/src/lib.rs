@@ -6154,14 +6154,32 @@ fn is_json_value_end_boundary(input: &str, index: usize) -> bool {
 fn column_from_json_values(values: Vec<Scalar>) -> Result<Column, IoError> {
     let saw_utf8 = values.iter().any(|value| matches!(value, Scalar::Utf8(_)));
     let saw_missing = values.iter().any(Scalar::is_missing);
+    let saw_float = values
+        .iter()
+        .any(|value| matches!(value, Scalar::Float64(_)));
     let saw_numeric_like = values.iter().any(|value| {
         matches!(
             value,
             Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_)
         )
     });
+    let only_numeric_like_or_missing = values.iter().all(|value| {
+        matches!(
+            value,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_) | Scalar::Null(_)
+        )
+    });
 
-    if !saw_utf8 && saw_missing && (saw_numeric_like || values.iter().all(Scalar::is_missing)) {
+    // JSON records follow pandas' numeric unification: a Float64 makes the
+    // entire numeric/bool column Float64 even when no value is missing.  The
+    // missing-value branch was already necessary for JSON nulls; keeping the
+    // same typed construction for float mixes prevents the first Int64 from
+    // fixing the column kind before later floats/bools are considered.
+    if !saw_utf8
+        && only_numeric_like_or_missing
+        && (saw_float
+            || (saw_missing && (saw_numeric_like || values.iter().all(Scalar::is_missing))))
+    {
         let promoted = values
             .into_iter()
             .map(|value| match value {
