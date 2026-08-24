@@ -2621,61 +2621,33 @@ impl Index {
         out
     }
 
-    /// First-occurrence-deduplicated union over raw `i64` keys: every value of
-    /// `a` then `b`, in that order, each emitted once. Bit-identical to the
-    /// `union_with` `FxHashMap<&IndexLabel>` seen-set filter for all-Int64
-    /// indexes, with INLINE `i64` dedup keys (dense bitset over the combined
-    /// value span when bounded, else `FxHashSet<i64>`).
+    /// Multiset union over raw `i64` keys, matching `Index.union(sort=False)`:
+    /// labels keep their first-seen order across `a` then `b`, while each label
+    /// is emitted the maximum of its multiplicities in either input.
     fn union_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
-        let combined_capacity = combined_output_capacity(a.len(), b.len());
-        let mut out: Vec<i64> = Vec::with_capacity(combined_capacity);
-        // Combined span for the single shared dedup set over both inputs.
-        let dense = if a.is_empty() {
-            Self::i64_dense_span(b)
-        } else if b.is_empty() {
-            Self::i64_dense_span(a)
-        } else {
-            let mut min = a[0];
-            let mut max = a[0];
-            for &v in a.iter().chain(b.iter()) {
-                if v < min {
-                    min = v;
-                } else if v > max {
-                    max = v;
-                }
-            }
-            let span = (max as i128 - min as i128 + 1) as u128;
-            let total = a.len().saturating_add(b.len());
-            if span <= (1u128 << 26) && span <= (total as u128).saturating_mul(16) {
-                Some((min, span as usize))
-            } else {
-                None
-            }
-        };
+        let mut counts = FxHashMap::<i64, (usize, usize)>::default();
+        counts.reserve(combined_output_capacity(a.len(), b.len()));
+        let mut order = Vec::with_capacity(combined_output_capacity(a.len(), b.len()));
 
-        let mut seen_bits = Vec::<u64>::new();
-        let mut seen_hash = FxHashSet::<i64>::default();
-        if let Some((_, span)) = dense {
-            seen_bits = vec![0u64; span.div_ceil(64)];
-        } else {
-            seen_hash.reserve(combined_capacity);
-        }
-        for &v in a.iter().chain(b.iter()) {
-            let fresh = match dense {
-                Some((min, _)) => {
-                    let s = (v - min) as usize;
-                    let (w, bit) = (s >> 6, 1u64 << (s & 63));
-                    let f = seen_bits[w] & bit == 0;
-                    if f {
-                        seen_bits[w] |= bit;
-                    }
-                    f
-                }
-                None => seen_hash.insert(v),
-            };
-            if fresh {
-                out.push(v);
+        for &value in a {
+            let entry = counts.entry(value).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(value);
             }
+            entry.0 += 1;
+        }
+        for &value in b {
+            let entry = counts.entry(value).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(value);
+            }
+            entry.1 += 1;
+        }
+
+        let mut out = Vec::with_capacity(combined_output_capacity(a.len(), b.len()));
+        for value in order {
+            let (left_count, right_count) = counts[&value];
+            out.extend(std::iter::repeat_n(value, left_count.max(right_count)));
         }
         out
     }
@@ -3641,10 +3613,9 @@ impl Index {
 
     #[must_use]
     pub fn union_with(&self, other: &Self) -> Self {
-        // Typed all-Int64 fast path: inline `i64` dedup instead of the
-        // pointer-keyed `FxHashMap<&IndexLabel>` seen-set (whose probes chase
-        // into the 32-byte enum vector). Bit-identical: self-then-other order,
-        // first-occurrence dedup.
+        // Typed all-Int64 fast path: inline `i64` multiplicity accounting instead
+        // of enum-keyed maps. It retains pandas' first-seen label ordering while
+        // preserving each label's maximum count across the two inputs.
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
             let mut result = Self::from_i64_values(Self::union_i64(&a_i64, &b_i64));
             result.name = self.shared_name(other);
@@ -3652,15 +3623,9 @@ impl Index {
         }
         let self_labels = self.labels();
         let other_labels = other.labels();
-        // Datetime64 / Timedelta64 i64-keyed union: both are ns-backed, but
-        // int64_view() only matches IndexLabel::Int64, so an all-temporal index
-        // fell to the pointer-key FxHashMap<&IndexLabel> fallback (union over a
-        // DatetimeIndex was 0.58x pandas). Extract the ns and reuse the proven
-        // union_i64 (dense-bitset / FxHashSet<i64>, first-occurrence dedup), then
-        // rebuild the matching temporal dtype. Bit-identical: union_i64 yields the
-        // same self-then-other first-occurrence ns sequence the pointer-key path
-        // would, with inline i64 keys instead of enum-pointer probes. Empty inputs
-        // return None so the degenerate empty-union dtype stays the fallback's.
+        // Datetime64 / Timedelta64 are ns-backed, so reuse the typed i64 multiset
+        // union and rebuild the matching temporal dtype. Empty inputs return None
+        // so the degenerate empty-union dtype stays the generic fallback's.
         let temporal_ns = |labels: &[IndexLabel], datetime: bool| -> Option<Vec<i64>> {
             if labels.is_empty() {
                 return None;
@@ -3692,44 +3657,39 @@ impl Index {
             result.name = self.shared_name(other);
             return result;
         }
-        // Typed all-Utf8 fast path: dedup the self-then-other concatenation with an
-        // FxHashSet of `&str` instead of `FxHashMap<&IndexLabel>` — hashes the
-        // string bytes directly, skipping the 32-byte enum load per probe.
-        // Bit-identical: self-then-other order, first-occurrence dedup.
-        if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
-            && other_labels
-                .iter()
-                .all(|l| matches!(l, IndexLabel::Utf8(_)))
-        {
-            let mut seen: FxHashMap<&str, ()> = FxHashMap::default();
-            seen.reserve(combined_output_capacity(
-                self_labels.len(),
-                other_labels.len(),
-            ));
-            let mut labels: Vec<IndexLabel> = Vec::with_capacity(combined_output_capacity(
-                self_labels.len(),
-                other_labels.len(),
-            ));
-            for label in self_labels.iter().chain(other_labels.iter()) {
-                if let IndexLabel::Utf8(s) = label
-                    && seen.insert(s.as_str(), ()).is_none()
-                {
-                    labels.push(label.clone());
-                }
+        let mut counts = FxHashMap::<&IndexLabel, (usize, usize)>::default();
+        counts.reserve(combined_output_capacity(
+            self.labels.len(),
+            other.labels.len(),
+        ));
+        let mut order = Vec::with_capacity(combined_output_capacity(
+            self.labels.len(),
+            other.labels.len(),
+        ));
+        for label in &self.labels {
+            let entry = counts.entry(label).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(label);
             }
-            let mut result = Self::new(labels);
-            result.name = self.shared_name(other);
-            return result;
+            entry.0 += 1;
         }
-        let mut seen = FxHashMap::<&IndexLabel, ()>::default();
+        for label in &other.labels {
+            let entry = counts.entry(label).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(label);
+            }
+            entry.1 += 1;
+        }
         let mut labels = Vec::with_capacity(combined_output_capacity(
             self.labels.len(),
             other.labels.len(),
         ));
-        for label in self.labels.iter().chain(other.labels.iter()) {
-            if seen.insert(label, ()).is_none() {
-                labels.push(label.clone());
-            }
+        for label in order {
+            let (left_count, right_count) = counts[label];
+            labels.extend(std::iter::repeat_n(
+                label.clone(),
+                left_count.max(right_count),
+            ));
         }
         let mut result = Self::new(labels);
         result.name = self.shared_name(other);
@@ -21548,6 +21508,42 @@ mod tests {
     }
 
     #[test]
+    fn union_with_preserves_maximum_duplicate_multiplicity_lerb2() {
+        // pandas 2.2.3: Index([3, 1, 2, 1]).union(Index([2, 4, 2]),
+        // sort=False) -> [3, 1, 1, 2, 2, 4]. The output is neither a
+        // deduplicated set nor a concatenation: labels are first-seen ordered,
+        // then repeated by the larger input multiplicity.
+        let left = Index::from_i64_values(vec![3, 1, 2, 1]);
+        let right = Index::from_i64_values(vec![2, 4, 2]);
+        let result = left.union_with(&right);
+        assert_eq!(
+            result.labels.int64_view().unwrap().as_slice(),
+            &[3, 1, 1, 2, 2, 4]
+        );
+        assert_ne!(
+            result.labels.int64_view().unwrap().as_slice(),
+            &[3, 1, 2, 1, 2, 4, 2],
+            "negative: union must not concatenate the duplicate-bearing inputs"
+        );
+    }
+
+    #[test]
+    fn union_with_preserves_utf8_duplicate_multiplicity_lerb2() {
+        let left = Index::new(vec!["b".into(), "a".into(), "b".into()]);
+        let right = Index::new(vec!["a".into(), "a".into(), "c".into()]);
+        assert_eq!(
+            left.union_with(&right).labels(),
+            &[
+                IndexLabel::Utf8("b".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("c".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn difference_removes_other_labels() {
         let left = Index::from_i64(vec![1, 2, 3, 4]);
         let right = Index::from_i64(vec![2, 4]);
@@ -21941,7 +21937,7 @@ mod tests {
     }
 
     #[test]
-    fn int64_set_ops_match_first_seen_reference_c6wel() {
+    fn int64_set_ops_match_pandas_reference_c6wel() {
         fn labels_i64(index: &Index) -> Vec<i64> {
             let mut out = Vec::with_capacity(index.len());
             for label in index.labels() {
@@ -21952,18 +21948,6 @@ mod tests {
                 }
             }
             out
-        }
-
-        fn push_first_seen(
-            values: &[i64],
-            seen: &mut std::collections::BTreeSet<i64>,
-            out: &mut Vec<i64>,
-        ) {
-            for &value in values {
-                if seen.insert(value) {
-                    out.push(value);
-                }
-            }
         }
 
         fn intersection_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
@@ -21979,10 +21963,27 @@ mod tests {
         }
 
         fn union_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
-            let mut seen = std::collections::BTreeSet::new();
+            let mut counts = std::collections::BTreeMap::<i64, (usize, usize)>::new();
+            let mut order = Vec::new();
+            for &value in a {
+                let entry = counts.entry(value).or_insert((0, 0));
+                if entry.0 == 0 && entry.1 == 0 {
+                    order.push(value);
+                }
+                entry.0 += 1;
+            }
+            for &value in b {
+                let entry = counts.entry(value).or_insert((0, 0));
+                if entry.0 == 0 && entry.1 == 0 {
+                    order.push(value);
+                }
+                entry.1 += 1;
+            }
             let mut out = Vec::with_capacity(super::combined_output_capacity(a.len(), b.len()));
-            push_first_seen(a, &mut seen, &mut out);
-            push_first_seen(b, &mut seen, &mut out);
+            for value in order {
+                let (left_count, right_count) = counts[&value];
+                out.extend(std::iter::repeat_n(value, left_count.max(right_count)));
+            }
             out
         }
 
