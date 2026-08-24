@@ -56926,18 +56926,36 @@ impl LazyTransposeFramePlan {
                 // without a plain typed slice) reconstructs the emission-rule
                 // Scalars and routes through `Column::from_values` — the
                 // exact eager constructor.
-                let all_typed: Option<Vec<f64>> = self
-                    .source_columns
-                    .iter()
-                    .map(|source| {
-                        if let Some(values) = source.as_f64_slice() {
-                            return Some(values[output_column]);
-                        }
+                // PRE-SIZED, not `collect()` into `Option<Vec<_>>`
+                // (br-frankenpandas-uza04). That collect may short-circuit on the
+                // first `None`, so its `size_hint` lower bound is 0 and the row
+                // Vec grows by realloc — and this runs ONCE PER OUTPUT COLUMN,
+                // which on a transposed frame is once per SOURCE ROW. Profiled on
+                // `df_transpose_full_materialize_positional` @10k x 10:
+                // `_mi_theap_realloc_zero` was 7.5% of the lane and the whole
+                // allocator ~17.6%. The row length is known exactly — one cell per
+                // source column — so reserve it once. Same values, same order, and
+                // the same short-circuit: a source without a typed slice abandons
+                // the row exactly where `collect` would have.
+                let mut typed_row = Vec::with_capacity(self.source_columns.len());
+                let mut row_is_typed = true;
+                for source in self.source_columns.iter() {
+                    let value = if let Some(values) = source.as_f64_slice() {
+                        Some(values[output_column])
+                    } else {
                         source
                             .as_i64_slice()
                             .map(|values| values[output_column] as f64)
-                    })
-                    .collect();
+                    };
+                    match value {
+                        Some(value) => typed_row.push(value),
+                        None => {
+                            row_is_typed = false;
+                            break;
+                        }
+                    }
+                }
+                let all_typed: Option<Vec<f64>> = row_is_typed.then_some(typed_row);
                 match all_typed {
                     // The typed row is already freshly allocated. Move it
                     // into the all-valid Float64 backing instead of scanning
@@ -56971,11 +56989,19 @@ impl LazyTransposeFramePlan {
                 // routes the row through `Column::from_values` — the exact
                 // eager constructor — so Null(Null) cells and the
                 // all-null-row dtype inference edge are bit-identical.
-                let all_valid: Option<Vec<i64>> = self
-                    .source_columns
-                    .iter()
-                    .map(|source| source.as_i64_slice().map(|values| values[output_column]))
-                    .collect();
+                // Pre-sized for the same reason as the Float64 arm above.
+                let mut typed_row = Vec::with_capacity(self.source_columns.len());
+                let mut row_is_valid = true;
+                for source in self.source_columns.iter() {
+                    match source.as_i64_slice() {
+                        Some(values) => typed_row.push(values[output_column]),
+                        None => {
+                            row_is_valid = false;
+                            break;
+                        }
+                    }
+                }
+                let all_valid: Option<Vec<i64>> = row_is_valid.then_some(typed_row);
                 match all_valid {
                     Some(values) => Column::from_i64_values_owned(values),
                     None => {
@@ -204895,5 +204921,196 @@ mod typed_construction_stays_unboxed_uza04 {
             filtered.column("mixed").expect("mixed").values(),
             &[Scalar::Int64(1), Scalar::Float64(3.0), Scalar::Int64(4),]
         );
+    }
+}
+
+#[cfg(test)]
+mod transpose_row_prealloc_uza04 {
+    //! The transposed-row buffer is pre-sized, and the short-circuit still works.
+    //!
+    //! br-frankenpandas-uza04. `LazyTransposeFramePlan::materialize_column` built
+    //! each output column with `collect()` into `Option<Vec<_>>`. That collect may
+    //! abandon the row on the first source without a typed slice, so its
+    //! `size_hint` lower bound is 0 and the Vec grew by realloc — once per OUTPUT
+    //! column, which on a transposed frame is once per SOURCE ROW. Profiled on
+    //! `df_transpose_full_materialize_positional` @10k x 10, `_mi_theap_realloc_zero`
+    //! was 7.5% of the lane and the allocator ~17.6% in total.
+    //!
+    //! Rewriting it as a pre-sized loop means the SHORT-CIRCUIT is now an explicit
+    //! `break` rather than `collect`'s early return, so these tests pin both
+    //! branches: the typed row that completes, and the row that abandons partway
+    //! and must fall through to the exact eager `Column::from_values` path with a
+    //! partially filled buffer discarded.
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::{NullKind, Scalar};
+
+    use super::DataFrame;
+
+    fn frame(columns: Vec<(&str, Column)>) -> DataFrame {
+        let rows = columns[0].1.len();
+        let index = Index::new_known_unique_int64_unit_range(0, rows);
+        let order: Vec<String> = columns.iter().map(|(name, _)| (*name).to_owned()).collect();
+        let store: std::collections::BTreeMap<String, Column> = columns
+            .into_iter()
+            .map(|(name, column)| (name.to_owned(), column))
+            .collect();
+        DataFrame::new_with_column_order(index, store, order).expect("frame")
+    }
+
+    /// Every source has a typed slice, so every row completes: the pre-sized
+    /// buffer is filled to capacity and moved into the typed backing.
+    #[test]
+    fn all_typed_float64_rows_transpose_exactly_uza04() {
+        let source = frame(vec![
+            ("a", Column::from_f64_values(vec![1.0, 2.0, 3.0])),
+            ("b", Column::from_f64_values(vec![10.0, 20.0, 30.0])),
+        ]);
+        let transposed = source.transpose().expect("transpose");
+        assert_eq!(
+            transposed.num_columns(),
+            3,
+            "one output column per source row"
+        );
+        for (position, expected) in [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]].iter().enumerate() {
+            let column = transposed.column_at(position).expect("output column");
+            assert_eq!(
+                column.as_f64_slice(),
+                Some(&expected[..]),
+                "output column {position} must be the source row, typed"
+            );
+        }
+    }
+
+    /// A Float64 source beside an Int64 one: the loop takes its `as_i64_slice`
+    /// arm and casts, and the row still completes typed.
+    #[test]
+    fn mixed_f64_and_i64_sources_promote_in_row_order_uza04() {
+        let source = frame(vec![
+            ("f", Column::from_f64_values(vec![1.5, 2.5])),
+            ("i", Column::from_i64_values(vec![10, 20])),
+        ]);
+        let transposed = source.transpose().expect("transpose");
+        assert_eq!(transposed.num_columns(), 2);
+        assert_eq!(
+            transposed.column_at(0).expect("row 0").as_f64_slice(),
+            Some(&[1.5, 10.0][..])
+        );
+        assert_eq!(
+            transposed.column_at(1).expect("row 1").as_f64_slice(),
+            Some(&[2.5, 20.0][..])
+        );
+    }
+
+    /// THE SHORT-CIRCUIT BRANCH, which is the one this change rewrote. A source
+    /// with a missing value has no plain typed slice, so the row abandons partway
+    /// — with a partially filled buffer that must be discarded — and falls through
+    /// to the eager `Column::from_values` route. The values must be unchanged.
+    #[test]
+    fn a_nullable_source_abandons_the_typed_row_and_still_transposes_uza04() {
+        let nullable = Column::from_values(vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(3.0),
+        ])
+        .expect("nullable float column");
+        let source = frame(vec![
+            // The FIRST source is typed, so the buffer takes one push before the
+            // second source abandons the row — the partial-fill case.
+            ("typed", Column::from_f64_values(vec![7.0, 8.0, 9.0])),
+            ("nullable", nullable),
+        ]);
+        let transposed = source.transpose().expect("transpose");
+        assert_eq!(transposed.num_columns(), 3);
+
+        let row0 = transposed.column_at(0).expect("row 0");
+        assert_eq!(row0.values(), &[Scalar::Float64(7.0), Scalar::Float64(1.0)]);
+        let row1 = transposed.column_at(1).expect("row 1");
+        assert_eq!(row1.values().len(), 2);
+        assert_eq!(row1.values()[0], Scalar::Float64(8.0));
+        assert!(
+            row1.values()[1].is_missing(),
+            "the missing source cell must stay missing, got {:?}",
+            row1.values()[1]
+        );
+        let row2 = transposed.column_at(2).expect("row 2");
+        assert_eq!(row2.values(), &[Scalar::Float64(9.0), Scalar::Float64(3.0)]);
+    }
+
+    /// The Int64 arm was rewritten the same way; both of its branches.
+    #[test]
+    fn int64_rows_transpose_typed_and_short_circuit_uza04() {
+        let all_valid = frame(vec![
+            ("a", Column::from_i64_values(vec![1, 2])),
+            ("b", Column::from_i64_values(vec![30, 40])),
+        ]);
+        let transposed = all_valid.transpose().expect("transpose");
+        assert_eq!(
+            transposed.column_at(0).expect("row 0").as_i64_slice(),
+            Some(&[1, 30][..])
+        );
+        assert_eq!(
+            transposed.column_at(1).expect("row 1").as_i64_slice(),
+            Some(&[2, 40][..])
+        );
+
+        let nullable = Column::from_values(vec![Scalar::Int64(5), Scalar::Null(NullKind::Null)])
+            .expect("nullable int column");
+        let mixed = frame(vec![
+            ("a", Column::from_i64_values(vec![1, 2])),
+            ("b", nullable),
+        ]);
+        let transposed = mixed.transpose().expect("transpose");
+        let row0 = transposed.column_at(0).expect("row 0");
+        assert_eq!(row0.values(), &[Scalar::Int64(1), Scalar::Int64(5)]);
+        let row1 = transposed.column_at(1).expect("row 1");
+        assert_eq!(row1.values()[0], Scalar::Int64(2));
+        assert!(
+            row1.values()[1].is_missing(),
+            "the missing Int64 cell must stay missing, got {:?}",
+            row1.values()[1]
+        );
+    }
+
+    /// A single-column frame is the degenerate capacity (1) and a wide frame is
+    /// the one where a wrong reservation would show up as reallocation rather
+    /// than as a wrong answer — so assert the values, which is what a wrong
+    /// buffer would corrupt.
+    #[test]
+    fn row_widths_from_one_to_many_are_exact_uza04() {
+        for width in [1_usize, 2, 5, 9] {
+            let columns: Vec<(String, Column)> = (0..width)
+                .map(|c| {
+                    (
+                        format!("c{c}"),
+                        Column::from_f64_values(vec![c as f64, 100.0 + c as f64]),
+                    )
+                })
+                .collect();
+            let index = Index::new_known_unique_int64_unit_range(0, 2);
+            let order: Vec<String> = columns.iter().map(|(name, _)| name.clone()).collect();
+            let store: std::collections::BTreeMap<String, Column> = columns.into_iter().collect();
+            let source = DataFrame::new_with_column_order(index, store, order).expect("frame");
+
+            let transposed = source.transpose().expect("transpose");
+            assert_eq!(
+                transposed.num_columns(),
+                2,
+                "width {width}: two source rows"
+            );
+            let expected_row0: Vec<f64> = (0..width).map(|c| c as f64).collect();
+            let expected_row1: Vec<f64> = (0..width).map(|c| 100.0 + c as f64).collect();
+            assert_eq!(
+                transposed.column_at(0).expect("row 0").as_f64_slice(),
+                Some(&expected_row0[..]),
+                "width {width}: row 0"
+            );
+            assert_eq!(
+                transposed.column_at(1).expect("row 1").as_f64_slice(),
+                Some(&expected_row1[..]),
+                "width {width}: row 1"
+            );
+        }
     }
 }
