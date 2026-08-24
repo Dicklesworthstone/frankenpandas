@@ -28346,72 +28346,48 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
             );
         }
 
-        assert_rejects_unknown_field::<super::PacketFixture>(
-            serde_json::json!({
-                "packet_id": "FP-VXBUF-001",
-                "case_id": "reject_unknown_top_level",
-                "mode": "strict",
-                "operation": "series_add",
-                "typoed_packet_field": true
-            }),
-            "typoed_packet_field",
-        );
-        assert_rejects_unknown_field::<super::FixtureSeries>(
-            serde_json::json!({
-                "name": "input",
-                "index": [],
-                "values": [],
-                "typoed_series_field": true
-            }),
-            "typoed_series_field",
-        );
-        assert_rejects_unknown_field::<super::FixtureDataFrame>(
-            serde_json::json!({
-                "index": [],
-                "columns": {},
-                "typoed_frame_field": true
-            }),
-            "typoed_frame_field",
-        );
-        assert_rejects_unknown_field::<super::FixtureCategoricalColumn>(
-            serde_json::json!({
-                "categories": [],
-                "typoed_categorical_field": true
-            }),
-            "typoed_categorical_field",
-        );
-        assert_rejects_unknown_field::<super::FixtureColumnAssignment>(
-            serde_json::json!({
-                "name": "a",
-                "values": [],
-                "typoed_assignment_field": true
-            }),
-            "typoed_assignment_field",
-        );
-        assert_rejects_unknown_field::<super::FixtureColumnRename>(
-            serde_json::json!({
-                "from": "a",
-                "to": "b",
-                "typoed_rename_field": true
-            }),
-            "typoed_rename_field",
-        );
-        assert_rejects_unknown_field::<super::FixtureProvenance>(
-            serde_json::json!({
-                "pandas_version": "2.2.3",
-                "oracle_script_sha256": "sha",
-                "generated_at": "2026-08-24T00:00:00Z",
-                "typoed_provenance_field": true
-            }),
-            "typoed_provenance_field",
-        );
-        assert_rejects_unknown_field::<super::FixtureRetirement>(
-            serde_json::json!({
-                "reason": "test",
-                "typoed_retirement_field": true
-            }),
-            "typoed_retirement_field",
-        );
+        assert_rejects_unknown_field::<super::PacketFixture>(serde_json::json!({
+            "packet_id": "FP-VXBUF-001",
+            "case_id": "reject_unknown_top_level",
+            "mode": "strict",
+            "operation": "series_add",
+            "typoed_packet_field": true
+        }), "typoed_packet_field");
+        assert_rejects_unknown_field::<super::FixtureSeries>(serde_json::json!({
+            "name": "input",
+            "index": [],
+            "values": [],
+            "typoed_series_field": true
+        }), "typoed_series_field");
+        assert_rejects_unknown_field::<super::FixtureDataFrame>(serde_json::json!({
+            "index": [],
+            "columns": {},
+            "typoed_frame_field": true
+        }), "typoed_frame_field");
+        assert_rejects_unknown_field::<super::FixtureCategoricalColumn>(serde_json::json!({
+            "categories": [],
+            "typoed_categorical_field": true
+        }), "typoed_categorical_field");
+        assert_rejects_unknown_field::<super::FixtureColumnAssignment>(serde_json::json!({
+            "name": "a",
+            "values": [],
+            "typoed_assignment_field": true
+        }), "typoed_assignment_field");
+        assert_rejects_unknown_field::<super::FixtureColumnRename>(serde_json::json!({
+            "from": "a",
+            "to": "b",
+            "typoed_rename_field": true
+        }), "typoed_rename_field");
+        assert_rejects_unknown_field::<super::FixtureProvenance>(serde_json::json!({
+            "pandas_version": "2.2.3",
+            "oracle_script_sha256": "sha",
+            "generated_at": "2026-08-24T00:00:00Z",
+            "typoed_provenance_field": true
+        }), "typoed_provenance_field");
+        assert_rejects_unknown_field::<super::FixtureRetirement>(serde_json::json!({
+            "reason": "test",
+            "typoed_retirement_field": true
+        }), "typoed_retirement_field");
     }
 
     #[test]
