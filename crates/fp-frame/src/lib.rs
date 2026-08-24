@@ -326,6 +326,38 @@ pub struct Series {
     sparse: Option<SparseDType>,
 }
 
+/// Borrowed typed numeric values for a [`Series`].
+///
+/// This is the zero-boxing consumer path for callers that can operate on a
+/// numeric buffer directly. `Series::values` remains the scalar compatibility
+/// API; use [`Series::typed_values`] to avoid materializing `Scalar` values.
+#[derive(Debug, Clone, Copy)]
+pub enum SeriesTypedValues<'a> {
+    Int64 {
+        data: &'a [i64],
+        validity: &'a fp_columnar::ValidityMask,
+    },
+    Float64 {
+        data: &'a [f64],
+        validity: &'a fp_columnar::ValidityMask,
+    },
+}
+
+impl SeriesTypedValues<'_> {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Int64 { data, .. } => data.len(),
+            Self::Float64 { data, .. } => data.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Per br-frankenpandas-g3jqn: between_time/at_time require a DatetimeIndex.
 /// Pandas raises TypeError if called on a non-datetime index. We approximate
 /// by requiring the index to contain Datetime64 labels, or Utf8 labels that
@@ -7008,6 +7040,108 @@ fn typed_dense_sort_order(values: &[Scalar], dtype: DType, ascending: bool) -> O
     }
 }
 
+/// Typed-slice sibling of [`typed_dense_values_already_sorted`], reading the
+/// column's contiguous buffer instead of its `Vec<Scalar>` materialization.
+///
+/// br-frankenpandas-uza04. `DataFrame::sort_values_multi` already routes its
+/// sort keys through `as_i64_slice`/`as_f64_slice` (br-frankenpandas-1tuf5);
+/// SINGLE-column `sort_values_na` never got the sibling, so sorting one column
+/// still forced the whole key column through the 32-B/elem `Scalar` spine.
+///
+/// Bit-identical to the `&[Scalar]` loop it mirrors. `as_f64_slice` only answers
+/// for an all-valid `Float64` column, whose `values()[i]` is exactly
+/// `Scalar::Float64(data[i])`, so this loop sees the same values in the same
+/// order and takes the same branches. `as_i64_slice` is the same statement for
+/// all-valid `Int64`. Anything else returns `None` and the caller falls back to
+/// the untouched Scalar path.
+///
+/// The Scalar loop's NaN bail has NO counterpart here, and deliberately so:
+/// pandas treats a NaN in a float column as MISSING, so `Column`'s typed
+/// ingestion marks it invalid (br-frankenpandas-jyhf7) precisely to stop
+/// `as_f64_slice` from handing a NaN out as a value. A slice from
+/// `as_f64_slice` is therefore NaN-free by construction and the bail is
+/// unreachable — a NaN-bearing key is not all-valid, so this function declines
+/// it at the accessor and the Scalar path decides the verdict as before. That
+/// invariant is pinned by `a_nan_float64_column_is_not_all_valid_uza04`; a
+/// prescan here would be an O(n) pass for a branch that cannot fire.
+fn typed_slice_already_sorted(column: &Column, ascending: bool) -> Option<bool> {
+    if let Some(data) = column.as_i64_slice() {
+        let mut previous: Option<i64> = None;
+        for &current in data {
+            if let Some(previous) = previous {
+                let order = previous.cmp(&current);
+                let order = if ascending { order } else { order.reverse() };
+                if order == Ordering::Greater {
+                    return Some(false);
+                }
+            }
+            previous = Some(current);
+        }
+        return Some(true);
+    }
+    if let Some(data) = column.as_f64_slice() {
+        debug_assert!(
+            !data.iter().any(|value| value.is_nan()),
+            "as_f64_slice must never expose a NaN (br-frankenpandas-jyhf7)"
+        );
+        let mut previous: Option<f64> = None;
+        for &current in data {
+            if let Some(previous) = previous {
+                let order = previous.partial_cmp(&current).unwrap_or(Ordering::Equal);
+                let order = if ascending { order } else { order.reverse() };
+                if order == Ordering::Greater {
+                    return Some(false);
+                }
+            }
+            previous = Some(current);
+        }
+        return Some(true);
+    }
+    None
+}
+
+/// Typed-slice sibling of [`typed_dense_sort_order`] (br-frankenpandas-uza04).
+///
+/// The Scalar version walks `&[Scalar]` to rebuild a contiguous `Vec<f64>` that
+/// the column ALREADY OWNS, so a single-column Float64 sort paid an O(n) enum
+/// match plus an 8n-byte allocation per call purely to hand `radix_argsort_f64`
+/// a slice. Here the existing buffer is passed straight to the same kernel.
+///
+/// Bit-identical: for an all-valid `Float64` column `values()[i] ==
+/// Scalar::Float64(data[i])`, so the vector the Scalar arm built element-by
+/// element IS this slice. The Scalar arm's `None`-on-NaN has no counterpart for
+/// the same reason as in [`typed_slice_already_sorted`] — a NaN-bearing float
+/// column is not all-valid (br-frankenpandas-jyhf7), so `as_f64_slice` declines
+/// it here and the old path still decides. Ascending uses the same stable
+/// `radix_argsort_f64`; descending keeps the same stable `partial_cmp`
+/// comparison sort over the same `(position, value)` pairs. The `Int64` arm
+/// mirrors its Scalar counterpart's `sort_by` on `(position, value)` unchanged —
+/// note `as_i64_slice` answers only for `DType::Int64`, so an all-valid
+/// `Int64Nullable` key keeps the Scalar path.
+fn typed_slice_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>> {
+    if let Some(data) = column.as_i64_slice() {
+        let mut keyed: Vec<(usize, i64)> = data.iter().copied().enumerate().collect();
+        keyed.sort_by(|left, right| {
+            let order = left.1.cmp(&right.1);
+            if ascending { order } else { order.reverse() }
+        });
+        return Some(keyed.into_iter().map(|(position, _)| position).collect());
+    }
+    if let Some(data) = column.as_f64_slice() {
+        debug_assert!(
+            !data.iter().any(|value| value.is_nan()),
+            "as_f64_slice must never expose a NaN (br-frankenpandas-jyhf7)"
+        );
+        if ascending {
+            return Some(fp_columnar::radix_argsort_f64(data, true));
+        }
+        let mut keyed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
+        keyed.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
+        return Some(keyed.into_iter().map(|(position, _)| position).collect());
+    }
+    None
+}
+
 fn compare_indexed_i64_value(
     left: &(usize, i64),
     right: &(usize, i64),
@@ -7708,6 +7842,21 @@ impl Series {
     #[must_use]
     pub fn values(&self) -> &[Scalar] {
         self.column.values()
+    }
+
+    /// Borrow the native numeric buffer and its validity mask when available.
+    ///
+    /// Unlike [`Self::values`], this never allocates or boxes one `Scalar` per
+    /// element. Non-numeric Series deliberately return `None` so callers retain
+    /// the scalar path for heterogeneous and object-like data.
+    #[must_use]
+    pub fn typed_values(&self) -> Option<SeriesTypedValues<'_>> {
+        if let Some((data, validity)) = self.column.as_i64_slice_with_validity() {
+            return Some(SeriesTypedValues::Int64 { data, validity });
+        }
+        self.column
+            .as_f64_slice_with_validity()
+            .map(|(data, validity)| SeriesTypedValues::Float64 { data, validity })
     }
 
     /// Object-array-shaped materialization of the Series values.
@@ -63980,20 +64129,30 @@ impl DataFrame {
             let order = sort_column.argsort_with(ascending);
             return self.reorder_rows_by_positions_unchecked(&order);
         }
-        let already_sorted =
-            typed_dense_values_already_sorted(sort_column.values(), sort_column.dtype(), ascending)
-                .unwrap_or_else(|| {
-                    values_already_sorted_with_na_position(
-                        sort_column.values(),
-                        ascending,
-                        na_first,
-                    )
-                });
+        // br-frankenpandas-uza04: try the column's contiguous typed buffer FIRST,
+        // and only fall back to `sort_column.values()` when it has none. On an
+        // all-valid Int64/Float64 key that keeps the `Vec<Scalar>` spine out of a
+        // single-column sort entirely — the multi-column sibling has read its keys
+        // this way since br-frankenpandas-1tuf5.
+        let already_sorted = typed_slice_already_sorted(sort_column, ascending)
+            .or_else(|| {
+                typed_dense_values_already_sorted(
+                    sort_column.values(),
+                    sort_column.dtype(),
+                    ascending,
+                )
+            })
+            .unwrap_or_else(|| {
+                values_already_sorted_with_na_position(sort_column.values(), ascending, na_first)
+            });
         if already_sorted {
             return Ok(self.clone());
         }
 
-        let order = if !na_first
+        let order = if !na_first && let Some(order) = typed_slice_sort_order(sort_column, ascending)
+        {
+            order
+        } else if !na_first
             && let Some(order) =
                 typed_dense_sort_order(sort_column.values(), sort_column.dtype(), ascending)
         {
@@ -120676,6 +120835,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn series_typed_values_borrows_combine_first_numeric_output_3gsa7() {
+        let index = Index::from_range(0, 3, 1);
+        let mut left_validity = fp_columnar::ValidityMask::all_valid(3);
+        left_validity.set(1, false);
+        let left = Series::new(
+            "left",
+            index.clone(),
+            Column::from_f64_values_with_validity(vec![1.0, 0.0, 3.0], left_validity),
+        )
+        .unwrap();
+        let right = Series::new(
+            "right",
+            index,
+            Column::from_f64_values_owned(vec![10.0, 20.0, 30.0]),
+        )
+        .unwrap();
+
+        let combined = left.combine_first(&right).unwrap();
+        match combined.typed_values() {
+            Some(super::SeriesTypedValues::Float64 { data, validity }) => {
+                assert_eq!(data, &[1.0, 20.0, 3.0]);
+                assert!(validity.all());
+            }
+            other => panic!("expected Float64 typed view, got {other:?}"),
+        }
+
+        let non_numeric = Series::from_values(
+            "text",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8("x".to_owned())],
+        )
+        .unwrap();
+        assert!(non_numeric.typed_values().is_none());
     }
 
     #[test]
@@ -202755,6 +202950,262 @@ mod groupby_null_key_label_no6s4 {
         assert!(
             !labels.iter().any(|l| matches!(l, IndexLabel::Utf8(_))),
             "no group label may be a stringified scalar, got {labels:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod single_column_sort_typed_slice_uza04 {
+    //! Single-column `sort_values` reads its key off the contiguous typed
+    //! buffer instead of the `Vec<Scalar>` spine.
+    //!
+    //! br-frankenpandas-uza04. `sort_values_multi` has read its keys through
+    //! `as_i64_slice`/`as_f64_slice` since br-frankenpandas-1tuf5;
+    //! `sort_values_na` had no sibling, so a one-column sort walked 32 B per
+    //! element to rebuild a contiguous buffer the column already owned.
+    //!
+    //! The contract is bit-identity, so these tests are DIFFERENTIAL: for every
+    //! shape the typed route accepts, its answer must equal the `&[Scalar]`
+    //! function it now runs ahead of. Shapes it declines must still be declined
+    //! (`None`), leaving the old path in charge.
+
+    use super::{
+        Column, DataFrame, Index, Scalar, typed_dense_sort_order,
+        typed_dense_values_already_sorted, typed_slice_already_sorted, typed_slice_sort_order,
+    };
+
+    /// Every shape below is asserted in BOTH directions, since ascending and
+    /// descending take different kernels (radix vs comparison sort).
+    fn assert_matches_scalar_path(column: &Column, label: &str) {
+        for ascending in [true, false] {
+            assert_eq!(
+                typed_slice_sort_order(column, ascending),
+                typed_dense_sort_order(column.values(), column.dtype(), ascending),
+                "{label}: sort order diverged from the Scalar path (ascending={ascending})"
+            );
+            assert_eq!(
+                typed_slice_already_sorted(column, ascending),
+                typed_dense_values_already_sorted(column.values(), column.dtype(), ascending),
+                "{label}: already-sorted verdict diverged (ascending={ascending})"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_route_matches_the_scalar_path_on_every_accepted_shape_uza04() {
+        let f64_cases: Vec<(&str, Vec<f64>)> = vec![
+            ("empty", vec![]),
+            ("single", vec![7.5]),
+            ("random", vec![3.0, 1.0, 4.0, 1.5, 9.0, 2.0, 6.0]),
+            ("ascending", vec![1.0, 2.0, 3.0, 4.0]),
+            ("descending", vec![4.0, 3.0, 2.0, 1.0]),
+            // Stability: equal keys must keep input order under both kernels.
+            ("ties", vec![2.0, 1.0, 2.0, 1.0, 2.0, 1.0]),
+            ("all_equal", vec![5.0, 5.0, 5.0]),
+            // Signed zero and negatives are where a radix key transform is most
+            // likely to disagree with `partial_cmp`.
+            ("signed_zero", vec![0.0, -0.0, 1.0, -1.0]),
+            ("negatives", vec![-3.5, -1.0, -2.25, 0.0, 2.5]),
+            (
+                "infinities",
+                vec![f64::INFINITY, 0.0, f64::NEG_INFINITY, 1.0],
+            ),
+        ];
+        for (label, data) in f64_cases {
+            let column = Column::from_f64_values(data);
+            assert_matches_scalar_path(&column, label);
+        }
+
+        let i64_cases: Vec<(&str, Vec<i64>)> = vec![
+            ("empty", vec![]),
+            ("single", vec![42]),
+            ("random", vec![3, 1, 4, 1, 5, 9, 2, 6]),
+            ("ascending", vec![1, 2, 3, 4]),
+            ("descending", vec![4, 3, 2, 1]),
+            ("ties", vec![2, 1, 2, 1, 2, 1]),
+            ("extremes", vec![i64::MAX, 0, i64::MIN, -1, 1]),
+        ];
+        for (label, data) in i64_cases {
+            let column = Column::from_i64_values(data);
+            assert_matches_scalar_path(&column, label);
+        }
+    }
+
+    /// NON-VACUITY. Every assertion above would also pass if the typed route
+    /// simply answered `None` everywhere and the old path did all the work.
+    #[test]
+    fn the_typed_route_actually_fires_uza04() {
+        let float = Column::from_f64_values(vec![3.0, 1.0, 2.0]);
+        assert!(
+            float.as_f64_slice().is_some(),
+            "precondition: an all-valid Float64 column exposes its buffer"
+        );
+        assert!(
+            typed_slice_sort_order(&float, true).is_some(),
+            "the typed sort-order route must answer for an all-valid Float64 key"
+        );
+        assert!(
+            typed_slice_already_sorted(&float, true).is_some(),
+            "the typed already-sorted route must answer for an all-valid Float64 key"
+        );
+
+        let int = Column::from_i64_values(vec![3, 1, 2]);
+        assert!(int.as_i64_slice().is_some(), "precondition: typed Int64");
+        assert!(
+            typed_slice_sort_order(&int, true).is_some(),
+            "the typed sort-order route must answer for an all-valid Int64 key"
+        );
+        assert!(
+            typed_slice_already_sorted(&int, true).is_some(),
+            "the typed already-sorted route must answer for an all-valid Int64 key"
+        );
+    }
+
+    /// THE INVARIANT BOTH TYPED ROUTES REST ON. pandas treats a NaN in a float
+    /// column as missing, so typed ingestion marks it invalid
+    /// (br-frankenpandas-jyhf7) and `as_f64_slice` declines the column. That is
+    /// why neither typed route carries the Scalar path's NaN bail. If this ever
+    /// changes, a NaN would reach `radix_argsort_f64`, which orders finite f64 —
+    /// so this test is the tripwire, and the bails must come back.
+    #[test]
+    fn a_nan_float64_column_is_not_all_valid_uza04() {
+        let with_nan = Column::from_f64_values(vec![1.0, f64::NAN, 2.0]);
+        assert!(
+            !with_nan.validity().all(),
+            "a NaN must make the column nullable, not an all-valid value"
+        );
+        assert!(
+            with_nan.as_f64_slice().is_none(),
+            "as_f64_slice must never hand out a buffer containing a NaN"
+        );
+        for ascending in [true, false] {
+            assert_eq!(
+                typed_slice_sort_order(&with_nan, ascending),
+                None,
+                "a NaN key must decline the typed sort (ascending={ascending})"
+            );
+            assert_eq!(
+                typed_slice_already_sorted(&with_nan, ascending),
+                None,
+                "a NaN key must decline the typed already-sorted check"
+            );
+        }
+    }
+
+    /// The composed chain — typed route first, Scalar path behind it — must
+    /// answer exactly what the Scalar path alone answered before, INCLUDING for
+    /// the keys the typed route declines.
+    ///
+    /// The sharp case: for `[3.0, 1.0, NaN]` the Scalar loop meets the
+    /// out-of-order pair BEFORE the missing value and returns `Some(false)`
+    /// rather than `None`. The typed route declines the column outright, so the
+    /// fallback must be what produces that verdict.
+    #[test]
+    fn declined_keys_still_get_the_scalar_verdict_uza04() {
+        let unsorted_then_nan = Column::from_f64_values(vec![3.0, 1.0, f64::NAN]);
+        assert_eq!(
+            typed_slice_already_sorted(&unsorted_then_nan, true),
+            None,
+            "precondition: the typed route declines a NaN-bearing key"
+        );
+        let composed = typed_slice_already_sorted(&unsorted_then_nan, true).or_else(|| {
+            typed_dense_values_already_sorted(
+                unsorted_then_nan.values(),
+                unsorted_then_nan.dtype(),
+                true,
+            )
+        });
+        assert_eq!(
+            composed,
+            Some(false),
+            "the out-of-order pair precedes the missing value and still decides the verdict"
+        );
+
+        // ...and when the missing value comes first, the whole chain declines
+        // and the generic na_position-aware check takes over, as before.
+        let nan_then_unsorted = Column::from_f64_values(vec![f64::NAN, 3.0, 1.0]);
+        let composed = typed_slice_already_sorted(&nan_then_unsorted, true).or_else(|| {
+            typed_dense_values_already_sorted(
+                nan_then_unsorted.values(),
+                nan_then_unsorted.dtype(),
+                true,
+            )
+        });
+        assert_eq!(composed, None);
+    }
+
+    /// A nullable key has no contiguous all-valid buffer, so the typed route
+    /// must decline and leave the nullable fast path (br-frankenpandas-s2i37)
+    /// and the generic sort untouched.
+    #[test]
+    fn nullable_and_untyped_keys_decline_uza04() {
+        let nullable = Column::from_values(vec![
+            Scalar::Float64(2.0),
+            Scalar::Null(super::NullKind::NaN),
+            Scalar::Float64(1.0),
+        ])
+        .expect("nullable float column");
+        for ascending in [true, false] {
+            assert_eq!(typed_slice_sort_order(&nullable, ascending), None);
+            assert_eq!(typed_slice_already_sorted(&nullable, ascending), None);
+        }
+
+        let text = Column::from_values(vec![
+            Scalar::Utf8("b".to_owned()),
+            Scalar::Utf8("a".to_owned()),
+        ])
+        .expect("utf8 column");
+        for ascending in [true, false] {
+            assert_eq!(typed_slice_sort_order(&text, ascending), None);
+            assert_eq!(typed_slice_already_sorted(&text, ascending), None);
+        }
+    }
+
+    /// End-to-end: the observable `sort_values` result, including which rows the
+    /// index carries and how ties are ordered.
+    #[test]
+    fn sort_values_output_is_unchanged_uza04() {
+        let key = Column::from_f64_values(vec![2.0, 1.0, 2.0, 0.5]);
+        let payload = Column::from_i64_values(vec![10, 20, 30, 40]);
+        let index = Index::new((0..4_i64).map(Into::into).collect());
+        let frame = DataFrame::new_with_column_order(
+            index,
+            std::collections::BTreeMap::from([("k".to_owned(), key), ("v".to_owned(), payload)]),
+            vec!["k".to_owned(), "v".to_owned()],
+        )
+        .expect("frame");
+
+        let ascending = frame.sort_values("k", true).expect("sort ascending");
+        assert_eq!(
+            ascending
+                .column("v")
+                .expect("payload")
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Int64(x) => *x,
+                    other => panic!("payload must stay Int64, got {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            // 0.5, then 1.0, then the two 2.0s in INPUT order (stable).
+            vec![40, 20, 10, 30]
+        );
+
+        let descending = frame.sort_values("k", false).expect("sort descending");
+        assert_eq!(
+            descending
+                .column("v")
+                .expect("payload")
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Int64(x) => *x,
+                    other => panic!("payload must stay Int64, got {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            // Descending keeps the comparison sort, whose `reverse()` leaves the
+            // equal 2.0s in input order too.
+            vec![10, 30, 20, 40]
         );
     }
 }
