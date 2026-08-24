@@ -27,7 +27,10 @@ use std::{
 use fp_columnar::{Column, ValidityMask};
 use fp_frame::{DataFrame, Series, to_datetime};
 use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
-use fp_join::{JoinType, merge_dataframes_on_with};
+use fp_join::{
+    JoinType, MergeExecutionOptions, MergeValidateMode, merge_dataframes_on_with,
+    merge_dataframes_on_with_options,
+};
 use fp_types::{DType, NullKind, Scalar};
 use mimalloc::MiMalloc;
 use sha2::{Digest, Sha256};
@@ -3582,6 +3585,26 @@ fn run(
             time_us(|| {
                 let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], join_type)
                     .expect("merge");
+            })
+        }
+        // pandas: left.merge(right, on="key", how="inner", validate="one_to_many").
+        // This deliberately measures the validated generic path: the unique
+        // left keys satisfy the contract while the validator need not scan right.
+        ("joins", "join_inner_validate_one_to_many") => {
+            let (left, right) = build_join_frames(rows);
+            time_us(|| {
+                let _ = merge_dataframes_on_with_options(
+                    &left,
+                    &right,
+                    &["key"],
+                    &["key"],
+                    JoinType::Inner,
+                    MergeExecutionOptions {
+                        validate_mode: Some(MergeValidateMode::OneToMany),
+                        ..MergeExecutionOptions::default()
+                    },
+                )
+                .expect("validated merge");
             })
         }
         ("joins", "join_inner_shuffled") => {

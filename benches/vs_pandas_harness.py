@@ -2724,6 +2724,13 @@ def bench_join_outer_pandas(df: pd.DataFrame) -> list[float]:
     left, right = _build_join_frames(len(df))
     return time_operation(lambda: left.merge(right, on="key", how="outer"))
 
+
+def bench_join_inner_validate_one_to_many_pandas(df: pd.DataFrame) -> list[float]:
+    left, right = _build_join_frames(len(df))
+    return time_operation(
+        lambda: left.merge(right, on="key", how="inner", validate="one_to_many")
+    )
+
 def _build_str_join_frames(n: int):
     # String-key variant of _build_join_frames: left key "k{i:08}" (unique),
     # right key "k{2i:08}" — ~n/2 inner matches, exercises the Utf8 key path.
@@ -3129,6 +3136,7 @@ PANDAS_WORKLOADS = {
         "join_inner": bench_join_inner_pandas,
         "join_left": bench_join_left_pandas,
         "join_outer": bench_join_outer_pandas,
+        "join_inner_validate_one_to_many": bench_join_inner_validate_one_to_many_pandas,
         "join_inner_str": bench_join_inner_str_pandas,
     },
     "strings": {

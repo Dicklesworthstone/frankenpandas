@@ -1139,9 +1139,6 @@ fn validate_merge_cardinality(
     left_keys: &[CompositeJoinKey],
     right_keys: &[CompositeJoinKey],
 ) -> Result<(), JoinError> {
-    let left_has_duplicates = has_duplicate_composite_keys(left_keys);
-    let right_has_duplicates = has_duplicate_composite_keys(right_keys);
-
     let fail = |message: &str| {
         Err(JoinError::Frame(FrameError::CompatibilityRejected(
             message.to_owned(),
@@ -1150,20 +1147,23 @@ fn validate_merge_cardinality(
 
     match validate_mode {
         MergeValidateMode::OneToOne => {
-            if left_has_duplicates {
+            // Preserve pandas's left-first failure precedence when both sides
+            // duplicate while avoiding an unnecessary right-side scan on a
+            // left-side failure.
+            if has_duplicate_composite_keys(left_keys) {
                 return fail("merge validate='one_to_one' failed: left keys are not unique");
             }
-            if right_has_duplicates {
+            if has_duplicate_composite_keys(right_keys) {
                 return fail("merge validate='one_to_one' failed: right keys are not unique");
             }
         }
         MergeValidateMode::OneToMany => {
-            if left_has_duplicates {
+            if has_duplicate_composite_keys(left_keys) {
                 return fail("merge validate='one_to_many' failed: left keys are not unique");
             }
         }
         MergeValidateMode::ManyToOne => {
-            if right_has_duplicates {
+            if has_duplicate_composite_keys(right_keys) {
                 return fail("merge validate='many_to_one' failed: right keys are not unique");
             }
         }
@@ -18886,6 +18886,40 @@ mod tests {
             },
         )
         .expect_err("one_to_one must reject duplicate left keys");
+        assert!(format!("{err}").contains("left keys are not unique"));
+    }
+
+    #[test]
+    fn merge_validate_one_to_one_keeps_left_error_precedence_when_both_sides_duplicate() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("left_v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right frame");
+
+        let err = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect_err("one_to_one must reject duplicate left keys before right keys");
         assert!(format!("{err}").contains("left keys are not unique"));
     }
 
