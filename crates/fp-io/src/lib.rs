@@ -8687,6 +8687,13 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             Arc::new(builder.finish())
         }
         DType::Bool | DType::BoolNullable => {
+            if let Some(values) = column.as_bool_slice() {
+                let mut builder = BooleanBuilder::with_capacity(values.len());
+                for &value in values {
+                    builder.append_value(value);
+                }
+                return Ok(Arc::new(builder.finish()));
+            }
             let mut builder = BooleanBuilder::with_capacity(column.len());
             for value in column.values() {
                 match value {
@@ -8698,6 +8705,17 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             Arc::new(builder.finish())
         }
         DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse => {
+            if column.dtype() == DType::Utf8
+                && let Some((bytes, offsets)) = column.as_utf8_contiguous()
+            {
+                let mut builder = StringBuilder::with_capacity(offsets.len() - 1, bytes.len());
+                for window in offsets.windows(2) {
+                    let value = std::str::from_utf8(&bytes[window[0]..window[1]])
+                        .map_err(|error| IoError::Parquet(error.to_string()))?;
+                    builder.append_value(value);
+                }
+                return Ok(Arc::new(builder.finish()));
+            }
             let mut builder = StringBuilder::with_capacity(column.len(), column.len() * 8);
             for value in column.values() {
                 match value {
@@ -21451,6 +21469,69 @@ mod tests {
         assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
         assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
         assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn parquet_writer_uses_typed_bool_and_utf8_buffers_uza04() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "flag".to_owned(),
+            Column::from_bool_values(vec![true, false, true]),
+        );
+        columns.insert(
+            "label".to_owned(),
+            Column::from_utf8_contiguous(b"redgreenblue".to_vec(), vec![0, 3, 8, 12]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2]),
+            columns,
+            vec!["flag".to_owned(), "label".to_owned()],
+        )
+        .expect("typed parquet source");
+
+        assert!(
+            !frame
+                .column("flag")
+                .expect("typed bool source")
+                .scalar_cache_is_materialized()
+        );
+        assert!(
+            !frame
+                .column("label")
+                .expect("typed utf8 source")
+                .scalar_cache_is_materialized()
+        );
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write typed parquet");
+
+        assert!(
+            !frame
+                .column("flag")
+                .expect("typed bool source")
+                .scalar_cache_is_materialized(),
+            "all-valid bool must avoid the Scalar fallback"
+        );
+        assert!(
+            !frame
+                .column("label")
+                .expect("typed utf8 source")
+                .scalar_cache_is_materialized(),
+            "all-valid contiguous Utf8 must avoid the Scalar fallback"
+        );
+
+        let decoded = super::read_parquet_bytes(&bytes).expect("read typed parquet");
+        assert_eq!(
+            decoded.column("flag").expect("decoded bool").values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            decoded.column("label").expect("decoded utf8").values(),
+            &[
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("green".to_owned()),
+                Scalar::Utf8("blue".to_owned()),
+            ]
+        );
     }
 
     #[cfg(feature = "block-storage")]
