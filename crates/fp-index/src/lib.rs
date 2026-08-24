@@ -1470,6 +1470,53 @@ impl IndexLabels {
             .clone()
     }
 
+    /// Resolve this label collection against a lazy affine Int64 source without
+    /// materializing either affine range into an `i64` vector.  The source is
+    /// unique by construction, so each raw target value has at most one
+    /// position; non-Int64 labels are necessarily misses.
+    fn affine_int64_indexer(&self, source: Int64AffineLabels) -> Vec<Option<usize>> {
+        let mut out = Vec::with_capacity(self.len());
+        let mut push_affine = |range: Int64AffineLabels| {
+            for position in 0..range.len {
+                out.push(source.position(range.value_at(position)));
+            }
+        };
+
+        if let Some(range) = self.int64_affine_range() {
+            push_affine(range);
+            return out;
+        }
+        if let Some(runs) = &self.int64_two_affine {
+            push_affine(runs.first);
+            push_affine(runs.second);
+            return out;
+        }
+        if let Some(strided) = &self.int64_strided {
+            for position in 0..strided.len {
+                let offset = strided
+                    .step
+                    .checked_mul(position)
+                    .expect("validated Int64 strided range");
+                let index = strided
+                    .start
+                    .checked_add(offset)
+                    .expect("validated Int64 strided range");
+                out.push(source.position(strided.values[index]));
+            }
+            return out;
+        }
+        if let Some(Some(values)) = self.int64_typed.get() {
+            out.extend(values.iter().map(|&value| source.position(value)));
+            return out;
+        }
+
+        out.extend(self.as_slice().iter().map(|label| match label {
+            IndexLabel::Int64(value) => source.position(*value),
+            _ => None,
+        }));
+        out
+    }
+
     /// The cached `i64` view if it has already been computed (never computes).
     /// Outer `None` = not yet computed; `Some(None)` = known non-Int64.
     fn cached_int64_view(&self) -> Option<Option<Arc<Vec<i64>>>> {
@@ -2910,6 +2957,13 @@ impl Index {
 
     #[must_use]
     pub fn get_indexer(&self, target: &Index) -> Vec<Option<usize>> {
+        // An affine Int64 source can answer every lookup from its arithmetic
+        // witness.  Keep the target typed as well: materializing the source to
+        // an `Arc<Vec<i64>>` solely to reject a miss-heavy target made this
+        // otherwise O(m) operation pay an avoidable O(n) allocation and scan.
+        if let Some(source) = self.labels.int64_affine_range() {
+            return target.labels.affine_int64_indexer(source);
+        }
         // When `self` is strictly ascending (any SortOrder::Ascending* ⟹
         // globally IndexLabel::Ord-sorted and unique) we can resolve target
         // positions without building the O(n) FxHashMap of `self`
@@ -25328,6 +25382,41 @@ mod tests {
                 "get_indexer iter={iter} targ={targ_vals:?}"
             );
         }
+    }
+
+    #[test]
+    fn affine_get_indexer_probes_typed_targets_without_materializing_3gsa7() {
+        let source = Index::new_known_unique_int64_affine_range(10, 2, 5).unwrap();
+        let targets = Index::from_i64_values(vec![10, 11, 16, 99, 12]);
+
+        assert_eq!(
+            source.get_indexer(&targets),
+            vec![Some(0), None, Some(3), None, Some(1)]
+        );
+        assert!(
+            source.cached_int64_label_values().is_none(),
+            "affine source lookup must not materialize an i64 label vector"
+        );
+        assert!(
+            targets.labels.materialized.get().is_none(),
+            "typed target lookup must not box values into IndexLabel"
+        );
+
+        let all_miss = Index::new_known_unique_int64_affine_range(11, 2, 5).unwrap();
+        assert_eq!(source.get_indexer(&all_miss), vec![None; 5]);
+        assert!(all_miss.cached_int64_label_values().is_none());
+
+        let descending = Index::new_known_unique_int64_affine_range(18, -2, 5).unwrap();
+        assert_eq!(
+            descending.get_indexer(&targets),
+            vec![Some(4), None, Some(1), None, Some(3)]
+        );
+        assert!(descending.cached_int64_label_values().is_none());
+
+        // Planted negative: a non-Int64 target cannot match an affine Int64
+        // source and must not be treated as a numerically compatible label.
+        let non_int64 = Index::new(vec![IndexLabel::Utf8("10".to_owned())]);
+        assert_eq!(source.get_indexer(&non_int64), vec![None]);
     }
 
     #[test]
