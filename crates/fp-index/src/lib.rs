@@ -25579,7 +25579,7 @@ mod tests {
         let error = range.take(&[1, 3, 10]).unwrap_err();
         assert!(matches!(
             error,
-            IndexError::OutOfBounds {
+            super::IndexError::OutOfBounds {
                 position: 10,
                 length: 10,
             }
