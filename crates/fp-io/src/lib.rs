@@ -6589,23 +6589,106 @@ enum JsonNumericColumn {
 }
 
 impl JsonNumericColumn {
-    fn push_number(&mut self, number: &serde_json::Number) -> Option<()> {
+    fn push_number(&mut self, number: JsonRecordNumber) {
         match self {
-            Self::Int(values) => {
-                if let Some(value) = number.as_i64() {
-                    values.push(value);
-                } else {
-                    let value = number.as_f64()?;
+            Self::Int(values) => match number {
+                JsonRecordNumber::Int(value) => values.push(value),
+                JsonRecordNumber::Float(value) => {
                     let mut promoted = Vec::with_capacity(values.capacity().saturating_add(1));
                     promoted.extend(values.iter().map(|&prior| prior as f64));
                     promoted.push(value);
                     *self = Self::Float(promoted);
                 }
-            }
-            Self::Float(values) => values.push(number.as_f64()?),
+            },
+            Self::Float(values) => values.push(number.as_f64()),
         }
-        Some(())
     }
+}
+
+/// JSON-number representation for the typed records reader.  This parser is
+/// deliberately stricter than Rust's number parsers: it first accepts exactly
+/// JSON's grammar, then lets the standard library perform the IEEE conversion.
+/// Keeping the grammar check here avoids the per-cell serde deserializer while
+/// preserving the fallback boundary for inputs the generic JSON parser owns.
+#[derive(Clone, Copy, Debug)]
+enum JsonRecordNumber {
+    Int(i64),
+    Float(f64),
+}
+
+impl JsonRecordNumber {
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Int(value) => value as f64,
+            Self::Float(value) => value,
+        }
+    }
+}
+
+fn parse_json_record_number(token: &[u8]) -> Option<JsonRecordNumber> {
+    let mut index = 0usize;
+    if token.get(index) == Some(&b'-') {
+        index += 1;
+    }
+
+    match token.get(index)? {
+        b'0' => {
+            index += 1;
+            if matches!(token.get(index), Some(b'0'..=b'9')) {
+                return None;
+            }
+        }
+        b'1'..=b'9' => {
+            index += 1;
+            while matches!(token.get(index), Some(b'0'..=b'9')) {
+                index += 1;
+            }
+        }
+        _ => return None,
+    }
+
+    let mut is_float = false;
+    if token.get(index) == Some(&b'.') {
+        is_float = true;
+        index += 1;
+        let fraction_start = index;
+        while matches!(token.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+        if index == fraction_start {
+            return None;
+        }
+    }
+
+    if matches!(token.get(index), Some(b'e' | b'E')) {
+        is_float = true;
+        index += 1;
+        if matches!(token.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        while matches!(token.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+        if index == exponent_start {
+            return None;
+        }
+    }
+
+    if index != token.len() {
+        return None;
+    }
+    let token = std::str::from_utf8(token).ok()?;
+    if !is_float {
+        if let Ok(value) = token.parse::<i64>() {
+            return Some(JsonRecordNumber::Int(value));
+        }
+    }
+    token
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(JsonRecordNumber::Float)
 }
 
 /// Parse a range of a homogeneous, numeric flat-records array into typed column
@@ -6681,20 +6764,19 @@ fn parse_json_records_numeric_range(
             if !any {
                 return None;
             }
-            let number = serde_json::from_slice::<serde_json::Number>(&s[value_start..i]).ok()?;
+            let number = parse_json_record_number(&s[value_start..i])?;
             if rows == 0 {
                 names.push(key.to_owned());
-                let column = if let Some(value) = number.as_i64() {
-                    JsonNumericColumn::Int(vec![value])
-                } else {
-                    JsonNumericColumn::Float(vec![number.as_f64()?])
+                let column = match number {
+                    JsonRecordNumber::Int(value) => JsonNumericColumn::Int(vec![value]),
+                    JsonRecordNumber::Float(value) => JsonNumericColumn::Float(vec![value]),
                 };
                 columns.push(column);
             } else {
                 if names.get(field).is_none_or(|expected| expected != key) {
                     return None;
                 }
-                columns.get_mut(field)?.push_number(&number)?;
+                columns.get_mut(field)?.push_number(number);
             }
             field += 1;
             ws!();
@@ -15541,6 +15623,70 @@ mod tests {
             super::parse_json_records_numeric_range(input, 0, input.len()).is_none(),
             "key reordering must defer instead of assigning by position"
         );
+    }
+
+    #[test]
+    fn json_read_numeric_typed_builder_accepts_only_json_number_grammar_92n1x() {
+        for (token, expected) in [
+            (b"0".as_slice(), super::JsonRecordNumber::Int(0)),
+            (b"-17".as_slice(), super::JsonRecordNumber::Int(-17)),
+            (b"1.25".as_slice(), super::JsonRecordNumber::Float(1.25)),
+            (b"6e-4".as_slice(), super::JsonRecordNumber::Float(0.0006)),
+            (
+                b"9223372036854775808".as_slice(),
+                super::JsonRecordNumber::Float(9.223_372_036_854_776e18),
+            ),
+        ] {
+            let actual = super::parse_json_record_number(token).expect("valid JSON number");
+            let serde = serde_json::from_slice::<serde_json::Number>(token)
+                .expect("serde accepts valid JSON number");
+            match (actual, expected) {
+                (super::JsonRecordNumber::Int(actual), super::JsonRecordNumber::Int(expected)) => {
+                    assert_eq!(actual, expected, "token={token:?}");
+                    assert_eq!(serde.as_i64(), Some(actual), "token={token:?}");
+                }
+                (
+                    super::JsonRecordNumber::Float(actual),
+                    super::JsonRecordNumber::Float(expected),
+                ) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits(), "token={token:?}");
+                    assert_eq!(
+                        serde.as_f64().expect("serde float conversion").to_bits(),
+                        actual.to_bits(),
+                        "token={token:?}"
+                    );
+                }
+                (actual, expected) => {
+                    panic!("token={token:?}: got {actual:?}, expected {expected:?}")
+                }
+            }
+        }
+
+        for invalid in [b"01".as_slice(), b"-", b"1.", b"1e", b"+1", b"1+2"] {
+            assert!(
+                super::parse_json_record_number(invalid).is_none(),
+                "invalid JSON number {invalid:?} must defer"
+            );
+        }
+    }
+
+    #[test]
+    fn json_read_numeric_typed_builder_rejects_mixed_dtype_92n1x() {
+        // The typed numeric path must not turn a bool-bearing column into a
+        // numeric one merely because a neighbouring column is numeric. It must
+        // defer to the scalar parser, which retains the Bool column.
+        let input = br#"{"n":1,"flag":true},{"n":2,"flag":false}"#;
+        assert!(
+            super::parse_json_records_numeric_range(input, 0, input.len()).is_none(),
+            "mixed numeric/bool records must bypass the typed numeric builder"
+        );
+        let frame = read_json_str(
+            r#"[{"n":1,"flag":true},{"n":2,"flag":false}]"#,
+            JsonOrient::Records,
+        )
+        .expect("scalar fallback parses mixed records");
+        assert_eq!(frame.column("n").expect("n").dtype(), DType::Int64);
+        assert_eq!(frame.column("flag").expect("flag").dtype(), DType::Bool);
     }
 
     #[test]
