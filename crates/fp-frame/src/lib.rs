@@ -70475,6 +70475,151 @@ impl DataFrame {
         Some(result_cols)
     }
 
+    /// Compute a pairwise matrix when every column shares one missing-value mask.
+    ///
+    /// Independent missing patterns require a distinct count and both marginal
+    /// moments for every pair.  When the pattern is shared, those values depend
+    /// only on the column, so compute them once and retain the historical
+    /// left-to-right product fold for each pair.  This deliberately does not
+    /// compact or reassociate rows: corr/cov results retain their exact bits.
+    fn pairwise_shared_nan_pattern_stat_matrix(
+        numeric_cols: &[String],
+        col_data: &[std::borrow::Cow<'_, [f64]>],
+        stat: &str,
+        min_periods: usize,
+    ) -> Result<Option<BTreeMap<String, Column>>, FrameError> {
+        let n = numeric_cols.len();
+        let Some(first) = col_data.first() else {
+            return Ok(Some(BTreeMap::new()));
+        };
+        let len = first.len();
+        if n != col_data.len() || !first.iter().any(|value| value.is_nan()) {
+            return Ok(None);
+        }
+
+        let mut sum = vec![0.0_f64; n];
+        let mut sum2 = vec![0.0_f64; n];
+        let mut count = 0_usize;
+        for row in 0..len {
+            let missing = first[row].is_nan();
+            if col_data
+                .iter()
+                .skip(1)
+                .any(|column| column[row].is_nan() != missing)
+            {
+                return Ok(None);
+            }
+            if missing {
+                continue;
+            }
+            for (column_idx, column) in col_data.iter().enumerate() {
+                let value = column[row];
+                sum[column_idx] += value;
+                sum2[column_idx] += value * value;
+            }
+            count += 1;
+        }
+
+        let compute_pair = |i: usize, j: usize| -> (f64, f64) {
+            let mut sum_xy = 0.0_f64;
+            for (&x, &y) in col_data[i].iter().zip(col_data[j].iter()) {
+                if x.is_nan() {
+                    continue;
+                }
+                sum_xy += x * y;
+            }
+            let v_ij = Self::finalize_pairwise_stat(
+                stat,
+                min_periods,
+                count,
+                sum[i],
+                sum[j],
+                sum_xy,
+                sum2[i],
+                sum2[j],
+            );
+            let v_ji = if i != j {
+                Self::finalize_pairwise_stat(
+                    stat,
+                    min_periods,
+                    count,
+                    sum[j],
+                    sum[i],
+                    sum_xy,
+                    sum2[j],
+                    sum2[i],
+                )
+            } else {
+                v_ij
+            };
+            (v_ij, v_ji)
+        };
+
+        let pairs: Vec<(usize, usize)> =
+            (0..n).flat_map(|j| (0..=j).map(move |i| (i, j))).collect();
+        let mut mat = vec![0.0_f64; n * n];
+        let worker_count = fp_columnar::cached_available_parallelism()
+            .min(64)
+            .min(pairs.len().max(1));
+        let big_enough = (pairs.len() as u128) * (len as u128) >= (1u128 << 20);
+        if worker_count >= 2 && big_enough {
+            const MORSEL: usize = 8;
+            let pairs_ref: &[(usize, usize)] = &pairs;
+            let compute_ref = &compute_pair;
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let cells: Vec<(usize, usize, f64, f64)> = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(worker_count);
+                for _ in 0..worker_count {
+                    let next = &next;
+                    handles.push(scope.spawn(move || {
+                        let mut out = Vec::new();
+                        loop {
+                            let start =
+                                next.fetch_add(MORSEL, std::sync::atomic::Ordering::Relaxed);
+                            if start >= pairs_ref.len() {
+                                break;
+                            }
+                            let end = (start + MORSEL).min(pairs_ref.len());
+                            for &(i, j) in &pairs_ref[start..end] {
+                                let (v_ij, v_ji) = compute_ref(i, j);
+                                out.push((i, j, v_ij, v_ji));
+                            }
+                        }
+                        out
+                    }));
+                }
+                let mut all = Vec::new();
+                for handle in handles {
+                    if let Ok(mut part) = handle.join() {
+                        all.append(&mut part);
+                    }
+                }
+                all
+            });
+            for (i, j, v_ij, v_ji) in cells {
+                mat[i * n + j] = v_ij;
+                if i != j {
+                    mat[j * n + i] = v_ji;
+                }
+            }
+        } else {
+            for (i, j) in pairs {
+                let (v_ij, v_ji) = compute_pair(i, j);
+                mat[i * n + j] = v_ij;
+                if i != j {
+                    mat[j * n + i] = v_ji;
+                }
+            }
+        }
+
+        let mut result_cols = BTreeMap::new();
+        for (j, name) in numeric_cols.iter().enumerate() {
+            let vals = (0..n).map(|i| Scalar::Float64(mat[i * n + j])).collect();
+            result_cols.insert(name.clone(), Column::new(DType::Float64, vals)?);
+        }
+        Ok(Some(result_cols))
+    }
+
     /// Finalize a pairwise cov/corr cell from accumulated moments.
     ///
     /// Arithmetic is bit-identical to the historical per-pair inline form.
@@ -70565,6 +70710,15 @@ impl DataFrame {
             .map(|v| std::borrow::Cow::Borrowed(v.as_slice()))
             .collect();
         let col_data: &[std::borrow::Cow<'_, [f64]>] = &shifted;
+
+        if let Some(result_cols) = Self::pairwise_shared_nan_pattern_stat_matrix(
+            numeric_cols,
+            col_data,
+            stat,
+            min_periods,
+        )? {
+            return Ok(result_cols);
+        }
 
         let mut mat = vec![0.0_f64; n * n];
 
@@ -115048,6 +115202,68 @@ mod tests {
         assert!(
             (c - (-0.9166666666666666)).abs() < 1e-6,
             "df.cov must be -0.91666.., got {c}"
+        );
+    }
+
+    #[test]
+    fn dataframe_corr_cov_reuses_shared_nan_mask_uza04219() {
+        let labels = vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()];
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "x",
+                labels.clone(),
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "y",
+                labels,
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(6.0),
+                    Scalar::Float64(8.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let corr = df.corr().unwrap();
+        assert_eq!(corr.columns["x"].values()[1], Scalar::Float64(1.0));
+        let cov = df.cov().unwrap();
+        assert!((cov.columns["x"].values()[1].to_f64().unwrap() - 14.0 / 3.0).abs() < 1e-12);
+
+        let shared_x = [1.0, f64::NAN, 3.0, 4.0];
+        let shared_y = [2.0, f64::NAN, 6.0, 8.0];
+        let shared = [
+            std::borrow::Cow::Borrowed(shared_x.as_slice()),
+            std::borrow::Cow::Borrowed(shared_y.as_slice()),
+        ];
+        let names = ["x".to_owned(), "y".to_owned()];
+        assert!(
+            DataFrame::pairwise_shared_nan_pattern_stat_matrix(&names, &shared, "corr", 1)
+                .unwrap()
+                .is_some()
+        );
+
+        // Negative: independently missing columns must decline this fast path;
+        // each pair then retains its own observation count in the generic route.
+        let independent_x = [1.0, f64::NAN, 3.0, 4.0];
+        let independent_y = [2.0, 4.0, f64::NAN, 8.0];
+        let independent = [
+            std::borrow::Cow::Borrowed(independent_x.as_slice()),
+            std::borrow::Cow::Borrowed(independent_y.as_slice()),
+        ];
+        assert!(
+            DataFrame::pairwise_shared_nan_pattern_stat_matrix(&names, &independent, "corr", 1,)
+                .unwrap()
+                .is_none()
         );
     }
 
