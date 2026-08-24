@@ -16805,6 +16805,17 @@ pub struct MultiIndex {
     identity_codes: Option<Vec<Vec<u32>>>,
 }
 
+/// Typed position plan for an outer alignment of two unique MultiIndexes.
+///
+/// Each vector is indexed by `union_index` row and names the corresponding
+/// source row, or `None` when that side has no matching tuple.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiIndexOuterAlignment {
+    pub union_index: MultiIndex,
+    pub left_positions: Vec<Option<usize>>,
+    pub right_positions: Vec<Option<usize>>,
+}
+
 type Utf8LevelPair<'a> = (&'a [IndexLabel], &'a [IndexLabel]);
 type Utf8LevelPairs<'a> = (Utf8LevelPair<'a>, Utf8LevelPair<'a>);
 
@@ -17254,6 +17265,75 @@ impl MultiIndex {
             });
         }
         Ok(())
+    }
+
+    /// Build the AACE outer-alignment witness without materializing composite
+    /// `Vec<IndexLabel>` tuples when the per-level codes fit in a `u64`.
+    ///
+    /// Outer alignment is only position-preserving for unique composite labels;
+    /// duplicate tuples retain pandas' duplicate-aware expansion surface and
+    /// are rejected here rather than silently choosing a first occurrence.
+    pub fn outer_align(&self, other: &Self) -> Result<MultiIndexOuterAlignment, IndexError> {
+        self.ensure_same_nlevels(other)?;
+        if self.has_duplicates() || other.has_duplicates() {
+            return Err(IndexError::InvalidArgument(
+                "outer_align requires uniquely valued MultiIndexes".to_owned(),
+            ));
+        }
+
+        if let Some((left_keys, right_keys)) = self.factorize_packed_keys(other) {
+            let mut union_levels: Vec<Vec<IndexLabel>> = self
+                .levels
+                .iter()
+                .map(|_| Vec::with_capacity(self.len().saturating_add(other.len())))
+                .collect();
+            let mut union_positions =
+                FxHashMap::<u64, usize>::with_capacity_and_hasher(self.len(), Default::default());
+            let mut left_positions = Vec::with_capacity(self.len().saturating_add(other.len()));
+            let mut right_positions = Vec::with_capacity(self.len().saturating_add(other.len()));
+
+            for (row, &key) in left_keys.iter().enumerate() {
+                union_positions.insert(key, left_positions.len());
+                for (out, level) in union_levels.iter_mut().zip(&self.levels) {
+                    out.push(level[row].clone());
+                }
+                left_positions.push(Some(row));
+                right_positions.push(None);
+            }
+            for (row, &key) in right_keys.iter().enumerate() {
+                if let Some(&union_row) = union_positions.get(&key) {
+                    right_positions[union_row] = Some(row);
+                } else {
+                    union_positions.insert(key, left_positions.len());
+                    for (out, level) in union_levels.iter_mut().zip(&other.levels) {
+                        out.push(level[row].clone());
+                    }
+                    left_positions.push(None);
+                    right_positions.push(Some(row));
+                }
+            }
+
+            return Ok(MultiIndexOuterAlignment {
+                union_index: Self::from_levels_and_names(union_levels, self.shared_names(other)),
+                left_positions,
+                right_positions,
+            });
+        }
+
+        let union_index = self.union(other)?;
+        Ok(MultiIndexOuterAlignment {
+            left_positions: self
+                .get_indexer(&union_index)?
+                .into_iter()
+                .map(|position| usize::try_from(position).ok())
+                .collect(),
+            right_positions: other
+                .get_indexer(&union_index)?
+                .into_iter()
+                .map(|position| usize::try_from(position).ok())
+                .collect(),
+            union_index,
+        })
     }
 
     fn tuple_at(&self, row: usize) -> Vec<IndexLabel> {
@@ -19064,6 +19144,34 @@ impl MultiIndex {
             }
             return Ok(Self::two_utf8_result_from_pairs(
                 pairs,
+                self.shared_names(other),
+            ));
+        }
+        // General typed composite path: pack the dictionary-coded level columns
+        // into one key and gather rows column-by-column.  This preserves the
+        // left-first outer-union order without allocating a `Vec<IndexLabel>`
+        // tuple (or cloning its labels merely to hash it) for every row.
+        if let Some((self_keys, other_keys)) = self.factorize_packed_keys(other) {
+            let mut seen: FxHashSet<u64> = FxHashSet::with_capacity_and_hasher(
+                self.len().saturating_add(other.len()),
+                Default::default(),
+            );
+            let mut levels: Vec<Vec<IndexLabel>> = self
+                .levels
+                .iter()
+                .map(|_| Vec::with_capacity(self.len().saturating_add(other.len())))
+                .collect();
+            for (keys, source) in [(&self_keys, self), (&other_keys, other)] {
+                for (row, &key) in keys.iter().enumerate() {
+                    if seen.insert(key) {
+                        for (out, level) in levels.iter_mut().zip(&source.levels) {
+                            out.push(level[row].clone());
+                        }
+                    }
+                }
+            }
+            return Ok(Self::from_levels_and_names(
+                levels,
                 self.shared_names(other),
             ));
         }
@@ -27630,6 +27738,49 @@ mod tests {
 
         assert_eq!(source.get_indexer(&target)?, vec![1, -1, 0]);
         assert_eq!(source.get_indexer_for(&target)?, vec![1, -1, 0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_typed_outer_align_preserves_columns_and_rejects_duplicate_tuple_3gsa7()
+    -> Result<(), super::IndexError> {
+        let left = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+        ])?;
+        let right = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 2_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])?;
+
+        let plan = left.outer_align(&right)?;
+        assert_eq!(
+            plan.union_index.to_list(),
+            vec![
+                vec!["a".into(), 1_i64.into()],
+                vec!["a".into(), 2_i64.into()],
+                vec!["b".into(), 1_i64.into()],
+                vec!["c".into(), 3_i64.into()],
+            ]
+        );
+        assert_eq!(plan.left_positions, vec![Some(0), Some(1), Some(2), None]);
+        assert_eq!(plan.right_positions, vec![None, Some(0), None, Some(1)]);
+        assert_eq!(plan.union_index, left.union(&right)?);
+
+        // A repeated value in one level is valid when the complete tuples are
+        // unique; a duplicate tuple is not valid for this unique-only witness.
+        let duplicate_tuple = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])?;
+        let error = duplicate_tuple.outer_align(&right).unwrap_err();
+        assert!(matches!(
+            error,
+            super::IndexError::InvalidArgument(message)
+                if message == "outer_align requires uniquely valued MultiIndexes"
+        ));
 
         Ok(())
     }
