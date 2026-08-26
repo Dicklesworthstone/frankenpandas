@@ -41181,3 +41181,74 @@ on the per-worker cost. The intercept and the conclusion — that no worker coun
 rest on the 3/4/6 rows, all measured under comparable load.
 
 **No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`.**
+
+---
+
+### 2026-08-26 OliveCarp — `div @1M` SETTLED at last: CERTIFIED SLOWER **0.885x**, which REFUTES MY OWN "div is at parity" call from the start of this session. Three undecidable runs were under-powered, not evidence of parity
+
+**This is a certified LOSS and banking it is the point.** It also closes the question this session
+opened with, and it does so against my own published conclusion.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=b75722266afcd63b6458d38f18354eb1171c70c03a6a9927cd14eafdf76db784 (86213400 bytes)
+/data/projects/fp-wt-divlead/tdl10/release-perf/fp-bench`, built in a DETACHED WORKTREE with its own
+`CARGO_TARGET_DIR`; `git log a5ad3cb8f..HEAD -- crates/` empty at measurement time. Harness
+`bench_harness_source_sha256=b37e364f8e8deb8f3f8f17e7f7d6cbf3904b8f7f89a3cc3212a94f564226538d`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f`;
+`invocation_id=vs-pandas-20260826T094253.677075Z-pid2953455`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 1.01250904 and pandas null
+median ratio 1.00311496, both inside the 0.02 maximum absolute deviation. **Median-CI decision:**
+effect median 0.885x, CI [0.85202182, 0.90257868], excluding unity; claimed log effect 0.12242511
+against a required 0.06160861 — 1.99x the margin. All three gate clauses TRUE. **CV role:**
+provenance-only, no vote. FP p50 378.81us cv 13.22% against pandas p50 334.84us cv 13.03%, 256
+iterations over 64 balanced-square rounds. Best-vs-best 0.87 agrees. Loadavg 7.08-8.72, arms
+clock-matched 1.0000.
+
+    python3 benches/vs_pandas_harness.py --category math_unary --workloads div --sizes 1M \
+      --measurement-mode balanced-square --balanced-square-rounds 64 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl10/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_div1M_r64_2026-08-26.json
+
+**⚠️ I PUBLISHED "div @1M IS AT PARITY" AND THAT WAS WRONG.** Earlier in this session I measured
+0.958x (24 rounds), 1.000x (48 rounds) and 0.86x (5-round survey), observed that every CI contained
+unity, and banked the conclusion that "div @1M is at parity, not 0.903x and not 0.496x". **Three
+NULL_UNDECIDABLE runs are an under-powered instrument, not a finding of no effect.** At 64 rounds in
+a quiet window the same workload on the same class of binary certifies at 0.885x with both nulls
+clean. **The 0.903x figure I was handed at the start — and treated as stale archaeology — was closer
+to the truth than my own "parity" conclusion.** The general lesson is the one this campaign keeps
+paying for from the other direction: an undecidable row licenses "I could not measure it", never
+"there is nothing there". Rounds were the difference, exactly as they were for `log_int64` (32 -> 64)
+and `log10` tonight.
+
+**What survives from that earlier entry:** the AVX2 dispatch really is live and really did close most
+of the gap. `div @1M` was 0.496x/0.878x on pre-uza04 binaries; it is 0.885x now. The lever shipped and
+worked. **What does not survive is the claim that what remains is nothing.**
+
+**Counted mechanism — FrankenPandas computes a NaN witness that numpy does not.** Disassembling
+`fp_dot_kernel::div_f64_into` at `0x7ead50` (first 0x300 bytes, which covers the unrolled body):
+
+    5 x vdivpd        5 x vcmpunordpd        1 x vucomisd
+
+**One unordered compare for every divide, 1:1.** That is
+`output_nan |= r.is_nan()` in the kernel body — FrankenPandas derives whether any output is NaN so it
+can set validity, while numpy's `divide` ufunc simply writes quotients and never asks. Measured cost
+of the difference: FP 0.379ns/element against numpy 0.335ns/element, a 13% gap on an op that is
+otherwise the same 4-lane `vdivpd` on both sides. `thread_count_actually_used` = 1, so this is not a
+parallelism question and — at 378.81us, below the ~397us break-even established tonight — threading
+it could not pay anyway.
+
+**⚠️ HYPOTHESIS, NOT A FINDING:** the compares themselves should be nearly free, since `vcmpunordpd`
+issues on a different port from the divider and 4-way unrolling gives the scheduler room. A 13% cost
+is more consistent with the `|=` accumulator forming a loop-carried dependency than with the compare
+throughput. **I did not confirm which**, and the fix that would follow — independent per-lane
+accumulators OR-ed once at the end — is untested. It is the next thing to try on this row and it is
+NOT done here.
+
+**⚠️ THE CONCURRENCY GUARD COST 48 CONSECUTIVE REFUSALS ON THIS ROW.** The false positive recorded
+earlier (any process whose argv merely CONTAINS `vs_pandas_harness.py`, including a peer's `pgrep`
+watcher) is still unfixed, and a single 64-round measurement now needs a retry loop of 60 attempts to
+find a slot. The row was obtained on attempt 49.
+
+**No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`.**
