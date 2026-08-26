@@ -11992,6 +11992,30 @@ impl Column {
         self.values.all_valid_float64_finite_witness()
     }
 
+    /// Build an all-valid Float64 column as a ZERO-COPY WINDOW into a shared
+    /// buffer: `data[start .. start + len]`.
+    ///
+    /// Added for the transposed-frame plan, whose output has one column per
+    /// SOURCE ROW — 100_000 of them at the 100k fixture. Building each as its own
+    /// heap `Column` costs one allocation, one `OnceLock` init and one drop per
+    /// output column; profiled on `df_transpose_full_materialize_positional`
+    /// those three lines were ~43% of the whole lane (drop_glue 14.49%, OnceLock
+    /// machinery ~14.8%, mimalloc ~14%). A page of output columns can instead
+    /// share ONE gathered buffer, with each column a window into it.
+    ///
+    /// The caller guarantees the window is all-valid and NaN-free, exactly as
+    /// [`Self::from_f64_all_valid_with_finite_opt`] requires; the window bounds
+    /// are debug-asserted by the underlying `ScalarValues` constructor.
+    #[must_use]
+    pub fn from_f64_shared_window(data: Arc<[f64]>, start: usize, len: usize) -> Self {
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_slice(data, start, len),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     /// Build an all-valid (no-NaN) Float64 column from a values buffer, carrying
     /// an optional pre-known all-finite witness WITHOUT scanning. The caller
     /// guarantees the buffer has no NaN (NaN ⇒ missing under pandas semantics);

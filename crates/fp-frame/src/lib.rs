@@ -56982,6 +56982,17 @@ struct LazyTransposeFramePlan {
     dtype: DType,
     output_columns: usize,
     column_slot_pages: Box<[OnceLock<LazyTransposeColumnSlotPage>]>,
+    /// One shared gathered buffer per page of output columns; `None` inside the
+    /// inner `OnceLock` records that this page declined the contiguous path (an
+    /// untyped source), so the decision is made once rather than re-probed per
+    /// column.
+    ///
+    /// The OUTER `OnceLock` matters: allocating this array eagerly in the
+    /// constructor measured a real 15% regression on the shell-only
+    /// `df.transpose()` lane (interleaved A/B, 1391.5us -> 1641.0us), which every
+    /// transpose caller pays whether or not it ever materialises a column. Built
+    /// on first page access instead, so the lazy path is untouched.
+    page_buffers: OnceLock<Box<[OnceLock<Option<Arc<[f64]>>>]>>,
 }
 
 #[cfg(feature = "lazy-transpose-view")]
@@ -56993,6 +57004,17 @@ impl LazyTransposeFramePlan {
             .map(|_| OnceLock::new())
             .collect::<Vec<_>>()
             .into_boxed_slice()
+    }
+
+    fn page_buffer_slots(&self) -> &[OnceLock<Option<Arc<[f64]>>>] {
+        self.page_buffers.get_or_init(|| {
+            (0..self
+                .output_columns
+                .div_ceil(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN))
+                .map(|_| OnceLock::new())
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        })
     }
 
     fn materialize_column(&self, output_column: usize) -> Column {
@@ -57177,9 +57199,101 @@ impl LazyTransposeFramePlan {
                 .collect::<Vec<_>>()
                 .into_boxed_slice()
         });
+        // PAGE-CONTIGUOUS FAST PATH. The transposed frame has one output column
+        // per SOURCE ROW — 100_000 at the 100k fixture — and giving each its own
+        // heap `Column` costs an allocation, a `OnceLock` init and a drop apiece.
+        // Profiled on `df_transpose_full_materialize_positional`, those three
+        // lines were ~43% of the lane (drop_glue::<ScalarValues> 14.49%, OnceLock
+        // machinery ~14.8%, mimalloc ~14%), and `Column::as_f64_slice` a further
+        // 12.11% because `materialize_column` re-resolves the SAME source slices
+        // once per output column — 1M dispatches of ten things that never change.
+        //
+        // So gather a whole page into ONE buffer and hand every column in it a
+        // zero-copy window. That is 1 allocation and 1 source-slice resolution per
+        // 256 columns instead of per column. Laziness is preserved at PAGE
+        // granularity: touching one column of a 1M-column frame materialises 256
+        // columns (256 x ncols f64, ~20KB at ncols=10), not the frame.
+        //
+        // Float64-with-typed-sources only; every other plan shape keeps the
+        // per-column path below unchanged.
+        if let Some(page_buffer) = self.page_contiguous_buffer(page_index, page_start, page_len) {
+            let ncols = self.source_columns.len();
+            return page[slot_index]
+                .get_or_init(|| {
+                    Box::new(Column::from_f64_shared_window(
+                        page_buffer,
+                        slot_index * ncols,
+                        ncols,
+                    ))
+                })
+                .as_ref();
+        }
+
         page[slot_index]
             .get_or_init(|| Box::new(self.materialize_column(output_column)))
             .as_ref()
+    }
+
+    /// Gather one page of output columns into a single shared buffer, laid out
+    /// output-column-major: slot `j` of the page occupies `[j * ncols, (j+1) * ncols)`
+    /// and holds `source_columns[k][page_start + j]` at offset `k`.
+    ///
+    /// Returns `None` — leaving the per-column path to handle it — unless the plan
+    /// is Float64 and EVERY source hands out a plain typed slice, which is the same
+    /// condition `materialize_column`'s typed row requires. Values and order are
+    /// identical to that path; this only changes where they are stored.
+    fn page_contiguous_buffer(
+        &self,
+        page_index: usize,
+        page_start: usize,
+        page_len: usize,
+    ) -> Option<std::sync::Arc<[f64]>> {
+        if self.dtype != DType::Float64 {
+            return None;
+        }
+        let slots = self.page_buffer_slots();
+        if let Some(cached) = slots.get(page_index)?.get() {
+            return cached.clone();
+        }
+        let built = self.build_page_contiguous_buffer(page_start, page_len);
+        Some(slots[page_index].get_or_init(|| built).clone()?)
+    }
+
+    fn build_page_contiguous_buffer(
+        &self,
+        page_start: usize,
+        page_len: usize,
+    ) -> Option<std::sync::Arc<[f64]>> {
+        // Resolve every source ONCE for the whole page. This is the hoist: the
+        // per-column path pays this per output column.
+        enum Src<'a> {
+            F64(&'a [f64]),
+            I64(&'a [i64]),
+        }
+        let mut sources: Vec<Src<'_>> = Vec::with_capacity(self.source_columns.len());
+        for source in self.source_columns.iter() {
+            if let Some(values) = source.as_f64_slice() {
+                sources.push(Src::F64(values));
+            } else if let Some(values) = source.as_i64_slice() {
+                sources.push(Src::I64(values));
+            } else {
+                // Canonical-nullable or otherwise untyped source: the per-column
+                // path reconstructs emission-rule Scalars and must keep it.
+                return None;
+            }
+        }
+        let ncols = sources.len();
+        let mut buffer: Vec<f64> = Vec::with_capacity(page_len.checked_mul(ncols)?);
+        for offset in 0..page_len {
+            let row = page_start + offset;
+            for source in &sources {
+                match source {
+                    Src::F64(values) => buffer.push(*values.get(row)?),
+                    Src::I64(values) => buffer.push(*values.get(row)? as f64),
+                }
+            }
+        }
+        Some(std::sync::Arc::from(buffer))
     }
 
     fn cached_column_if_present(&self, output_column: usize) -> Option<&Column> {
@@ -67413,6 +67527,7 @@ impl DataFrame {
                 dtype: view.dtype(),
                 output_columns: view.column_len,
                 column_slot_pages: LazyTransposeFramePlan::empty_column_slot_pages(view.column_len),
+                page_buffers: OnceLock::new(),
             });
             return Ok(Self {
                 index: view.row_index.clone(),
