@@ -41573,3 +41573,66 @@ first attempt at this table died on a 2400-second subprocess timeout with loadav
 average) — a peer swarm, not a hang. It was re-run at loadavg 6-12 and those are the numbers above.
 
 **No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`.**
+
+---
+
+### 2026-08-26 OliveCarp — SHIPPED: declining an OPTIONAL finiteness witness cuts `expm1 @100k` self-time 301.51us -> **264.33us** (12.3%). The row is no longer certifiable as a loss, but it does NOT certify as anything else either
+
+**Campaign result class:** maintenance-self-speedup
+
+FrankenPandas p50 301.51us -> 264.33us on the same workload, a 12.3% self-speedup that takes the row
+off the certified-loss list without putting it on the win list.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=6369a82d2eccb5e8401a54d58c4083a1865813092af60eefdc78db41ef8ebdb4 (86294520 bytes)
+/data/projects/fp-wt-divlead/tdl16/release-perf/fp-bench`, built in a DETACHED WORKTREE with its own
+`CARGO_TARGET_DIR`. Harness
+`bench_harness_source_sha256=b37e364f8e8deb8f3f8f17e7f7d6cbf3904b8f7f89a3cc3212a94f564226538d`;
+pandas 2.2.3 `artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f`;
+`invocation_id=vs-pandas-20260826T131939.729249Z-pid988033`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 1.00224157 and pandas null
+median ratio 0.99862795, both inside the 0.02 maximum absolute deviation.
+
+**Median-CI decision:** effect median 0.983x, CI [0.97815917, 0.99590157] — it still EXCLUDES unity —
+but the claimed log effect 0.01762053 falls far below the required threshold 0.21675944, so the row
+is NULL_UNDECIDABLE. **That is the honest verdict and I am not dressing it as a win.**
+
+**CV role:** provenance-only, no vote. FP p50 264.33us cv 10.52% against pandas p50 259.66us cv
+11.54%, 32 balanced-square rounds, loadavg 13.5-13.8.
+
+**WHAT CHANGED, and why declining is sound where claiming would not be.** `expm1` cannot set
+`preserves_finiteness` — a finite input CAN overflow to `+inf` — so the fused arm folds
+`y.is_finite()` on **every element** to produce an all-finite witness. That witness is an OPTIONAL
+CACHED HINT: `from_f64_all_valid_with_finite_opt` takes `Option<bool>` and stores it **without
+scanning**, so `None` means "unknown", not "false". Declining to compute a hint is sound; claiming a
+wrong one would not be. The no-NaN precondition of the all-valid constructor also holds by
+construction — `expm1` is TOTAL over an all-valid input (`exp_m1(+inf) = +inf`,
+`exp_m1(-inf) = -1.0`, never NaN) and `as_f64_slice` returns `Some` only when `validity.all()`
+(fp-columnar:12774).
+
+**THE FOLD WAS ALMOST THE WHOLE GAP.** Before: FP 301.51us against pandas 257.69us, a 43.8us deficit.
+Removing the per-element fold recovered **37.2us of it**. The residual 4.7us is the libm `exp_m1`
+itself against numpy's vectorised kernel, which is the part no bookkeeping change can reach.
+
+**⚠️ THIS IS A TRADE, NOT A FREE WIN, AND THE COST IS REAL.** The witness is no longer computed, so a
+later consumer that asks for `all_finite` on an `expm1` result must scan for it (~10us at this size)
+where previously it was free. **A guaranteed 37us cost became a conditional ~10us cost paid only when
+something asks.** That is the right trade for a hint most consumers never read, but it is a trade and
+it could be wrong for a pipeline that reads the witness on every intermediate.
+
+**⚠️ SERIAL ONLY, AND THE LARGE-SIZE CONTROL WAS MEASURED.** The fused arm also carries the parallel
+path, so the new path is gated on the same serial condition
+(`max_workers <= 1 || len < policy_par_min`) used by the i64 two-pass gate — the third time tonight
+the correct gate was a boundary the code already computes. Control: `expm1 @10M` still reports
+`thread_count_actually_used` = **8** at FASTER **2.225x**, FP p50 12417.64us, three clauses TRUE.
+**Unchanged, and it must be: at 10M the fold overlaps memory latency and threading pays.**
+
+**PRIOR REFUTATIONS THAT MADE THIS THE REMAINING LEVER.** Both threading approaches were already
+measured dead for this row: at 301.51us serial it is below the ~397us break-even, and a worker sweep
+put every count from 3 to 8 SLOWER than serial (326.70 / 319.89 / 347.74 / 386.19us). **This entry is
+what was left after those were eliminated, not the first thing tried.**
+
+fp-columnar lib suite: **672 passed, 0 failed, 58 ignored.**
+
+**No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`.**

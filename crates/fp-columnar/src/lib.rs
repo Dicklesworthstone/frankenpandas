@@ -28898,6 +28898,37 @@ impl Column {
         // `-1.0`, and a finite input gives a finite or infinite result — never NaN.
         // So the output mask is provably all-valid and the predicate is constant.
         // br-frankenpandas-4kig1.
+        // WITNESS-FREE SERIAL PATH. `expm1 @100k` is CERTIFIED SLOWER at 0.855x
+        // (FP 301.51us against pandas 257.69us) and BOTH threading levers are
+        // already refuted for it: at 301.51us of serial work it is below the
+        // ~397us break-even, and a worker sweep measured every count from 3 to 8
+        // SLOWER than serial (326.70 / 319.89 / 347.74 / 386.19us).
+        //
+        // What is left is per-element work pandas does not do. Unlike `sqrt`,
+        // `expm1` cannot set `preserves_finiteness` — a finite input CAN overflow
+        // to `+inf` — so the fused arm folds `y.is_finite()` on every element to
+        // produce an all-finite witness. That witness is an OPTIONAL cached hint
+        // (`from_f64_all_valid_with_finite_opt` takes `Option<bool>` and stores it
+        // without scanning), so declining to compute it is sound where claiming
+        // it wrongly would not be. `expm1` is TOTAL over an all-valid input —
+        // `exp_m1(+inf) = +inf`, `exp_m1(-inf) = -1.0`, never NaN — and
+        // `as_f64_slice` only returns `Some` when `validity.all()`, so the
+        // no-NaN precondition of the all-valid constructor holds.
+        //
+        // ⚠️ SERIAL ONLY. The fused arm also carries the parallel path, and at
+        // sizes where threading pays (10M) bypassing it would regress the op. The
+        // gate mirrors `par_map_slice_f64_domain_fused`'s own serial condition
+        // rather than inventing a size constant, the same shape as the i64
+        // two-pass gate.
+        {
+            let (max_workers, policy_par_min) = elementwise_witness_policy();
+            if let Some(data) = self.as_f64_slice()
+                && (max_workers <= 1 || data.len() < policy_par_min)
+            {
+                let out: Vec<f64> = data.iter().map(|&x| x.exp_m1()).collect();
+                return Ok(Self::from_f64_all_valid_with_finite_opt(out, None));
+            }
+        }
         if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::exp_m1) {
             return Ok(out);
         }
