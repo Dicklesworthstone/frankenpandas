@@ -80926,7 +80926,37 @@ impl DataFrame {
         // (2^17, safely past the crossover) so small L1/L2-resident frames stay
         // serial and avoid the spawn floor. Bit-identical either way (pure
         // scheduling; each column runs the identical Column::abs).
-        self.apply_per_column_min(131_072, |s| s.abs())
+        //
+        // ⚠️ 2026-08-26: 131_072 IS NOW STALE AND COSTS A CERTIFIED LOSS. The table
+        // above was measured when the SERIAL arm was far slower than it is today;
+        // the one-pass witness-propagating `Column::abs` has since moved serial
+        // 1M cells to ~0.145ns/cell, and nobody re-derived the crossover the
+        // faster arm implies. `df_abs @100k` (100_000 rows x 10 cols = 1_000_000
+        // cells) was CERTIFIED SLOWER at 0.523x purely because it clears 131_072
+        // and fans out. A/B on ONE ELF, env-gated floor, same invocation:
+        //
+        //   1M cells   serial 144.65us  (1 thread)   threaded  409.67us (10)  -> serial 2.83x
+        //   10M cells  serial 7312.85us (1 thread)   threaded 4847.71us (10)  -> threaded 1.51x
+        //
+        // Serial at 1M cells FLIPS the row from 0.419x to a certified 1.101x WIN.
+        // The threaded figure is not mysterious: the `thread::scope` tax measured
+        // four ways this month is `148.6us fixed + 24.9us per worker`, so ten
+        // workers cost ~397us to save ~130us of work — predicted 412us against
+        // 409.67us measured.
+        //
+        // 2_097_152 (2^21) sits BETWEEN the two measured points, so both land on
+        // the side the measurement puts them: 1M cells serial, 10M cells threaded.
+        // Break-even is where serial exceeds `tax / (1 - 1/workers)` ~ 441us, which
+        // log-interpolating the two points puts near 2M cells.
+        //
+        // ⚠️ ONLY `abs` IS CHANGED. `neg` (:81440) and the transform at :80810 share
+        // the old constant and were NOT measured here; the same staleness probably
+        // applies to them, but "probably" is how the 4M phantom happened and each
+        // needs its own A/B at its own per-cell cost. Bit-identity of the two arms
+        // was verified, not assumed: FrankenPandas returned checksum
+        // a7662249ab28241be066 at 1M cells and f870dffb81be5da7ba9a at 10M cells,
+        // IDENTICAL between the serial and threaded runs.
+        self.apply_per_column_min(2_097_152, |s| s.abs())
     }
 
     /// Clip values per column.

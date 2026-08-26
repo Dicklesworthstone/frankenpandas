@@ -41414,3 +41414,87 @@ that is a separate piece of work and is NOT done here.
 **No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs` or on
 `crates/fp-frame/src/lib.rs`** — both are in the size class that OOMs the host; the edited blocks were
 hand-formatted and the commit used `--no-verify`.
+
+---
+
+### 2026-08-26 OliveCarp — SHIPPED: `df_abs @100k` 0.523x -> **1.309x** by RAISING a parallel floor. The 131_072 constant was calibrated against a serial arm that has since become ~18x faster, and nobody re-derived the crossover
+
+**Campaign result class:** incumbent-win
+
+One workload, gated FASTER on three clauses against live pandas 2.2.3 in the same invocation, with
+the large-size control measured and unchanged.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=6e46d14787d24cf0d9a9816261bf6cd74eda4f39952a0c76db7f708e35b4151d (86221328 bytes)
+/data/projects/fp-wt-divlead/tdl13/release-perf/fp-bench`, built in a DETACHED WORKTREE with its own
+`CARGO_TARGET_DIR`. Harness
+`bench_harness_source_sha256=b37e364f8e8deb8f3f8f17e7f7d6cbf3904b8f7f89a3cc3212a94f564226538d`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260826T063903Z-dfabs-absfix measured_ratio=1.309x — pinned artifact is
+/home/ubuntu/.local/lib/python3.13/site-packages/pandas/__init__.py (70681559 bytes, 2922 files);
+pandas p50 206.30us against FrankenPandas p50 158.27us in the same invocation.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.99257 and pandas null
+median ratio 1.01345, both inside the 0.02 maximum absolute deviation.
+
+**Median-CI decision:** effect median 1.309x, CI [1.18758038, 1.38733023], excluding unity; the
+claimed log effect cleared the required two-x-null threshold. All three clauses TRUE.
+
+**CV role:** provenance-only, no vote. FP p50 158.27us against pandas p50 206.30us over 32
+balanced-square rounds; best-vs-best 1.0609 agrees in direction.
+
+    python3 benches/vs_pandas_harness.py --category dataframe_ops --workloads df_abs --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 32 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl13/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_dfabs_100k_ABSFIX_2026-08-26.json
+
+**THE FIX RAISES A FLOOR RATHER THAN LOWERING ONE, WHICH IS THE OPPOSITE OF TONIGHT'S OTHER WIN.**
+`DataFrame::abs` fanned out at `>= 131_072` cells. The `100k` fixture is 100_000 rows x 10 cols =
+**1_000_000 cells**, so it threaded onto 10 workers and paid the `thread::scope` tax to save work that
+was cheaper than the tax. Changed to `2_097_152`; at this size it now runs **serial, 1 thread**.
+
+**A/B ON ONE ELF, env-gated floor, the method br-frankenpandas-qmajv prescribed after the last floor
+phantom ("ALWAYS env-gate the floor and measure both paths at the actual target size"):**
+
+    cells      serial              threaded             winner
+    1M         144.65us (1 thr)    409.67us (10 thr)    SERIAL   2.83x
+    10M       7312.85us (1 thr)   4847.71us (10 thr)    THREADED 1.51x
+
+**The threaded figure is predicted, not just observed.** The `thread::scope` tax measured four ways
+this month is `148.6us fixed + 24.9us per worker`; ten workers cost ~397us, plus 144.65/10 = 14.5us of
+work, predicts **412us against 409.67us measured** — 0.6% out. That is the sixth consecutive correct
+prediction from this model (cbrt, log10, log, expm1, sqrt_int64, df_abs).
+
+**WHY THE OLD CONSTANT WAS RIGHT WHEN IT WAS WRITTEN AND IS WRONG NOW.** The comment block above it
+records the measurements that set it: `800k cells 2.607ms serial`, i.e. **3.26ns/cell**. Today the
+serial arm does 1M cells in 144.65us — **0.145ns/cell, about 18x faster** — because `Column::abs`
+became a single vectorised pass with a propagated finiteness witness in the meantime. **A threshold is
+a statement about the RATIO of two arms, so making one arm faster silently invalidates it.** Nothing
+was wrong with qmajv's measurement; it simply was not re-derived after the thing it was measuring
+changed. This is the same failure mode as a stale certified row, applied to a constant.
+
+**2_097_152 (2^21) SITS BETWEEN TWO MEASURED POINTS**, so both land where the measurement puts them:
+1M cells serial, 10M cells threaded. Break-even is where serial exceeds `tax / (1 - 1/workers)` ~
+441us, which log-interpolating the two points puts near 2M cells.
+
+**THE LARGE-SIZE CONTROL WAS MEASURED, NOT ASSUMED.** With the shipped constant, `df_abs @1M`
+(10M cells) still reports `thread_count_actually_used` = **10** at FP p50 4885.42us and ratio 2.025x,
+against 4847.71us threaded before the change — unchanged within noise. **The change moves one size
+class and leaves the other alone.**
+
+**BIT-IDENTITY VERIFIED, NOT ASSUMED.** FrankenPandas returned checksum `a7662249ab28241be066` at 1M
+cells and `f870dffb81be5da7ba9a` at 10M cells, **IDENTICAL between the serial and threaded runs** at
+each size — direct evidence the two arms are interchangeable, which is what a pure scheduling change
+has to demonstrate. fp-frame lib suite: **3437 passed, 2 failed** — the same two pre-existing datetime
+failures present on pristine (3436 / same 2).
+
+**⚠️ ONLY `abs` IS CHANGED, DELIBERATELY.** `neg` (fp-frame:81470) and the transform at :80810 share
+the old 131_072 constant and were NOT measured here. The same staleness very likely applies — the
+ledger records neg being given the identical floor for the identical reason — but "very likely" is
+exactly how the 4M phantom happened, and each needs its own A/B at its own per-cell cost before
+being moved. **Not done here, and named so it is not mistaken for done.**
+
+**No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs` or
+`crates/fp-frame/src/lib.rs`.**
