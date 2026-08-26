@@ -2520,6 +2520,20 @@ enum ScalarValues {
         len: usize,
         all_finite: OnceLock<bool>,
         values: OnceLock<Vec<Scalar>>,
+        /// PAGE-SHARED Scalar view, for windows that are siblings over one
+        /// buffer (the transposed-frame plan builds 256 such columns per page).
+        ///
+        /// Without it each window owns a private `values` OnceLock, so a caller
+        /// walking every column pays one `Vec<Scalar>` allocation, one OnceLock
+        /// init and one free PER COLUMN — profiled on
+        /// `df_transpose_full_materialize_positional` as drop_glue 17.24%,
+        /// OnceLock-init 9.21% and `Once::call` 5.43%. Sharing one lazily-built
+        /// buffer across the page turns 100_000 of each into 391.
+        ///
+        /// It covers the WHOLE of `data`, so slot `start..start + len` indexes it
+        /// directly. Lazy: nothing is built unless a caller actually asks for the
+        /// Scalar view, so typed consumers (`as_f64_slice`) pay nothing.
+        shared_values: Option<Arc<OnceLock<Vec<Scalar>>>>,
     },
     /// Deferred all-valid Float64 output column for finite `DataFrame::dot`.
     ///
@@ -3207,6 +3221,29 @@ impl ScalarValues {
             len,
             all_finite: Self::bool_once_lock(all_finite),
             values: OnceLock::new(),
+            shared_values: None,
+        }
+    }
+
+    /// As [`Self::lazy_all_valid_float64_slice`], but every window over `data`
+    /// shares one lazily-built Scalar view instead of owning a private one.
+    fn lazy_all_valid_float64_slice_shared(
+        data: Arc<[f64]>,
+        start: usize,
+        len: usize,
+        shared_values: Arc<OnceLock<Vec<Scalar>>>,
+    ) -> Self {
+        debug_assert!(
+            start.checked_add(len).is_some_and(|end| end <= data.len()),
+            "Float64 view window must lie within source data"
+        );
+        Self::LazyAllValidFloat64Slice {
+            data,
+            start,
+            len,
+            all_finite: OnceLock::new(),
+            values: OnceLock::new(),
+            shared_values: Some(shared_values),
         }
     }
 
@@ -5199,16 +5236,29 @@ impl ScalarValues {
                 start,
                 len,
                 values,
+                shared_values,
                 ..
-            } => values
-                .get_or_init(|| {
-                    data[*start..*start + *len]
-                        .iter()
-                        .copied()
-                        .map(Scalar::Float64)
-                        .collect()
-                })
-                .as_slice(),
+            } => {
+                // Page-shared view when this window has siblings: build the whole
+                // buffer's Scalars ONCE and index into it. Identical values and
+                // order to the private path below, which still runs for a
+                // standalone window.
+                if let Some(shared) = shared_values {
+                    let all = shared.get_or_init(|| {
+                        data.iter().copied().map(Scalar::Float64).collect()
+                    });
+                    return &all[*start..*start + *len];
+                }
+                values
+                    .get_or_init(|| {
+                        data[*start..*start + *len]
+                            .iter()
+                            .copied()
+                            .map(Scalar::Float64)
+                            .collect()
+                    })
+                    .as_slice()
+            }
             Self::LazyAllValidFloat64Dot {
                 a_cols,
                 b_col,
@@ -12011,6 +12061,34 @@ impl Column {
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_all_valid_float64_slice(data, start, len),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
+    /// As [`Self::from_f64_shared_window`], but the window also shares a
+    /// lazily-built Scalar view with its siblings over the same buffer.
+    ///
+    /// A caller that walks every column of a transposed frame goes through
+    /// `values()`, and with a private view that is one `Vec<Scalar>` allocation,
+    /// one `OnceLock` init and one free PER COLUMN. Sharing collapses those to
+    /// one per page. Nothing is built unless `values()` is actually called, so
+    /// typed consumers are unaffected.
+    #[must_use]
+    pub fn from_f64_shared_window_with_shared_values(
+        data: Arc<[f64]>,
+        start: usize,
+        len: usize,
+        shared_values: Arc<OnceLock<Vec<Scalar>>>,
+    ) -> Self {
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_slice_shared(
+                data,
+                start,
+                len,
+                shared_values,
+            ),
             validity: ValidityMask::all_valid(len),
             data: None,
         }

@@ -57219,13 +57219,19 @@ impl LazyTransposeFramePlan {
             // one allocation for its columns, zero per-slot OnceLocks.
             if let Some(buffer) = self.page_contiguous_buffer(page_index, page_start, page_len) {
                 let ncols = self.source_columns.len();
+                // One lazily-built Scalar view for the WHOLE page, shared by all
+                // its columns. A caller walking every column reaches `values()`
+                // once per column; with a private view that is an allocation, an
+                // OnceLock init and a free apiece.
+                let shared_values = Arc::new(OnceLock::new());
                 return LazyTransposeColumnSlotPage::Contiguous(
                     (0..page_len)
                         .map(|slot| {
-                            Column::from_f64_shared_window(
+                            Column::from_f64_shared_window_with_shared_values(
                                 Arc::clone(&buffer),
                                 slot * ncols,
                                 ncols,
+                                Arc::clone(&shared_values),
                             )
                         })
                         .collect::<Vec<_>>()
