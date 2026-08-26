@@ -23,6 +23,7 @@ fn live_oracle_unavailable_propagates_without_fallback() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();
     cfg.allow_system_pandas_fallback = false;
+    cfg.allow_fixture_fallback = false;
     cfg.require_live_oracle = false;
 
     let report = super::run_packet_by_id(&cfg, "FP-P2C-001", super::OracleMode::LiveLegacyPandas)
@@ -45,7 +46,8 @@ fn live_oracle_unavailable_propagates_without_fallback() {
 fn live_oracle_unavailable_falls_back_to_fixture_when_enabled() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();
-    cfg.allow_system_pandas_fallback = true;
+    cfg.allow_system_pandas_fallback = false;
+    cfg.allow_fixture_fallback = true;
     cfg.require_live_oracle = false;
 
     let report = super::run_packet_by_id(&cfg, "FP-P2C-001", super::OracleMode::LiveLegacyPandas)
@@ -64,6 +66,25 @@ fn live_oracle_unavailable_falls_back_to_fixture_when_enabled() {
                 .is_some_and(|message| message.contains("legacy oracle root does not exist"))
         }),
         "fixture fallback should not surface oracle-unavailable mismatches: {report:?}"
+    );
+}
+
+#[test]
+fn system_pandas_permission_never_enables_fixture_fallback_mlnu3() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+    cfg.allow_fixture_fallback = false;
+
+    let unavailable = super::HarnessError::OracleUnavailable("synthetic outage".to_owned());
+    assert!(
+        !super::should_fallback_to_fixture(&cfg, &unavailable),
+        "system-pandas permission must not silently accept a stored fixture"
+    );
+
+    cfg.allow_fixture_fallback = true;
+    assert!(
+        super::should_fallback_to_fixture(&cfg, &unavailable),
+        "fixture fallback needs its own explicit permission"
     );
 }
 

@@ -477,6 +477,7 @@ pub fn harness_config_from_repo_root(repo_root: impl AsRef<Path>) -> HarnessConf
         strict_mode: true,
         python_bin: "python3".to_owned(),
         allow_system_pandas_fallback: false,
+        allow_fixture_fallback: false,
         require_live_oracle: false,
     }
 }

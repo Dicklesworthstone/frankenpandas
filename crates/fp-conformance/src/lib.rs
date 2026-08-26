@@ -147,34 +147,17 @@ pub struct HarnessConfig {
     pub fixture_root: PathBuf,
     pub strict_mode: bool,
     pub python_bin: String,
-    /// ⚠️ ONE FLAG, TWO MEANINGS — and they are not separable today
-    /// (br-frankenpandas-mlnu3). Read both before setting it:
-    ///
-    /// 1. Via [`allows_live_oracle_fallback`](Self::allows_live_oracle_fallback),
-    ///    it lets [`capture_live_oracle_expected`] proceed when the vendored
-    ///    legacy oracle root is absent, i.e. "use system pandas".
-    /// 2. On its own it ALSO permits a silent degrade to the fixture's stored
-    ///    expectation when the oracle is unavailable (the `OracleUnavailable`
-    ///    arm near lib.rs:12973), which makes a differential test compare FP
-    ///    against a banked answer rather than against pandas — vacuous.
-    ///
-    /// The `live_oracle_*` test modules therefore set this to FALSE explicitly
-    /// (773 occurrences across 11 of the 12 modules) to block meaning 2, and
-    /// lose meaning 1 as collateral. That is why
-    /// `FP_ALLOW_SYSTEM_PANDAS_FALLBACK=1` ALONE still skips them, while
-    /// `FP_REQUIRE_LIVE_ORACLE=1` runs them: REQUIRE reaches meaning 1 through
-    /// the `||` in `allows_live_oracle_fallback` WITHOUT enabling meaning 2,
-    /// which reads this raw field.
-    ///
-    /// So the behaviour is coherent; the NAME is not. Splitting it into
-    /// `allow_system_pandas` and `allow_fixture_fallback` would let a caller ask
-    /// for one without the other — that is a corpus-wide sweep and belongs to
-    /// mlnu3, not to a drive-by.
-    ///
-    /// Practical rule until then: to run the differential suite for real, pass
-    /// BOTH vars, and check the CLOCK — a module that finishes in 0.00s skipped,
-    /// whatever its pass count says.
+    /// Permit the oracle subprocess to import installed system pandas when the
+    /// vendored legacy checkout is unavailable.
     pub allow_system_pandas_fallback: bool,
+    /// Permit a live-oracle request to use a fixture's stored expectation when
+    /// neither the vendored nor system pandas oracle is available.
+    ///
+    /// This is deliberately independent from
+    /// [`Self::allow_system_pandas_fallback`]: opting into system pandas must
+    /// never turn a differential test into a fixture-vs-FrankenPandas comparison
+    /// (br-frankenpandas-mlnu3).
+    pub allow_fixture_fallback: bool,
     pub require_live_oracle: bool,
 }
 
@@ -204,6 +187,7 @@ impl HarnessConfig {
             })
             .unwrap_or_else(|| "python3".to_owned());
         let allow_system_pandas_fallback = Self::env_flag("FP_ALLOW_SYSTEM_PANDAS_FALLBACK");
+        let allow_fixture_fallback = Self::env_flag("FP_ALLOW_FIXTURE_FALLBACK");
         let require_live_oracle = Self::env_flag("FP_REQUIRE_LIVE_ORACLE");
         Self {
             oracle_root: repo_root.join("legacy_pandas_code/pandas"),
@@ -211,6 +195,7 @@ impl HarnessConfig {
             strict_mode: true,
             python_bin,
             allow_system_pandas_fallback,
+            allow_fixture_fallback,
             require_live_oracle,
             repo_root,
         }
@@ -239,8 +224,15 @@ impl HarnessConfig {
     }
 
     #[must_use]
+    pub fn allows_system_pandas_fallback(&self) -> bool {
+        self.allow_system_pandas_fallback
+            || Self::env_flag("FP_ALLOW_SYSTEM_PANDAS_FALLBACK")
+            || self.require_live_oracle
+    }
+
+    #[must_use]
     pub fn allows_live_oracle_fallback(&self) -> bool {
-        self.allow_system_pandas_fallback || self.require_live_oracle
+        self.allows_system_pandas_fallback()
     }
 }
 
@@ -4892,7 +4884,7 @@ fn capture_live_oracle_response_for_generation(
         }
     }
 
-    let allow_system_pandas_fallback = config.allows_live_oracle_fallback();
+    let allow_system_pandas_fallback = config.allows_system_pandas_fallback();
 
     if !config.oracle_root.exists() && !allow_system_pandas_fallback {
         return Err(oracle_unavailable(
@@ -5956,10 +5948,16 @@ fn configure_live_oracle_cargo_command<'a>(
             if config.require_live_oracle { "1" } else { "0" },
         );
 
-    if config.allow_system_pandas_fallback {
+    if config.allows_system_pandas_fallback() {
         command.env("FP_ALLOW_SYSTEM_PANDAS_FALLBACK", "1");
     } else {
         command.env_remove("FP_ALLOW_SYSTEM_PANDAS_FALLBACK");
+    }
+
+    if config.allow_fixture_fallback {
+        command.env("FP_ALLOW_FIXTURE_FALLBACK", "1");
+    } else {
+        command.env_remove("FP_ALLOW_FIXTURE_FALLBACK");
     }
 
     command
@@ -6472,6 +6470,7 @@ pub fn fuzz_fixture_parse_bytes(input: &[u8]) -> Result<(), HarnessError> {
         strict_mode: true,
         python_bin: "python3".to_owned(),
         allow_system_pandas_fallback: false,
+        allow_fixture_fallback: false,
         require_live_oracle: false,
     };
     let policy = match fixture.mode {
@@ -13007,7 +13006,7 @@ fn resolve_expected(
         OracleMode::FixtureExpected => fixture_expected(fixture),
         OracleMode::LiveLegacyPandas => match capture_live_oracle_expected(config, fixture) {
             Ok(expected) => Ok(expected),
-            Err(HarnessError::OracleUnavailable(_)) if config.allow_system_pandas_fallback => {
+            Err(error) if should_fallback_to_fixture(config, &error) => {
                 // Environment guard: if neither legacy nor system pandas is usable,
                 // fall back to fixture-backed expectations when explicitly allowed.
                 fixture_expected(fixture)
@@ -13015,6 +13014,10 @@ fn resolve_expected(
             Err(err) => Err(err),
         },
     }
+}
+
+fn should_fallback_to_fixture(config: &HarnessConfig, error: &HarnessError) -> bool {
+    matches!(error, HarnessError::OracleUnavailable(_)) && config.allow_fixture_fallback
 }
 
 fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, HarnessError> {
@@ -13551,7 +13554,7 @@ fn capture_live_oracle_expected(
     }
 
     let expects_error = fixture.expected_error_contains.is_some();
-    let allow_system_pandas_fallback = config.allows_live_oracle_fallback();
+    let allow_system_pandas_fallback = config.allows_system_pandas_fallback();
 
     if !config.oracle_root.exists() && !allow_system_pandas_fallback {
         return Err(oracle_unavailable(
@@ -27353,6 +27356,7 @@ mod tests {
             strict_mode: true,
             python_bin: "python3".to_owned(),
             allow_system_pandas_fallback: false,
+            allow_fixture_fallback: false,
             require_live_oracle: false,
         };
         let report = PacketParityReport {
@@ -27469,6 +27473,7 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
             strict_mode: true,
             python_bin: "python3".to_owned(),
             allow_system_pandas_fallback: false,
+            allow_fixture_fallback: false,
             require_live_oracle: true,
         };
         let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({

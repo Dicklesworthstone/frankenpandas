@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut require_green = false;
     let mut write_drift_history = false;
     let mut allow_system_pandas_fallback = false;
+    let mut allow_fixture_fallback = false;
     let mut write_differential_validation = false;
     let mut write_fault_injection = false;
     let mut write_e2e_scenarios = false;
@@ -68,6 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--allow-system-pandas-fallback" => {
                 allow_system_pandas_fallback = true;
+            }
+            "--allow-fixture-fallback" => {
+                allow_fixture_fallback = true;
             }
             "--write-differential-validation" => {
                 write_differential_validation = true;
@@ -143,6 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = HarnessConfig::default_paths();
     config.allow_system_pandas_fallback = allow_system_pandas_fallback;
+    config.allow_fixture_fallback = allow_fixture_fallback;
     if let Some(python_bin) = python_bin {
         config.python_bin = python_bin;
     }

@@ -22,6 +22,7 @@ struct CliArgs {
     json_out: Option<PathBuf>,
     python_bin: Option<String>,
     allow_system_pandas_fallback: bool,
+    allow_fixture_fallback: bool,
 }
 
 fn main() -> ExitCode {
@@ -40,6 +41,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
 
     let mut harness = HarnessConfig::default_paths();
     harness.allow_system_pandas_fallback = args.allow_system_pandas_fallback;
+    harness.allow_fixture_fallback = args.allow_fixture_fallback;
     if let Some(python_bin) = args.python_bin {
         harness.python_bin = python_bin;
     }
@@ -125,6 +127,7 @@ where
     let mut json_out = None;
     let mut python_bin = None;
     let mut allow_system_pandas_fallback = false;
+    let mut allow_fixture_fallback = false;
 
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
@@ -158,6 +161,9 @@ where
             "--allow-system-pandas-fallback" => {
                 allow_system_pandas_fallback = true;
             }
+            "--allow-fixture-fallback" => {
+                allow_fixture_fallback = true;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -174,6 +180,7 @@ where
         json_out,
         python_bin,
         allow_system_pandas_fallback,
+        allow_fixture_fallback,
     })
 }
 
@@ -206,6 +213,7 @@ fn print_help() {
          \t--no-fail-fast      continue evaluating all configured gates after failures\n\
          \t--no-verify-sidecars  skip sidecar integrity check after gate success\n\
          \t--allow-system-pandas-fallback  allow non-legacy pandas import in live mode\n\
+         \t--allow-fixture-fallback  permit fixture expectations after a live oracle outage\n\
          \t-h, --help          show this help"
     );
 }
