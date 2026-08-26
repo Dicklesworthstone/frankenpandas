@@ -11869,6 +11869,18 @@ impl Column {
         }
     }
 
+    /// Build an already-proven NaN-free Float64 buffer without either a scan or
+    /// the `Arc<[f64]>` conversion copy used by the slice-backed constructor.
+    ///
+    /// The caller must establish the same no-NaN precondition as
+    /// [`Self::from_f64_values_all_valid_unchecked`]. This owns and moves the
+    /// freshly-produced vector into the column backing.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_values_all_valid_owned_unchecked(data: Vec<f64>) -> Self {
+        Self::from_f64_all_valid_with_finite_opt(data, None)
+    }
+
     #[must_use]
     #[doc(hidden)]
     pub fn from_f64_combine_first_all_valid(

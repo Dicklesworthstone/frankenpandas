@@ -56998,11 +56998,11 @@ impl LazyTransposeFramePlan {
                 }
                 let all_typed: Option<Vec<f64>> = row_is_typed.then_some(typed_row);
                 match all_typed {
-                    // The typed row is already freshly allocated. Move it
-                    // into the all-valid Float64 backing instead of scanning
-                    // then copying it into a second Arc allocation. The
-                    // owned constructor retains the canonical NaN fallback.
-                    Some(values) => Column::from_f64_values_owned(values),
+                    // The typed row is already freshly allocated and its two
+                    // sources (`as_f64_slice` and `as_i64_slice`) prove that
+                    // no cell is NaN. Move it directly into the all-valid
+                    // Float64 backing without re-scanning the row.
+                    Some(values) => Column::from_f64_values_all_valid_owned_unchecked(values),
                     None => {
                         let scalars: Vec<Scalar> = self
                             .source_columns
@@ -205151,6 +205151,33 @@ mod transpose_row_prealloc_uza04 {
         );
         let row2 = transposed.column_at(2).expect("row 2");
         assert_eq!(row2.values(), &[Scalar::Float64(9.0), Scalar::Float64(3.0)]);
+    }
+
+    /// Negative case for the unchecked owned constructor: Float64 *dtype* is
+    /// not proof that a source is all-valid. A NaN-bearing Float64 column must
+    /// reject the typed-row route and keep its missing cell after transpose.
+    /// A naive implementation that only checks `source.dtype()` would feed the
+    /// NaN to the no-scan constructor and incorrectly mark it present.
+    #[test]
+    fn nan_bearing_float64_source_never_reaches_unchecked_typed_row_a1p6s() {
+        let source = frame(vec![
+            ("typed", Column::from_f64_values(vec![7.0, 8.0])),
+            ("nan", Column::from_f64_values(vec![1.0, f64::NAN])),
+        ]);
+        let transposed = source.transpose().expect("transpose");
+
+        assert_eq!(
+            transposed.column_at(0).expect("first row").values(),
+            &[Scalar::Float64(7.0), Scalar::Float64(1.0)]
+        );
+        assert!(
+            transposed
+                .column_at(1)
+                .expect("second row")
+                .values()[1]
+                .is_missing(),
+            "a NaN source cell must bypass the unchecked typed-row constructor"
+        );
     }
 
     /// The Int64 arm was rewritten the same way; both of its branches.
