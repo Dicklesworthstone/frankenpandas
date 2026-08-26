@@ -46200,6 +46200,45 @@ impl StringAccessor<'_> {
     /// Per br-frankenpandas-rg8ys.6.6: pandas returns float64 (not int64)
     /// to represent nullable integers. Nulls become NaN.
     pub fn len(&self) -> Result<Series, FrameError> {
+        // ASCII FAST PATH. `str_len @100k` was CERTIFIED SLOWER at 0.853x against
+        // pandas 2.2.3 on Arrow-backed strings (three gate clauses, A/A nulls
+        // 0.9995658 / 1.0004774), at 11.5ns/element for 15-byte inputs — about
+        // 0.77ns per byte, which is a per-byte walk and not the offset read the
+        // storage already supports.
+        //
+        // The generic arm below walks every string's bytes TWICE per row:
+        // `apply_str_int`'s contiguous rung calls `std::str::from_utf8` (an O(bytes)
+        // validation its own comment calls redundant — "valid by construction") and
+        // then `func` runs `chars().count()`, an O(bytes) decode. For an ASCII
+        // buffer both are avoidable: char count == byte count == the offset
+        // difference the column already stores.
+        //
+        // `is_ascii()` is ONE vectorised pass over the whole buffer, amortised
+        // across every row, and it is what keeps this correct for multi-byte input
+        // — a non-ASCII buffer falls through to the decode, where `chars().count()`
+        // is the only right answer. `as_utf8_contiguous` returns `Some` only when
+        // `validity.all()` (fp-columnar:13057), so the all-valid Int64 output below
+        // matches what the generic rung would have produced.
+        //
+        // Same lever `StrAccessor::slice` already carries for the same reason
+        // (br-frankenpandas-1q4q4: "when ... the string is ASCII, char index ==
+        // byte index"); fp-frame has 14 such `is_ascii()` paths and `len` was not
+        // one of them.
+        let column = self.series.column();
+        if let Some((bytes, offsets)) = column.as_utf8_contiguous()
+            && bytes.is_ascii()
+        {
+            let out: Vec<i64> = offsets
+                .windows(2)
+                .map(|w| (w[1] - w[0]) as i64)
+                .collect();
+            let index = self.series.index().clone();
+            return Series::new(
+                self.series.name(),
+                index,
+                Column::from_i64_values_owned(out),
+            );
+        }
         // Int64 when no nulls, Float64 (NaN) when any null — matches pandas.
         self.apply_str_int(|s| s.chars().count() as i64, self.series.name())
     }
@@ -117153,6 +117192,71 @@ mod tests {
         // pandas str.len returns int64 when no nulls, float64 with nulls
         assert_eq!(result.values()[0], Scalar::Int64(2));
         assert_eq!(result.values()[1], Scalar::Int64(5));
+    }
+
+    /// `StrAccessor::len` gained an ASCII fast path that returns byte-offset
+    /// differences instead of decoding. The whole correctness question is that
+    /// `chars().count() != len()` for multi-byte input, so this pins BOTH arms to
+    /// the same oracle and makes sure the non-ASCII case still decodes.
+    ///
+    /// The fast path only engages on a CONTIGUOUS Utf8 column, so the fixtures are
+    /// built large enough and uniformly enough to take that representation, and the
+    /// non-ASCII case is checked to be genuinely non-ASCII rather than assumed.
+    #[test]
+    fn str_len_ascii_fast_path_matches_the_decode_on_both_arms() {
+        fn check(label: &str, strings: Vec<String>) {
+            let n = strings.len();
+            let index: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::from).collect();
+            let values: Vec<Scalar> = strings
+                .iter()
+                .map(|s| Scalar::Utf8(s.clone().into()))
+                .collect();
+            let series = Series::from_values("x", index, values).unwrap();
+            let got = series.str().len().unwrap();
+            for (i, s) in strings.iter().enumerate() {
+                // The oracle is char count, which is what pandas str.len returns.
+                assert_eq!(
+                    got.values()[i],
+                    Scalar::Int64(s.chars().count() as i64),
+                    "{label} row {i}: {s:?}"
+                );
+            }
+        }
+
+        // Pure ASCII, the arm the fast path is for. Varying lengths so a fixed-width
+        // assumption would be caught.
+        let ascii: Vec<String> = (0..5_000).map(|i| format!("item_{i}")).collect();
+        assert!(ascii.iter().all(|s| s.is_ascii()));
+        check("ascii", ascii);
+
+        // Multi-byte: char count and byte count DIFFER, so a fast path that leaked
+        // into this case returns byte lengths and fails here. "héllo" is 5 chars /
+        // 6 bytes; "日本語" is 3 chars / 9 bytes; the emoji is 1 char / 4 bytes.
+        let multibyte: Vec<String> = (0..5_000)
+            .map(|i| match i % 4 {
+                0 => "héllo".to_owned(),
+                1 => "日本語".to_owned(),
+                2 => "🦀".to_owned(),
+                _ => format!("plain_{i}"),
+            })
+            .collect();
+        assert!(
+            multibyte.iter().any(|s| !s.is_ascii()),
+            "fixture must actually contain non-ASCII or this arm is vacuous"
+        );
+        assert!(
+            multibyte
+                .iter()
+                .any(|s| s.chars().count() != s.len()),
+            "fixture must contain a string whose char count differs from its byte count"
+        );
+        check("multibyte", multibyte);
+
+        // A single non-ASCII byte anywhere must disqualify the WHOLE buffer, since
+        // the check is per-buffer and not per-row.
+        let mut mostly_ascii: Vec<String> = (0..5_000).map(|i| format!("row_{i}")).collect();
+        mostly_ascii[4_999] = "é".to_owned();
+        check("one-non-ascii-row", mostly_ascii);
     }
 
     #[test]
