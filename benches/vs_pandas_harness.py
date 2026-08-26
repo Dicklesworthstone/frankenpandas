@@ -1271,6 +1271,7 @@ def _corrected_null_gate_self_test() -> None:
             runtime_available_parallelism=10,
             operation_threads_used=1,
             runtime_detected_isa_features=["avx2"],
+            compiled_target_features=["sse2", "avx2"],
         )
 
     whole_binary = compute_candidate_vs_reference(
@@ -1279,6 +1280,18 @@ def _corrected_null_gate_self_test() -> None:
     )
     assert whole_binary["ratio"] == 2.0
     assert whole_binary["verdict"] == "CANDIDATE_FASTER"
+
+    persisted = synthetic_result([2.0] * 10, "candidate").to_metrics(1)
+    assert persisted["compiled_target_features"] == ["sse2", "avx2"]
+
+    # Negative case: treating an older child that omitted this field as a
+    # default-feature build would recreate the provenance hole this protects.
+    try:
+        compiled_target_features_from_provenance({})
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("missing compiled target features must fail closed")
 
 
 @dataclass
@@ -1302,6 +1315,7 @@ class TimingResult:
     peak_process_threads: int | None = None
     operation_threads_used: int | None = None
     runtime_detected_isa_features: list[str] = field(default_factory=list)
+    compiled_target_features: list[str] = field(default_factory=list)
 
     @property
     def p50_us(self) -> float:
@@ -1374,6 +1388,7 @@ class TimingResult:
             "process_threads_before_probe": self.process_threads_before_probe,
             "peak_process_threads": self.peak_process_threads,
             "runtime_detected_isa_features": self.runtime_detected_isa_features,
+            "compiled_target_features": self.compiled_target_features,
             "samples_us": self.times_us,
             "executable": {
                 "sha256": self.executable_sha256,
@@ -1397,6 +1412,18 @@ class TimingResult:
                 ],
             },
         }
+
+
+def compiled_target_features_from_provenance(
+    thread_provenance: dict[str, Any],
+) -> list[str]:
+    """Require the child to identify the features compiled into its ELF."""
+    features = thread_provenance.get("compiled_target_features")
+    if not isinstance(features, list) or not all(
+        isinstance(feature, str) for feature in features
+    ):
+        raise ValueError("compiled_target_features must be a list of strings")
+    return features
 
 
 def generate_test_data(rows: int, cols: int, dtype: str, seed: int = 42) -> pd.DataFrame:
@@ -3542,6 +3569,20 @@ def run_fp_workload_subprocess(
 
     null_control = data.get("null_control", {})
     thread_provenance = data.get("thread_provenance", {})
+    try:
+        compiled_target_features = compiled_target_features_from_provenance(
+            thread_provenance
+        )
+    except ValueError as exc:
+        print(f"[WARN] fp-bench missing build provenance: {exc}", file=sys.stderr)
+        return TimingResult(
+            workload=workload,
+            category=category,
+            size=size,
+            dtype=dtype,
+            engine="frankenpandas",
+            times_us=[],
+        )
     return TimingResult(
         workload=workload,
         category=category,
@@ -3568,6 +3609,7 @@ def run_fp_workload_subprocess(
             "runtime_detected_isa_features",
             [],
         ),
+        compiled_target_features=compiled_target_features,
     )
 
 
@@ -3597,6 +3639,7 @@ def _balanced_square_aggregate(
         "executable_sha256",
         "executable_bytes",
         "executable_path",
+        "compiled_target_features",
     )
     for slot in slots[1:]:
         if any(getattr(slot, field) != getattr(first, field) for field in identity_fields):
@@ -3633,6 +3676,7 @@ def _balanced_square_aggregate(
         ),
         operation_threads_used=max(slot.operation_threads_used or 0 for slot in slots),
         runtime_detected_isa_features=first.runtime_detected_isa_features,
+        compiled_target_features=first.compiled_target_features,
     )
 
 
