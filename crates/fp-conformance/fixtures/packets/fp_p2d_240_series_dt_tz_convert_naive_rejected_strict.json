@@ -1,0 +1,22 @@
+{
+  "packet_id": "FP-P2D-240",
+  "case_id": "series_dt_tz_convert_naive_rejected_strict",
+  "mode": "strict",
+  "operation": "series_dt_tz_convert",
+  "dt_tz": "UTC",
+  "left": {
+    "name": "ts",
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024-01-15 10:30:00" }
+    ]
+  },
+  "expected_error_contains": "Cannot convert tz-naive timestamps",
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "b48fb3339fb77eb988f64fe349732dd49b54d24bf4b78a017e4cfcab36290dee",
+    "generated_at": "2026-08-26T03:34:48Z"
+  }
+}

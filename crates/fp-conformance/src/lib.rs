@@ -13517,6 +13517,27 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
     }
 }
 
+fn resolve_expected_oracle_error(
+    fixture: &PacketFixture,
+    oracle_error: String,
+) -> Result<ResolvedExpected, HarnessError> {
+    let expected = fixture.expected_error_contains.as_deref().ok_or_else(|| {
+        HarnessError::FixtureFormat(format!(
+            "oracle returned an error for non-error case {}: {oracle_error}",
+            fixture.case_id
+        ))
+    })?;
+
+    if oracle_error.contains(expected) {
+        Ok(ResolvedExpected::ErrorAny)
+    } else {
+        Err(HarnessError::FixtureFormat(format!(
+            "oracle error for {} did not contain expected substring {expected:?}: {oracle_error}",
+            fixture.case_id
+        )))
+    }
+}
+
 fn capture_live_oracle_expected(
     config: &HarnessConfig,
     fixture: &PacketFixture,
@@ -13765,13 +13786,12 @@ fn capture_live_oracle_expected(
         .map_err(|_| std::io::Error::other("oracle stdin writer thread panicked"))??;
 
     if !output.status.success() {
-        if expects_error {
-            return Ok(ResolvedExpected::ErrorAny);
-        }
-
         if let Ok(response) = serde_json::from_slice::<OracleResponse>(&output.stdout)
             && let Some(error) = response.error
         {
+            if expects_error {
+                return resolve_expected_oracle_error(fixture, error);
+            }
             return Err(oracle_unavailable(config, error));
         }
 
@@ -13788,7 +13808,7 @@ fn capture_live_oracle_expected(
     let _ = response.fixture_provenance.as_ref();
     if let Some(error) = response.error {
         if expects_error {
-            return Ok(ResolvedExpected::ErrorAny);
+            return resolve_expected_oracle_error(fixture, error);
         }
         return Err(oracle_unavailable(config, error));
     }
@@ -27473,6 +27493,36 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
                     if message.contains("oracle script does not exist")
             ),
             "expected required live oracle failure, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn live_oracle_expected_error_requires_the_fixture_substring_t2n6i() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-240",
+            "case_id": "series_dt_tz_convert_naive_rejected_strict",
+            "mode": "strict",
+            "operation": "series_dt_tz_convert",
+            "expected_error_contains": "tz-naive timestamps"
+        }))
+        .expect("fixture");
+
+        assert!(matches!(
+            super::resolve_expected_oracle_error(
+                &fixture,
+                "series_dt_tz_convert failed: Cannot convert tz-naive timestamps, use tz_localize to localize".to_owned(),
+            ),
+            Ok(super::ResolvedExpected::ErrorAny)
+        ));
+
+        let error = super::resolve_expected_oracle_error(
+            &fixture,
+            "series_dt_tz_convert failed: invalid timezone specifier".to_owned(),
+        )
+        .expect_err("a different pandas failure must not satisfy the fixture");
+        assert!(
+            matches!(error, super::HarnessError::FixtureFormat(ref message) if message.contains("tz-naive timestamps")),
+            "unexpected error: {error:?}"
         );
     }
 
