@@ -11411,8 +11411,25 @@ impl RangeIndexValues<'_> {
     }
 
     #[must_use]
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = i64> + DoubleEndedIterator + '_ {
-        (0..self.len()).map(|position| self.index.value_at(position))
+    pub fn iter(&self) -> RangeValuesIter {
+        let len = self.len();
+        // br-frankenpandas-3gsa7 made this view zero-boxing; it is still
+        // 0.112x against pandas at 100k because `RangeIndex::value_at` pays
+        // i128 arithmetic PER ELEMENT — an i128 multiply (no SIMD form on
+        // x86-64), an i128 add, and a checked narrow back to i64. The proof
+        // that none of that is needed already existed one function below as
+        // `i64_position_arithmetic_is_safe`, which establishes ONCE that
+        // `start + step * (len - 1)` fits in i64. Values are monotone in
+        // `position` for either sign of `step`, so every intermediate is
+        // bracketed by `start` and that endpoint and cannot overflow.
+        // Hoisting the check turns the body into pure i64 affine arithmetic.
+        RangeValuesIter {
+            start: self.index.start,
+            step: self.index.step,
+            head: 0,
+            tail: len,
+            i64_safe: self.index.i64_position_arithmetic_is_safe(len).is_some(),
+        }
     }
 
     #[must_use]
@@ -11420,6 +11437,123 @@ impl RangeIndexValues<'_> {
         self.iter().collect()
     }
 }
+
+/// Affine iterator over a [`RangeIndex`]'s values.
+///
+/// `i64_safe` is decided once at construction. It is NOT a correctness switch:
+/// both arms yield identical values, and the i128 arm remains a complete
+/// implementation for ranges whose endpoint genuinely does not fit in i64.
+/// Its only purpose is to let `fold`/`rfold` run a branch-free i64 loop that
+/// LLVM can strength-reduce to repeated addition and vectorize.
+#[derive(Clone, Copy, Debug)]
+pub struct RangeValuesIter {
+    start: i64,
+    step: i64,
+    head: usize,
+    tail: usize,
+    i64_safe: bool,
+}
+
+impl RangeValuesIter {
+    #[inline]
+    fn value_at(&self, position: usize) -> i64 {
+        if self.i64_safe {
+            self.start
+                .wrapping_add(self.step.wrapping_mul(position as i64))
+        } else {
+            let value = i128::from(self.start) + (position as i128) * i128::from(self.step);
+            i64::try_from(value).expect("validated RangeIndex value bounds")
+        }
+    }
+}
+
+impl Iterator for RangeValuesIter {
+    type Item = i64;
+
+    #[inline]
+    fn next(&mut self) -> Option<i64> {
+        if self.head >= self.tail {
+            return None;
+        }
+        let value = self.value_at(self.head);
+        self.head += 1;
+        Some(value)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.tail - self.head;
+        (remaining, Some(remaining))
+    }
+
+    /// Overridden so the `i64_safe` branch is tested ONCE per fold rather than
+    /// once per element. This is the whole lever: the default `fold` routes
+    /// through `next()`, which keeps the test inside the loop and blocks
+    /// vectorisation.
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, i64) -> B,
+    {
+        let mut acc = init;
+        if self.i64_safe {
+            let mut value = self
+                .start
+                .wrapping_add(self.step.wrapping_mul(self.head as i64));
+            for _ in self.head..self.tail {
+                acc = f(acc, value);
+                value = value.wrapping_add(self.step);
+            }
+        } else {
+            for position in self.head..self.tail {
+                acc = f(acc, self.value_at(position));
+            }
+        }
+        acc
+    }
+}
+
+impl DoubleEndedIterator for RangeValuesIter {
+    #[inline]
+    fn next_back(&mut self) -> Option<i64> {
+        if self.head >= self.tail {
+            return None;
+        }
+        self.tail -= 1;
+        Some(self.value_at(self.tail))
+    }
+
+    #[inline]
+    fn rfold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, i64) -> B,
+    {
+        let mut acc = init;
+        if self.i64_safe && self.tail > self.head {
+            let mut value = self
+                .start
+                .wrapping_add(self.step.wrapping_mul((self.tail - 1) as i64));
+            for _ in self.head..self.tail {
+                acc = f(acc, value);
+                value = value.wrapping_sub(self.step);
+            }
+        } else {
+            for position in (self.head..self.tail).rev() {
+                acc = f(acc, self.value_at(position));
+            }
+        }
+        acc
+    }
+}
+
+impl ExactSizeIterator for RangeValuesIter {
+    #[inline]
+    fn len(&self) -> usize {
+        self.tail - self.head
+    }
+}
+
+impl std::iter::FusedIterator for RangeValuesIter {}
 
 impl RangeIndex {
     pub fn new(start: i64, stop: i64, step: i64) -> Result<Self, IndexError> {
@@ -20435,6 +20569,127 @@ mod tests {
                 b.iter().map(|t| a.iter().position(|x| x == t)).collect();
             assert_eq!(ia.get_indexer(&ib), ref_out, "get_indexer {a:?} -> {b:?}");
         }
+    }
+
+    /// br-frankenpandas: `RangeValuesIter` carries an i64 fast arm and an i128
+    /// fallback, plus overridden `fold`/`rfold` that must agree with the
+    /// element-at-a-time `next`/`next_back` they bypass. Every combination is
+    /// checked against an independent i128 reference, including a range whose
+    /// endpoint does NOT fit in i64 so the fallback is genuinely exercised —
+    /// otherwise this test would pass while only ever running one arm.
+    #[test]
+    fn range_values_iter_arms_and_folds_all_agree() {
+        let cases: [(i64, i64, i64); 9] = [
+            (0, 20, 2),
+            (1, 7, 3),
+            (5, 5, 1),
+            (10, 0, -2),
+            (-9, 9, 4),
+            (0, 1, 1),
+            (i64::MIN, i64::MIN + 10, 1),
+            (i64::MAX - 10, i64::MAX, 1),
+            (0, i64::MAX, i64::MAX / 2),
+        ];
+        let mut saw_fast = false;
+        for (start, stop, step) in cases {
+            let range = RangeIndex::new(start, stop, step).expect("valid range");
+            let values = range.values();
+            let len = values.len();
+
+            // The i128 fallback cannot be reached through a normally-sized
+            // RangeIndex: the last value is always strictly inside `stop`, so
+            // it fits in i64 by construction, and the only ranges that select
+            // the fallback are longer than i64::MAX and cannot be iterated in
+            // a test. So drive the SAME parameters through a forced-slow
+            // iterator and require the two arms to agree element for element.
+            // Without this the fallback would be dead code under test.
+            let slow = crate::RangeValuesIter {
+                start,
+                step,
+                head: 0,
+                tail: len,
+                i64_safe: false,
+            };
+            assert!(!slow.i64_safe);
+            assert_eq!(
+                slow.collect::<Vec<_>>(),
+                values.iter().collect::<Vec<_>>(),
+                "i128 arm disagrees with i64 arm {start},{stop},{step}"
+            );
+            assert_eq!(
+                slow.fold(0_i128, |acc, v| acc + i128::from(v)),
+                values.iter().fold(0_i128, |acc, v| acc + i128::from(v)),
+                "i128 fold disagrees with i64 fold {start},{stop},{step}"
+            );
+            assert_eq!(
+                slow.rfold(0_i128, |acc, v| acc + i128::from(v)),
+                values.iter().rfold(0_i128, |acc, v| acc + i128::from(v)),
+                "i128 rfold disagrees with i64 rfold {start},{stop},{step}"
+            );
+
+            let reference: Vec<i64> = (0..len)
+                .map(|position| {
+                    let v = i128::from(start) + (position as i128) * i128::from(step);
+                    i64::try_from(v).expect("reference fits")
+                })
+                .collect();
+
+            assert!(
+                values.iter().i64_safe,
+                "a normally-sized range must select the i64 arm {start},{stop},{step}"
+            );
+            saw_fast = true;
+
+            assert_eq!(
+                values.iter().collect::<Vec<_>>(),
+                reference,
+                "next {start},{stop},{step}"
+            );
+            assert_eq!(values.to_vec(), reference, "to_vec {start},{stop},{step}");
+
+            let mut reversed: Vec<i64> = values.iter().rev().collect();
+            reversed.reverse();
+            assert_eq!(reversed, reference, "next_back {start},{stop},{step}");
+
+            let want: i128 = reference.iter().map(|&v| i128::from(v)).sum();
+            let folded = values.iter().fold(0_i128, |acc, v| acc + i128::from(v));
+            let rfolded = values.iter().rfold(0_i128, |acc, v| acc + i128::from(v));
+            assert_eq!(folded, want, "fold {start},{stop},{step}");
+            assert_eq!(rfolded, want, "rfold {start},{stop},{step}");
+
+            assert_eq!(
+                values.iter().len(),
+                len,
+                "ExactSizeIterator {start},{stop},{step}"
+            );
+
+            // A partially consumed iterator must fold the REMAINDER, which is
+            // where a fast arm that recomputes from `start` would silently
+            // disagree with `next`.
+            if len >= 3 {
+                let mut partial = values.iter();
+                partial.next();
+                partial.next_back();
+                assert_eq!(
+                    partial.fold(0_i128, |acc, v| acc + i128::from(v)),
+                    reference[1..len - 1]
+                        .iter()
+                        .map(|&v| i128::from(v))
+                        .sum::<i128>(),
+                    "partial fold {start},{stop},{step}"
+                );
+            }
+        }
+        assert!(saw_fast, "no case exercised the i64 fast arm");
+
+        // And the selector itself must still be able to say NO: a range longer
+        // than i64::MAX positions cannot do i64 position arithmetic. Checked
+        // without iterating it.
+        let huge = RangeIndex::new(i64::MIN, i64::MAX, 1).expect("valid range");
+        assert!(
+            !huge.values().iter().i64_safe,
+            "a range longer than i64::MAX must fall back to the i128 arm"
+        );
     }
 
     #[test]

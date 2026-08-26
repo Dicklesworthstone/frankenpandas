@@ -40374,3 +40374,103 @@ from 2026-08-23 — "five-of-twenty-one is a statement about the measured set" �
 constraint, and this entry moves the measured set to roughly thirty. **Three of the four rows I
 banked contradicted the record I started from.** The re-measure sweep remains the highest-value work
 here, above any kernel.
+
+---
+
+### 2026-08-26 OliveCarp — CERTIFIED SLOWER `range_index_values @100k` **0.097x** (pandas 10.3x faster): the mechanism is per-element **i128** arithmetic in `RangeIndex::value_at`, and the fix makes the harness row VACUOUS rather than fast
+
+**This is a certified LOSS and banking it is the point.** It is also, by a factor of seven, the worst
+thing found in a 126-workload re-survey — and it was not on any prior losses list.
+
+**Executing ELF SHA-256 (self-reported by the process):**
+`791a49d740999afa03e496a0540f41e4691f298d28a5fa585f8cb20836eb62f5` (86476472 bytes),
+`/data/projects/fp-wt-divlead/tdl3/release-perf/fp-bench`, built at git `9d96fd908` in a DETACHED
+WORKTREE with its own `CARGO_TARGET_DIR`. Verified `git diff 9d96fd908..HEAD -- crates/` EMPTY at
+measurement time, so this ELF is current code, not archaeology. Harness
+`bench_harness_source_sha256=e5fb993558421579b0cc03c2cf763e45e21d195f7bc09f886680ff16720bb2d4`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f` (70681559 bytes,
+2922 files); `invocation_id=vs-pandas-20260826T042137.545678Z-pid1535248`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.99993414 and pandas null
+median ratio 1.00038879, against a 0.02 maximum absolute deviation — the cleanest pair of nulls
+recorded on this campaign. **Median-CI decision:** effect median 0.097x, CI
+[0.09598859, 0.09728432], excluding unity; claimed log effect 2.3352652 against a required
+0.01763594 — **132x the margin**. All three gate clauses TRUE. **CV role:** provenance-only, no vote;
+FP p50 168.72us cv 1.60% against pandas p50 16.26us cv 4.23%, 128 iterations over 32 balanced-square
+rounds. Best-vs-best 0.1002 agrees with the gated median. Arms clock-matched 1.0033, same clock TRUE.
+
+    python3 benches/vs_pandas_harness.py --category indexing --workloads range_index_values \
+      --sizes 100k --measurement-mode balanced-square --balanced-square-rounds 32 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl3/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_rangeidxvalues100k_BEFORE_quiet_2026-08-26.json
+
+**Counted mechanism:** `RangeIndex::value_at` (crates/fp-index/src/lib.rs) computes every element as
+`i64::try_from(i128::from(start) + (position as i128) * i128::from(step))` — **one i128 multiply, one
+i128 add and one checked narrow PER ELEMENT**. i128 multiply has no SIMD form on x86-64, and the
+checked narrow is a per-element compare-and-branch, so the loop cannot vectorise. Measured cost
+168.72us for 100k elements = **1.69ns/element, about 7.3 cycles at the 4292MHz this row ran at**, against
+pandas' 16.26us = 0.163ns/element. **The proof that none of the i128 work is needed already existed
+17 lines below it** as `i64_position_arithmetic_is_safe`, which establishes ONCE that
+`start + step*(len-1)` fits in i64; values are monotone in position for either sign of step, so every
+intermediate is bracketed by the endpoints. `fast_i64_values_at_positions` already used that pattern
+for the GATHER path. Only the sequential path paid full price.
+
+**⚠️ br-frankenpandas-3gsa7's "zero-boxing RangeIndex value view" IS IN THIS BINARY AND DID NOT FIX
+THIS.** Verified by ancestry (`git merge-base --is-ancestor 33fcdd6f3 9d96fd908` = true), not
+assumed. Removing the boxing left the i128 arithmetic underneath it untouched. **A view being
+zero-allocation says nothing about what it costs per element.**
+
+**⚠️⚠️ THE FIX WORKS AND THE BENCHMARK CANNOT SEE IT — IT SEES 445x INSTEAD, AND THAT NUMBER IS
+GARBAGE.** Hoisting the safety check (i64 affine arithmetic, `fold`/`rfold` overridden so the arm is
+selected once per fold rather than once per element) produces ELF
+`c6b0a61b53c1b880…`. Measured against live pandas on the same instrument it reports **FASTER 445.37x
+with all three clauses TRUE** — and **FP p50 0.03us for 100k elements, which is 0.3 PICOSECONDS per
+element and physically impossible.** Once the arithmetic is plain i64, LLVM recognises the fold as a
+closed-form arithmetic series and deletes the loop; `black_box(sum)` protects the *result* from being
+discarded, not the loop from being solved. **I am not banking 445x, and no one else should either.**
+Both ELFs return checksum `4957dea0fe3e2ed1` on the same input, so the arms agree; only the timing is
+fiction.
+
+**WHAT THAT MAKES THE HARNESS ROW.** `range_index_values` sums an affine sequence. The moment the
+subject stops paying i128 per element the row becomes **vacuous — it will report a four-hundred-fold
+win forever and hide any future regression in this path.** It is also not like-for-like even before
+that: pandas `index.values` MATERIALISES an 800KB ndarray and then sums it, while FrankenPandas folds
+a lazy view and never allocates. **FrankenPandas was 10.3x slower while doing strictly less work.**
+Fixing the row means consuming the values un-elidably (`to_vec`, or a per-element `black_box`); that
+is a harness change, it orphans standing rows via `harness_sha256`, and it is NOT done here.
+
+**THE FIX IS COMMITTED AND IS EXPLICITLY UNCERTIFIED.** It is proven value-identical, not proven
+fast: a differential test drives both arms over nine ranges — including `i64::MIN`/`i64::MAX`
+endpoints and a partially-consumed iterator, where a fast arm that recomputed from `start` would
+silently disagree with `next` — and asserts `next`/`next_back`/`fold`/`rfold`/`to_vec` all match an
+independent i128 reference. **The test caught its own vacuity first:** my initial "overflowing" case
+did not overflow, because a valid `RangeIndex`'s last value is always strictly inside `stop` and
+therefore ALWAYS fits in i64. The i128 arm is only selected by ranges longer than `i64::MAX`, which
+cannot be iterated in a test, so the fallback is now exercised by constructing it directly and
+requiring the two arms to agree element-for-element. **fp-index lib suite: 555 passed / 2 failed with
+the change, 554 passed / 2 failed WITHOUT it — the same two pre-existing failures
+(`range_index_join_direct_i64_matches_flat_oracle_uza04190`,
+`unsorted_int64_set_ops_keep_typed_backing_without_materializing_m8x4p`), which are NOT mine.**
+
+**THE SURVEY THAT FOUND IT — 126 workloads across 10 families at 100k, 5-round ranking pass**
+(undecidable by construction; this ranks, it does not certify). Sub-parity set, worst first:
+
+    range_index_values 0.10   reindex 0.747   cbrt 0.762   sqrt_int64 0.84   expm1 0.867
+    str_len 0.894   log_int64 0.908   log10 0.928   log 0.938   log2 0.985   log1p 0.986
+
+**`reindex @100k` at 0.747x is the next target and is NOT measured here.** Note that math_unary
+INVERTS with size: `log` is 2.25x at 1M and 0.938x at 100k, `cbrt` 3.18x at 1M and 0.762x at 100k.
+**The 1M sweep I ran yesterday would have reported this family clean.** Sub-parity is a
+size-dependent property and a single-size survey is not a survey.
+
+**⚠️ 54 OF 126 ROWS IN THE FIRST PASS WERE LOST TO MY OWN LOCK CONTENTION** — `HARNESS_ERR`, because
+an orphaned `csv_write` process from a killed earlier sweep still held the new
+concurrent-measurement lock added by `f20a3183f`. They were re-run. Recorded because the failure mode
+is silent: a sweep that errors on 43% of its rows still prints a tidy sorted table of the rest.
+
+**⚠️ THE HARNESS SHA MOVED TWICE MORE WHILE I MEASURED.** `2c72e4d8e321…` -> `5ede43dd1422…` ->
+`e5fb99355842…` inside one session. The rows in my previous entry are keyed to the first, this row to
+the third. `comparability_identity` includes `harness_sha256`; at the current rate of harness churn
+**no row on this campaign stays comparable for more than a few hours**, and that is now a structural
+fact about the instrument rather than an accident.
