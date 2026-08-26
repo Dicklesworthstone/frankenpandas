@@ -41498,3 +41498,78 @@ being moved. **Not done here, and named so it is not mistaken for done.**
 
 **No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs` or
 `crates/fp-frame/src/lib.rs`.**
+
+---
+
+### 2026-08-26 OliveCarp — SHIPPED: serial-only two-pass widening flips `sqrt_int64 @100k` from CERTIFIED SLOWER 0.744x to **1.17x**, and the gate falls exactly on the serial/threaded boundary in all four measured sizes
+
+**Campaign result class:** incumbent-win
+
+One workload flipped, with three size controls measured and unchanged.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=60a1bcf7412610490319871ef6ac36fd94f991f276b0bafddf2a715d97cf6e53 (86294520 bytes)
+/data/projects/fp-wt-divlead/tdl15/release-perf/fp-bench`, built in a DETACHED WORKTREE with its own
+`CARGO_TARGET_DIR`. Harness
+`bench_harness_source_sha256=b37e364f8e8deb8f3f8f17e7f7d6cbf3904b8f7f89a3cc3212a94f564226538d`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260826T130721.458388Z-pid690515 measured_ratio=1.17x — pinned artifact is
+/home/ubuntu/.local/lib/python3.13/site-packages/pandas/__init__.py (70681559 bytes, 2922 files);
+pandas p50 161.30us against FrankenPandas p50 137.63us in the same invocation.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.99482 and pandas null
+median ratio 1.01167, both inside the 0.02 maximum absolute deviation.
+
+**Median-CI decision:** effect median 1.17x, CI [1.15572269, 1.24460016], excluding unity; claimed log
+effect 0.15709438 against the required threshold 0.11793815. All three clauses TRUE.
+
+**CV role:** provenance-only, no vote. FP p50 137.63us cv 11.35% against pandas p50 161.30us cv
+12.60%, 128 iterations over 32 balanced-square rounds. Best-vs-best 1.163 agrees. Loadavg 6.09-11.92.
+
+**THE MECHANISM I FINALLY GOT RIGHT.** Two entries ago I claimed this row was Scalar boxing from a
+missing `as_i64_slice` arm; that was false and I retracted it. The arm exists. The real cost is the
+widening **fused into the kernel loop**: `vcvtqq2pd` is AVX512DQ and this host reports `avx512f`
+ABSENT, so an interleaved i64->f64 conversion keeps the whole loop off the vector unit. Widening ONCE
+into an f64 buffer lets the kernel run the same vectorised path the float arm already gets — which is
+structurally what numpy does when it casts an int64 array before `sqrt`.
+
+**⚠️ A BLANKET TWO-PASS IS A LOSS, AND THE GATE IS MEASURED RATHER THAN GUESSED.** A/B on one pair of
+ELFs, FrankenPandas p50, `sqrt_int64`:
+
+    size   threads   fused        two-pass      verdict
+    100k     1        216.27us     137.45us     1.57x BETTER
+      1M     8       1268.65us    2898.86us     2.29x WORSE
+      2M     8       2390.75us    5793.51us     2.42x WORSE
+     10M     8      12207.48us   24741.99us     2.03x WORSE
+
+**The split falls on the serial/threaded boundary in all four**, because once the op threads, the
+extra full-size buffer adds memory traffic that per-worker chunking had already avoided. So the
+condition mirrors `par_map_slice_f64_domain_fused`'s own — `max_workers <= 1 || len < par_min` —
+instead of inventing a size constant. **This is the third threshold tonight where the honest answer
+was a boundary the code already computes rather than a number I picked.**
+
+**SHIPPED BEHAVIOUR AT EVERY MEASURED SIZE, all on the final ELF:**
+
+    sqrt_int64 @100k   1 thread   FASTER 1.17x    137.63us   was CERTIFIED SLOWER 0.744x
+    sqrt_int64 @1M     8 threads  1.162x         1249.74us   against 1268.65us before — unchanged
+    sqrt_int64 @10M    8 threads  FASTER 1.709x 11976.16us   against 12207.48us before — unchanged
+    log_int64  @100k   1 thread   0.958x          421.65us   was 0.915x — improved, still sub-parity
+
+**`log_int64` moved 0.915x -> 0.958x and is NOT fixed.** It is now NULL_UNDECIDABLE (one clause of
+three, CI [0.94453817, 1.0002749] touching unity), so the honest statement is that the same lever
+helps it materially less — its libm `ln` at ~3.9ns/element dominates a widening that costs ~0.45ns,
+where `sqrt`'s cheap `vsqrtpd` could not hide it. **Reported as a remaining loss, not as collateral
+success.**
+
+**BIT-IDENTITY VERIFIED, NOT ASSUMED.** `x as f64` is the identical widening and the predicate and
+kernel see the identical widened value; FrankenPandas returned checksum `8630d5994e01253e`
+(`sqrt_int64`) and `f59f9ee1239f3b8b` (`log_int64`) **identical between the fused and two-pass arms**.
+fp-columnar lib suite: **672 passed, 0 failed, 58 ignored.**
+
+**⚠️ ONE MEASUREMENT WAS LOST TO HOST SATURATION AND IS RECORDED RATHER THAN QUIETLY RETRIED.** The
+first attempt at this table died on a 2400-second subprocess timeout with loadavg at **369** (15-min
+average) — a peer swarm, not a hang. It was re-run at loadavg 6-12 and those are the numbers above.
+
+**No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`.**

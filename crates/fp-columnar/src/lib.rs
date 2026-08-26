@@ -28431,6 +28431,52 @@ impl Column {
         // WIDENED value, which is what makes a domain like `x >= 0.0` mean the
         // same thing for both input types.
         if let Some(data) = self.as_i64_slice() {
+            // SERIAL-ONLY TWO-PASS WIDENING. `sqrt_int64 @100k` was CERTIFIED
+            // SLOWER at 0.744x while `sqrt` on f64 at the same size was 1.173x
+            // FASTER — the Int64 penalty is the widening FUSED into the kernel
+            // loop. There is no `vcvtqq2pd` without AVX512DQ (this host reports
+            // `avx512f` absent), so the interleaved i64->f64 conversion keeps the
+            // whole loop off the vector unit. Widening ONCE into an f64 buffer
+            // lets the kernel run the same vectorised path the float arm gets.
+            //
+            // ⚠️ ONLY WHEN THIS CALL WOULD RUN SERIAL, and the gate is measured
+            // rather than guessed. A blanket two-pass is a LOSS the moment the op
+            // threads, because the extra full-size buffer adds traffic that
+            // per-worker chunking had already avoided. A/B on one pair of ELFs,
+            // `sqrt_int64`, FrankenPandas p50:
+            //
+            //   100k  serial    fused  216.27us   two-pass  137.45us   1.57x BETTER
+            //     1M  8 workers fused 1268.65us   two-pass 2898.86us   2.29x WORSE
+            //     2M  8 workers fused 2390.75us   two-pass 5793.51us   2.42x WORSE
+            //    10M  8 workers fused 12207.5us   two-pass 24742.0us   2.03x WORSE
+            //
+            // The split falls exactly on the serial/threaded boundary in all four,
+            // so the condition below mirrors `par_map_slice_f64_domain_fused`'s own
+            // (`workers <= 1 || n < par_min`) rather than inventing a size constant.
+            // Bit-identical either way: `x as f64` is the identical widening and the
+            // predicate and kernel see the identical widened value — checksums
+            // 8630d5994e01253e (sqrt_int64) and f59f9ee1239f3b8b (log_int64) matched
+            // between the two arms.
+            let runs_serial = max_workers <= 1 || data.len() < policy_par_min;
+            if runs_serial {
+                let widened: Vec<f64> = data.iter().map(|&x| x as f64).collect();
+                let derived = preserves_finiteness.then_some(true);
+                let (out, domain_held, all_finite) = par_map_slice_f64_domain_fused(
+                    &widened,
+                    &in_domain,
+                    &f,
+                    max_workers,
+                    policy_par_min,
+                    derived,
+                );
+                if !domain_held {
+                    return Some(Self::from_f64_values(out));
+                }
+                return Some(Self::from_f64_all_valid_with_finite_opt(
+                    out,
+                    Some(all_finite),
+                ));
+            }
             let widened_domain = |x: i64| in_domain(x as f64);
             let widened_f = |x: i64| f(x as f64);
             // An i64 widens to a FINITE f64 without exception, so a
