@@ -40939,3 +40939,76 @@ workloads.
 **No source touched** (Agent Mail remains down on its SQLite corruption breaker). **No `cargo fmt`,
 `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`** — USER-GIVEN, rustfmt exceeds 26GB RSS
 on that file and OOM-kills the host and peer agents.
+
+---
+
+### 2026-08-26 OliveCarp — CERTIFIED SLOWER `log10 @100k` **0.915x**, and the break-even model from tonight's `cbrt` entry now has FOUR correct out-of-sample predictions: an env-only probe flips this row to 1.532x
+
+**This is a certified LOSS and banking it is the point.** It is also the fourth consecutive correct
+prediction from a model this campaign built two entries ago, which is the part worth keeping.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=4ee8b92f9642fcd3d7588bc59f269a8751e541f61057f8fb8fbc5eb89132e157 (86215160 bytes)
+/data/projects/fp-wt-divlead/tdl8/release-perf/fp-bench`, built at git `2be247d39` in a DETACHED
+WORKTREE with its own `CARGO_TARGET_DIR`. Harness
+`bench_harness_source_sha256=b37e364f8e8deb8f3f8f17e7f7d6cbf3904b8f7f89a3cc3212a94f564226538d`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f`;
+`invocation_id=vs-pandas-20260826T084718.025391Z-pid1590064`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.99986235 and pandas null
+median ratio 1.00203747, both inside the 0.02 maximum absolute deviation. **Median-CI decision:**
+effect median 0.915x, CI [0.91324754, 0.91946854], excluding unity; claimed log effect 0.088423
+against a required 0.01200769 — **7.36x the margin**. All three gate clauses TRUE. **CV role:**
+provenance-only, no vote; FP p50 757.86us cv 10.85% against pandas p50 691.35us cv 8.64%, 256
+iterations over 64 balanced-square rounds. Best-vs-best 0.9153 agrees. Loadavg 10.63-23.40, arms
+clock-matched 1.0000. **A far more solid certification than `log_int64`'s 1.02x margin an hour ago.**
+
+    python3 benches/vs_pandas_harness.py --category math_unary --workloads log10 --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 64 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl8/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_log10_100k_2026-08-26.json
+
+**Counted mechanism, and it is the `ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN = 200_000` gate again.**
+`thread_count_actually_used` = 1 at 100k. The break-even this campaign derived two entries ago says
+parallelise when serial exceeds roughly `8/7 x 350us ~ 400us`; **log10's 757.86us serial is well
+above it**, so unlike `log` (390us, flat) and `expm1` (303us, regressed) this row was PREDICTED to
+respond. Measured with `FP_ELEMENTWISE_PAR_MIN=50000` on the SAME ELF, env-only difference:
+
+| | default (200_000) | `FP_ELEMENTWISE_PAR_MIN=50000` |
+|---|---|---|
+| `log10 @100k` | **0.915x**, 757.86us, **1** thread | **1.532x**, 458.14us, **8** threads |
+
+**I predicted 757.86/8 + ~350us = ~445us before running it; the measurement came back 458.14us**, 3%
+off. Solving this row for the fixed overhead gives `458.14 - 94.73 = 363.4us`, a fourth independent
+estimate of the `thread::scope` spawn tax consistent with tonight's 421 / 335 / 351us.
+
+**THE MODEL IS NOW 4 FOR 4 OUT OF SAMPLE**, predicting the SIGN of the effect from per-element cost
+alone:
+
+    cbrt   1479us serial  -> PROFITABLE   measured 0.759x -> 1.91x    (predicted)
+    log10   758us serial  -> PROFITABLE   measured 0.915x -> 1.532x   (predicted)
+    log     390us serial  -> FLAT         measured 0.948x -> 0.946x   (predicted)
+    expm1   303us serial  -> REGRESSES    measured 0.872x -> 0.709x   (predicted)
+
+**So the per-op `par_min_override` recommendation now covers two ops, not one.** `cbrt` and `log10`
+both want roughly `Some(30_000)`; `log` and `expm1` must keep 200_000. A single global constant
+cannot express that, and `typed_float_domain_fused_unary_with_finiteness` already accepts the
+override — it is simply unused. **Still not landed by me** (see below).
+
+**AND THE 100k SURFACE IS NOW ESSENTIALLY EXHAUSTED.** Tonight's sweeps covered `math_unary` 22/22,
+`groupby` 32/32 (zero sub-parity, worst 1.609x), `rolling` 10/10, `strings` 12/12, `indexing` 6/6,
+`joins` 5/5, `datetime` 7/7, `linalg` 1/1, `pipeline` 2/2, and `dataframe_ops` 28/31 — about **125 of
+136 workloads**. Two hypotheses died in the process: the "WIDE-output structural-loss suspects"
+(`df_pivot` 1.87x, `df_pivot_table` 2.17x, `df_explode` 5.42x, `df_explode_string_arrow` 5.11x) are
+all WINS at this size, and so is every row-wise lane (`df_itertuples` 11.07x,
+`series_apply_stateful` 24.41x, `df_row_tuples_fastest` 5.41x, `df_explode_string_python` 5.08x).
+**Unmeasured and named rather than hidden:** `cumsum_batched`, `df_apply_row`, `df_iterrows`,
+`df_transpose` — each ran past 18 minutes on FIVE rounds and I killed them to free the measurement
+lock rather than let one lane consume the night; and the whole `io` family (10 workloads), skipped
+because csv rows are ~100ms.
+
+**No source touched** (Agent Mail is still down on its SQLite corruption breaker, so no reservation
+could be taken; GreenAnchor's fp-columnar lease has since expired but I am not editing a file I
+cannot announce). **No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`** —
+USER-GIVEN, rustfmt exceeds 26GB RSS on that file and OOM-kills the host and peer agents.
