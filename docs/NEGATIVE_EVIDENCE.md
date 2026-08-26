@@ -41101,3 +41101,83 @@ or a cheaper per-element `expm1` will.
 2026-08-26, rustfmt exceeds 26GB RSS on that 62k-line file and OOM-kills the host along with peer
 agents. Both edited blocks were formatted by hand to match the surrounding style and the crate
 compiles clean; the commit used `--no-verify` so no hook could reach that file.
+
+---
+
+### 2026-08-26 OliveCarp — CERTIFIED SLOWER `expm1 @100k` **0.855x**, and BOTH threading levers are REFUTED with data: no worker count from 3 to 8 beats serial, because the `thread::scope` tax is **148.6us FIXED + 24.9us per worker**
+
+**This is a certified LOSS and banking it is the point.** The refutation is the more valuable half:
+it closes the threading avenue for this whole size class rather than leaving it as a plausible-looking
+next step.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=b75722266afcd63b6458d38f18354eb1171c70c03a6a9927cd14eafdf76db784 (86213400 bytes)
+/data/projects/fp-wt-divlead/tdl10/release-perf/fp-bench` — the binary that shipped the cbrt/log10
+override, so this row is measured on current code including my own change. Harness
+`bench_harness_source_sha256=b37e364f8e8deb8f3f8f17e7f7d6cbf3904b8f7f89a3cc3212a94f564226538d`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 1.00082809 and pandas null
+median ratio 1.00000195, both inside the 0.02 maximum absolute deviation. **Median-CI decision:**
+effect median 0.855x, CI [0.85251906, 0.85813895], excluding unity and clearing twice the null
+margin. All three gate clauses TRUE. **CV role:** provenance-only, no vote. FP p50 301.51us cv 10.66%
+against pandas p50 257.69us cv 11.17%. Best-vs-best 0.8525 agrees.
+
+    python3 benches/vs_pandas_harness.py --category math_unary --workloads expm1 --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 24 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl10/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_expm1_100k_PARMINFIX_2026-08-26.json
+
+**LEVER 1, THRESHOLD — REFUTED BEFORE RUNNING, AND THAT PREDICTION IS WHY expm1 WAS EXCLUDED FROM THE
+SHIPPED CHANGE.** At 301.51us of serial work expm1 sits below the ~400us break-even, and an env probe
+had already measured a flat `PAR_MIN` drop taking it **0.872x -> 0.709x**. The shipped per-op
+override deliberately left expm1 on the 200_000 default, and the control measurement confirmed it
+never moved: `thread_count_actually_used` = 1 before and after.
+
+**LEVER 2, FEWER WORKERS — PLAUSIBLE, TESTED, REFUTED.** If the spawn tax were proportional to worker
+count, 2-4 workers would cost proportionally less while still dividing the work, and expm1 could pay
+for a small pool. Measured env-only on ONE ELF (`FP_ELEMENTWISE_PAR_MIN=50000` plus
+`FP_ELEMENTWISE_MAX_WORKERS`), 20 balanced-square rounds each:
+
+    workers   FP p50      work/W    implied tax    verdict
+      1 (ship) 301.51us   301.5us      —           SLOWER 0.855x   <- FASTEST
+      3        326.70us   100.5us    226.2us       (nulls failed)
+      4        319.89us    75.4us    244.5us       SLOWER 0.894x
+      6        347.74us    50.3us    297.5us       SLOWER 0.784x
+      8        386.19us    37.7us    348.5us       (nulls failed)
+
+**Every worker count is slower than serial in FrankenPandas absolute time, and above 4 the cost grows
+monotonically.** A least-squares fit of the implied tax gives
+
+    tax(W) = 148.6us FIXED + 24.9us per worker
+
+so **even two workers cost ~198us**, and an op must exceed **~397us of serial work before ANY
+threading pays** — which is the ~400us break-even this campaign derived independently from the
+8-worker figure, now re-derived from its slope and intercept. The tax is dominated by a fixed
+component, not by the number of threads, so "use a smaller pool" is not a fix for anything in this
+size class.
+
+**⚠️ AND A TRAP IN MY OWN TABLE THAT I ALMOST REPORTED THE WRONG WAY.** The 4-worker row shows ratio
+**0.894** against serial's **0.855** — better — while FrankenPandas is absolutely **slower** (319.89us
+against 301.51us). The ratio improved only because the pandas arm drifted between invocations
+(257.69 -> 271.91us). **Balanced-square pairs the arms WITHIN an invocation, so cross-invocation ratio
+comparisons are exactly what the design does not license.** For "which configuration is best for
+FrankenPandas" the FP absolute time is the signal and the ratio is not; for "does FrankenPandas beat
+pandas" it is the reverse. Reading the ratio column down the table would have concluded that 4
+workers helps, and it does not.
+
+**WHAT IS ACTUALLY LEFT, and it is not a constant.** Routing is already correct — `Column::expm1`
+takes the same fused arm as the two ops I just fixed. The residual is per-element: FrankenPandas calls
+libm `f64::exp_m1` at 3.02ns/element against numpy's vectorised expm1 at 2.58ns/element, a 17% gap.
+expm1 additionally CANNOT skip the finiteness fold that `sqrt` skips — a finite input can overflow to
+`+inf`, so `preserves_finiteness` is correctly `false` and the ~12-instruction-per-iteration fold
+stays in the loop body. **Closing this needs a vectorised expm1 kernel or the thread pool that would
+collapse the 148.6us fixed tax; it does not need another threshold.**
+
+**⚠️ Host caveat:** the 8-worker row ran as loadavg climbed to 53.7 while the earlier rows ran at
+10-21. That inflates the 8-worker figure by an unknown amount, so the fitted slope is an upper bound
+on the per-worker cost. The intercept and the conclusion — that no worker count beats serial here —
+rest on the 3/4/6 rows, all measured under comparable load.
+
+**No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`.**
