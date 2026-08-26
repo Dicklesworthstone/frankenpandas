@@ -57512,7 +57512,7 @@ enum LazyDataFrameColumns {
     HomogeneousTranspose {
         plan: Arc<LazyTransposeFramePlan>,
         column_start: i64,
-        materialized: OnceLock<ColumnStore>,
+        materialized: OnceLock<Arc<ColumnStore>>,
     },
     /// All-valid Float64 frame backed by a single column-major `Arc<[f64]>`
     /// block (`block[col * rows + row]`). Enables an O(1) `.values`/`.to_numpy`
@@ -57521,7 +57521,7 @@ enum LazyDataFrameColumns {
     #[cfg(feature = "block-storage")]
     Float64Block {
         store: Arc<Float64BlockStore>,
-        materialized: OnceLock<ColumnStore>,
+        materialized: OnceLock<Arc<ColumnStore>>,
     },
 }
 
@@ -57666,12 +57666,16 @@ impl LazyDataFrameColumns {
                 plan,
                 column_start,
                 materialized,
-            } => materialized.get_or_init(|| plan.materialize_columns(*column_start)),
+            } => materialized
+                .get_or_init(|| Arc::new(plan.materialize_columns(*column_start)))
+                .as_ref(),
             #[cfg(feature = "block-storage")]
             Self::Float64Block {
                 store,
                 materialized,
-            } => materialized.get_or_init(|| store.materialize_columns()),
+            } => materialized
+                .get_or_init(|| Arc::new(store.materialize_columns()))
+                .as_ref(),
         }
     }
 
@@ -57686,9 +57690,10 @@ impl LazyDataFrameColumns {
             else {
                 unreachable!();
             };
-            let columns = materialized
-                .into_inner()
-                .unwrap_or_else(|| plan.materialize_columns(column_start));
+            let columns = materialized.into_inner().map_or_else(
+                || plan.materialize_columns(column_start),
+                Arc::unwrap_or_clone,
+            );
             *self = Self::Eager(columns);
         }
         #[cfg(feature = "block-storage")]
@@ -57701,9 +57706,10 @@ impl LazyDataFrameColumns {
             else {
                 unreachable!();
             };
-            let columns = materialized
-                .into_inner()
-                .unwrap_or_else(|| store.materialize_columns());
+            let columns = materialized.into_inner().map_or_else(
+                || store.materialize_columns(),
+                Arc::unwrap_or_clone,
+            );
             *self = Self::Eager(columns);
         }
         let Self::Eager(columns) = self else {
@@ -57719,16 +57725,18 @@ impl LazyDataFrameColumns {
                 plan,
                 column_start,
                 materialized,
-            } => materialized
-                .into_inner()
-                .unwrap_or_else(|| plan.materialize_columns(column_start)),
+            } => materialized.into_inner().map_or_else(
+                || plan.materialize_columns(column_start),
+                Arc::unwrap_or_clone,
+            ),
             #[cfg(feature = "block-storage")]
             Self::Float64Block {
                 store,
                 materialized,
-            } => materialized
-                .into_inner()
-                .unwrap_or_else(|| store.materialize_columns()),
+            } => materialized.into_inner().map_or_else(
+                || store.materialize_columns(),
+                Arc::unwrap_or_clone,
+            ),
         }
     }
 }
@@ -57844,7 +57852,7 @@ impl Clone for LazyDataFrameColumns {
             } => {
                 let cloned = OnceLock::new();
                 if let Some(columns) = materialized.get() {
-                    let _ = cloned.set(columns.clone());
+                    let _ = cloned.set(Arc::clone(columns));
                 }
                 Self::HomogeneousTranspose {
                     plan: Arc::clone(plan),
@@ -57859,7 +57867,7 @@ impl Clone for LazyDataFrameColumns {
             } => {
                 let cloned = OnceLock::new();
                 if let Some(columns) = materialized.get() {
-                    let _ = cloned.set(columns.clone());
+                    let _ = cloned.set(Arc::clone(columns));
                 }
                 Self::Float64Block {
                     store: Arc::clone(store),
@@ -205096,6 +205104,52 @@ mod transpose_row_prealloc_uza04 {
                 "output column {position} must be the source row, typed"
             );
         }
+    }
+
+    /// A materialized lazy transpose is shared by clones, but a mutation must
+    /// detach first. The pointer assertion rejects the former deep-clone
+    /// implementation; the mutation assertion rejects the naive alternative
+    /// that shares a mutable store between frames.
+    #[test]
+    fn materialized_transpose_clone_shares_until_copy_on_write_4kszu() {
+        let source = frame(vec![
+            ("a", Column::from_f64_values(vec![1.0, 2.0, 3.0])),
+            ("b", Column::from_f64_values(vec![10.0, 20.0, 30.0])),
+        ]);
+        let transposed = source.transpose().expect("transpose");
+        assert_eq!(transposed.columns().len(), 3, "materialize the column map");
+        let mut cloned = transposed.clone();
+
+        let (original_cache, cloned_cache) = match (&transposed.columns, &cloned.columns) {
+            (
+                super::LazyDataFrameColumns::HomogeneousTranspose {
+                    materialized: original,
+                    ..
+                },
+                super::LazyDataFrameColumns::HomogeneousTranspose {
+                    materialized: copied,
+                    ..
+                },
+            ) => (
+                original.get().expect("original cache initialized"),
+                copied.get().expect("clone cache initialized"),
+            ),
+            _ => panic!("expected lazy transpose storage"),
+        };
+        assert!(
+            std::sync::Arc::ptr_eq(original_cache, cloned_cache),
+            "a materialized clone must share the immutable column map"
+        );
+
+        cloned.columns.make_eager().insert(
+            "only_in_clone".to_owned(),
+            Column::from_f64_values(vec![7.0, 8.0]),
+        );
+        assert!(
+            transposed.column("only_in_clone").is_none(),
+            "copy-on-write must keep a clone mutation out of the original frame"
+        );
+        assert!(cloned.column("only_in_clone").is_some());
     }
 
     /// A Float64 source beside an Int64 one: the loop takes its `as_i64_slice`

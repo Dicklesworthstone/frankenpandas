@@ -41,6 +41,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 const WARMUP: usize = 3;
 const ITERS: usize = 25;
 const TAKE_BATCH: usize = 256;
+const MATERIALIZED_CLONE_BATCH: usize = 1_024;
 const TELEMETRY_STRING_BATCH_ROWS: usize = 250_000;
 
 #[derive(Debug)]
@@ -2114,6 +2115,18 @@ fn run(
             }
             black_box((&transposed, touched));
         }),
+        ("dataframe_ops", "df_transpose_materialized_clone") => {
+            // br-frankenpandas-4kszu. The source frame has ten columns; its
+            // transpose has one column per source row. Materialize that wide
+            // (>1,000 columns at this lane's minimum size) frame once outside
+            // the timer, then measure only DataFrame::clone. This is the cache
+            // ownership boundary the bead names, not transpose construction.
+            let transposed = df.transpose().expect("transpose");
+            let materialized_columns = transposed.columns();
+            black_box(materialized_columns.len());
+            assert!(transposed.num_columns() >= 1_000, "wide clone lane needs 1k columns");
+            time_us_repeated_total(MATERIALIZED_CLONE_BATCH, || black_box(transposed.clone()))
+        }
         ("dataframe_ops", "df_skew") => time_us(|| {
             // pandas: df.skew()
             let _ = df.skew().expect("skew");

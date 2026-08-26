@@ -246,6 +246,7 @@ SETUP_QUIESCENCE_SETTLE_SECONDS = 1.0
 PROVENANCE_QUIESCENCE_SETTLE_SECONDS = 5.0
 TAKE_BATCH = 256
 TRANSPOSE_BATCH = 8192
+MATERIALIZED_CLONE_BATCH = 1024
 TELEMETRY_STRING_BATCH_ROWS = 250_000
 TELEMETRY_MIMALLOC_PURGE_DELAY_MS = "0"
 
@@ -2179,6 +2180,20 @@ def bench_df_transpose_materialize_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(op)
 
 
+def bench_df_transpose_materialized_clone_pandas(df: pd.DataFrame) -> list[float]:
+    """Clone a prebuilt wide transpose with payload sharing, matching Rust Clone.
+
+    `deep=False` preserves pandas' data-sharing clone contract.  The transpose
+    is built before timing, exactly like the Rust materialized-clone lane; only
+    the wide frame clone is measured.
+    """
+    transposed = df.T
+    assert transposed.shape[1] >= 1_000
+    return time_operation_repeated(
+        lambda: transposed.copy(deep=False), MATERIALIZED_CLONE_BATCH
+    )
+
+
 def bench_df_to_dict_index_materialize_pandas(df: pd.DataFrame) -> list[float]:
     # Counterpart to fp-bench dataframe_ops/df_to_dict_index_materialize:
     # to_dict('index') is fully materialized in pandas, so the plain call is
@@ -3212,6 +3227,7 @@ PANDAS_WORKLOADS = {
         "df_transpose": bench_df_transpose_pandas,
         "df_transpose_materialize": bench_df_transpose_materialize_pandas,
         "df_transpose_full_materialize": bench_df_transpose_full_materialize_pandas,
+        "df_transpose_materialized_clone": bench_df_transpose_materialized_clone_pandas,
         "series_skew": bench_series_skew_pandas,
         "series_kurtosis": bench_series_kurtosis_pandas,
         "df_skew": bench_df_skew_pandas,
