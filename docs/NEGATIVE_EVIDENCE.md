@@ -41252,3 +41252,76 @@ watcher) is still unfixed, and a single 64-round measurement now needs a retry l
 find a slot. The row was obtained on attempt 49.
 
 **No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`.**
+
+---
+
+### 2026-08-26 OliveCarp — CORRECTION: the "`sqrt`/`log` have no `as_i64_slice` arm" mechanism I published TWICE tonight is FALSE. The arm exists, is taken, and the real cost is the widening plus a deliberately-serial i64 path. Threading it is refuted 5-for-5
+
+**Two committed entries state a mechanism that is wrong, and this corrects both** —
+`bench(evidence): CERTIFIED SLOWER sqrt_int64 @100k 0.744x` (11806e8a7) and
+`CERTIFIED SLOWER log_int64 @100k 0.915x` (d61473a46). **The certified RATIOS stand; the explanation
+attached to them does not.**
+
+**WHAT I CLAIMED.** That `Column::sqrt` and `Column::log` reach only helpers gating on
+`as_f64_slice()`, so an Int64 column "matches neither and falls to the generic tail that builds a
+boxed `Vec<Scalar>` one enum push per element", and that the measured Int64 penalty
+(+1.01ns/element on sqrt) was that boxing.
+
+**WHAT IS ACTUALLY THERE.** `typed_float_domain_fused_unary_with_finiteness` — the FIRST helper both
+ops call — has **two** arms: `as_f64_slice()` at relative line 36 and **`as_i64_slice()` at relative
+line 109**. The i64 arm was added by br-frankenpandas-4kig1 for exactly these ops; its own comment
+says the migration "was only half done for `sqrt`, `log`, `sin` and the rest" and that it widens with
+`x as f64`, "bit-identical to the path it replaces". **An Int64 column is handled by a typed arm and
+never reaches the Scalar tail.** My grep window stopped at the f64 arm and I published the absence of
+something I had not looked far enough to see — the same false-absence failure as
+`false-absence-search-by-shape`, twice in one night, in the same function.
+
+**THE REAL MECHANISM, and the i64 arm documents half of it against itself.** That arm deliberately
+does NOT honour `par_min_override`:
+
+    // THE OVERRIDE DOES NOT APPLY TO THIS ARM, and that is a correction to
+    // my own change rather than an oversight. br-frankenpandas-4kig1.
+    //   sqrt_int64 @10M   parallel 1.203x FASTER   serial 0.771x SLOWER
+
+So it uses the shared `policy_par_min` = 200_000, and at 100k **`sqrt_int64` runs SERIAL** —
+`thread_count_actually_used` = 1, measured. The residual per-element cost is the **i64 -> f64 widening
+fused into the kernel**: this host reports `avx512f` ABSENT (`runtime_absent_isa_features`), and
+`vcvtqq2pd` is AVX512DQ, so a 4-lane i64->f64 conversion has no single AVX2 instruction and costs a
+multi-instruction sequence. numpy instead casts the whole array in a separate optimised pass and then
+runs `sqrt` — two passes, both vectorised, and it wins: 160.65us against FrankenPandas' 216.60us.
+**FrankenPandas does fewer passes and still loses, which is the opposite shape from the boxing story
+I told.**
+
+**AND THREADING IS REFUTED HERE TOO — the break-even model is now 5 for 5.** Measured env-only on ONE
+ELF `b75722266afcd63b6458d38f18354eb1171c70c03a6a9927cd14eafdf76db784`, `sqrt_int64 @100k`:
+
+| | serial (shipped) | `FP_ELEMENTWISE_PAR_MIN=50000` |
+|---|---|---|
+| verdict | **SLOWER 0.858x**, 3/3 clauses | NULL_UNDECIDABLE 0.468x, 2/3 |
+| FP p50 | **234.48us**, 1 thread | **380.19us**, 8 threads |
+| A/A nulls | 1.00076 / 1.00259 | 1.01105 / 1.04825 |
+
+At 234.48us of serial work this sits below the ~397us break-even (`148.6us fixed + 24.9us/worker`), so
+threading was PREDICTED to cost about +146us and measured at +145.7us. **Five consecutive correct
+sign predictions: cbrt, log10, log, expm1, sqrt_int64.** The 10M row quoted in the source comment is
+not in conflict — at 10M the serial work is ~100x larger and clears break-even easily. **The threshold
+is right for that size and wrong for this one, which is the same per-op-cost argument the shipped
+`cbrt`/`log10` override rests on — except that the i64 arm cannot express it, because it ignores the
+override by design.**
+
+**A/A null control (same invocation):** serial arm FrankenPandas 1.00076 and pandas 1.00259, both
+inside the 0.02 maximum absolute deviation; the parallel probe's pandas null 1.04825 is OUTSIDE and
+that row is reported as undecidable, not banked. **Median-CI decision:** the serial row's effect
+median 0.858x cleared unity and twice the null margin with all three clauses TRUE. **CV role:**
+provenance-only, no vote. Loadavg 46-65 during this pair, which is why the 0.744x row measured at
+loadavg 5.77-5.92 remains the better-quality figure for this workload.
+
+**WHAT THE FIX ACTUALLY IS, now that the mechanism is right.** Not an `as_i64_slice` arm — that
+exists. Either (a) let the i64 arm take a per-op `par_min_override` so `sqrt_int64 @10M` keeps its
+1.203x while 100k stays serial, which is a strictly larger threshold than the float path wants and
+needs its own measurement per op; or (b) attack the widening itself, which on a non-AVX512 host means
+an explicit unpack-based i64->f64 sequence or numpy's two-pass split. **Neither is done here, and I am
+not proposing (a) blind: the same comment I quoted records a 1.56x swing from getting a threshold
+wrong on this exact path.**
+
+**No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`.**
